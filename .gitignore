@@ -15,3 +15,5 @@ erl_crash.dump
 !.env.example
 *.swp
 docs/
+
+data/live.env
