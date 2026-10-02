@@ -134,22 +134,85 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                         [] ->
                             {error, all_cooling};
                         Candidates ->
-                            Picked = weighted_rr_pick(ModelId, Candidates, Cursors),
-                            case maybe_pick_key(Picked, Cool, Cursors, Now) of
-                                undefined ->
-                                    case janus_catalog:provider_keys(maps:get(provider_id, Picked)) of
-                                        [] ->
-                                            {error, missing_provider_key};
-                                        _ ->
-                                            {error, all_cooling}
-                                    end;
-                                Key ->
-                                    bump_inflight(route_target(Picked), Inflight),
-                                    {ok, Picked#{provider_key => Key}}
+                            case pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight) of
+                                {ok, _} = Ok ->
+                                    Ok;
+                                {error, Reason} = Err ->
+                                    logger:warning(#{
+                                        what => janus_lb_no_usable_route,
+                                        model_id => ModelId,
+                                        reason => Reason,
+                                        candidates => length(Candidates)
+                                    }),
+                                    Err
                             end
                     end
             end
     end.
+
+%% Prefer a candidate with at least one enabled, non-cooling key.
+pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight) ->
+    Usable = [R || R <- Candidates, has_usable_key(R, Cool, Now)],
+    case Usable of
+        [] ->
+            {error, classify_key_failures(Candidates, Cool, Now)};
+        _ ->
+            Picked = weighted_rr_pick(ModelId, Usable, Cursors),
+            {ok, Key} = select_key(Picked, Cool, Cursors, Now),
+            bump_inflight(route_target(Picked), Inflight),
+            {ok, Picked#{provider_key => Key}}
+    end.
+
+has_usable_key(#{provider_id := ProviderId}, Cool, Now) ->
+    lists:any(
+        fun(K) ->
+            maps:get(enabled, K, true) andalso not is_cooling(key_target(K), Cool, Now)
+        end,
+        janus_catalog:provider_keys(ProviderId)
+    );
+has_usable_key(_, _, _) ->
+    false.
+
+classify_key_failures(Candidates, Cool, Now) ->
+    Statuses = [key_status(R, Cool, Now) || R <- Candidates],
+    case lists:member(all_cooling, Statuses) of
+        true -> all_cooling;
+        false ->
+            case lists:member(keys_disabled, Statuses) of
+                true -> keys_disabled;
+                false -> missing_provider_key
+            end
+    end.
+
+key_status(#{provider_id := ProviderId}, Cool, Now) ->
+    All = janus_catalog:provider_keys(ProviderId),
+    Enabled = [K || K <- All, maps:get(enabled, K, true)],
+    Usable = [K || K <- Enabled, not is_cooling(key_target(K), Cool, Now)],
+    case {All, Enabled, Usable} of
+        {[], _, _} -> missing_provider_key;
+        {_, [], _} -> keys_disabled;
+        {_, _, []} -> all_cooling;
+        {_, _, _} -> ok
+    end;
+key_status(_, _, _) ->
+    missing_provider_key.
+
+select_key(#{provider_id := ProviderId} = Route, Cool, Cursors, Now) ->
+    Keys = [
+        K
+     || K <- janus_catalog:provider_keys(ProviderId),
+        maps:get(enabled, K, true),
+        not is_cooling(key_target(K), Cool, Now)
+    ],
+    case Keys of
+        [] ->
+            {error, key_status(Route, Cool, Now)};
+        _ ->
+            CursorKey = {provider_keys, ProviderId, maps:get(model_id, Route, undefined)},
+            {ok, weighted_rr_pick(CursorKey, Keys, Cursors)}
+    end;
+select_key(_, _, _, _) ->
+    {error, missing_provider_key}.
 
 catalog_generation_ok(Opts) ->
     case janus_catalog:get() of
@@ -172,23 +235,6 @@ provider_enabled(#{provider_id := ProviderId}) ->
 provider_enabled(_) ->
     false.
 
-maybe_pick_key(#{provider_id := ProviderId} = Route, Cool, Cursors, Now) ->
-    Keys0 = [
-        K
-     || K <- janus_catalog:provider_keys(ProviderId),
-        maps:get(enabled, K, true),
-        not is_cooling(key_target(K), Cool, Now)
-    ],
-    case Keys0 of
-        [] ->
-            undefined;
-        Keys ->
-            CursorKey = {provider_keys, ProviderId, maps:get(model_id, Route, undefined)},
-            weighted_rr_pick(CursorKey, Keys, Cursors)
-    end;
-maybe_pick_key(_, _, _, _) ->
-    undefined.
-
 weighted_rr_pick(CursorKey, Items, Cursors) ->
     Expanded = lists:append([lists:duplicate(maps:get(weight, I, 1), I) || I <- Items]),
     case Expanded of
@@ -206,11 +252,12 @@ weighted_rr_pick(CursorKey, Items, Cursors) ->
 
 do_note_failure(Target, Reason, #state{cooldowns = Cool, inflight = Inflight}) ->
     Key = normalize_target(Target),
-    Ms = cooldown_ms(Reason),
+    SafeReason = sanitize_cooldown_reason(Reason),
+    Ms = cooldown_ms(SafeReason),
     Until = erlang:monotonic_time(millisecond) + Ms,
-    ets:insert(Cool, {Key, Until, Reason}),
+    ets:insert(Cool, {Key, Until, SafeReason}),
     dec_inflight(Key, Inflight),
-    logger:info(#{what => janus_lb_cooldown, target => Key, reason => Reason, ms => Ms}),
+    logger:info(#{what => janus_lb_cooldown, target => Key, reason => SafeReason, ms => Ms}),
     ok.
 
 do_note_success(Target, #state{cooldowns = Cool, inflight = Inflight}) ->
@@ -282,3 +329,10 @@ cooldown_ms(_Reason) ->
         Val ->
             try list_to_integer(Val) catch _:_ -> ?DEFAULT_COOLDOWN_MS end
     end.
+
+sanitize_cooldown_reason(R) when is_atom(R) -> R;
+sanitize_cooldown_reason({http, N}) when is_integer(N) -> {http, N};
+sanitize_cooldown_reason({retry_after, Ms}) when is_integer(Ms) -> {retry_after, Ms};
+sanitize_cooldown_reason({Tag, Sub}) when is_atom(Tag), is_atom(Sub) -> {Tag, Sub};
+sanitize_cooldown_reason({Tag, _}) when is_atom(Tag) -> Tag;
+sanitize_cooldown_reason(_) -> failure.

@@ -105,16 +105,18 @@ validate_provider(P) when is_map(P) ->
         false -> error({bad_protocol, Proto})
     end,
     Keys0 = map_get(P, keys, undefined),
-    Models0 = map_get(P, models, []),
+    Models0 = map_get(P, models, undefined),
     case Keys0 of
         undefined -> error({missing_field, keys});
         [] -> error({empty_field, keys});
         _ when is_list(Keys0) -> ok;
         _ -> error({bad_provider_lists, Name})
     end,
-    case is_list(Models0) of
-        true -> ok;
-        false -> error({bad_provider_lists, Name})
+    case Models0 of
+        undefined -> error({missing_field, models});
+        [] -> error({empty_field, models});
+        _ when is_list(Models0) -> ok;
+        _ -> error({bad_provider_lists, Name})
     end,
     Keys = [required_secret(K, key) || K <- Keys0],
     Models = [required_bin_value(M, model) || M <- Models0],
@@ -315,7 +317,7 @@ sanitize_error({bad_field, Key}) -> {bad_field, Key};
 sanitize_error({missing_field, Key}) -> {missing_field, Key};
 sanitize_error({empty_field, Key}) -> {empty_field, Key};
 sanitize_error({bad_protocol, _}) -> bad_protocol;
-sanitize_error({read, Path, Reason}) -> {read, Path, Reason};
+sanitize_error({read, Path, Reason}) -> {read, Path, sanitize_error(Reason)};
 sanitize_error({Class, Reason, _Stack})
   when Class =:= error; Class =:= throw; Class =:= exit ->
     {Class, sanitize_error(Reason)};
@@ -377,7 +379,11 @@ rewrite_pg([C | Rest], N, Acc) ->
 bin(B) when is_binary(B) -> B;
 bin(L) when is_list(L) ->
     case io_lib:char_list(L) of
-        true -> list_to_binary(L);
+        true ->
+            case unicode:characters_to_binary(L) of
+                Bin when is_binary(Bin) -> Bin;
+                _ -> error(bad_field_value)
+            end;
         false -> error(bad_field_value)
     end;
 bin(A) when is_atom(A) -> atom_to_binary(A, utf8);

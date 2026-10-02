@@ -59,25 +59,51 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
                                 logger:error(#{
                                     what => janus_chat_crashed,
                                     class => Class,
-                                    reason => janus_seed:sanitize_error(CatchReason),
+                                    reason => sanitize_upstream_error(CatchReason),
                                     stack => janus_seed:redact_stack(Stack)
                                 }),
                                 {error, crashed}
                         end,
                     handle_upstream(Result, Route, Req, State);
-                {error, all_cooling} ->
-                    reply_json(
-                        Req,
-                        State,
-                        503,
-                        error_body(<<"all_cooling">>, <<"all upstream routes are cooling down">>)
-                    );
                 {error, Reason} ->
-                    reply_json(Req, State, 404, error_body(<<"no_route">>, format_reason(Reason)))
+                    reply_pick_error(Req, State, Reason)
             end;
         error ->
             reply_json(Req, State, 404, error_body(<<"model_not_found">>, <<"unknown model">>))
     end.
+
+reply_pick_error(Req, State, all_cooling) ->
+    reply_json(
+        Req,
+        State,
+        503,
+        error_body(<<"all_cooling">>, <<"all upstream routes are cooling down">>),
+        #{<<"retry-after">> => <<"5">>}
+    );
+reply_pick_error(Req, State, keys_disabled) ->
+    reply_json(
+        Req,
+        State,
+        503,
+        error_body(<<"no_usable_key">>, <<"no enabled upstream keys">>)
+    );
+reply_pick_error(Req, State, missing_provider_key) ->
+    reply_json(
+        Req,
+        State,
+        503,
+        error_body(<<"no_usable_key">>, <<"provider has no keys configured">>)
+    );
+reply_pick_error(Req, State, catalog_not_ready) ->
+    reply_json(
+        Req,
+        State,
+        503,
+        error_body(<<"catalog_not_ready">>, <<"catalog not ready">>),
+        #{<<"retry-after">> => <<"1">>}
+    );
+reply_pick_error(Req, State, _Reason) ->
+    reply_json(Req, State, 404, error_body(<<"no_route">>, <<"no route for model">>)).
 
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
   when Status =:= 401; Status =:= 403; Status =:= 429; Status >= 500 ->
@@ -99,16 +125,19 @@ handle_upstream({error, crashed}, Route, Req, State) ->
     _ = note_route_success(Route),
     reply_json(Req, State, 500, error_body(<<"internal_error">>, <<"upstream call crashed">>));
 handle_upstream({error, Reason}, Route, Req, State) ->
+    SafeReason = sanitize_upstream_error(Reason),
     case is_transient(Reason) of
         true ->
             %% Transport failure: cool the route/provider, not the API key.
-            _ = note_route_failure(Route, Reason);
+            _ = note_route_failure(Route, SafeReason);
         false ->
             _ = note_route_success(Route)
     end,
     logger:warning(#{
         what => janus_chat_upstream_error,
-        reason => janus_seed:sanitize_error(Reason)
+        reason => SafeReason,
+        provider_id => maps:get(provider_id, Route, undefined),
+        model_id => maps:get(model_id, Route, undefined)
     }),
     Status = case Reason of
         provider_disabled -> 503;
@@ -117,40 +146,26 @@ handle_upstream({error, Reason}, Route, Req, State) ->
     reply_json(Req, State, Status, error_body(<<"upstream_error">>, <<"upstream request failed">>)).
 
 note_key_failure(Route, Headers, Status) when is_integer(Status) ->
-    case key_target(Route) of
-        undefined -> ok;
-        Target -> janus_lb:note_failure(Target, retry_reason(Headers, Status))
-    end;
-note_key_failure(Route, _Headers, Reason) ->
-    case key_target(Route) of
-        undefined -> ok;
-        Target -> janus_lb:note_failure(Target, Reason)
-    end.
+    janus_lb:note_failure(key_target(Route), retry_reason(Headers, Status)).
 
 note_key_success(Route) ->
-    case key_target(Route) of
-        undefined -> ok;
-        Target -> janus_lb:note_success(Target)
-    end.
+    janus_lb:note_success(key_target(Route)).
 
 note_route_failure(Route, Reason) ->
-    case route_target(Route) of
-        undefined -> ok;
-        Target -> janus_lb:note_failure(Target, Reason)
-    end.
+    janus_lb:note_failure(route_target(Route), Reason).
 
 note_route_success(Route) ->
-    case route_target(Route) of
-        undefined -> ok;
-        Target -> janus_lb:note_success(Target)
-    end.
+    janus_lb:note_success(route_target(Route)).
 
 retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
     case maps:get(<<"retry-after">>, Headers, undefined) of
         Bin when is_binary(Bin) ->
             try
                 Sec = binary_to_integer(Bin),
-                {retry_after, min(max(Sec, 0), 300) * 1000}
+                case Sec > 0 of
+                    true -> {retry_after, Sec * 1000};
+                    false -> {http, Status}
+                end
             catch
                 _:_ -> {http, Status}
             end;
@@ -158,9 +173,7 @@ retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
             {http, Status}
     end;
 retry_reason(_Headers, Status) when is_integer(Status) ->
-    {http, Status};
-retry_reason(_Headers, Reason) ->
-    Reason.
+    {http, Status}.
 
 is_transient({open, _}) -> true;
 is_transient({await_up, _}) -> true;
@@ -169,6 +182,12 @@ is_transient({body, _}) -> true;
 is_transient({unexpected_await, _}) -> true;
 is_transient({unexpected_body, _}) -> true;
 is_transient(_) -> false.
+
+sanitize_upstream_error(R) when is_atom(R) -> R;
+sanitize_upstream_error({Tag, Sub}) when is_atom(Tag), is_atom(Sub) -> {Tag, Sub};
+sanitize_upstream_error({Tag, N}) when is_atom(Tag), is_integer(N) -> {Tag, N};
+sanitize_upstream_error({Tag, _}) when is_atom(Tag) -> Tag;
+sanitize_upstream_error(_) -> upstream_error.
 
 resolve_model(Name) when is_binary(Name), Name =/= <<>> ->
     case janus_catalog:lookup_model(Name) of
@@ -191,11 +210,15 @@ filter_headers(Headers) when is_map(Headers) ->
 filter_headers(_) ->
     #{<<"content-type">> => <<"application/json">>}.
 
-reply_json(Req, State, Status, Body) when is_binary(Body) ->
-    Req2 = cowboy_req:reply(Status, #{<<"content-type">> => <<"application/json">>}, Body, Req),
+reply_json(Req, State, Status, Body) ->
+    reply_json(Req, State, Status, Body, #{}).
+
+reply_json(Req, State, Status, Body, ExtraHeaders) when is_binary(Body), is_map(ExtraHeaders) ->
+    Headers = maps:merge(#{<<"content-type">> => <<"application/json">>}, ExtraHeaders),
+    Req2 = cowboy_req:reply(Status, Headers, Body, Req),
     {ok, Req2, State};
-reply_json(Req, State, Status, Map) when is_map(Map) ->
-    reply_json(Req, State, Status, thoas:encode(Map)).
+reply_json(Req, State, Status, Map, ExtraHeaders) when is_map(Map), is_map(ExtraHeaders) ->
+    reply_json(Req, State, Status, thoas:encode(Map), ExtraHeaders).
 
 error_body(Code, Msg) ->
     #{
@@ -205,10 +228,6 @@ error_body(Code, Msg) ->
             code => Code
         }
     }.
-
-format_reason(R) when is_atom(R) -> atom_to_binary(R, utf8);
-format_reason(R) when is_binary(R) -> R;
-format_reason(R) -> iolist_to_binary(io_lib:format("~p", [R])).
 
 key_target(#{provider_key := #{id := Kid}}) ->
     {provider_key, Kid};
