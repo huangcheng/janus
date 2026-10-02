@@ -1,0 +1,29 @@
+---
+description: After every git commit, run Alibaba Open Code Review (ocr) on that commit
+alwaysApply: true
+---
+
+# Commit review with `ocr`
+
+After creating any git commit in this repo (or when the user asks to commit/push), **always** run Open Code Review before considering the commit done:
+
+```bash
+ocr review --audience agent --commit HEAD --background "<1-2 sentence why of the commit>"
+```
+
+Redirect full output to a temp file and read it (do not pipe through `head`/`tail`).
+
+## Requirements
+
+- CLI: `ocr` (`@alibaba-group/open-code-review`). If missing: `npm i -g @alibaba-group/open-code-review`.
+- LLM must work: `ocr llm test` (already configured via dashscope locally).
+- Use `--audience agent` only (never `--audience human`).
+- Pass meaningful `--background` from the commit message / change intent.
+
+## After review
+
+1. Report High/Medium findings to the user (drop Low/noise).
+2. Fix High/Medium when clear and safe; otherwise ask before large refactors.
+3. If you fix, create a **new** follow-up commit (do not amend unless the user asked) and run `ocr` on that commit too.
+
+Do not skip `ocr` for “small” commits.

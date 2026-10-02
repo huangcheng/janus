@@ -42,20 +42,37 @@ apply_seed(Map) ->
                 undefined ->
                     {error, missing_providers};
                 Providers when is_list(Providers) ->
-                    lists:foreach(fun seed_provider/1, Providers),
-                    maybe_seed_agent_key(Map),
-                    case janus_db_conn:get_generation() of
-                        {ok, Gen} ->
-                            case janus_db_conn:cas_generation(Gen) of
-                                {ok, _} ->
-                                    _ = catch janus_config:reload(),
-                                    ok;
-                                {error, _} = Err ->
-                                    Err
-                            end;
-                        {error, _} = Err ->
-                            Err
-                    end
+                    try
+                        lists:foreach(fun seed_provider/1, Providers),
+                        maybe_seed_agent_key(Map),
+                        bump_generation()
+                    catch
+                        error:Reason -> {error, Reason};
+                        Class:Reason:Stack -> {error, {Class, Reason, Stack}}
+                    end;
+                Other ->
+                    {error, {bad_providers, Other}}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+bump_generation() ->
+    bump_generation(3).
+
+bump_generation(0) ->
+    {error, generation_cas_exhausted};
+bump_generation(N) when N > 0 ->
+    case janus_db_conn:get_generation() of
+        {ok, Gen} ->
+            case janus_db_conn:cas_generation(Gen) of
+                {ok, _} ->
+                    _ = catch janus_config:reload(),
+                    ok;
+                {error, conflict} ->
+                    bump_generation(N - 1);
+                {error, _} = Err ->
+                    Err
             end;
         {error, _} = Err ->
             Err
@@ -68,13 +85,17 @@ ensure_db() ->
     end.
 
 seed_provider(P) when is_map(P) ->
-    Name = bin(map_get(P, name)),
-    Base = bin(map_get(P, base_url)),
+    Name = required_bin(P, name),
+    Base = required_bin(P, base_url),
     Proto = bin(map_get(P, protocol, <<"openai_chat">>)),
     Keys = map_get(P, keys, []),
     Models = map_get(P, models, []),
+    case {is_list(Keys), is_list(Models)} of
+        {true, true} -> ok;
+        _ -> error({bad_provider_lists, Name})
+    end,
     ProviderId = upsert_provider(Name, Base, Proto),
-    lists:foreach(fun(K) -> insert_provider_key(ProviderId, K) end, Keys),
+    replace_provider_keys(ProviderId, Keys),
     lists:foreach(
         fun(ModelName0) ->
             ModelId = upsert_model(bin(ModelName0)),
@@ -89,7 +110,22 @@ seed_provider(P) when is_map(P) ->
         keys => length(Keys),
         models => length(Models)
     }),
-    ok.
+    ok;
+seed_provider(Other) ->
+    error({bad_provider, Other}).
+
+required_bin(Map, Key) ->
+    case map_get(Map, Key, undefined) of
+        undefined -> error({missing_field, Key});
+        <<>> -> error({empty_field, Key});
+        "" -> error({empty_field, Key});
+        V when is_binary(V); is_list(V) -> bin(V);
+        Other -> error({bad_field, Key, Other})
+    end.
+
+replace_provider_keys(ProviderId, Keys) ->
+    _ = q(<<"DELETE FROM provider_keys WHERE provider_id = ?">>, [ProviderId]),
+    lists:foreach(fun(K) -> insert_provider_key(ProviderId, K) end, Keys).
 
 upsert_provider(Name, Base, Proto) ->
     case q(<<"SELECT id FROM providers WHERE name = ?">>, [Name]) of
@@ -174,18 +210,24 @@ maybe_seed_agent_key(Map) ->
             ok;
         Raw0 ->
             Raw = bin(Raw0),
-            {Prefix, Hash} = janus_api_keys:hash_key(Raw),
-            case q(<<"SELECT id FROM api_keys WHERE prefix = ?">>, [Prefix]) of
-                {ok, [_ | _]} ->
-                    ok;
-                {ok, []} ->
-                    _ = q(
-                            <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
-                            [Prefix, Hash]
-                        ),
-                    ok;
-                {error, Reason} ->
-                    error({seed_agent_key, Reason})
+            case Raw of
+                <<>> -> error({empty_field, agent_api_key});
+                _ ->
+                    {Prefix, Hash} = janus_api_keys:hash_key(Raw),
+                    case q(<<"SELECT id FROM api_keys WHERE key_hash = ?">>, [Hash]) of
+                        {ok, [_ | _]} ->
+                            ok;
+                        {ok, []} ->
+                            case q(
+                                     <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
+                                     [Prefix, Hash]
+                                 ) of
+                                {ok, _} -> ok;
+                                {error, Reason} -> error({seed_agent_key, Reason})
+                            end;
+                        {error, Reason} ->
+                            error({seed_agent_key, Reason})
+                    end
             end
     end.
 

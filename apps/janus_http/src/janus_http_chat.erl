@@ -30,14 +30,18 @@ handle_body(Body, Agent, Req, State) ->
             case Model of
                 undefined ->
                     reply_json(Req, State, 400, error_body(<<"invalid_request">>, <<"model required">>));
-                _ ->
+                Model when is_binary(Model), Model =/= <<>> ->
                     case model_allowed(Agent, Model) of
                         false ->
                             reply_json(Req, State, 403, error_body(<<"model_not_allowed">>, <<"model not in allowlist">>));
                         true ->
                             proxy_chat(Model, Body, Map, Req, State)
-                    end
+                    end;
+                _ ->
+                    reply_json(Req, State, 400, error_body(<<"invalid_request">>, <<"model must be a non-empty string">>))
             end;
+        {ok, _} ->
+            reply_json(Req, State, 400, error_body(<<"invalid_json">>, <<"request body must be a JSON object">>));
         {error, _} ->
             reply_json(Req, State, 400, error_body(<<"invalid_json">>, <<"request body must be JSON">>))
     end.
@@ -47,18 +51,31 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
         {ok, ModelId} ->
             case janus_lb:pick_route(ModelId, #{}) of
                 {ok, Route} ->
-                    case janus_providers_openai:chat_completions(Route, Body, Map) of
-                        {ok, Status, Headers, RespBody} ->
-                            _ = janus_lb:note_success(lb_target(Route)),
-                            Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
-                            {ok, Req2, State};
-                        {error, {upstream, Status, RespBody}} ->
-                            _ = janus_lb:note_failure(lb_target(Route), {http, Status}),
-                            reply_json(Req, State, Status, RespBody);
-                        {error, Reason} ->
-                            _ = janus_lb:note_failure(lb_target(Route), Reason),
-                            logger:warning(#{what => janus_chat_upstream_error, reason => Reason}),
-                            reply_json(Req, State, 502, error_body(<<"upstream_error">>, format_reason(Reason)))
+                    try
+                        case janus_providers_openai:chat_completions(Route, Body, Map) of
+                            {ok, Status, Headers, RespBody} when Status >= 400 ->
+                                _ = janus_lb:note_failure(lb_target(Route), {http, Status}),
+                                Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+                                {ok, Req2, State};
+                            {ok, Status, Headers, RespBody} ->
+                                _ = janus_lb:note_success(lb_target(Route)),
+                                Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+                                {ok, Req2, State};
+                            {error, Reason} ->
+                                _ = janus_lb:note_failure(lb_target(Route), Reason),
+                                logger:warning(#{what => janus_chat_upstream_error, reason => Reason}),
+                                reply_json(Req, State, 502, error_body(<<"upstream_error">>, format_reason(Reason)))
+                        end
+                    catch
+                        Class:CatchReason:Stack ->
+                            _ = janus_lb:note_failure(lb_target(Route), {Class, CatchReason}),
+                            logger:error(#{
+                                what => janus_chat_crashed,
+                                class => Class,
+                                reason => CatchReason,
+                                stack => Stack
+                            }),
+                            reply_json(Req, State, 500, error_body(<<"internal_error">>, <<"upstream call crashed">>))
                     end;
                 {error, Reason} ->
                     reply_json(Req, State, 404, error_body(<<"no_route">>, format_reason(Reason)))
@@ -67,11 +84,13 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
             reply_json(Req, State, 404, error_body(<<"model_not_found">>, <<"unknown model">>))
     end.
 
-resolve_model(Name) when is_binary(Name) ->
+resolve_model(Name) when is_binary(Name), Name =/= <<>> ->
     case janus_catalog:lookup_model(Name) of
         {ok, #{id := Id}} -> {ok, Id};
         error -> error
-    end.
+    end;
+resolve_model(_) ->
+    error.
 
 model_allowed(#{model_ids := all}, _) -> true;
 model_allowed(#{model_ids := Ids}, ModelName) when is_list(Ids) ->
@@ -105,9 +124,12 @@ format_reason(R) when is_atom(R) -> atom_to_binary(R, utf8);
 format_reason(R) when is_binary(R) -> R;
 format_reason(R) -> iolist_to_binary(io_lib:format("~p", [R])).
 
-lb_target(#{provider_id := P, provider_key := #{id := K}}) ->
-    #{provider_id => P, key_id => K};
+lb_target(#{provider_key := #{id := Kid}}) ->
+    %% Must match janus_lb:key_target/1 cool-down keys.
+    {provider_key, Kid};
+lb_target(#{provider_id := P, model_id := M}) ->
+    {route, M, P};
 lb_target(#{provider_id := P}) ->
-    #{provider_id => P};
+    {route, P};
 lb_target(Other) ->
     Other.

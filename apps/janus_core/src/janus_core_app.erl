@@ -16,8 +16,31 @@ stop(_State) ->
     ok.
 
 maybe_auto_seed() ->
-    case os:getenv("JANUS_AUTO_SEED") of
-        "1" -> spawn(fun() -> timer:sleep(300), _ = janus_seed:from_file() end);
-        "true" -> spawn(fun() -> timer:sleep(300), _ = janus_seed:from_file() end);
-        _ -> ok
+    case env_truthy(os:getenv("JANUS_AUTO_SEED")) of
+        true ->
+            spawn(fun() ->
+                try
+                    case janus_seed:from_file() of
+                        ok ->
+                            logger:info(#{what => janus_auto_seed_ok});
+                        {error, Reason} ->
+                            logger:error(#{what => janus_auto_seed_failed, reason => Reason})
+                    end
+                catch
+                    Class:CatchReason:Stack ->
+                        logger:error(#{
+                            what => janus_auto_seed_crashed,
+                            class => Class,
+                            reason => CatchReason,
+                            stack => Stack
+                        })
+                end
+            end);
+        false ->
+            ok
     end.
+
+env_truthy(false) -> false;
+env_truthy("") -> false;
+env_truthy(Val) when is_list(Val) ->
+    lists:member(string:lowercase(Val), ["1", "true", "yes", "on"]).
