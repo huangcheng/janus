@@ -51,38 +51,97 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
         {ok, ModelId} ->
             case janus_lb:pick_route(ModelId, #{}) of
                 {ok, Route} ->
-                    try
-                        case janus_providers_openai:chat_completions(Route, Body, Map) of
-                            {ok, Status, Headers, RespBody} when Status >= 400 ->
-                                _ = janus_lb:note_failure(lb_target(Route), {http, Status}),
-                                Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
-                                {ok, Req2, State};
-                            {ok, Status, Headers, RespBody} ->
-                                _ = janus_lb:note_success(lb_target(Route)),
-                                Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
-                                {ok, Req2, State};
-                            {error, Reason} ->
-                                _ = janus_lb:note_failure(lb_target(Route), Reason),
-                                logger:warning(#{what => janus_chat_upstream_error, reason => Reason}),
-                                reply_json(Req, State, 502, error_body(<<"upstream_error">>, format_reason(Reason)))
-                        end
-                    catch
-                        Class:CatchReason:Stack ->
-                            _ = janus_lb:note_failure(lb_target(Route), {Class, CatchReason}),
-                            logger:error(#{
-                                what => janus_chat_crashed,
-                                class => Class,
-                                reason => CatchReason,
-                                stack => Stack
-                            }),
-                            reply_json(Req, State, 500, error_body(<<"internal_error">>, <<"upstream call crashed">>))
-                    end;
+                    Result =
+                        try
+                            janus_providers_openai:chat_completions(Route, Body, Map)
+                        catch
+                            Class:CatchReason:Stack ->
+                                logger:error(#{
+                                    what => janus_chat_crashed,
+                                    class => Class,
+                                    reason => CatchReason,
+                                    stack => janus_seed:redact_stack(Stack)
+                                }),
+                                {error, crashed}
+                        end,
+                    handle_upstream(Result, Route, Req, State);
                 {error, Reason} ->
                     reply_json(Req, State, 404, error_body(<<"no_route">>, format_reason(Reason)))
             end;
         error ->
             reply_json(Req, State, 404, error_body(<<"model_not_found">>, <<"unknown model">>))
     end.
+
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
+  when Status =:= 401; Status =:= 403; Status =:= 429; Status >= 500 ->
+    _ = note_key_failure(Route, Headers, Status),
+    _ = janus_lb:note_success(route_target(Route)),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 400 ->
+    %% Client/request errors: pass through, do not cool the key.
+    _ = janus_lb:note_success(route_target(Route)),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) ->
+    _ = janus_lb:note_success(key_target(Route)),
+    _ = janus_lb:note_success(route_target(Route)),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+handle_upstream({error, crashed}, Route, Req, State) ->
+    _ = janus_lb:note_success(route_target(Route)),
+    reply_json(Req, State, 500, error_body(<<"internal_error">>, <<"upstream call crashed">>));
+handle_upstream({error, Reason}, Route, Req, State) ->
+    case is_transient(Reason) of
+        true ->
+            _ = note_key_failure(Route, #{}, Reason),
+            _ = janus_lb:note_success(route_target(Route));
+        false ->
+            _ = janus_lb:note_success(route_target(Route))
+    end,
+    logger:warning(#{what => janus_chat_upstream_error, reason => format_reason(Reason)}),
+    Status = case Reason of
+        provider_disabled -> 503;
+        provider_not_found -> 502;
+        bad_secret_ref -> 502;
+        missing_provider_key -> 502;
+        _ -> 502
+    end,
+    reply_json(Req, State, Status, error_body(<<"upstream_error">>, format_reason(Reason))).
+
+note_key_failure(Route, Headers, Status) when is_integer(Status) ->
+    janus_lb:note_failure(key_target(Route), retry_reason(Headers, Status));
+note_key_failure(Route, _Headers, Reason) ->
+    janus_lb:note_failure(key_target(Route), Reason).
+
+retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
+    case maps:get(<<"retry-after">>, Headers, undefined) of
+        Bin when is_binary(Bin) ->
+            try
+                Sec = binary_to_integer(Bin),
+                {retry_after, Sec * 1000}
+            catch
+                _:_ -> {http, Status}
+            end;
+        _ ->
+            {http, Status}
+    end;
+retry_reason(_Headers, Status) when is_integer(Status) ->
+    {http, Status};
+retry_reason(_Headers, Reason) ->
+    Reason.
+
+is_transient({open, _}) -> true;
+is_transient({await_up, _}) -> true;
+is_transient({await, _}) -> true;
+is_transient({body, _}) -> true;
+is_transient(crashed) -> false;
+is_transient(provider_disabled) -> false;
+is_transient(provider_not_found) -> false;
+is_transient(bad_secret_ref) -> false;
+is_transient(missing_provider_key) -> false;
+is_transient({bad_base_url, _}) -> false;
+is_transient(_) -> false.
 
 resolve_model(Name) when is_binary(Name), Name =/= <<>> ->
     case janus_catalog:lookup_model(Name) of
@@ -124,12 +183,14 @@ format_reason(R) when is_atom(R) -> atom_to_binary(R, utf8);
 format_reason(R) when is_binary(R) -> R;
 format_reason(R) -> iolist_to_binary(io_lib:format("~p", [R])).
 
-lb_target(#{provider_key := #{id := Kid}}) ->
-    %% Must match janus_lb:key_target/1 cool-down keys.
+key_target(#{provider_key := #{id := Kid}}) ->
     {provider_key, Kid};
-lb_target(#{provider_id := P, model_id := M}) ->
+key_target(Other) ->
+    Other.
+
+route_target(#{provider_id := P, model_id := M}) ->
     {route, M, P};
-lb_target(#{provider_id := P}) ->
+route_target(#{provider_id := P}) ->
     {route, P};
-lb_target(Other) ->
+route_target(Other) ->
     Other.

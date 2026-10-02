@@ -10,7 +10,9 @@
 %%%-------------------------------------------------------------------
 -module(janus_seed).
 
--export([from_file/0, from_file/1]).
+-export([from_file/0, from_file/1, sanitize_error/1, redact_stack/1]).
+
+-define(PROTOCOLS, [<<"openai_chat">>, <<"anthropic_messages">>, <<"openai_responses">>]).
 
 -spec from_file() -> ok | {error, term()}.
 from_file() ->
@@ -29,6 +31,7 @@ from_file(Path0) ->
         {ok, Bin} ->
             case thoas:decode(Bin) of
                 {ok, Map} when is_map(Map) -> apply_seed(Map);
+                {ok, _} -> {error, json_not_object};
                 {error, Reason} -> {error, {json, Reason}}
             end;
         {error, Reason} ->
@@ -43,15 +46,16 @@ apply_seed(Map) ->
                     {error, missing_providers};
                 Providers when is_list(Providers) ->
                     try
-                        lists:foreach(fun seed_provider/1, Providers),
+                        Validated = [validate_provider(P) || P <- Providers],
+                        lists:foreach(fun apply_provider/1, Validated),
                         maybe_seed_agent_key(Map),
                         bump_generation()
                     catch
-                        error:Reason -> {error, Reason};
-                        Class:Reason:Stack -> {error, {Class, Reason, Stack}}
+                        Class:Reason:Stack ->
+                            {error, {Class, Reason, Stack}}
                     end;
-                Other ->
-                    {error, {bad_providers, Other}}
+                _Other ->
+                    {error, bad_providers}
             end;
         {error, _} = Err ->
             Err
@@ -70,6 +74,7 @@ bump_generation(N) when N > 0 ->
                     _ = catch janus_config:reload(),
                     ok;
                 {error, conflict} ->
+                    timer:sleep(50 * (4 - N)),
                     bump_generation(N - 1);
                 {error, _} = Err ->
                     Err
@@ -84,21 +89,32 @@ ensure_db() ->
         undefined -> {error, db_not_started}
     end.
 
-seed_provider(P) when is_map(P) ->
+validate_provider(P) when is_map(P) ->
     Name = required_bin(P, name),
     Base = required_bin(P, base_url),
     Proto = bin(map_get(P, protocol, <<"openai_chat">>)),
-    Keys = map_get(P, keys, []),
-    Models = map_get(P, models, []),
-    case {is_list(Keys), is_list(Models)} of
+    case lists:member(Proto, ?PROTOCOLS) of
+        true -> ok;
+        false -> error({bad_protocol, Proto})
+    end,
+    Keys0 = map_get(P, keys, []),
+    Models0 = map_get(P, models, []),
+    case {is_list(Keys0), is_list(Models0)} of
         {true, true} -> ok;
         _ -> error({bad_provider_lists, Name})
     end,
+    Keys = [required_secret(K) || K <- Keys0],
+    Models = [required_bin_value(M, model) || M <- Models0],
+    #{name => Name, base_url => Base, protocol => Proto, keys => Keys, models => Models};
+validate_provider(_Other) ->
+    error(bad_provider).
+
+apply_provider(#{name := Name, base_url := Base, protocol := Proto, keys := Keys, models := Models}) ->
     ProviderId = upsert_provider(Name, Base, Proto),
     replace_provider_keys(ProviderId, Keys),
     lists:foreach(
-        fun(ModelName0) ->
-            ModelId = upsert_model(bin(ModelName0)),
+        fun(ModelName) ->
+            ModelId = upsert_model(ModelName),
             ensure_route(ModelId, ProviderId)
         end,
         Models
@@ -110,9 +126,7 @@ seed_provider(P) when is_map(P) ->
         keys => length(Keys),
         models => length(Models)
     }),
-    ok;
-seed_provider(Other) ->
-    error({bad_provider, Other}).
+    ok.
 
 required_bin(Map, Key) ->
     case map_get(Map, Key, undefined) of
@@ -120,21 +134,74 @@ required_bin(Map, Key) ->
         <<>> -> error({empty_field, Key});
         "" -> error({empty_field, Key});
         V when is_binary(V); is_list(V) -> bin(V);
-        Other -> error({bad_field, Key, Other})
+        _Other -> error({bad_field, Key})
     end.
 
+required_bin_value(V, _Label) when is_binary(V), V =/= <<>> -> V;
+required_bin_value(V, _Label) when is_list(V), V =/= "" -> bin(V);
+required_bin_value(_, Label) -> error({bad_field, Label}).
+
+required_secret(V) when is_binary(V), V =/= <<>> -> V;
+required_secret(V) when is_list(V), V =/= "" -> bin(V);
+required_secret(_) -> error({bad_field, key}).
+
+%% Encrypt first, then DELETE+INSERT in one backend transaction.
 replace_provider_keys(ProviderId, Keys) ->
-    _ = q(<<"DELETE FROM provider_keys WHERE provider_id = ?">>, [ProviderId]),
-    lists:foreach(fun(K) -> insert_provider_key(ProviderId, K) end, Keys).
+    Encrypted =
+        lists:map(
+            fun(Raw) ->
+                case janus_secrets:encrypt(Raw) of
+                    {ok, Cipher} ->
+                        {KeyId, _} = janus_crypto_env:active_secrets_key(),
+                        {Cipher, KeyId};
+                    {error, Reason} ->
+                        error({encrypt, Reason})
+                end
+            end,
+            Keys
+        ),
+    {ok, Mod, Conn} = janus_db_conn:conn(),
+    DelSql = sql(<<"DELETE FROM provider_keys WHERE provider_id = ?">>),
+    InsSql = sql(
+        <<"INSERT INTO provider_keys "
+          "(provider_id, secret_ciphertext, key_id, weight, enabled) "
+          "VALUES (?, ?, ?, 1, 1)">>
+    ),
+    case Mod:with_tx(Conn, fun(C) ->
+        case Mod:query(C, DelSql, [ProviderId]) of
+            {ok, _} ->
+                lists:foreach(
+                    fun({Cipher, KeyId}) ->
+                        case Mod:query(C, InsSql, [ProviderId, Cipher, KeyId]) of
+                            {ok, _} -> ok;
+                            {error, Reason} -> error({insert_provider_key, Reason})
+                        end
+                    end,
+                    Encrypted
+                ),
+                ok;
+            {error, Reason} ->
+                {error, {delete_provider_keys, Reason}}
+        end
+    end) of
+        ok ->
+            ok;
+        {error, _} = Err ->
+            error(Err);
+        Other ->
+            error({replace_provider_keys, Other})
+    end.
 
 upsert_provider(Name, Base, Proto) ->
     case q(<<"SELECT id FROM providers WHERE name = ?">>, [Name]) of
         {ok, [{Id}]} ->
-            _ = q(
-                    <<"UPDATE providers SET base_url = ?, protocol = ?, enabled = 1 WHERE id = ?">>,
-                    [Base, Proto, Id]
-                ),
-            Id;
+            case q(
+                     <<"UPDATE providers SET base_url = ?, protocol = ?, enabled = 1 WHERE id = ?">>,
+                     [Base, Proto, Id]
+                 ) of
+                {ok, _} -> Id;
+                {error, Reason} -> error({update_provider, Reason})
+            end;
         {ok, []} ->
             case q(
                      <<"INSERT INTO providers (name, base_url, protocol, enabled) VALUES (?, ?, ?, 1)">>,
@@ -151,30 +218,15 @@ upsert_provider(Name, Base, Proto) ->
             error({upsert_provider, Reason})
     end.
 
-insert_provider_key(ProviderId, Raw0) ->
-    Raw = bin(Raw0),
-    case janus_secrets:encrypt(Raw) of
-        {ok, Cipher} ->
-            {KeyId, _} = janus_crypto_env:active_secrets_key(),
-            case q(
-                     <<"INSERT INTO provider_keys "
-                       "(provider_id, secret_ciphertext, key_id, weight, enabled) "
-                       "VALUES (?, ?, ?, 1, 1)">>,
-                     [ProviderId, Cipher, KeyId]
-                 ) of
-                {ok, _} -> ok;
-                {error, Reason} -> error({insert_provider_key, Reason})
-            end;
-        {error, Reason} ->
-            error({encrypt, Reason})
-    end.
-
 upsert_model(Name) ->
     case q(<<"SELECT id FROM models WHERE name = ?">>, [Name]) of
         {ok, [{Id}]} ->
             Id;
         {ok, []} ->
-            _ = q(<<"INSERT INTO models (name, enabled) VALUES (?, 1)">>, [Name]),
+            case q(<<"INSERT INTO models (name, enabled) VALUES (?, 1)">>, [Name]) of
+                {ok, _} -> ok;
+                {error, Reason} -> error({insert_model, Reason})
+            end,
             case q(<<"SELECT id FROM models WHERE name = ?">>, [Name]) of
                 {ok, [{Id}]} -> Id;
                 Other -> error({model_id_missing, Other})
@@ -209,27 +261,56 @@ maybe_seed_agent_key(Map) ->
         undefined ->
             ok;
         Raw0 ->
-            Raw = bin(Raw0),
-            case Raw of
-                <<>> -> error({empty_field, agent_api_key});
-                _ ->
-                    {Prefix, Hash} = janus_api_keys:hash_key(Raw),
-                    case q(<<"SELECT id FROM api_keys WHERE key_hash = ?">>, [Hash]) of
-                        {ok, [_ | _]} ->
-                            ok;
-                        {ok, []} ->
-                            case q(
-                                     <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
-                                     [Prefix, Hash]
-                                 ) of
-                                {ok, _} -> ok;
-                                {error, Reason} -> error({seed_agent_key, Reason})
-                            end;
-                        {error, Reason} ->
-                            error({seed_agent_key, Reason})
-                    end
+            Raw = required_secret(Raw0),
+            {Prefix, Hash} = janus_api_keys:hash_key(Raw),
+            case q(<<"SELECT id FROM api_keys WHERE key_hash = ?">>, [Hash]) of
+                {ok, [_ | _]} ->
+                    ok;
+                {ok, []} ->
+                    case q(
+                             <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
+                             [Prefix, Hash]
+                         ) of
+                        {ok, _} -> ok;
+                        {error, Reason} -> error({seed_agent_key, Reason})
+                    end;
+                {error, Reason} ->
+                    error({seed_agent_key, Reason})
             end
     end.
+
+-spec sanitize_error(term()) -> term().
+sanitize_error({bad_providers, _}) -> bad_providers;
+sanitize_error({bad_provider, _}) -> bad_provider;
+sanitize_error({bad_field, Key, _}) -> {bad_field, Key};
+sanitize_error({bad_field, Key}) -> {bad_field, Key};
+sanitize_error({missing_field, Key}) -> {missing_field, Key};
+sanitize_error({empty_field, Key}) -> {empty_field, Key};
+sanitize_error({bad_protocol, _}) -> bad_protocol;
+sanitize_error({Class, Reason, _Stack}) when is_atom(Class) ->
+    {Class, sanitize_error(Reason)};
+sanitize_error(Reason) when is_atom(Reason) -> Reason;
+sanitize_error(Reason) when is_tuple(Reason), tuple_size(Reason) >= 1 ->
+    case element(1, Reason) of
+        Tag when is_atom(Tag) -> Tag;
+        _ -> seed_error
+    end;
+sanitize_error(_) ->
+    seed_error.
+
+-spec redact_stack(list()) -> list().
+redact_stack(Stack) when is_list(Stack) ->
+    [
+        case Frame of
+            {M, F, A, Loc} when is_list(A) -> {M, F, length(A), Loc};
+            {M, F, A, Loc} when is_integer(A) -> {M, F, A, Loc};
+            {M, F, A} when is_list(A) -> {M, F, length(A)};
+            Other -> Other
+        end
+     || Frame <- Stack
+    ];
+redact_stack(Other) ->
+    Other.
 
 map_get(Map, Key) ->
     map_get(Map, Key, undefined).
@@ -246,14 +327,14 @@ map_get(Map, Key, Default) when is_map(Map), is_binary(Key) ->
         error -> Default
     end.
 
-%% Convert `?` placeholders to `$N` for Postgres; leave for SQLite.
+sql(Sql0) ->
+    case janus_db_conn:backend() of
+        sqlite -> Sql0;
+        postgres -> rewrite_pg(Sql0)
+    end.
+
 q(Sql0, Params) ->
-    Sql =
-        case janus_db_conn:backend() of
-            sqlite -> Sql0;
-            postgres -> rewrite_pg(Sql0)
-        end,
-    janus_db_conn:query(Sql, Params).
+    janus_db_conn:query(sql(Sql0), Params).
 
 rewrite_pg(Sql) ->
     rewrite_pg(binary_to_list(iolist_to_binary(Sql)), 1, []).
@@ -268,8 +349,7 @@ rewrite_pg([C | Rest], N, Acc) ->
 
 bin(B) when is_binary(B) -> B;
 bin(L) when is_list(L) -> list_to_binary(L);
-bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
-bin(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).
+bin(A) when is_atom(A) -> atom_to_binary(A, utf8).
 
 to_list(P) when is_list(P) -> P;
 to_list(P) when is_binary(P) -> binary_to_list(P).

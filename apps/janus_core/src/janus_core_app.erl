@@ -24,15 +24,18 @@ maybe_auto_seed() ->
                         ok ->
                             logger:info(#{what => janus_auto_seed_ok});
                         {error, Reason} ->
-                            logger:error(#{what => janus_auto_seed_failed, reason => Reason})
+                            logger:error(#{
+                                what => janus_auto_seed_failed,
+                                reason => janus_seed:sanitize_error(Reason)
+                            })
                     end
                 catch
                     Class:CatchReason:Stack ->
                         logger:error(#{
                             what => janus_auto_seed_crashed,
                             class => Class,
-                            reason => CatchReason,
-                            stack => Stack
+                            reason => janus_seed:sanitize_error(CatchReason),
+                            stack => janus_seed:redact_stack(Stack)
                         })
                 end
             end);
@@ -43,4 +46,6 @@ maybe_auto_seed() ->
 env_truthy(false) -> false;
 env_truthy("") -> false;
 env_truthy(Val) when is_list(Val) ->
-    lists:member(string:lowercase(Val), ["1", "true", "yes", "on"]).
+    lists:member(string:lowercase(Val), ["1", "true", "yes", "on"]);
+env_truthy(_) ->
+    false.

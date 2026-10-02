@@ -4,12 +4,11 @@ data/*.db
 data/*.db-*
 data/snapshots/
 data/seed*.json
-!data/seed*.example.json
 data/seed*.yaml
 data/seed*.yml
-seed*.json
-seed*.yaml
-seed*.yml
+!data/seed*.example.json
+!data/seed*.example.yaml
+!data/seed*.example.yml
 *.beam
 .erlang.cookie
 erl_crash.dump
@@ -17,7 +16,6 @@ erl_crash.dump
 .env
 .env.*
 !.env.example
-*.env
-!*.env.example
+data/*.env
 *.swp
 docs/
