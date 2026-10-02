@@ -1,0 +1,24 @@
+{application, janus, [
+    {description, "Janus LLM gateway root application"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {janus_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        sasl,
+        cowboy,
+        thoas,
+        gun,
+        epgsql,
+        esqlite,
+        janus_core,
+        janus_providers,
+        janus_http,
+        janus_admin
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/huangcheng/janus"}]}
+]}.

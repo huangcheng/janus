@@ -1,0 +1,40 @@
+services:
+  janus:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Omit JANUS_DB_* to use SQLite at JANUS_SQLITE_PATH
+      JANUS_SQLITE_PATH: /var/lib/janus/janus.db
+    volumes:
+      - janus_data:/var/lib/janus
+
+  janus-pg:
+    profiles: ["postgres"]
+    build: .
+    ports:
+      - "8081:8080"
+    environment:
+      JANUS_DB_HOST: postgres
+      JANUS_DB_PORT: "5432"
+      JANUS_DB_USER: janus
+      JANUS_DB_PASSWORD: janus
+      JANUS_DB_NAME: janus
+    depends_on:
+      - postgres
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: janus
+      POSTGRES_PASSWORD: janus
+      POSTGRES_DB: janus
+    ports:
+      - "5432:5432"
+    volumes:
+      - janus_pg:/var/lib/postgresql/data
+
+volumes:
+  janus_data:
+  janus_pg:

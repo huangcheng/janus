@@ -1,0 +1,12 @@
+.rebar3
+_build
+data/*.db
+data/*.db-*
+data/snapshots/
+*.beam
+.erlang.cookie
+erl_crash.dump
+.DS_Store
+.env
+*.swp
+docs/
