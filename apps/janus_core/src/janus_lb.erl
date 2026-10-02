@@ -27,6 +27,7 @@
 -define(INFLIGHT, janus_lb_inflight).
 -define(CURSORS, janus_lb_rr_cursors).
 -define(DEFAULT_COOLDOWN_MS, 5000).
+-define(MAX_RETRY_AFTER_MS, 300000).
 
 -record(state, {
     cooldowns :: ets:tid(),
@@ -48,11 +49,15 @@ start_link() ->
 
 %% @doc Record a failure against a route/key target; apply cool-down.
 -spec note_failure(target(), term()) -> ok.
+note_failure(undefined, _Reason) ->
+    ok;
 note_failure(Target, Reason) ->
     gen_server:cast(?SERVER, {note_failure, Target, Reason}).
 
 %% @doc Record a success; clear cool-down and decrement in-flight.
 -spec note_success(target()) -> ok.
+note_success(undefined) ->
+    ok;
 note_success(Target) ->
     gen_server:cast(?SERVER, {note_success, Target}).
 
@@ -130,9 +135,18 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                             {error, all_cooling};
                         Candidates ->
                             Picked = weighted_rr_pick(ModelId, Candidates, Cursors),
-                            Key = maybe_pick_key(Picked, Cool, Cursors, Now),
-                            bump_inflight(route_target(Picked), Inflight),
-                            {ok, Picked#{provider_key => Key}}
+                            case maybe_pick_key(Picked, Cool, Cursors, Now) of
+                                undefined ->
+                                    case janus_catalog:provider_keys(maps:get(provider_id, Picked)) of
+                                        [] ->
+                                            {error, missing_provider_key};
+                                        _ ->
+                                            {error, all_cooling}
+                                    end;
+                                Key ->
+                                    bump_inflight(route_target(Picked), Inflight),
+                                    {ok, Picked#{provider_key => Key}}
+                            end
                     end
             end
     end.
@@ -257,8 +271,10 @@ normalize_target(#{id := Id}) ->
 normalize_target(Target) ->
     Target.
 
-cooldown_ms({retry_after, Ms}) when is_integer(Ms), Ms > 0 -> Ms;
-cooldown_ms(#{retry_after_ms := Ms}) when is_integer(Ms), Ms > 0 -> Ms;
+cooldown_ms({retry_after, Ms}) when is_integer(Ms), Ms > 0 ->
+    min(Ms, ?MAX_RETRY_AFTER_MS);
+cooldown_ms(#{retry_after_ms := Ms}) when is_integer(Ms), Ms > 0 ->
+    min(Ms, ?MAX_RETRY_AFTER_MS);
 cooldown_ms(_Reason) ->
     case os:getenv("JANUS_LB_COOLDOWN_MS") of
         false -> ?DEFAULT_COOLDOWN_MS;

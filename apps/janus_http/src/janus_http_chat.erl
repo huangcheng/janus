@@ -59,12 +59,19 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
                                 logger:error(#{
                                     what => janus_chat_crashed,
                                     class => Class,
-                                    reason => CatchReason,
+                                    reason => janus_seed:sanitize_error(CatchReason),
                                     stack => janus_seed:redact_stack(Stack)
                                 }),
                                 {error, crashed}
                         end,
                     handle_upstream(Result, Route, Req, State);
+                {error, all_cooling} ->
+                    reply_json(
+                        Req,
+                        State,
+                        503,
+                        error_body(<<"all_cooling">>, <<"all upstream routes are cooling down">>)
+                    );
                 {error, Reason} ->
                     reply_json(Req, State, 404, error_body(<<"no_route">>, format_reason(Reason)))
             end;
@@ -75,51 +82,75 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
   when Status =:= 401; Status =:= 403; Status =:= 429; Status >= 500 ->
     _ = note_key_failure(Route, Headers, Status),
-    _ = janus_lb:note_success(route_target(Route)),
+    _ = note_route_success(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 400 ->
     %% Client/request errors: pass through, do not cool the key.
-    _ = janus_lb:note_success(route_target(Route)),
+    _ = note_route_success(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) ->
-    _ = janus_lb:note_success(key_target(Route)),
-    _ = janus_lb:note_success(route_target(Route)),
+    _ = note_key_success(Route),
+    _ = note_route_success(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({error, crashed}, Route, Req, State) ->
-    _ = janus_lb:note_success(route_target(Route)),
+    _ = note_route_success(Route),
     reply_json(Req, State, 500, error_body(<<"internal_error">>, <<"upstream call crashed">>));
 handle_upstream({error, Reason}, Route, Req, State) ->
     case is_transient(Reason) of
         true ->
-            _ = note_key_failure(Route, #{}, Reason),
-            _ = janus_lb:note_success(route_target(Route));
+            %% Transport failure: cool the route/provider, not the API key.
+            _ = note_route_failure(Route, Reason);
         false ->
-            _ = janus_lb:note_success(route_target(Route))
+            _ = note_route_success(Route)
     end,
-    logger:warning(#{what => janus_chat_upstream_error, reason => format_reason(Reason)}),
+    logger:warning(#{
+        what => janus_chat_upstream_error,
+        reason => janus_seed:sanitize_error(Reason)
+    }),
     Status = case Reason of
         provider_disabled -> 503;
-        provider_not_found -> 502;
-        bad_secret_ref -> 502;
-        missing_provider_key -> 502;
         _ -> 502
     end,
-    reply_json(Req, State, Status, error_body(<<"upstream_error">>, format_reason(Reason))).
+    reply_json(Req, State, Status, error_body(<<"upstream_error">>, <<"upstream request failed">>)).
 
 note_key_failure(Route, Headers, Status) when is_integer(Status) ->
-    janus_lb:note_failure(key_target(Route), retry_reason(Headers, Status));
+    case key_target(Route) of
+        undefined -> ok;
+        Target -> janus_lb:note_failure(Target, retry_reason(Headers, Status))
+    end;
 note_key_failure(Route, _Headers, Reason) ->
-    janus_lb:note_failure(key_target(Route), Reason).
+    case key_target(Route) of
+        undefined -> ok;
+        Target -> janus_lb:note_failure(Target, Reason)
+    end.
+
+note_key_success(Route) ->
+    case key_target(Route) of
+        undefined -> ok;
+        Target -> janus_lb:note_success(Target)
+    end.
+
+note_route_failure(Route, Reason) ->
+    case route_target(Route) of
+        undefined -> ok;
+        Target -> janus_lb:note_failure(Target, Reason)
+    end.
+
+note_route_success(Route) ->
+    case route_target(Route) of
+        undefined -> ok;
+        Target -> janus_lb:note_success(Target)
+    end.
 
 retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
     case maps:get(<<"retry-after">>, Headers, undefined) of
         Bin when is_binary(Bin) ->
             try
                 Sec = binary_to_integer(Bin),
-                {retry_after, Sec * 1000}
+                {retry_after, min(max(Sec, 0), 300) * 1000}
             catch
                 _:_ -> {http, Status}
             end;
@@ -135,12 +166,8 @@ is_transient({open, _}) -> true;
 is_transient({await_up, _}) -> true;
 is_transient({await, _}) -> true;
 is_transient({body, _}) -> true;
-is_transient(crashed) -> false;
-is_transient(provider_disabled) -> false;
-is_transient(provider_not_found) -> false;
-is_transient(bad_secret_ref) -> false;
-is_transient(missing_provider_key) -> false;
-is_transient({bad_base_url, _}) -> false;
+is_transient({unexpected_await, _}) -> true;
+is_transient({unexpected_body, _}) -> true;
 is_transient(_) -> false.
 
 resolve_model(Name) when is_binary(Name), Name =/= <<>> ->
@@ -185,12 +212,12 @@ format_reason(R) -> iolist_to_binary(io_lib:format("~p", [R])).
 
 key_target(#{provider_key := #{id := Kid}}) ->
     {provider_key, Kid};
-key_target(Other) ->
-    Other.
+key_target(_) ->
+    undefined.
 
 route_target(#{provider_id := P, model_id := M}) ->
     {route, M, P};
 route_target(#{provider_id := P}) ->
     {route, P};
-route_target(Other) ->
-    Other.
+route_target(_) ->
+    undefined.

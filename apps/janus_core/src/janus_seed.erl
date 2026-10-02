@@ -47,12 +47,13 @@ apply_seed(Map) ->
                 Providers when is_list(Providers) ->
                     try
                         Validated = [validate_provider(P) || P <- Providers],
+                        AgentKey = validate_agent_key(Map),
                         lists:foreach(fun apply_provider/1, Validated),
-                        maybe_seed_agent_key(Map),
+                        maybe_seed_agent_key(AgentKey),
                         bump_generation()
                     catch
                         Class:Reason:Stack ->
-                            {error, {Class, Reason, Stack}}
+                            {error, {Class, sanitize_error(Reason), redact_stack(Stack)}}
                     end;
                 _Other ->
                     {error, bad_providers}
@@ -92,22 +93,40 @@ ensure_db() ->
 validate_provider(P) when is_map(P) ->
     Name = required_bin(P, name),
     Base = required_bin(P, base_url),
-    Proto = bin(map_get(P, protocol, <<"openai_chat">>)),
+    Proto0 = map_get(P, protocol, <<"openai_chat">>),
+    Proto =
+        try
+            bin(Proto0)
+        catch
+            error:bad_field_value -> error({bad_protocol, Proto0})
+        end,
     case lists:member(Proto, ?PROTOCOLS) of
         true -> ok;
         false -> error({bad_protocol, Proto})
     end,
-    Keys0 = map_get(P, keys, []),
+    Keys0 = map_get(P, keys, undefined),
     Models0 = map_get(P, models, []),
-    case {is_list(Keys0), is_list(Models0)} of
-        {true, true} -> ok;
+    case Keys0 of
+        undefined -> error({missing_field, keys});
+        [] -> error({empty_field, keys});
+        _ when is_list(Keys0) -> ok;
         _ -> error({bad_provider_lists, Name})
     end,
-    Keys = [required_secret(K) || K <- Keys0],
+    case is_list(Models0) of
+        true -> ok;
+        false -> error({bad_provider_lists, Name})
+    end,
+    Keys = [required_secret(K, key) || K <- Keys0],
     Models = [required_bin_value(M, model) || M <- Models0],
     #{name => Name, base_url => Base, protocol => Proto, keys => Keys, models => Models};
 validate_provider(_Other) ->
     error(bad_provider).
+
+validate_agent_key(Map) ->
+    case map_get(Map, agent_api_key, undefined) of
+        undefined -> undefined;
+        Raw0 -> required_secret(Raw0, agent_api_key)
+    end.
 
 apply_provider(#{name := Name, base_url := Base, protocol := Proto, keys := Keys, models := Models}) ->
     ProviderId = upsert_provider(Name, Base, Proto),
@@ -133,17 +152,30 @@ required_bin(Map, Key) ->
         undefined -> error({missing_field, Key});
         <<>> -> error({empty_field, Key});
         "" -> error({empty_field, Key});
-        V when is_binary(V); is_list(V) -> bin(V);
+        V when is_binary(V) -> V;
+        V when is_list(V) ->
+            case io_lib:char_list(V) of
+                true -> bin(V);
+                false -> error({bad_field, Key})
+            end;
         _Other -> error({bad_field, Key})
     end.
 
 required_bin_value(V, _Label) when is_binary(V), V =/= <<>> -> V;
-required_bin_value(V, _Label) when is_list(V), V =/= "" -> bin(V);
+required_bin_value(V, Label) when is_list(V), V =/= "" ->
+    case io_lib:char_list(V) of
+        true -> bin(V);
+        false -> error({bad_field, Label})
+    end;
 required_bin_value(_, Label) -> error({bad_field, Label}).
 
-required_secret(V) when is_binary(V), V =/= <<>> -> V;
-required_secret(V) when is_list(V), V =/= "" -> bin(V);
-required_secret(_) -> error({bad_field, key}).
+required_secret(V, _Label) when is_binary(V), V =/= <<>> -> V;
+required_secret(V, Label) when is_list(V), V =/= "" ->
+    case io_lib:char_list(V) of
+        true -> bin(V);
+        false -> error({bad_field, Label})
+    end;
+required_secret(_, Label) -> error({bad_field, Label}).
 
 %% Encrypt first, then DELETE+INSERT in one backend transaction.
 replace_provider_keys(ProviderId, Keys) ->
@@ -186,8 +218,8 @@ replace_provider_keys(ProviderId, Keys) ->
     end) of
         ok ->
             ok;
-        {error, _} = Err ->
-            error(Err);
+        {error, Reason} ->
+            error(Reason);
         Other ->
             error({replace_provider_keys, Other})
     end.
@@ -256,27 +288,23 @@ ensure_route(ModelId, ProviderId) ->
             error({ensure_route, Reason})
     end.
 
-maybe_seed_agent_key(Map) ->
-    case map_get(Map, agent_api_key, undefined) of
-        undefined ->
+maybe_seed_agent_key(undefined) ->
+    ok;
+maybe_seed_agent_key(Raw) when is_binary(Raw) ->
+    {Prefix, Hash} = janus_api_keys:hash_key(Raw),
+    case q(<<"SELECT id FROM api_keys WHERE key_hash = ?">>, [Hash]) of
+        {ok, [_ | _]} ->
             ok;
-        Raw0 ->
-            Raw = required_secret(Raw0),
-            {Prefix, Hash} = janus_api_keys:hash_key(Raw),
-            case q(<<"SELECT id FROM api_keys WHERE key_hash = ?">>, [Hash]) of
-                {ok, [_ | _]} ->
-                    ok;
-                {ok, []} ->
-                    case q(
-                             <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
-                             [Prefix, Hash]
-                         ) of
-                        {ok, _} -> ok;
-                        {error, Reason} -> error({seed_agent_key, Reason})
-                    end;
-                {error, Reason} ->
-                    error({seed_agent_key, Reason})
-            end
+        {ok, []} ->
+            case q(
+                     <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
+                     [Prefix, Hash]
+                 ) of
+                {ok, _} -> ok;
+                {error, Reason} -> error({seed_agent_key, Reason})
+            end;
+        {error, Reason} ->
+            error({seed_agent_key, Reason})
     end.
 
 -spec sanitize_error(term()) -> term().
@@ -287,7 +315,9 @@ sanitize_error({bad_field, Key}) -> {bad_field, Key};
 sanitize_error({missing_field, Key}) -> {missing_field, Key};
 sanitize_error({empty_field, Key}) -> {empty_field, Key};
 sanitize_error({bad_protocol, _}) -> bad_protocol;
-sanitize_error({Class, Reason, _Stack}) when is_atom(Class) ->
+sanitize_error({read, Path, Reason}) -> {read, Path, Reason};
+sanitize_error({Class, Reason, _Stack})
+  when Class =:= error; Class =:= throw; Class =:= exit ->
     {Class, sanitize_error(Reason)};
 sanitize_error(Reason) when is_atom(Reason) -> Reason;
 sanitize_error(Reason) when is_tuple(Reason), tuple_size(Reason) >= 1 ->
@@ -311,9 +341,6 @@ redact_stack(Stack) when is_list(Stack) ->
     ];
 redact_stack(Other) ->
     Other.
-
-map_get(Map, Key) ->
-    map_get(Map, Key, undefined).
 
 map_get(Map, Key, Default) when is_map(Map), is_atom(Key) ->
     BinKey = atom_to_binary(Key, utf8),
@@ -348,8 +375,13 @@ rewrite_pg([C | Rest], N, Acc) ->
     rewrite_pg(Rest, N, [C | Acc]).
 
 bin(B) when is_binary(B) -> B;
-bin(L) when is_list(L) -> list_to_binary(L);
-bin(A) when is_atom(A) -> atom_to_binary(A, utf8).
+bin(L) when is_list(L) ->
+    case io_lib:char_list(L) of
+        true -> list_to_binary(L);
+        false -> error(bad_field_value)
+    end;
+bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
+bin(_) -> error(bad_field_value).
 
 to_list(P) when is_list(P) -> P;
 to_list(P) when is_binary(P) -> binary_to_list(P).
