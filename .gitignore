@@ -3,10 +3,15 @@ _build
 data/*.db
 data/*.db-*
 data/snapshots/
+data/seed*.json
+data/seed*.yaml
+data/seed*.yml
 *.beam
 .erlang.cookie
 erl_crash.dump
 .DS_Store
 .env
+.env.*
+!.env.example
 *.swp
 docs/
