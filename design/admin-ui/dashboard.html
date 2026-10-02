@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard · Janus Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">⇄</div>
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a class="active" href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
+      <form style="margin-top:10px">
+        <button class="btn small danger" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Dashboard</h1>
+        <div class="sub">Gateway configuration state at a glance.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="gen-badge" title="Serving catalog generation">gen 42</span>
+      <!-- POST /admin/reload — bumps config generation and rebuilds catalog -->
+      <button class="btn primary" type="button">↻ Reload catalog</button>
+    </div>
+
+    <div class="flash ok">Catalog reloaded — generation 41 → 42.</div>
+
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="value ok">ready</div>
+        <div class="label">Catalog state</div>
+      </div>
+      <div class="stat">
+        <div class="value">42</div>
+        <div class="label">Serving generation</div>
+      </div>
+      <div class="stat">
+        <div class="value">sqlite</div>
+        <div class="label">DB backend</div>
+      </div>
+      <div class="stat">
+        <div class="value">4</div>
+        <div class="label">Providers</div>
+      </div>
+      <div class="stat">
+        <div class="value">6</div>
+        <div class="label">Models</div>
+      </div>
+      <div class="stat">
+        <div class="value">7</div>
+        <div class="label">Routes</div>
+      </div>
+      <div class="stat">
+        <div class="value">2</div>
+        <div class="label">Agent keys</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Providers</h2>
+          <span class="hint">health as of last reload</span>
+        </div>
+        <table class="tbl">
+          <thead>
+            <tr><th>Provider</th><th>Protocol</th><th>Keys</th><th>State</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="name">glm</td>
+              <td class="dim mono">openai_chat</td>
+              <td class="num">3</td>
+              <td><span class="pill ok">enabled</span></td>
+            </tr>
+            <tr>
+              <td class="name">deepseek</td>
+              <td class="dim mono">openai_chat</td>
+              <td class="num">2</td>
+              <td><span class="pill ok">enabled</span></td>
+            </tr>
+            <tr>
+              <td class="name">kimi</td>
+              <td class="dim mono">openai_chat</td>
+              <td class="num">1</td>
+              <td><span class="pill warn">cooldown</span></td>
+            </tr>
+            <tr>
+              <td class="name">mimo</td>
+              <td class="dim mono">openai_chat</td>
+              <td class="num">1</td>
+              <td><span class="pill off">disabled</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Recent admin actions</h2>
+          <span class="hint">last 5</span>
+          <div class="spacer"></div>
+          <a href="audit.html">view all →</a>
+        </div>
+        <table class="tbl">
+          <thead>
+            <tr><th>When</th><th>Action</th><th>Target</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="dim mono">21:44:07</td>
+              <td>provider_key.add</td>
+              <td class="mono">glm</td>
+            </tr>
+            <tr>
+              <td class="dim mono">21:41:52</td>
+              <td>agent_key.create</td>
+              <td class="mono">sk-3fA9x</td>
+            </tr>
+            <tr>
+              <td class="dim mono">21:40:18</td>
+              <td>route.add</td>
+              <td class="mono">glm-5.3 → glm</td>
+            </tr>
+            <tr>
+              <td class="dim mono">21:12:03</td>
+              <td>provider.disable</td>
+              <td class="mono">mimo</td>
+            </tr>
+            <tr>
+              <td class="dim mono">20:58:41</td>
+              <td>catalog.reload</td>
+              <td class="dim">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </div>
+  </main>
+</div>
+</body>
+</html>

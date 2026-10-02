@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent keys · Janus Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">⇄</div>
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a class="active" href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
+      <form style="margin-top:10px">
+        <button class="btn small danger" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Agent keys</h1>
+        <div class="sub">Bearer keys for the data plane — stored as peppered HMAC hashes.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="gen-badge">gen 42</span>
+    </div>
+
+    <!-- Rendered once, directly from the POST /admin/keys create response -->
+    <div class="key-reveal">
+      <strong>Key created — copy it now</strong>
+      <div class="key">sk-3fA9xQw7Lb2nRm8Kd4Vp6Tz0Jh5Xc1B</div>
+      <div class="note">
+        This is the only time the full key is shown. Janus stores an HMAC-SHA256 hash
+        and cannot recover it. Grants: <span class="tag">glm-5.3</span><span class="tag">kimi-k3</span>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Keys</h2>
+        <span class="hint">empty grants = key cannot call any model</span>
+      </div>
+      <table class="tbl">
+        <thead>
+          <tr><th>Prefix</th><th>Model grants</th><th>Created</th><th>State</th><th class="actions">Actions</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">sk-3fA9x…</td>
+            <td>
+              <span class="tag">glm-5.3</span><span class="tag">kimi-k3</span>
+            </td>
+            <td class="dim mono">2026-10-02 21:41</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="actions">
+              <!-- POST action=agent_key.disable / agent_key.delete -->
+              <button class="btn small" type="button">Disable</button>
+              <button class="btn small danger" type="button">Revoke…</button>
+            </td>
+          </tr>
+          <tr>
+            <td class="mono">sk-kQ82m…</td>
+            <td>
+              <span class="tag">glm-5.3</span><span class="tag">deepseek-v41-flash</span>
+              <span class="tag">kimi-k3</span><span class="tag">mimo-v26-pro</span>
+            </td>
+            <td class="dim mono">2026-09-28 10:02</td>
+            <td><span class="pill off">disabled</span></td>
+            <td class="actions">
+              <button class="btn small" type="button">Enable</button>
+              <button class="btn small danger" type="button">Revoke…</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Create key</h2></div>
+      <div class="panel-body" style="padding:18px">
+        <!-- POST /admin/keys action=agent_key.create -->
+        <form>
+          <label class="f">Model grants</label>
+          <div class="checks">
+            <label><input type="checkbox" checked> glm-5.3</label>
+            <label><input type="checkbox" checked> deepseek-v41-flash</label>
+            <label><input type="checkbox" checked> kimi-k3</label>
+            <label><input type="checkbox"> mimo-v26-pro</label>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Generate key</button>
+            <span class="form-note">Grants can be edited later by revoking and re-creating the key.</span>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

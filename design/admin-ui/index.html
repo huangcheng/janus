@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design overview · Janus Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+<style>
+  .toc { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin:22px 0; }
+  .toc a.card {
+    display:block; background:var(--surface); border:1px solid var(--border-soft);
+    border-radius:10px; padding:16px; color:var(--text);
+  }
+  .toc a.card:hover { border-color: var(--accent-dim); text-decoration:none; }
+  .toc .card b { display:block; font-size:14px; margin-bottom:4px; }
+  .toc .card span { color:var(--muted); font-size:12.5px; }
+  .design-notes h3 { font-size:14px; margin:26px 0 8px; color:var(--accent); }
+  .design-notes ul { margin:6px 0; padding-left:20px; color:var(--muted); }
+  .design-notes li { margin:4px 0; }
+  .design-notes code { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">⇄</div>
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a class="active" href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Admin UI — design overview</h1>
+        <div class="sub">HTML blueprint for the Janus admin console. Static mockups with sample data; the implementation renders the same layout server-side.</div>
+      </div>
+    </div>
+
+    <div class="toc">
+      <a class="card" href="login.html"><b>Sign in</b><span>Password gate, login lockout notice</span></a>
+      <a class="card" href="dashboard.html"><b>Dashboard</b><span>Catalog state, provider health, recent actions, reload</span></a>
+      <a class="card" href="providers.html"><b>Providers &amp; keys</b><span>Upstreams, write-only encrypted keys</span></a>
+      <a class="card" href="models.html"><b>Models &amp; routes</b><span>Public model names → upstream routing</span></a>
+      <a class="card" href="keys.html"><b>Agent keys</b><span>Create (shown once), grant models, disable, revoke</span></a>
+      <a class="card" href="audit.html"><b>Audit log</b><span>Every admin mutation with actor and detail</span></a>
+    </div>
+
+    <section class="panel design-notes" style="padding:22px 26px">
+      <h2 style="margin:0 0 6px">Design decisions</h2>
+
+      <h3>Separate admin plane</h3>
+      <ul>
+        <li>Own Cowboy listener on <code>127.0.0.1:8090</code> (app env <code>janus_admin</code>: port / bind) — never on the data-plane listener.</li>
+        <li>Caddy terminates TLS and may add IP allowlist or basic auth in front of <code>/admin</code>; the app still enforces its own session auth (defense in depth).</li>
+      </ul>
+
+      <h3>Auth model</h3>
+      <ul>
+        <li>Single operator password from <code>JANUS_ADMIN_PASSWORD</code> (fail closed: unset → no logins possible, listener still serves the login page).</li>
+        <li>Session cookie <code>janus_admin_session</code>: random 256-bit token, HttpOnly, SameSite=Strict, 12 h expiry, optional Secure flag.</li>
+        <li>5 failed logins per source IP → 15 min lockout.</li>
+        <li>Every mutating form carries a per-session CSRF token; POSTs without a match are rejected with 403.</li>
+        <li>Logins, login failures and every mutation are written to the audit log.</li>
+      </ul>
+
+      <h3>Secret handling</h3>
+      <ul>
+        <li>Provider keys: pasted once → AES-256-GCM envelope via <code>janus_secrets</code> → plaintext discarded. The UI can only ever show <code>key_id</code> + weight + state.</li>
+        <li>Agent keys: generated server-side (<code>sk-</code> + random), stored as peppered HMAC hash. The full key is shown exactly once, in the response to the create POST — never re-displayed, never logged.</li>
+        <li>Model grants are explicit checkboxes; a key with no grants can call nothing.</li>
+      </ul>
+
+      <h3>Catalog mutations</h3>
+      <ul>
+        <li>All forms POST to the page URL with an <code>action</code> field; handlers validate, write via <code>janus_db_conn</code>, bump the config generation (CAS), and the reload propagates to the serving catalog.</li>
+        <li>PRG everywhere (303 redirects) with a flash message — except key creation, which renders the one-time reveal page directly.</li>
+      </ul>
+
+      <h3>Rendering</h3>
+      <ul>
+        <li>Server-rendered Erlang (Cowboy handlers + one layout module), this stylesheet served from <code>priv/www</code>. No client framework, no build step, no JS except native forms.</li>
+        <li>All dynamic output HTML-escaped; identifiers rendered in monospace.</li>
+      </ul>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Providers &amp; keys · Janus Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">⇄</div>
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a class="active" href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
+      <form style="margin-top:10px">
+        <button class="btn small danger" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Providers &amp; keys</h1>
+        <div class="sub">Upstream endpoints and their encrypted credentials.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="gen-badge">gen 42</span>
+    </div>
+
+    <div class="flash err">Provider name already exists.</div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Providers</h2>
+        <span class="hint">provider secrets are write-only — never displayed or exported</span>
+      </div>
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Provider</th><th>Base URL</th><th>Protocol</th><th>State</th><th class="actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">glm</td>
+            <td class="dim mono">https://api.glm.example/v1</td>
+            <td class="dim mono">openai_chat</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="actions">
+              <!-- POST action=provider.disable / provider.enable -->
+              <button class="btn small" type="button">Disable</button>
+              <!-- POST action=key.delete -->
+              <button class="btn small danger" type="button">Delete…</button>
+            </td>
+          </tr>
+          <tr class="subrow">
+            <td colspan="5">
+              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
+                <strong style="color:var(--muted)">keys</strong>
+                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
+                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
+                <span class="tag">k2 · w2 · <span class="pill off" style="padding:0 6px">off</span></span>
+                <span style="flex:1"></span>
+                <button class="btn small" type="button">+ Add key</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="name">deepseek</td>
+            <td class="dim mono">https://api.deepseek.example/v1</td>
+            <td class="dim mono">openai_chat</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="actions">
+              <button class="btn small" type="button">Disable</button>
+              <button class="btn small danger" type="button">Delete…</button>
+            </td>
+          </tr>
+          <tr class="subrow">
+            <td colspan="5">
+              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
+                <strong style="color:var(--muted)">keys</strong>
+                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
+                <span class="tag">k1 · w3 · <span class="pill ok" style="padding:0 6px">on</span></span>
+                <span style="flex:1"></span>
+                <button class="btn small" type="button">+ Add key</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="name">kimi</td>
+            <td class="dim mono">https://api.moonshot.example/v1</td>
+            <td class="dim mono">openai_chat</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="actions">
+              <button class="btn small" type="button">Disable</button>
+              <button class="btn small danger" type="button">Delete…</button>
+            </td>
+          </tr>
+          <tr class="subrow">
+            <td colspan="5">
+              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
+                <strong style="color:var(--muted)">keys</strong>
+                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
+                <span style="flex:1"></span>
+                <button class="btn small" type="button">+ Add key</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="name">mimo</td>
+            <td class="dim mono">https://api.mimo.example/v1</td>
+            <td class="dim mono">openai_chat</td>
+            <td><span class="pill off">disabled</span></td>
+            <td class="actions">
+              <button class="btn small" type="button">Enable</button>
+              <button class="btn small danger" type="button">Delete…</button>
+            </td>
+          </tr>
+          <tr class="subrow">
+            <td colspan="5">
+              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
+                <strong style="color:var(--muted)">keys</strong>
+                <span class="tag">k1 · w1 · <span class="pill off" style="padding:0 6px">off</span></span>
+                <span style="flex:1"></span>
+                <button class="btn small" type="button">+ Add key</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head"><h2>Add provider</h2></div>
+        <div class="panel-body" style="padding:18px">
+          <!-- POST /admin/providers action=provider.add -->
+          <form class="form-grid">
+            <label class="f">Name
+              <input type="text" name="name" placeholder="openrouter">
+            </label>
+            <label class="f">Protocol
+              <select name="protocol">
+                <option value="openai_chat">openai_chat</option>
+                <option value="anthropic_messages">anthropic_messages</option>
+                <option value="openai_responses">openai_responses</option>
+              </select>
+            </label>
+            <label class="f" style="grid-column: 1 / -1">Base URL
+              <input type="text" name="base_url" placeholder="https://api.example.com/v1">
+            </label>
+            <div class="form-actions" style="grid-column: 1 / -1">
+              <button class="btn primary" type="submit">Add provider</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Add key to <span class="mono">glm</span></h2></div>
+        <div class="panel-body" style="padding:18px">
+          <!-- POST /admin/providers action=key.add (provider_id in form) -->
+          <form class="form-grid">
+            <label class="f" style="grid-column: 1 / -1">API key secret
+              <textarea name="secret" rows="3" placeholder="sk-…"></textarea>
+            </label>
+            <label class="f">Weight
+              <input type="number" name="weight" value="1" min="1">
+            </label>
+            <div class="form-actions" style="grid-column: 1 / -1">
+              <button class="btn primary" type="submit">Encrypt &amp; store</button>
+            </div>
+          </form>
+          <div class="form-note warn">
+            Stored as an AES-256-GCM envelope. The plaintext is discarded after
+            encryption and can never be shown again.
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+</body>
+</html>

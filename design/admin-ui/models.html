@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Models &amp; routes · Janus Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">⇄</div>
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a class="active" href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
+      <form style="margin-top:10px">
+        <button class="btn small danger" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1>Models &amp; routes</h1>
+        <div class="sub">Public model names and the upstream providers that serve them.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="gen-badge">gen 42</span>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Models</h2>
+        <span class="hint">model name = the <code>model</code> field agents send to /v1/chat/completions</span>
+      </div>
+      <table class="tbl">
+        <thead>
+          <tr><th>Model</th><th>State</th><th>Routes</th><th class="actions">Actions</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name mono">glm-5.3</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="dim">2 upstream</td>
+            <td class="actions">
+              <!-- POST action=model.disable / model.enable -->
+              <button class="btn small" type="button">Disable</button>
+            </td>
+          </tr>
+          <tr class="subrow">
+            <td colspan="4">
+              <table class="tbl" style="margin:4px 0">
+                <thead><tr><th></th><th>Provider</th><th>Upstream id</th><th>Weight</th><th>Priority</th><th>State</th><th class="actions"></th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td class="indent dim">↳</td>
+                    <td class="mono">glm</td>
+                    <td class="dim mono">—</td>
+                    <td class="num">1</td>
+                    <td class="num">0</td>
+                    <td><span class="pill ok">on</span></td>
+                    <td class="actions">
+                      <!-- POST action=route.disable / route.delete -->
+                      <button class="btn small" type="button">Off</button>
+                      <button class="btn small danger" type="button">Remove</button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="indent dim">↳</td>
+                    <td class="mono">openrouter</td>
+                    <td class="dim mono">zhipu/glm-5.3</td>
+                    <td class="num">2</td>
+                    <td class="num">1</td>
+                    <td><span class="pill ok">on</span></td>
+                    <td class="actions">
+                      <button class="btn small" type="button">Off</button>
+                      <button class="btn small danger" type="button">Remove</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="name mono">deepseek-v41-flash</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="dim">1 upstream</td>
+            <td class="actions"><button class="btn small" type="button">Disable</button></td>
+          </tr>
+          <tr class="subrow">
+            <td colspan="4">
+              <table class="tbl" style="margin:4px 0">
+                <thead><tr><th></th><th>Provider</th><th>Upstream id</th><th>Weight</th><th>Priority</th><th>State</th><th class="actions"></th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td class="indent dim">↳</td>
+                    <td class="mono">deepseek</td>
+                    <td class="dim mono">—</td>
+                    <td class="num">1</td>
+                    <td class="num">0</td>
+                    <td><span class="pill ok">on</span></td>
+                    <td class="actions">
+                      <button class="btn small" type="button">Off</button>
+                      <button class="btn small danger" type="button">Remove</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="name mono">kimi-k3</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="dim">1 upstream</td>
+            <td class="actions"><button class="btn small" type="button">Disable</button></td>
+          </tr>
+          <tr>
+            <td class="name mono">mimo-v26-pro</td>
+            <td><span class="pill off">disabled</span></td>
+            <td class="dim">1 upstream</td>
+            <td class="actions"><button class="btn small" type="button">Enable</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head"><h2>Add model</h2></div>
+        <div class="panel-body" style="padding:18px">
+          <!-- POST /admin/models action=model.add -->
+          <form class="form-grid">
+            <label class="f">Model name
+              <input type="text" name="name" placeholder="qwen4-max">
+            </label>
+            <div class="form-actions" style="grid-column: 1 / -1">
+              <button class="btn primary" type="submit">Add model</button>
+              <span class="form-note">Enable it on at least one route before agents can use it.</span>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Add route</h2></div>
+        <div class="panel-body" style="padding:18px">
+          <!-- POST /admin/models action=route.add -->
+          <form class="form-grid">
+            <label class="f">Model
+              <select name="model"><option>glm-5.3</option><option>kimi-k3</option></select>
+            </label>
+            <label class="f">Provider
+              <select name="provider"><option>glm</option><option>kimi</option></select>
+            </label>
+            <label class="f">Upstream model id
+              <input type="text" name="upstream_model_id" placeholder="optional — defaults to model name">
+            </label>
+            <label class="f">Weight
+              <input type="number" name="weight" value="1" min="1">
+            </label>
+            <label class="f">Priority
+              <input type="number" name="priority" value="0">
+            </label>
+            <div class="form-actions" style="grid-column: 1 / -1">
+              <button class="btn primary" type="submit">Add route</button>
+              <span class="form-note">Lower priority runs first; same priority = weighted round-robin.</span>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+</body>
+</html>
