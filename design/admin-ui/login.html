@@ -9,29 +9,32 @@
 <body>
 <div class="login-wrap">
   <main class="login-card">
-    <div class="logo">
-      <div class="logo-mark">⇄</div>
-      <div>
-        <div class="logo-name">Janus</div>
-        <div class="logo-sub">gateway console</div>
+    <div class="inner">
+      <div class="logo">
+        <div class="logo-mark">⇄</div>
+        <div>
+          <div class="logo-name">Janus</div>
+          <div class="logo-sub">gateway console</div>
+        </div>
       </div>
-    </div>
 
-    <h1>Sign in</h1>
-    <p class="sub">Operator access to the Janus LLM gateway.</p>
+      <h1>Sign in</h1>
+      <p class="sub">Operator access to the Janus LLM gateway.</p>
 
-    <!-- POST /admin/login -->
-    <form method="post" action="/admin/login">
-      <label class="f">Admin password
-        <input type="password" name="password" placeholder="••••••••••••" autofocus autocomplete="current-password">
-      </label>
-      <button class="btn primary" type="submit">Sign in</button>
-    </form>
+      <!-- POST /admin/api/session -->
+      <form method="post" action="/admin/api/session">
+        <label class="f">Admin password
+          <input type="password" name="password" placeholder="••••••••••••" autofocus autocomplete="current-password">
+        </label>
+        <button class="btn primary" type="submit">
+          Sign in <span class="cta-ico">→</span>
+        </button>
+      </form>
 
-    <div class="login-foot">
-      Single operator password — set via <code>JANUS_ADMIN_PASSWORD</code>.<br>
-      5 failed attempts lock the source IP for 15&nbsp;minutes.
-      Sessions expire after 12&nbsp;h.
+      <div class="login-foot">
+        Single operator password — set via <code>JANUS_ADMIN_PASSWORD</code>.<br>
+        5 failed attempts lock the source IP for 15&nbsp;min · sessions expire after 12&nbsp;h.
+      </div>
     </div>
   </main>
 </div>

@@ -24,12 +24,14 @@
       <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
       <a href="audit.html"><span class="ico">☰</span> Audit log</a>
       <span class="nav-label">Reference</span>
+      <a href="modals.html"><span class="ico">▣</span> Modals</a>
+      <a href="api.html"><span class="ico">⇄</span> API contract</a>
       <a href="index.html"><span class="ico">✦</span> Design overview</a>
     </nav>
     <div class="sidebar-footer">
       <div class="row"><span>data plane</span><span class="val">:8080</span></div>
       <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
-      <form style="margin-top:10px">
+      <form style="margin-top:12px">
         <button class="btn small danger" type="submit">Sign out</button>
       </form>
     </div>
@@ -38,11 +40,14 @@
   <main class="main">
     <div class="topbar">
       <div>
+        <span class="eyebrow">Configuration · Upstreams</span>
         <h1>Providers &amp; keys</h1>
         <div class="sub">Upstream endpoints and their encrypted credentials.</div>
       </div>
       <div class="spacer"></div>
-      <span class="gen-badge">gen 42</span>
+      <span class="gen-badge"><span class="dot"></span>gen 42</span>
+      <!-- Opens the "Add provider" modal (see modals.html) -->
+      <button class="btn primary" type="button">Add provider <span class="cta-ico">+</span></button>
     </div>
 
     <div class="flash err">Provider name already exists.</div>
@@ -55,7 +60,7 @@
       <table class="tbl">
         <thead>
           <tr>
-            <th>Provider</th><th>Base URL</th><th>Protocol</th><th>State</th><th class="actions">Actions</th>
+            <th>Provider <span class="sort">▲</span></th><th>Base URL</th><th>Protocol</th><th>State</th><th class="actions">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -65,22 +70,24 @@
             <td class="dim mono">openai_chat</td>
             <td><span class="pill ok">enabled</span></td>
             <td class="actions">
-              <!-- POST action=provider.disable / provider.enable -->
+              <!-- POST /admin/api/providers/3/disable · DELETE /admin/api/providers/3 (confirm modal) -->
               <button class="btn small" type="button">Disable</button>
-              <!-- POST action=key.delete -->
               <button class="btn small danger" type="button">Delete…</button>
             </td>
           </tr>
           <tr class="subrow">
             <td colspan="5">
-              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
-                <strong style="color:var(--muted)">keys</strong>
-                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
-                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
-                <span class="tag">k2 · w2 · <span class="pill off" style="padding:0 6px">off</span></span>
-                <span style="flex:1"></span>
-                <button class="btn small" type="button">+ Add key</button>
-              </div>
+              <details open>
+                <summary><span class="chev">›</span> 3 keys · weighted round-robin</summary>
+                <div class="keys-strip">
+                  <span class="tag">k1 · w1 <span class="pill ok">on</span></span>
+                  <span class="tag">k1 · w1 <span class="pill ok">on</span></span>
+                  <span class="tag">k2 · w2 <span class="pill off">off</span></span>
+                  <span style="flex:1"></span>
+                  <!-- Opens the "Add key" modal (shown open below) -->
+                  <button class="btn small" type="button">+ Add key</button>
+                </div>
+              </details>
             </td>
           </tr>
           <tr>
@@ -95,13 +102,15 @@
           </tr>
           <tr class="subrow">
             <td colspan="5">
-              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
-                <strong style="color:var(--muted)">keys</strong>
-                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
-                <span class="tag">k1 · w3 · <span class="pill ok" style="padding:0 6px">on</span></span>
-                <span style="flex:1"></span>
-                <button class="btn small" type="button">+ Add key</button>
-              </div>
+              <details>
+                <summary><span class="chev">›</span> 2 keys · weighted round-robin</summary>
+                <div class="keys-strip">
+                  <span class="tag">k1 · w1 <span class="pill ok">on</span></span>
+                  <span class="tag">k1 · w3 <span class="pill ok">on</span></span>
+                  <span style="flex:1"></span>
+                  <button class="btn small" type="button">+ Add key</button>
+                </div>
+              </details>
             </td>
           </tr>
           <tr>
@@ -116,12 +125,14 @@
           </tr>
           <tr class="subrow">
             <td colspan="5">
-              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
-                <strong style="color:var(--muted)">keys</strong>
-                <span class="tag">k1 · w1 · <span class="pill ok" style="padding:0 6px">on</span></span>
-                <span style="flex:1"></span>
-                <button class="btn small" type="button">+ Add key</button>
-              </div>
+              <details>
+                <summary><span class="chev">›</span> 1 key · weighted round-robin</summary>
+                <div class="keys-strip">
+                  <span class="tag">k1 · w1 <span class="pill ok">on</span></span>
+                  <span style="flex:1"></span>
+                  <button class="btn small" type="button">+ Add key</button>
+                </div>
+              </details>
             </td>
           </tr>
           <tr>
@@ -136,67 +147,56 @@
           </tr>
           <tr class="subrow">
             <td colspan="5">
-              <div class="indent" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 0;">
-                <strong style="color:var(--muted)">keys</strong>
-                <span class="tag">k1 · w1 · <span class="pill off" style="padding:0 6px">off</span></span>
-                <span style="flex:1"></span>
-                <button class="btn small" type="button">+ Add key</button>
-              </div>
+              <details>
+                <summary><span class="chev">›</span> 1 key · weighted round-robin</summary>
+                <div class="keys-strip">
+                  <span class="tag">k1 · w1 <span class="pill off">off</span></span>
+                  <span style="flex:1"></span>
+                  <button class="btn small" type="button">+ Add key</button>
+                </div>
+              </details>
             </td>
           </tr>
         </tbody>
       </table>
     </section>
+  </main>
+</div>
 
-    <div class="grid-2">
-      <section class="panel">
-        <div class="panel-head"><h2>Add provider</h2></div>
-        <div class="panel-body" style="padding:18px">
-          <!-- POST /admin/providers action=provider.add -->
-          <form class="form-grid">
-            <label class="f">Name
-              <input type="text" name="name" placeholder="openrouter">
-            </label>
-            <label class="f">Protocol
-              <select name="protocol">
-                <option value="openai_chat">openai_chat</option>
-                <option value="anthropic_messages">anthropic_messages</option>
-                <option value="openai_responses">openai_responses</option>
-              </select>
-            </label>
-            <label class="f" style="grid-column: 1 / -1">Base URL
-              <input type="text" name="base_url" placeholder="https://api.example.com/v1">
-            </label>
-            <div class="form-actions" style="grid-column: 1 / -1">
-              <button class="btn primary" type="submit">Add provider</button>
-            </div>
-          </form>
+<!-- Live demo: "Add key to glm" modal, opened from the keys strip above. -->
+<div class="overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Add key to glm">
+    <div class="inner">
+      <div class="modal-head">
+        <div class="titles">
+          <h3>Add key · <span class="mono">glm</span></h3>
+          <div class="sub">POST /admin/api/providers/3/keys</div>
         </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>Add key to <span class="mono">glm</span></h2></div>
-        <div class="panel-body" style="padding:18px">
-          <!-- POST /admin/providers action=key.add (provider_id in form) -->
-          <form class="form-grid">
-            <label class="f" style="grid-column: 1 / -1">API key secret
-              <textarea name="secret" rows="3" placeholder="sk-…"></textarea>
-            </label>
-            <label class="f">Weight
-              <input type="number" name="weight" value="1" min="1">
-            </label>
-            <div class="form-actions" style="grid-column: 1 / -1">
-              <button class="btn primary" type="submit">Encrypt &amp; store</button>
-            </div>
-          </form>
-          <div class="form-note warn">
+        <button class="modal-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <form class="form-grid">
+          <label class="f" style="grid-column: 1 / -1">API key secret
+            <textarea name="secret" rows="3" placeholder="sk-…"></textarea>
+          </label>
+          <label class="f">Weight
+            <input type="number" name="weight" value="1" min="1">
+          </label>
+          <label class="f">Keyring id
+            <select name="key_id"><option value="k1">k1 (active)</option><option value="k2">k2</option></select>
+          </label>
+          <div class="form-note warn" style="grid-column: 1 / -1">
             Stored as an AES-256-GCM envelope. The plaintext is discarded after
             encryption and can never be shown again.
           </div>
-        </div>
-      </section>
+        </form>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" type="button">Cancel <span class="kbd">esc</span></button>
+        <button class="btn primary" type="submit">Encrypt &amp; store <span class="cta-ico">🔒</span></button>
+      </div>
     </div>
-  </main>
+  </div>
 </div>
 </body>
 </html>

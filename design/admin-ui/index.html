@@ -6,18 +6,33 @@
 <title>Design overview · Janus Admin</title>
 <link rel="stylesheet" href="assets/admin.css">
 <style>
-  .toc { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin:22px 0; }
+  .toc { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px,1fr)); gap:16px; margin:24px 0; }
   .toc a.card {
-    display:block; background:var(--surface); border:1px solid var(--border-soft);
-    border-radius:10px; padding:16px; color:var(--text);
+    display:block; border-radius: var(--radius-lg); padding:2px; background: var(--surface);
+    border:1px solid var(--hairline-soft); color: var(--text);
+    transition: border-color var(--t) var(--ease), transform var(--t) var(--ease);
   }
-  .toc a.card:hover { border-color: var(--accent-dim); text-decoration:none; }
+  .toc a.card:hover { border-color: var(--hairline); transform: translateY(-2px); text-decoration: none; }
+  .toc a.card .inner {
+    border-radius: calc(var(--radius-lg) - 2px);
+    background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    padding:16px 18px;
+  }
   .toc .card b { display:block; font-size:14px; margin-bottom:4px; }
   .toc .card span { color:var(--muted); font-size:12.5px; }
-  .design-notes h3 { font-size:14px; margin:26px 0 8px; color:var(--accent); }
-  .design-notes ul { margin:6px 0; padding-left:20px; color:var(--muted); }
-  .design-notes li { margin:4px 0; }
-  .design-notes code { color: var(--text); }
+  .notes h3 { font-size:13px; margin:28px 0 8px; color: var(--accent); letter-spacing: 0.04em; text-transform: uppercase; }
+  .notes ul { margin:6px 0; padding-left:20px; color:var(--muted); }
+  .notes li { margin:5px 0; }
+  .notes code { color: var(--text); }
+  .stack { display:grid; grid-template-columns: 1fr 40px 1fr; gap: 0; align-items: center; margin: 18px 0 6px; }
+  .stack .box {
+    border-radius: var(--radius); border:1px solid var(--hairline); background: var(--surface-2);
+    padding: 14px 18px; font-size: 13px;
+  }
+  .stack .box b { display:block; font-size: 13.5px; margin-bottom: 6px; }
+  .stack .box .dim { color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .stack .arrow { text-align:center; color: var(--accent); font-size: 18px; }
 </style>
 </head>
 <body>
@@ -38,6 +53,8 @@
       <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
       <a href="audit.html"><span class="ico">☰</span> Audit log</a>
       <span class="nav-label">Reference</span>
+      <a href="modals.html"><span class="ico">▣</span> Modals</a>
+      <a href="api.html"><span class="ico">⇄</span> API contract</a>
       <a class="active" href="index.html"><span class="ico">✦</span> Design overview</a>
     </nav>
     <div class="sidebar-footer">
@@ -49,56 +66,88 @@
   <main class="main">
     <div class="topbar">
       <div>
+        <span class="eyebrow">Reference · Overview</span>
         <h1>Admin UI — design overview</h1>
-        <div class="sub">HTML blueprint for the Janus admin console. Static mockups with sample data; the implementation renders the same layout server-side.</div>
+        <div class="sub">HTML blueprint for the Janus admin console.
+          The implementation is a <strong>React SPA (TanStack Router)</strong> served by the
+          Erlang admin listener; these mockups define the layout, motion and
+          interaction contract.</div>
       </div>
     </div>
 
     <div class="toc">
-      <a class="card" href="login.html"><b>Sign in</b><span>Password gate, login lockout notice</span></a>
-      <a class="card" href="dashboard.html"><b>Dashboard</b><span>Catalog state, provider health, recent actions, reload</span></a>
-      <a class="card" href="providers.html"><b>Providers &amp; keys</b><span>Upstreams, write-only encrypted keys</span></a>
-      <a class="card" href="models.html"><b>Models &amp; routes</b><span>Public model names → upstream routing</span></a>
-      <a class="card" href="keys.html"><b>Agent keys</b><span>Create (shown once), grant models, disable, revoke</span></a>
-      <a class="card" href="audit.html"><b>Audit log</b><span>Every admin mutation with actor and detail</span></a>
+      <a class="card" href="login.html"><div class="inner"><b>Sign in</b><span>Password gate, lockout notice</span></div></a>
+      <a class="card" href="dashboard.html"><div class="inner"><b>Dashboard</b><span>Catalog state, provider health, activity, reload</span></div></a>
+      <a class="card" href="providers.html"><div class="inner"><b>Providers &amp; keys</b><span>Upstreams, write-only encrypted keys, live modal demo</span></div></a>
+      <a class="card" href="models.html"><div class="inner"><b>Models &amp; routes</b><span>Public model names → upstream routing</span></div></a>
+      <a class="card" href="keys.html"><div class="inner"><b>Agent keys</b><span>Create (reveal-once modal), grants, disable, revoke</span></div></a>
+      <a class="card" href="audit.html"><div class="inner"><b>Audit log</b><span>Filterable, paged admin action trace</span></div></a>
+      <a class="card" href="modals.html"><div class="inner"><b>Modals</b><span>All mutation dialogs in one gallery</span></div></a>
+      <a class="card" href="api.html"><div class="inner"><b>API contract</b><span>The JSON endpoints the SPA consumes</span></div></a>
     </div>
 
-    <section class="panel design-notes" style="padding:22px 26px">
-      <h2 style="margin:0 0 6px">Design decisions</h2>
+    <section class="panel notes" style="padding:3px">
+      <div style="padding:22px 26px">
 
-      <h3>Separate admin plane</h3>
-      <ul>
-        <li>Own Cowboy listener on <code>127.0.0.1:8090</code> (app env <code>janus_admin</code>: port / bind) — never on the data-plane listener.</li>
-        <li>Caddy terminates TLS and may add IP allowlist or basic auth in front of <code>/admin</code>; the app still enforces its own session auth (defense in depth).</li>
-      </ul>
+        <h3>Architecture</h3>
+        <div class="stack">
+          <div class="box">
+            <b>SPA · React + TanStack Router</b>
+            <div class="dim">
+              Vite build · TypeScript · file-based routes<br>
+              loaders prefetch page data · search-param filters<br>
+              built assets served from <code>apps/janus_admin/priv/www</code>
+            </div>
+          </div>
+          <div class="arrow">⇄</div>
+          <div class="box">
+            <b>Erlang · admin listener <code>127.0.0.1:8090</code></b>
+            <div class="dim">
+              JSON API under <code>/admin/api</code> (contract →)<br>
+              sessions, CSRF, audit, <code>janus_db_conn</code> writes<br>
+              generation bump → catalog hot-swap
+            </div>
+          </div>
+        </div>
 
-      <h3>Auth model</h3>
-      <ul>
-        <li>Single operator password from <code>JANUS_ADMIN_PASSWORD</code> (fail closed: unset → no logins possible, listener still serves the login page).</li>
-        <li>Session cookie <code>janus_admin_session</code>: random 256-bit token, HttpOnly, SameSite=Strict, 12 h expiry, optional Secure flag.</li>
-        <li>5 failed logins per source IP → 15 min lockout.</li>
-        <li>Every mutating form carries a per-session CSRF token; POSTs without a match are rejected with 403.</li>
-        <li>Logins, login failures and every mutation are written to the audit log.</li>
-      </ul>
+        <h3>Route tree (TanStack Router)</h3>
+        <div class="route-tree">
+          <b>/admin</b> — layout route: sidebar chrome + <span class="guard">auth guard (beforeLoad → /admin/login)</span><br>
+          &nbsp;&nbsp;├─ <b>index</b> — dashboard · loader: <code>GET /overview</code><br>
+          &nbsp;&nbsp;├─ <b>/providers</b> — loader: <code>GET /providers</code> · modals for create/add-key/delete<br>
+          &nbsp;&nbsp;├─ <b>/models</b> — loader: <code>GET /models</code> + <code>GET /providers</code> · modals for create/route/delete<br>
+          &nbsp;&nbsp;├─ <b>/keys</b> — loader: <code>GET /keys</code> + <code>GET /models</code> · create modal w/ reveal-once state<br>
+          &nbsp;&nbsp;└─ <b>/audit</b> — loaders + <code>?action=&amp;actor=&amp;page=</code> search params<br>
+          <b>/admin/login</b> — outside the guard, own minimal layout
+        </div>
 
-      <h3>Secret handling</h3>
-      <ul>
-        <li>Provider keys: pasted once → AES-256-GCM envelope via <code>janus_secrets</code> → plaintext discarded. The UI can only ever show <code>key_id</code> + weight + state.</li>
-        <li>Agent keys: generated server-side (<code>sk-</code> + random), stored as peppered HMAC hash. The full key is shown exactly once, in the response to the create POST — never re-displayed, never logged.</li>
-        <li>Model grants are explicit checkboxes; a key with no grants can call nothing.</li>
-      </ul>
+        <h3>Interaction model</h3>
+        <ul>
+          <li><strong>All mutations are modals</strong> — add provider, add key, add model, add route, create agent key; destructive actions (delete/revoke) get a danger-confirm modal with consequences spelled out.</li>
+          <li><strong>Toggles act immediately</strong> (enable/disable is reversible) with an undo toast — no modal.</li>
+          <li>Key creation renders its one-time reveal inside the success state of the modal; closing it discards the plaintext forever.</li>
+          <li>Optimistic none — mutations await the API response, then invalidate the route loader (TanStack Query or loader revalidation).</li>
+        </ul>
 
-      <h3>Catalog mutations</h3>
-      <ul>
-        <li>All forms POST to the page URL with an <code>action</code> field; handlers validate, write via <code>janus_db_conn</code>, bump the config generation (CAS), and the reload propagates to the serving catalog.</li>
-        <li>PRG everywhere (303 redirects) with a flash message — except key creation, which renders the one-time reveal page directly.</li>
-      </ul>
+        <h3>Auth &amp; security posture</h3>
+        <ul>
+          <li>Separate admin listener on <code>127.0.0.1:8090</code>; Caddy fronts it with TLS (+ optional IP allowlist) while the app still enforces its own session auth.</li>
+          <li>Password from <code>JANUS_ADMIN_PASSWORD</code>; unset ⇒ fail closed (no login possible). 5 failed logins lock the IP 15 min.</li>
+          <li>Session cookie HttpOnly · SameSite=Strict · 12 h; CSRF token via <code>X-Janus-CSRF</code> on every mutation.</li>
+          <li>Provider secrets are write-only (AES-256-GCM at rest); agent keys stored as peppered HMAC hashes, revealed once.</li>
+          <li>Every mutation and login attempt lands in the audit log.</li>
+        </ul>
 
-      <h3>Rendering</h3>
-      <ul>
-        <li>Server-rendered Erlang (Cowboy handlers + one layout module), this stylesheet served from <code>priv/www</code>. No client framework, no build step, no JS except native forms.</li>
-        <li>All dynamic output HTML-escaped; identifiers rendered in monospace.</li>
-      </ul>
+        <h3>Visual language</h3>
+        <ul>
+          <li>OLED-dark canvas with a fixed radial mesh glow; glass sidebar with backdrop blur (the only blurred element).</li>
+          <li>Double-bezel cards: 2px shell + inner surface with top highlight; hairline <code>white/8%</code> borders, no gray lines.</li>
+          <li>Pill buttons with trailing circular icon, press-scale physics; motion on <code>cubic-bezier(0.32, 0.72, 0, 1)</code>.</li>
+          <li>Geist / Plus Jakarta Sans for UI, Geist Mono / Cascadia for identifiers and code.</li>
+          <li>Status pills: green = enabled, amber = cooldown/warning, dim = off, red = destructive.</li>
+        </ul>
+
+      </div>
     </section>
   </main>
 </div>

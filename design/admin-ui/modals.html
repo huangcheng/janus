@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modals · Janus Admin</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">⇄</div>
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a class="active" href="modals.html"><span class="ico">▣</span> Modals</a>
+      <a href="api.html"><span class="ico">⇄</span> API contract</a>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>admin plane</span><span class="val">:8090</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <span class="eyebrow">Reference · Components</span>
+        <h1>Modals</h1>
+        <div class="sub">
+          Every mutation happens in a modal — never in inline page forms.
+          Overlay dims + blurs the page; <span class="kbd">esc</span> or backdrop click closes.
+        </div>
+      </div>
+    </div>
+
+    <div class="gallery-grid">
+
+      <div class="gallery-item">
+        <div class="caption">Add provider · providers page</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Add provider</h3>
+                <div class="sub">POST /admin/api/providers</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <form class="form-grid">
+                <label class="f">Name
+                  <input type="text" name="name" placeholder="openrouter">
+                </label>
+                <label class="f">Protocol
+                  <select name="protocol">
+                    <option value="openai_chat">openai_chat</option>
+                    <option value="anthropic_messages">anthropic_messages</option>
+                    <option value="openai_responses">openai_responses</option>
+                  </select>
+                </label>
+                <label class="f" style="grid-column: 1 / -1">Base URL
+                  <input type="text" name="base_url" placeholder="https://api.example.com/v1">
+                </label>
+              </form>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn primary" type="button">Add provider <span class="cta-ico">+</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Add key · from a provider row</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Add key · <span class="mono">glm</span></h3>
+                <div class="sub">POST /admin/api/providers/3/keys</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <form class="form-grid">
+                <label class="f" style="grid-column: 1 / -1">API key secret
+                  <textarea name="secret" rows="3" placeholder="sk-…"></textarea>
+                </label>
+                <label class="f">Weight
+                  <input type="number" name="weight" value="1" min="1">
+                </label>
+                <label class="f">Keyring id
+                  <select name="key_id"><option>k1 (active)</option><option>k2</option></select>
+                </label>
+                <div class="form-note warn" style="grid-column: 1 / -1">
+                  Stored as an AES-256-GCM envelope — plaintext is discarded and can never be shown again.
+                </div>
+              </form>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn primary" type="button">Encrypt &amp; store <span class="cta-ico">🔒</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Add model · models page</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Add model</h3>
+                <div class="sub">POST /admin/api/models</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <form class="form-grid">
+                <label class="f" style="grid-column: 1 / -1">Model name
+                  <input type="text" name="name" placeholder="qwen4-max">
+                </label>
+                <div class="form-note" style="grid-column: 1 / -1">
+                  Model is created disabled-with-no-routes; add a route next so agents can reach it.
+                </div>
+              </form>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn primary" type="button">Add model <span class="cta-ico">+</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Add route · pre-scoped to a model</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Add route · <span class="mono">glm-5.3</span></h3>
+                <div class="sub">POST /admin/api/models/1/routes</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <form class="form-grid">
+                <label class="f">Provider
+                  <select name="provider"><option>glm</option><option>openrouter</option><option>kimi</option></select>
+                </label>
+                <label class="f">Upstream model id
+                  <input type="text" name="upstream_model_id" placeholder="optional">
+                </label>
+                <label class="f">Weight
+                  <input type="number" name="weight" value="1" min="1">
+                </label>
+                <label class="f">Priority
+                  <input type="number" name="priority" value="0">
+                </label>
+                <div class="form-note" style="grid-column: 1 / -1">
+                  Lower priority runs first; same priority = weighted round-robin.
+                </div>
+              </form>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn primary" type="button">Add route <span class="cta-ico">+</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Create agent key · form state</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Create key</h3>
+                <div class="sub">POST /admin/api/keys</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <label class="f">Model grants</label>
+              <div class="checks">
+                <label><input type="checkbox" checked> glm-5.3</label>
+                <label><input type="checkbox" checked> deepseek-v41-flash</label>
+                <label><input type="checkbox" checked> kimi-k3</label>
+                <label><input type="checkbox"> mimo-v26-pro</label>
+              </div>
+              <div class="form-note warn">
+                The full key is generated server-side and shown once on the next screen.
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn primary" type="button">Generate key <span class="cta-ico">⚿</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Create agent key · success state (live demo on keys page)</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Key created</h3>
+                <div class="sub">POST /admin/api/keys · 201 Created</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="key-reveal" style="margin-bottom:0">
+                <div class="inner">
+                  <strong style="color: var(--warn)">Copy it now — shown only once</strong>
+                  <div class="key-row">
+                    <div class="key">sk-3fA9xQw7Lb2nRm8Kd4Vp6Tz0Jh5Xc1B</div>
+                    <button class="btn small" type="button">⧉ Copy</button>
+                  </div>
+                  <div class="note">Grants: <span class="tag">glm-5.3</span><span class="tag">kimi-k3</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn primary" type="button">Done <span class="cta-ico">✓</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Danger confirm · delete provider / revoke key / remove route</div>
+        <div class="modal danger">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="warn-ico">⚠</div>
+              <div class="titles">
+                <h3>Delete provider <span class="mono">mimo</span>?</h3>
+                <div class="sub">DELETE /admin/api/providers/6</div>
+              </div>
+              <button class="modal-close" type="button">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="dim" style="color: var(--muted); font-size: 13.5px">
+                This removes the provider, its <strong>1 stored key</strong> and
+                <strong>1 model route</strong>. Agents calling <code>mimo-v26-pro</code> will
+                get <code>no_route</code> until another provider serves it.
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn primary" type="button">Delete provider</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-item">
+        <div class="caption">Toggle confirm · non-destructive (no modal)</div>
+        <div class="modal">
+          <div class="inner">
+            <div class="modal-head">
+              <div class="titles">
+                <h3>Design rule</h3>
+                <div class="sub">toggles act immediately</div>
+              </div>
+            </div>
+            <div class="modal-body">
+              <div style="color: var(--muted); font-size: 13.5px">
+                Enable/disable of providers, keys, models and routes is reversible,
+                so it fires immediately with an undo toast — <strong>no confirmation modal</strong>.
+                Modals are reserved for creation and destructive actions.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+</body>
+</html>
