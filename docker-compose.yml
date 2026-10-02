@@ -2,10 +2,14 @@ services:
   janus:
     build: .
     ports:
-      - "8080:8080"
+      # Publish both planes on host loopback; front with Caddy for TLS.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8090:8090"
     environment:
       # Omit JANUS_DB_* to use SQLite at JANUS_SQLITE_PATH
       JANUS_SQLITE_PATH: /var/lib/janus/janus.db
+      # Admin console password (unset => admin logins disabled).
+      # JANUS_ADMIN_PASSWORD: change-me
     volumes:
       - janus_data:/var/lib/janus
 
@@ -13,7 +17,8 @@ services:
     profiles: ["postgres"]
     build: .
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:8091:8090"
     environment:
       JANUS_DB_HOST: postgres
       JANUS_DB_PORT: "5432"

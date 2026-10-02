@@ -1,9 +1,11 @@
 {application, janus_admin, [
-    {description, "Janus admin API and UI assets"},
+    {description, "Janus admin console: JSON API + React SPA on a separate listener"},
     {vsn, "0.1.0"},
     {registered, []},
     {mod, {janus_admin_app, []}},
-    {applications, [kernel, stdlib, cowboy, thoas, janus_core]},
+    {applications, [kernel, stdlib, crypto, cowboy, thoas, janus_core]},
     {env, []},
-    {modules, []}
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, []}
 ]}.

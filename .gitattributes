@@ -1,0 +1,5 @@
+*.config text eol=lf
+vm.args text eol=lf
+*.erl text eol=lf
+*.app.src text eol=lf
+rebar.lock text eol=lf
