@@ -21,6 +21,14 @@ init([]) ->
     ]),
     TransportOpts = [{port, Port}],
     ProtocolOpts = #{env => #{dispatch => Dispatch}},
+    AutoRouter = #{
+        id => janus_auto,
+        start => {janus_auto, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_auto]
+    },
     Listener = #{
         id => janus_http_listener,
         start => {cowboy, start_clear, [janus_http_listener, TransportOpts, ProtocolOpts]},
@@ -30,4 +38,4 @@ init([]) ->
         modules => [cowboy]
     },
     logger:info(#{what => janus_http_listen, port => Port}),
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [Listener]}}.
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [AutoRouter, Listener]}}.

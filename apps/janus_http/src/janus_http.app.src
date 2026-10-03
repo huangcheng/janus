@@ -1,7 +1,7 @@
 {application, janus_http, [
     {description, "Janus HTTP: Cowboy, OpenAI/Anthropic agent endpoints"},
     {vsn, "0.1.0"},
-    {registered, [janus_http_sup]},
+    {registered, [janus_http_sup, janus_auto]},
     {mod, {janus_http_app, []}},
     {applications, [
         kernel,

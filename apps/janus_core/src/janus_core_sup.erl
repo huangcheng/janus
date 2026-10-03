@@ -28,16 +28,6 @@ init([]) ->
             shutdown => 5000,
             type => worker,
             modules => [janus_config]
-        },
-        %% Started last: the router degrades to `pass`, so it must never
-        %% block (or crash-loop ahead of) the core config/catalog chain.
-        #{
-            id => janus_auto,
-            start => {janus_auto, start_link, []},
-            restart => permanent,
-            shutdown => 5000,
-            type => worker,
-            modules => [janus_auto]
         }
     ],
     {ok, {SupFlags, Children}}.
