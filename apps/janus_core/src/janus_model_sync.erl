@@ -168,7 +168,7 @@ fetch_provider_models(ProviderId) ->
     try
         case janus_catalog:lookup_provider(ProviderId) of
             {ok, #{base_url := Base0, enabled := true}} ->
-                case janus_lb:provider_keys(ProviderId) of
+                case janus_catalog:provider_keys(ProviderId) of
                     [#{secret_ref := Ref} | _] ->
                         {ok, Token} = janus_secrets:decrypt(
                             case Ref of {_, Cipher} -> Cipher; C -> C end),
@@ -184,17 +184,23 @@ fetch_provider_models(ProviderId) ->
                 {error, not_found}
         end
     catch
-        _:_ -> {error, fetch_crashed}
+        Class:Reason:Stack ->
+            logger:warning(#{what => janus_model_sync_fetch_crash,
+                provider_id => ProviderId, class => Class,
+                reason => Reason, stack_top => hd(Stack)}),
+            {error, fetch_crashed}
     end.
 
 http_get_json(Url, Token) ->
+    _ = application:ensure_all_started(inets),
+    _ = application:ensure_all_started(ssl),
     Headers = [
         {"authorization", "Bearer " ++ binary_to_list(Token)},
         {"accept", "application/json"}
     ],
     Req = {Url, Headers},
-    HTTPOpts = [{timeout, 15_000}, {autoredirect, true}],
-    Opts = [{body_format, binary}, {sync, true}, {receiver, self()}],
+    HTTPOpts = [{timeout, 15_000}, {autoredirect, true}, {ssl, [{verify, verify_none}]}],
+    Opts = [{body_format, binary}],
     case httpc:request(get, Req, HTTPOpts, Opts) of
         {ok, {{_V, 200, _}, _H, Body}} ->
             decode_model_names(Body);
