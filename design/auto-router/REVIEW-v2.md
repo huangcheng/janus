@@ -27,7 +27,7 @@ deepseek-v4.1-flash / glm-5.3 / kimi-k3）。原始输出：`reviews-v2/*.md`。
 | N5 | **ordered_set "按最旧清扫"不可实现**：ordered_set 按 key 排序非时间序，找最旧需全表扫 | qwen、minimax | 双表结构：主表 `{Hash, Tier, Exp}` + 辅表 `{{Ts, Hash}}` ordered_set 取最旧；或写入时顺带记序号 |
 | N6 | **max_tokens 语义歧义 + 双重放大**：`big_ctx_tokens` 指 prompt 窗口还是总窗口未定义；max_tokens 计入后再 ×1.2 导致大 max_tokens 请求必升 big；`max_completion_tokens` 字段未覆盖；缺失时取值未定义 | step-5、glm-5.3、kimi-k3 | 明确语义为"总窗口"；余量只乘 prompt 部分；兼容两字段名；缺失按 4096 默认 |
 | N7 | **404 生成路径与 catch 边界模糊**：tier 空若以异常形式抛出会被 catch 吞成 `pass`，最终返回泛型 no_route 而非带 auto-router 标注的错误 | step-5、kimi-k3 | tier 解析失败以**返回值** `{error, no_route}` 传递，不走异常通道 |
-| N8 | **A7 定案缺 mitigation**：定案不翻案，但配了 `api_key_models` 限制且白名单含 janus-auto 的 key，授权被静默扩大 | kimi、glm | 启动/重载校验：检测到此类 key 组合打一次 warn；admin UI 文案注明 |
+| N8 | **A7 定案缺 mitigation**：定案不翻案，但配了 `api_key_models` 限制且白名单含 janus-auto 的 key，授权被静默扩大 | kimi、glm | 启动/重载校验：检测到此类 key 组合打一次 warn；dashboard UI 文案注明 |
 
 ## 三、中优先边界（v2.1 一并处理或列入已知限制）
 

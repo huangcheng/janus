@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Janus Dashboard</title>
+<link rel="stylesheet" href="assets/dashboard.css">
+</head>
+<body>
+<div class="login-wrap">
+  <main class="login-card">
+    <div class="inner">
+      <div class="logo">
+        <img class="logo-mark" src="assets/janus-icon.png" alt="Janus">
+        <div>
+          <div class="logo-name">Janus</div>
+          <div class="logo-sub">gateway console</div>
+        </div>
+      </div>
+
+      <h1>Sign in</h1>
+      <p class="sub">Operator access to the Janus LLM gateway.</p>
+
+      <!-- POST /dashboard/api/session -->
+      <form method="post" action="/dashboard/api/session">
+        <label class="f">Dashboard password
+          <input type="password" name="password" placeholder="••••••••••••" autofocus autocomplete="current-password">
+        </label>
+        <button class="btn primary" type="submit">
+          Sign in <span class="cta-ico">→</span>
+        </button>
+      </form>
+
+      <div class="login-foot">
+        Single operator password — set via <code>JANUS_DASHBOARD_PASSWORD</code>.<br>
+        5 failed attempts lock the source IP for 15&nbsp;min · sessions expire after 12&nbsp;h.
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent keys · Janus Dashboard</title>
+<link rel="stylesheet" href="assets/dashboard.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <img class="logo-mark" src="assets/janus-icon.png" alt="Janus">
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a class="active" href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a href="modals.html"><span class="ico">▣</span> Modals</a>
+      <a href="api.html"><span class="ico">⇄</span> API contract</a>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>dashboard plane</span><span class="val">:8090</span></div>
+      <form style="margin-top:12px">
+        <button class="btn small danger" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <span class="eyebrow">Access · Data plane</span>
+        <h1>Agent keys</h1>
+        <div class="sub">Bearer keys for the data plane — stored as peppered HMAC hashes.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="gen-badge"><span class="dot"></span>gen 42</span>
+      <!-- Opens the "Create key" modal (shown open below with its one-time reveal) -->
+      <button class="btn primary" type="button">Create key <span class="cta-ico">⚿</span></button>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Keys</h2>
+        <span class="hint">empty grants = key cannot call any model</span>
+      </div>
+      <table class="tbl">
+        <thead>
+          <tr><th>Prefix <span class="sort">▲</span></th><th>Model grants</th><th>Created</th><th>State</th><th class="actions">Actions</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">sk-3fA9x…</td>
+            <td>
+              <span class="tag">glm-5.3</span><span class="tag">kimi-k3</span>
+            </td>
+            <td class="dim mono">2026-10-02 21:41</td>
+            <td><span class="pill ok">enabled</span></td>
+            <td class="actions">
+              <!-- POST /dashboard/api/keys/1/disable · DELETE /dashboard/api/keys/1 (confirm modal) -->
+              <button class="btn small" type="button">Disable</button>
+              <button class="btn small danger" type="button">Revoke…</button>
+            </td>
+          </tr>
+          <tr>
+            <td class="mono">sk-kQ82m…</td>
+            <td>
+              <span class="tag">glm-5.3</span><span class="tag">deepseek-v41-flash</span>
+              <span class="tag">kimi-k3</span><span class="tag">mimo-v26-pro</span>
+            </td>
+            <td class="dim mono">2026-09-28 10:02</td>
+            <td><span class="pill off">disabled</span></td>
+            <td class="actions">
+              <button class="btn small" type="button">Enable</button>
+              <button class="btn small danger" type="button">Revoke…</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</div>
+
+<!-- Live demo: "Create key" modal in its post-submit success state.
+     Form state + all other modals: see modals.html -->
+<div class="overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Create agent key">
+    <div class="inner">
+      <div class="modal-head">
+        <div class="titles">
+          <h3>Key created</h3>
+          <div class="sub">POST /dashboard/api/keys · 201 Created</div>
+        </div>
+        <button class="modal-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="key-reveal" style="margin-bottom:0">
+          <div class="inner">
+            <strong style="color: var(--warn)">Copy it now — shown only once</strong>
+            <div class="key-row">
+              <div class="key">sk-3fA9xQw7Lb2nRm8Kd4Vp6Tz0Jh5Xc1B</div>
+              <button class="btn small" type="button">⧉ Copy</button>
+            </div>
+            <div class="note">
+              Janus stores an HMAC-SHA256 hash and cannot recover the key.<br>
+              Grants: <span class="tag">glm-5.3</span><span class="tag">kimi-k3</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" type="button">Done <span class="cta-ico">✓</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

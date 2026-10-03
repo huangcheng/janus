@@ -10,8 +10,8 @@ services:
     environment:
       # Omit JANUS_DB_* to use SQLite at JANUS_SQLITE_PATH
       JANUS_SQLITE_PATH: /var/lib/janus/janus.db
-      # Admin console password (unset => admin logins disabled).
-      # JANUS_ADMIN_PASSWORD: change-me
+      # Dashboard console password (unset => dashboard logins disabled).
+      # JANUS_DASHBOARD_PASSWORD: change-me
     volumes:
       - janus_data:/var/lib/janus
 

@@ -361,6 +361,6 @@ judge 会把 system 前 256 字符与末条 user 消息前 1200 字符发送给�
 
 ## 12. Roadmap（本期不做）
 
-- admin UI 指派界面（models 加 tier 字段 + 下拉 + 熔断/统计面板）；
+- dashboard UI 指派界面（models 加 tier 字段 + 下拉 + 熔断/统计面板）；
 - 会话粘性显式化（客户端透传会话 ID）；
 - 路由统计接入 /overview 图表。

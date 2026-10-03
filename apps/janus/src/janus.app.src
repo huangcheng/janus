@@ -15,7 +15,7 @@
         janus_core,
         janus_providers,
         janus_http,
-        janus_admin
+        janus_dashboard
     ]},
     {env, []},
     {modules, []},

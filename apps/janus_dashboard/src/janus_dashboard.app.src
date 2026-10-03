@@ -1,0 +1,11 @@
+{application, janus_dashboard, [
+    {description, "Janus Dashboard console: JSON API + React SPA on a separate listener"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {janus_dashboard_app, []}},
+    {applications, [kernel, stdlib, crypto, cowboy, thoas, janus_core]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, []}
+]}.

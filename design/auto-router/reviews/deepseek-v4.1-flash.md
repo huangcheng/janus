@@ -34,7 +34,7 @@ Key issues:
 
 9. 缓存 key 使用 term hash (phash2) 未加盐/未防碰撞且缓存无按 key 的失效；TTL 300s 内同一内容跨用户共享——多租户串扰？key 不含 key_id/tenant，A 用户的请求结果影响 B 用户路由。虽不是数据泄漏（只是 tier 决策），但会把 B 的请求送往 A 认为合适的档位。低成本但应加 tenant/路由到 key。
 
-10. ETS 惰性建表无监督：表 owner 是调用进程（chat handler 进程）→ 该进程结束表就销毁。janus_admin_session 所谓的 ensure_table 模式必然是有 owner 进程或 heir。若在 chat handler 里创建，第一个请求进程结束表消失→缓存永不生效或每次重建，甚至并发 race（两个进程同时 create → badarg）。必须用 named table + heir 或放在 supervisor 下的 gen_server。这是会导致功能失效/崩溃的实质缺陷。
+10. ETS 惰性建表无监督：表 owner 是调用进程（chat handler 进程）→ 该进程结束表就销毁。janus_dashboard_session 所谓的 ensure_table 模式必然是有 owner 进程或 heir。若在 chat handler 里创建，第一个请求进程结束表消失→缓存永不生效或每次重建，甚至并发 race（两个进程同时 create → badarg）。必须用 named table + heir 或放在 supervisor 下的 gen_server。这是会导致功能失效/崩溃的实质缺陷。
 
 11. 规则门 #2: ctx > 60000 → big，但如果 big 档模型窗口小于请求，或者採用 cl100k 时实际更长。还有 #4 无 tools 且 ctx < 8000 且消息数≤3 → fast：多轮长对话（消息数>3）落 judge/default，默认 fast → 长会话每次都判分？不，有缓存。但缓存 key 用上次的消息，多轮里末条消息变化频繁，缓存命中率低 → judge 每次调用 1.5s。
 

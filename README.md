@@ -1,6 +1,6 @@
 # Janus
 
-Erlang/OTP LLM gateway — OpenAI + Anthropic faces, native cluster LB, admin UI.
+Erlang/OTP LLM gateway — OpenAI + Anthropic faces, native cluster LB, Dashboard UI.
 
 ## Status
 
@@ -55,7 +55,7 @@ docker compose --profile postgres up
 | **Postgres** | `JANUS_DB_URL` or `JANUS_DB_HOST` set | `JANUS_DB_URL` or `JANUS_DB_HOST` / `USER` / `PASSWORD` / `NAME` / `PORT` |
 | **SQLite** | otherwise | `JANUS_SQLITE_PATH` (default `data/janus.db`) |
 
-Hot path never queries SQL — ETS holds routes. Postgres is for shared admin catalog across nodes; SQLite is for single-node / laptop.
+Hot path never queries SQL — ETS holds routes. Postgres is for shared catalog across nodes; SQLite is for single-node / laptop.
 
 ## Agent endpoints (planned)
 
@@ -72,7 +72,7 @@ Hot path never queries SQL — ETS holds routes. Postgres is for shared admin ca
 | `janus_core` | DB backend select, ETS config, LB |
 | `janus_http` | Cowboy + agent HTTP API |
 | `janus_providers` | Upstream adapters |
-| `janus_admin` | Admin API + UI (later) |
+| `janus_dashboard` | Dashboard API + UI (`/dashboard`) |
 
 ## License
 

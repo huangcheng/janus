@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audit log · Janus Dashboard</title>
+<link rel="stylesheet" href="assets/dashboard.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <img class="logo-mark" src="assets/janus-icon.png" alt="Janus">
+      <div>
+        <div class="logo-name">Janus</div>
+        <div class="logo-sub">gateway console</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <span class="nav-label">Console</span>
+      <a href="dashboard.html"><span class="ico">▦</span> Dashboard</a>
+      <a href="providers.html"><span class="ico">⇉</span> Providers &amp; keys</a>
+      <a href="models.html"><span class="ico">⌗</span> Models &amp; routes</a>
+      <a href="keys.html"><span class="ico">⚿</span> Agent keys</a>
+      <a class="active" href="audit.html"><span class="ico">☰</span> Audit log</a>
+      <span class="nav-label">Reference</span>
+      <a href="modals.html"><span class="ico">▣</span> Modals</a>
+      <a href="api.html"><span class="ico">⇄</span> API contract</a>
+      <a href="index.html"><span class="ico">✦</span> Design overview</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="row"><span>data plane</span><span class="val">:8080</span></div>
+      <div class="row"><span>dashboard plane</span><span class="val">:8090</span></div>
+      <form style="margin-top:12px">
+        <button class="btn small danger" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <span class="eyebrow">Security · Trace</span>
+        <h1>Audit log</h1>
+        <div class="sub">Every dashboard mutation, newest first. Ring buffer — last 1000 events.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="gen-badge"><span class="dot"></span>gen 42</span>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Events</h2>
+        <span class="hint">in-memory; resets on restart</span>
+        <div class="spacer"></div>
+        <!-- GET /dashboard/api/audit?action=...&page=1 (TanStack Router search params) -->
+        <form style="display:flex; gap:12px; align-items:end">
+          <label class="f">Action
+            <select name="action">
+              <option value="">all</option>
+              <option>provider.add</option>
+              <option>provider_key.add</option>
+              <option>agent_key.create</option>
+              <option>catalog.reload</option>
+            </select>
+          </label>
+          <label class="f">Actor
+            <input type="text" name="actor" placeholder="127.0.0.1" style="min-width:130px">
+          </label>
+          <button class="btn small" type="submit">Filter</button>
+        </form>
+      </div>
+      <table class="tbl">
+        <thead>
+          <tr><th>Time <span class="sort">▼</span></th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="dim mono">2026-10-02 21:44:07</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method post">POST</span>&nbsp; provider_key.add</td>
+            <td class="mono">glm</td>
+            <td class="dim">key_id k1, weight 1</td>
+          </tr>
+          <tr>
+            <td class="dim mono">2026-10-02 21:41:52</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method post">POST</span>&nbsp; agent_key.create</td>
+            <td class="mono">sk-3fA9x…</td>
+            <td class="dim">grants: glm-5.3, kimi-k3</td>
+          </tr>
+          <tr>
+            <td class="dim mono">2026-10-02 21:40:18</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method post">POST</span>&nbsp; route.add</td>
+            <td class="mono">glm-5.3 → glm</td>
+            <td class="dim">weight 1, priority 0</td>
+          </tr>
+          <tr>
+            <td class="dim mono">2026-10-02 21:12:03</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method del">OFF</span>&nbsp; provider.disable</td>
+            <td class="mono">mimo</td>
+            <td class="dim">—</td>
+          </tr>
+          <tr>
+            <td class="dim mono">2026-10-02 21:12:03</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method get">IN</span>&nbsp; auth.login</td>
+            <td class="dim">—</td>
+            <td class="dim">password ok</td>
+          </tr>
+          <tr>
+            <td class="dim mono">2026-10-02 21:11:40</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method del">ERR</span>&nbsp; auth.login_failed</td>
+            <td class="dim">—</td>
+            <td class="dim">attempt 1/5</td>
+          </tr>
+          <tr>
+            <td class="dim mono">2026-10-02 20:58:41</td>
+            <td class="mono dim">127.0.0.1</td>
+            <td><span class="method post">POST</span>&nbsp; catalog.reload</td>
+            <td class="dim">—</td>
+            <td class="dim">generation 40 → 41</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="pager">
+        <span>1 – 7 of 214</span>
+        <button class="pg" type="button">‹</button>
+        <button class="pg cur" type="button">1</button>
+        <button class="pg" type="button">2</button>
+        <button class="pg" type="button">3</button>
+        <button class="pg" type="button">›</button>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -77,15 +77,15 @@ But Rule 3 about markers - "末条用户消息含升档标记" - this is a very 
 1. **Tier fallback order**: flagship → big → fast. This is "expensive to cheap" order. If flagship is empty, you fall back to big, then fast. But you wanted flagship (because user said "深度思考"), you downgrade to fast (cheapest). Is that the right behavior? Shouldn't big be preferred over flagship in fallback? Actually it's probably the right order - "if I can't give the user what they asked for, give them the best I can". OK probably correct.
 2. **But** the fallback is documented as "整档为空时按 flagship→big→fast 顺序回退". This means if the user wanted fast but the tier list is empty, they get flagship. That's surprising - a request that explicitly wants cheap gets routed to expensive! This contradicts the spirit of auto-routing. Should be: try requested tier first, then escalate up if needed.
 3. **The virtual model's own routes are described as "所有档位全空时的兜底 LB 池"** - this is conflating the virtual model as a routing entity with its own routes. The virtual model IS the auto-router; it has no routes of its own in the auto-routing sense. This section is confusing.
-4. **Configuration is in sys.config**, not in DB. So tier reconfiguration requires redeploy. Roadmap mentions admin UI for this.
+4. **Configuration is in sys.config**, not in DB. So tier reconfiguration requires redeploy. Roadmap mentions dashboard UI for this.
 
 **Section 8: Modules and integration**
 - janus_auto.erl with maybe_route/2, features/1, rules_gate/1, judge/2, cache_*
-- ETS lazy table creation, "参照 janus_admin_session, 无需监督树子进程"
+- ETS lazy table creation, "参照 janus_dashboard_session, 无需监督树子进程"
 - Modify janus_http_chat:proxy_chat/5
 
 **Issues**:
-1. **ETS without supervisor**: "参照 janus_admin_session, 无需监督树子进程" - this means ETS table is created at startup and never supervised. If the owning process dies, ETS table ownership is inherited by nothing or crashes. Need to specify ownership (e.g., give_away to a long-lived process or use named table with no owner).
+1. **ETS without supervisor**: "参照 janus_dashboard_session, 无需监督树子进程" - this means ETS table is created at startup and never supervised. If the owning process dies, ETS table ownership is inherited by nothing or crashes. Need to specify ownership (e.g., give_away to a long-lived process or use named table with no owner).
 2. **No mention of how to handle janus_auto being loaded as a module on cold start** - module loading order, dependency on janus_lb, janus_providers_openai
 3. **"features/1 / rules_gate/1 / judge/2 / cache_*"** are described as "纯函数为主, 便于 eunit". But `judge/2` does HTTP calls, so it's not pure. `cache_*` does ETS writes. Only `features/1` and `rules_gate/1` are likely pure.
 4. **body.model rewrite timing** - "改写 body.model → 目标模型 → 既有 proxy 链路". This means after rewriting, the proxy goes through the same pipeline. If the resolved target model is also a virtual model (like another janus-auto variant?), infinite loop. Probably the spec assumes targets are always real models.
@@ -121,7 +121,7 @@ But Rule 3 about markers - "末条用户消息含升档标记" - this is a very 
 5. **No test for tier empty / model-not-in-catalog fallback**
 
 **Section 12: Roadmap**
-- Admin UI, session stickiness, judge result stats
+- Dashboard UI, session stickiness, judge result stats
 
 **Section 13: Open questions**
 - 4 reasonable questions
@@ -142,7 +142,7 @@ Now let me synthesize my findings:
 
 6. **Conflict between Section 2 and Section 9**: Section 2 says "永不因路由器导致 5xx". Section 9 says router crash → 500. This is contradictory. Either router errors should be swallowed (degraded to default_tier or passthrough) or 500 is acceptable. Need to decide.
 
-7. **ETS table ownership not specified**: "无需监督树子进程" with "参照 janus_admin_session". If janus_admin_session uses a named table with no owner, that's OK if the creating process is long-lived. But if anything calls ensure_table from a short-lived process, ownership transfers are problematic. Should use `heir` option or named table owned by a long-lived process.
+7. **ETS table ownership not specified**: "无需监督树子进程" with "参照 janus_dashboard_session". If janus_dashboard_session uses a named table with no owner, that's OK if the creating process is long-lived. But if anything calls ensure_table from a short-lived process, ownership transfers are problematic. Should use `heir` option or named table owned by a long-lived process.
 
 **B. Engineering Risks and Missing Edge Cases**
 
@@ -160,7 +160,7 @@ Now let me synthesize my findings:
 
 7. **Marker matching is substring** - "ultrathink" appears in "ultrathinking" or "my ultrathink journal". Probably intentional but worth noting.
 
-8. **No authz on admin changes**: Tier config in sys.config means requires redeploy. Roadmap mentions admin UI - need RBAC story.
+8. **No authz on admin changes**: Tier config in sys.config means requires redeploy. Roadmap mentions dashboard UI - need RBAC story.
 
 9. **phash2 returns 32-bit hash** - birthday paradox at ~65k entries. Cache table sized at 4096 means ~5% collision rate. Need bigger hash (sha, etc.) or live with it.
 

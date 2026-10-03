@@ -38,7 +38,7 @@ Let me review this LLM gateway auto-router spec critically. Key areas:
 
 16. **Cache on judge result but not on failure → repeated failing judge every request** — thundering herd on judge; no negative caching / circuit breaker. Defect-ish (availability of latency). If judge model is down, every request waits 1500ms. Should add circuit breaker.
 
-17. **ETS ensure_table race** — lazy table creation races between processes; janus_admin_session pattern presumably handles. Minor.
+17. **ETS ensure_table race** — lazy table creation races between processes; janus_dashboard_session pattern presumably handles. Minor.
 
 18. **Decision cache value not namespaced by config changes** — if operator reassigns tiers, cached tier still valid (tier-level cache so fine actually — cache stores tier, not model). Good design actually.
 
