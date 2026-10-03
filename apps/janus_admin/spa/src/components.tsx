@@ -4,6 +4,7 @@
 import { ReactNode, useEffect, useRef, useState, createContext, useContext, useCallback } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { api } from './api'
+import { Icon, IconName } from './icons'
 
 // ---------- theme ----------
 
@@ -26,17 +27,17 @@ export function ThemeToggle() {
   const { theme, toggle } = useTheme()
   return (
     <button className="btn small" onClick={toggle} title="Switch theme">
-      {theme === 'light' ? '🌙 Dark' : '☀ Light'}
+      <Icon name={theme === 'light' ? 'moon' : 'sun'} /> {theme === 'light' ? 'Dark' : 'Light'}
     </button>
   )
 }
 
-const NAV = [
-  { to: '/', ico: '▦', label: 'Dashboard' },
-  { to: '/providers', ico: '⇉', label: 'Providers & keys' },
-  { to: '/models', ico: '⌗', label: 'Models & routes' },
-  { to: '/keys', ico: '⚿', label: 'Agent keys' },
-  { to: '/audit', ico: '☰', label: 'Audit log' },
+const NAV: { to: string; ico: IconName; label: string }[] = [
+  { to: '/', ico: 'dashboard', label: 'Dashboard' },
+  { to: '/providers', ico: 'routes', label: 'Providers & keys' },
+  { to: '/models', ico: 'models', label: 'Models & routes' },
+  { to: '/keys', ico: 'key', label: 'Agent keys' },
+  { to: '/audit', ico: 'audit', label: 'Audit log' },
 ]
 
 export function Layout({ children, title, eyebrow, sub }: {
@@ -71,7 +72,7 @@ export function Layout({ children, title, eyebrow, sub }: {
           <span className="nav-label">Console</span>
           {NAV.map((n) => (
             <Link key={n.to} to={n.to} activeProps={{ className: 'active' }}>
-              <span className="ico">{n.ico}</span> {n.label}
+              <Icon name={n.ico} /> {n.label}
             </Link>
           ))}
         </nav>
@@ -130,12 +131,12 @@ export function Modal({ title, sub, danger, onClose, children, footer }: {
       <div className={`modal${danger ? ' danger' : ''}`} role="dialog" aria-modal="true">
         <div className="inner">
           <div className="modal-head">
-            {danger && <div className="warn-ico">⚠</div>}
+            {danger && <div className="warn-ico"><Icon name="alert" /></div>}
             <div className="titles">
               <h3>{title}</h3>
               {sub && <div className="sub">{sub}</div>}
             </div>
-            <button className="modal-close" onClick={close} aria-label="Close">×</button>
+            <button className="modal-close" onClick={close} aria-label="Close"><Icon name="x" /></button>
           </div>
           <div className="modal-body">{children}</div>
           <div className="modal-foot">{footer}</div>

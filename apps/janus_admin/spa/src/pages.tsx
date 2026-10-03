@@ -4,6 +4,7 @@ import { FormEvent, Fragment, useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { api, setCsrf } from './api'
 import { Layout, Loading, Modal, Pill, Row, ErrorFlash, ThemeToggle, useToast } from './components'
+import { Icon } from './icons'
 
 type Provider = { id: number; name: string; base_url: string; protocol: string; enabled: boolean; keys: KeyMeta[] }
 type KeyMeta = { id: number; key_id: string; weight: number; enabled: boolean }
@@ -63,6 +64,7 @@ export function Login() {
             </label>
             <button className="btn primary" disabled={busy || !password}>
               {busy ? 'Signing in…' : 'Sign in'}
+              {!busy && <span className="cta-ico"><Icon name="arrow-right" /></span>}
             </button>
           </form>
           <div className="login-foot">
@@ -78,12 +80,16 @@ export function Login() {
 
 export function Dashboard() {
   const [data, setData] = useState<any>(null)
+  const [audit, setAudit] = useState<AuditEvent[] | null>(null)
   const [error, setError] = useState('')
   const toast = useToast()
 
   const load = () => api('/overview').then(setData).catch((e) => setError(e.message))
 
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    api('/audit?limit=200').then((r) => setAudit(r.events)).catch(() => setAudit([]))
+  }, [])
 
   const reload = async () => {
     try {
@@ -129,8 +135,13 @@ export function Dashboard() {
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 20 }}>
-        <button className="btn primary" onClick={reload}>Reload catalog ↻</button>
+        <button className="btn primary" onClick={reload}>Reload catalog <Icon name="refresh" /></button>
       </div>
+
+      <section className="panel">
+        <div className="panel-head"><h2>Admin activity · last 24h</h2><span className="hint">audit events per hour</span></div>
+        <ActivitySpark events={audit} />
+      </section>
 
       <div className="grid-2">
         <section className="panel">
@@ -173,6 +184,29 @@ export function Dashboard() {
   )
 }
 
+function ActivitySpark({ events }: { events: AuditEvent[] | null }) {
+  if (events === null) return <Loading />
+  const buckets = new Array<number>(24).fill(0)
+  const now = Date.now()
+  for (const e of events) {
+    const t = Date.parse(e.ts)
+    if (Number.isNaN(t)) continue
+    const hoursAgo = Math.floor((now - t) / 3_600_000)
+    if (hoursAgo >= 0 && hoursAgo < 24) buckets[23 - hoursAgo]++
+  }
+  const max = Math.max(...buckets)
+  if (max === 0) return <div className="empty">No admin activity in the last 24h.</div>
+  return (
+    <div className="spark">
+      {buckets.map((n, i) => (
+        <i key={i} className={n === max ? 'peak' : undefined}
+          style={{ height: `${Math.max(7, (n / max) * 100)}%` }}
+          title={`${n} event${n === 1 ? '' : 's'} · ${23 - i}h ago`} />
+      ))}
+    </div>
+  )
+}
+
 // ===================== Providers =====================
 
 export function Providers() {
@@ -211,7 +245,9 @@ export function Providers() {
           <h2>Providers</h2>
           <span className="hint">provider secrets are write-only — never displayed or exported</span>
           <div className="spacer" />
-          <button className="btn primary small" onClick={() => setModal('add')}>+ Add provider</button>
+          <button className="btn primary small" onClick={() => setModal('add')}>
+            <Icon name="plus" /> Add provider <span className="cta-ico"><Icon name="arrow-right" /></span>
+          </button>
         </div>
         {loaded && providers.length === 0 ? (
           <div className="empty">No providers yet — add one to start routing.</div>
@@ -229,7 +265,7 @@ export function Providers() {
                     <td className="actions">
                       <button className="btn small" onClick={() => toggle(p)}>{p.enabled ? 'Disable' : 'Enable'}</button>
                       <button className="btn small" onClick={() => setExpanded(expanded === p.id ? null : p.id)}>
-                        {p.keys.length} keys {expanded === p.id ? '▴' : '▾'}
+                        {p.keys.length} keys <Icon name={expanded === p.id ? 'chevron-down' : 'chevron-right'} />
                       </button>
                       <button className="btn small danger" onClick={() => setModal({ del: p })}>Delete…</button>
                     </td>
@@ -247,12 +283,12 @@ export function Providers() {
                                   'key updated')}>
                                 {k.enabled ? 'off' : 'on'}
                               </button>
-                              <button className="btn small danger" onClick={() => setModal({ delKey: [p, k] })}>×</button>
+                              <button className="btn small danger" onClick={() => setModal({ delKey: [p, k] })}><Icon name="x" /></button>
                             </span>
                           ))}
                           {p.keys.length === 0 && <span className="dim">no keys</span>}
                           <span style={{ flex: 1 }} />
-                          <button className="btn small" onClick={() => setModal({ addKey: p })}>+ Add key</button>
+                          <button className="btn small" onClick={() => setModal({ addKey: p })}><Icon name="plus" /> Add key</button>
                         </div>
                       </td>
                     </tr>
@@ -322,7 +358,7 @@ function AddProviderModal({ onClose, onDone }: { onClose: () => void; onDone: (b
         <button className="btn" onClick={onClose}>Cancel <span className="kbd">esc</span></button>
         <button className="btn primary" disabled={!name || !baseUrl}
           onClick={() => { if (!/^https?:\/\//.test(baseUrl)) { setErr('base_url must start with http:// or https://'); return } onDone({ name, base_url: baseUrl, protocol }) }}>
-          Add provider +
+          Add provider <Icon name="plus" />
         </button>
       </>}>
       {err && <div className="flash err" style={{ marginTop: 0 }}>{err}</div>}
@@ -352,7 +388,7 @@ function AddKeyModal({ provider, onClose, onDone }: { provider: Provider; onClos
       footer={<>
         <button className="btn" onClick={onClose}>Cancel <span className="kbd">esc</span></button>
         <button className="btn primary" disabled={!secret} onClick={() => onDone({ secret, weight })}>
-          Encrypt &amp; store 🔒
+          Encrypt &amp; store <Icon name="lock" />
         </button>
       </>}>
       <form className="form-grid" onSubmit={(e) => e.preventDefault()}>
@@ -376,6 +412,7 @@ export function Models() {
   const [models, setModels] = useState<Model[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [error, setError] = useState('')
+  const [expanded, setExpanded] = useState<number | null>(null)
   const [modal, setModal] = useState<'add' | { route: Model } | null>(null)
   const toast = useToast()
 
@@ -399,60 +436,67 @@ export function Models() {
           <h2>Models</h2>
           <span className="hint">model name = the <code>model</code> field agents send to /v1/chat/completions</span>
           <div className="spacer" />
-          <button className="btn primary small" onClick={() => setModal('add')}>+ Add model</button>
+          <button className="btn primary small" onClick={() => setModal('add')}>
+            <Icon name="plus" /> Add model <span className="cta-ico"><Icon name="arrow-right" /></span>
+          </button>
         </div>
         <table className="tbl">
           <thead><tr><th>Model</th><th>State</th><th>Routes</th><th className="actions">Actions</th></tr></thead>
           <tbody>
             {models.map((m, i) => (
-              <Row key={m.id} index={i}>
-                <td className="name mono">{m.name}</td>
-                <td><Pill enabled={m.enabled} /></td>
-                <td className="dim">{m.routes.length} upstream</td>
-                <td className="actions">
-                  <button className="btn small" onClick={() => setModal({ route: m })}>+ Route</button>
-                  <button className="btn small" onClick={() =>
-                    act(() => api(`/models/${m.id}/${m.enabled ? 'disable' : 'enable'}`, { method: 'POST', body: {} }), 'model updated')}>
-                    {m.enabled ? 'Disable' : 'Enable'}
-                  </button>
-                </td>
-              </Row>
-            ))}
-            {models.map((m) => (
-              <tr key={`${m.id}-routes`}>
-                <td colSpan={4} style={{ padding: 0 }}>
-                  <div className="routes-nested">
-                    <table className="tbl">
-                      <thead><tr><th></th><th>Provider</th><th>Upstream id</th><th>Weight</th><th>Priority</th><th>State</th><th className="actions"></th></tr></thead>
-                      <tbody>
-                        {m.routes.map((r) => (
-                          <tr key={`${r.model_id}-${r.provider_id}`}>
-                            <td className="dim">↳</td>
-                            <td className="mono">{r.provider_name ?? r.provider_id}</td>
-                            <td className="dim mono">{r.upstream_model_id ?? '—'}</td>
-                            <td className="num">{r.weight}</td>
-                            <td className="num">{r.priority}</td>
-                            <td><Pill enabled={r.enabled} /></td>
-                            <td className="actions">
-                              <button className="btn small"
-                                onClick={() => act(() => api(`/models/${r.model_id}/routes/${r.provider_id}/${r.enabled ? 'disable' : 'enable'}`, { method: 'POST', body: {} }), 'route updated')}>
-                                {r.enabled ? 'Off' : 'On'}
-                              </button>
-                              <button className="btn small danger"
-                                onClick={() => act(() => api(`/models/${r.model_id}/routes/${r.provider_id}`, { method: 'DELETE' }), 'route removed')}>
-                                Remove
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                        {m.routes.length === 0 && (
-                          <tr><td colSpan={7} className="dim" style={{ padding: '6px 10px' }}>No routes — agents get <code>no_route</code>.</td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </td>
-              </tr>
+              <Fragment key={m.id}>
+                <Row index={i}>
+                  <td className="name mono">{m.name}</td>
+                  <td><Pill enabled={m.enabled} /></td>
+                  <td className="dim">{m.routes.length} upstream</td>
+                  <td className="actions">
+                    <button className="btn small" onClick={() => setModal({ route: m })}><Icon name="plus" /> Route</button>
+                    <button className="btn small" onClick={() =>
+                      act(() => api(`/models/${m.id}/${m.enabled ? 'disable' : 'enable'}`, { method: 'POST', body: {} }), 'model updated')}>
+                      {m.enabled ? 'Disable' : 'Enable'}
+                    </button>
+                    <button className="btn small" onClick={() => setExpanded(expanded === m.id ? null : m.id)}>
+                      routes <Icon name={expanded === m.id ? 'chevron-down' : 'chevron-right'} />
+                    </button>
+                  </td>
+                </Row>
+                {expanded === m.id && (
+                  <tr key={`${m.id}-routes`}>
+                    <td colSpan={4} style={{ padding: 0 }}>
+                      <div className="routes-nested">
+                        <table className="tbl">
+                          <thead><tr><th></th><th>Provider</th><th>Upstream id</th><th>Weight</th><th>Priority</th><th>State</th><th className="actions"></th></tr></thead>
+                          <tbody>
+                            {m.routes.map((r) => (
+                              <tr key={`${r.model_id}-${r.provider_id}`}>
+                                <td className="dim"><Icon name="arrow-right" /></td>
+                                <td className="mono">{r.provider_name ?? r.provider_id}</td>
+                                <td className="dim mono">{r.upstream_model_id ?? '—'}</td>
+                                <td className="num">{r.weight}</td>
+                                <td className="num">{r.priority}</td>
+                                <td><Pill enabled={r.enabled} /></td>
+                                <td className="actions">
+                                  <button className="btn small"
+                                    onClick={() => act(() => api(`/models/${r.model_id}/routes/${r.provider_id}/${r.enabled ? 'disable' : 'enable'}`, { method: 'POST', body: {} }), 'route updated')}>
+                                    {r.enabled ? 'Off' : 'On'}
+                                  </button>
+                                  <button className="btn small danger"
+                                    onClick={() => act(() => api(`/models/${r.model_id}/routes/${r.provider_id}`, { method: 'DELETE' }), 'route removed')}>
+                                    Remove
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                            {m.routes.length === 0 && (
+                              <tr><td colSpan={7} className="dim" style={{ padding: '6px 10px' }}>No routes — agents get <code>no_route</code>.</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -474,7 +518,7 @@ function AddModelModal({ onClose, onDone }: { onClose: () => void; onDone: (b: a
     <Modal title="Add model" sub="POST /admin/api/models" onClose={onClose}
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={!name} onClick={() => onDone({ name })}>Add model +</button>
+        <button className="btn primary" disabled={!name} onClick={() => onDone({ name })}>Add model <Icon name="plus" /></button>
       </>}>
       <form onSubmit={(e) => e.preventDefault()}>
         <label className="f">Model name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="qwen4-max" autoFocus /></label>
@@ -498,7 +542,7 @@ function AddRouteModal({ model, providers, onClose, onDone }: {
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className="btn primary" disabled={!providerId}
           onClick={() => onDone({ provider_id: providerId, upstream_model_id: upstream || undefined, weight, priority })}>
-          Add route +
+          Add route <Icon name="plus" />
         </button>
       </>}>
       <form className="form-grid" onSubmit={(e) => e.preventDefault()}>
@@ -545,7 +589,9 @@ export function Keys() {
           <h2>Keys</h2>
           <span className="hint">empty grants = key cannot call any model</span>
           <div className="spacer" />
-          <button className="btn primary small" onClick={() => setModal('create')}>+ Create key</button>
+          <button className="btn primary small" onClick={() => setModal('create')}>
+            <Icon name="plus" /> Create key <span className="cta-ico"><Icon name="arrow-right" /></span>
+          </button>
         </div>
         <table className="tbl">
           <thead><tr><th>Prefix</th><th>Model grants</th><th>Created</th><th>State</th><th className="actions">Actions</th></tr></thead>
@@ -576,7 +622,7 @@ export function Keys() {
 
       {modal && typeof modal === 'object' && 'created' in modal && (
         <Modal title="Key created" sub="201 Created — shown only once" onClose={() => { setModal(null); load() }}
-          footer={<button className="btn primary" onClick={() => { setModal(null); load() }}>Done ✓</button>}>
+          footer={<button className="btn primary" onClick={() => { setModal(null); load() }}>Done <Icon name="check" /></button>}>
           <div className="key-reveal" style={{ marginBottom: 0 }}>
             <div className="inner">
               <strong style={{ color: 'var(--warn)' }}>Copy it now — shown only once</strong>
@@ -584,7 +630,7 @@ export function Keys() {
                 <div className="key">{modal.created}</div>
                 <button className="btn small"
                   onClick={() => { navigator.clipboard?.writeText(modal.created); toast('ok', 'copied to clipboard') }}>
-                  ⧉ Copy
+                  <Icon name="copy" /> Copy
                 </button>
               </div>
               <div className="note">Janus stores an HMAC-SHA256 hash and cannot recover the key.</div>
@@ -617,6 +663,7 @@ function CreateKeyModal({ models, onClose, onCreated }: {
 }) {
   const [grants, setGrants] = useState<Set<number>>(new Set(models.map((m) => m.id)))
   const [busy, setBusy] = useState(false)
+  const toast = useToast()
   const toggle = (id: number) =>
     setGrants((g) => { const n = new Set(g); n.has(id) ? n.delete(id) : n.add(id); return n })
 
@@ -627,7 +674,7 @@ function CreateKeyModal({ models, onClose, onCreated }: {
       onCreated(res.key)
     } catch (e: any) {
       setBusy(false)
-      alert(e.message)
+      toast('err', e.message)
     }
   }
 
@@ -636,7 +683,7 @@ function CreateKeyModal({ models, onClose, onCreated }: {
       footer={<>
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className="btn primary" disabled={grants.size === 0 || busy} onClick={create}>
-          {busy ? 'Generating…' : 'Generate key ⚿'}
+          {busy ? 'Generating…' : <>Generate key <Icon name="key" /></>}
         </button>
       </>}>
       <label className="f">Model grants</label>
@@ -653,6 +700,12 @@ function CreateKeyModal({ models, onClose, onCreated }: {
 }
 
 // ===================== Audit =====================
+
+function ActionBadge({ action }: { action: string }) {
+  const verb = action.split('.').pop() ?? ''
+  const cls = /delete|revoke|disable/.test(verb) ? ' danger' : /add|create|enable/.test(verb) ? ' ok' : ''
+  return <span className={`method${cls}`}>{action}</span>
+}
 
 export function Audit() {
   const [events, setEvents] = useState<AuditEvent[]>([])
@@ -675,7 +728,7 @@ export function Audit() {
               <Row key={i} index={i}>
                 <td className="dim mono">{a.ts}</td>
                 <td className="mono dim">{a.actor}</td>
-                <td className="mono">{a.action}</td>
+                <td><ActionBadge action={a.action} /></td>
                 <td className="mono dim">{a.target ?? '—'}</td>
                 <td className="dim">{a.detail ?? '—'}</td>
               </Row>

@@ -28,6 +28,7 @@ data/*.env
 docs/
 apps/janus_admin/spa/node_modules/
 apps/janus_admin/spa/dist/
+apps/janus_admin/spa/tsconfig.tsbuildinfo
 data/
 # SPA build output lands here via Docker (COPY --from=spa); never commit it.
 apps/janus_admin/priv/www/

@@ -60,8 +60,8 @@
   --radius-sm: 9px;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-  --font: "Geist", "Plus Jakarta Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  --mono: "Geist Mono", "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
+  --font: "Geist Variable", "Geist", "Plus Jakarta Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Geist Mono Variable", "Geist Mono", "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
 }
 
 :root[data-theme="dark"] {
@@ -152,7 +152,11 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
 }
 
 .logo { display: flex; align-items: center; gap: 11px; padding: 2px 10px 20px; }
-.logo img { width: 34px; height: 34px; border-radius: var(--icon-radius); box-shadow: var(--logo-shadow); }
+.logo img {
+  width: 34px; height: 34px; border-radius: var(--icon-radius);
+  background: linear-gradient(140deg, #2f7cf6 0%, var(--accent) 100%);
+  box-shadow: var(--logo-shadow);
+}
 .logo-name { font-size: 16.5px; font-weight: 700; }
 .logo-sub { font-size: 11px; color: var(--faint); margin-top: -2px; letter-spacing: .05em; }
 
@@ -173,7 +177,7 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
   background: var(--surface-2); color: var(--text);
   border-color: var(--hairline);
 }
-.nav a .ico { width: 18px; text-align: center; opacity: .95; font-size: 13px; }
+.nav a .ico { width: 16px; height: 16px; flex: none; opacity: .95; }
 
 .sidebar-footer {
   margin-top: auto; padding: 14px 10px 2px;
@@ -239,6 +243,21 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
 }
 .btn.danger { color: var(--danger); border-color: var(--danger-line); background: transparent; box-shadow: none; }
 .btn.small { padding: 4px 12px; font-size: 12px; font-weight: 550; }
+
+/* inline SVG icons */
+svg.ico { width: 1em; height: 1em; flex: none; vertical-align: -0.125em; }
+
+/* trailing circular arrow inside primary CTAs */
+.btn .cta-ico {
+  width: 20px; height: 20px; margin: -2px -8px -2px 2px;
+  border-radius: 50%; display: grid; place-items: center;
+  background: rgba(4, 16, 29, 0.28);
+  transition: transform 150ms var(--ease-out);
+}
+.btn .cta-ico .ico { width: 11px; height: 11px; }
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover .cta-ico { transform: translate(1px, -1px) scale(1.06); }
+}
 
 @media (hover: hover) and (pointer: fine) {
   .btn:hover { border-color: var(--accent-line); background-color: var(--accent-soft); }
@@ -343,6 +362,15 @@ table.tbl { width: 100%; border-collapse: collapse; }
   padding: 2px 8px; margin: 1px 4px 1px 0; white-space: nowrap;
 }
 
+/* audit action badges, tinted by verb */
+.method {
+  display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 700;
+  border-radius: 6px; padding: 2px 8px; letter-spacing: 0.04em; border: 1px solid;
+  color: var(--off-fg); background: var(--off-soft); border-color: var(--off-line);
+}
+.method.ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-line); }
+.method.danger { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+
 /* ---------- forms ---------- */
 
 label.f { display: block; font-size: 12px; color: var(--muted); font-weight: 600; }
@@ -430,6 +458,7 @@ input:focus, select:focus, textarea:focus {
   margin-left: auto; flex: none; width: 30px; height: 30px; border-radius: 50%;
   border: 1px solid var(--hairline); background: var(--surface-2); color: var(--muted);
   font-size: 14px; cursor: pointer; box-shadow: none;
+  display: grid; place-items: center; padding: 0;
   transition: color 120ms var(--ease-out), border-color 120ms var(--ease-out), transform 120ms var(--ease-out);
 }
 .modal-close:active { transform: scale(0.94); }
@@ -511,6 +540,19 @@ input:focus, select:focus, textarea:focus {
 .routes-nested { padding: 4px 14px 14px 42px; }
 .routes-nested th { padding: 5px 10px; font-size: 10px; border-bottom: none; }
 .routes-nested td { padding: 6px 10px; border-bottom: none; }
+
+/* ---------- sparkbars (hourly admin activity) ---------- */
+
+.spark { display: flex; align-items: flex-end; gap: 3px; height: 44px; padding: 16px 20px 18px; }
+.spark i {
+  flex: 1; border-radius: 2px 2px 0 0; min-height: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-soft));
+  transition: transform 150ms var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .spark i:hover { transform: scaleY(1.06); transform-origin: bottom; }
+}
+.spark i.peak { background: linear-gradient(180deg, var(--warn), var(--warn-soft)); }
 
 /* ---------- reduced motion ---------- */
 
