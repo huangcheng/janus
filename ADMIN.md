@@ -17,6 +17,16 @@ docker run -d --name janus \
 # open http://127.0.0.1:8090/admin
 ```
 
+On a server, pull the CI-built image instead (no local build needed):
+
+```bash
+docker pull ghcr.io/huangcheng/janus:main   # or :v0.1.0 / :sha-<commit>
+```
+
+Pushes to `main` (and `v*` tags) build multi-arch (amd64/arm64) images via
+GitHub Actions and publish them to GHCR — see `.github/workflows/docker.yml`.
+First published package inherits the repo's visibility (private by default).
+
 Unset `JANUS_ADMIN_PASSWORD` ⇒ logins are refused (fail closed).
 
 ## Architecture

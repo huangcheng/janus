@@ -1,5 +1,7 @@
 services:
   janus:
+    # Build locally, or pull the CI image instead:
+    #   image: ghcr.io/huangcheng/janus:main
     build: .
     ports:
       # Publish both planes on host loopback; front with Caddy for TLS.
