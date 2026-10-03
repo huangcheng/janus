@@ -129,10 +129,7 @@ write_snapshot(Catalog) ->
         %% Zero-padded digits (20 wide): legal on Windows too. The old
         %% ~20.10.0w produced asterisks for >10-digit integers — illegal
         %% filename chars on Windows (enoent).
-        Digits = integer_to_binary(NowUs),
-        PadLen = max(0, 20 - byte_size(Digits)),
-        Base = binary_to_list(
-            <<"janus-snapshot", (binary:copy(<<"0">>, PadLen))/binary, $-, Digits/binary, ".jsnp">>),
+        Base = snapshot_base_name(NowUs),
         FinalPath = filename:join(Dir, lists:flatten(Base)),
         TmpPath = FinalPath ++ ".tmp",
         case atomic_write(TmpPath, FinalPath, FileBin) of
@@ -293,6 +290,16 @@ code_change(_OldVsn, State, _Extra) ->
 %% File helpers
 %%--------------------------------------------------------------------
 
+%% Zero-padded, fixed-width (40 chars), [A-Za-z0-9._-] only — legal on
+%% every filesystem list_snapshots/1 may run on, and lexicographically
+%% time-ordered. The old ~20.10.0w produced asterisks for >10-digit
+%% microsecond timestamps (illegal on Windows).
+snapshot_base_name(NowUs) when is_integer(NowUs), NowUs > 0 ->
+    Digits = integer_to_binary(NowUs),
+    PadLen = max(0, 20 - byte_size(Digits)),
+    binary_to_list(
+        <<"janus-snapshot-", (binary:copy(<<"0">>, PadLen))/binary, Digits/binary, ".jsnp">>).
+
 ensure_dir(Dir) ->
     case filelib:is_dir(Dir) of
         true -> ok;
@@ -432,6 +439,21 @@ prune_old(Dir) ->
     end.
 
 -ifdef(TEST).
+
+snapshot_base_name_test() ->
+    N1 = snapshot_base_name(1791031970896065),
+    N2 = snapshot_base_name(1),
+    N3 = snapshot_base_name(999999999999999999),
+    [?assert(is_legal_name_char(C)) || C <- N1],
+    ?assertEqual(40, length(N1)),
+    ?assertEqual(40, length(N2)),
+    ?assertEqual(40, length(N3)),
+    ?assert(N2 < N1),
+    ?assert(N1 < N3).
+
+is_legal_name_char(C) ->
+    (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) orelse
+        (C >= $0 andalso C =< $9) orelse lists:member(C, [$., $_, $-]).
 
 roundtrip_snapshot_test() ->
     Key = crypto:strong_rand_bytes(32),

@@ -93,8 +93,9 @@ init([]) ->
     reclaim_tables(),
     _ = persistent_term:erase(?PT_KEY),
     %% Advisory DB checks run off the request path (a slow DB must not
-    %% block a Cowboy handler inside validate/1).
-    _ = spawn(fun() -> _ = (catch normalized()), _ = (catch warn_restricted_keys(undefined)) end),
+    %% block a Cowboy handler inside validate/1). Retried every 10 min
+    %% because boot-time seeding may not have inserted rows yet.
+    _ = spawn(fun() -> advisory_loop() end),
     {ok, #state{}}.
 
 handle_call(_Req, _From, State) ->
@@ -103,6 +104,9 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+handle_info(advisory_retry, State) ->
+    _ = spawn(fun() -> advisory_loop() end),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -111,6 +115,16 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+advisory_loop() ->
+    _ = (catch normalized()),
+    _ = (catch warn_restricted_keys(undefined)),
+    case whereis(?MODULE) of
+        Pid when is_pid(Pid) ->
+            erlang:send_after(600_000, Pid, advisory_retry);
+        _ ->
+            ok
+    end.
 
 %%%===================================================================
 %%% Routing
@@ -442,12 +456,18 @@ judge_worker(Parent, Ref, Cfg, F, Hash) ->
             Parent ! {Ref, skip};
         _ ->
             %% Bound the abandoned worker's slot hold: gun budgets are far
-            %% larger than judge_ms, so cap the worker's own lifetime.
-            TRef = erlang:start_timer(Cfg#acfg.judge_ms * 4, self(), slot_deadline),
+            %% larger than judge_ms. A watchdog kills the worker past 4x
+            %% the caller budget; the catch-all below releases the lease.
+            Self = self(),
+            _Watchdog = spawn(fun() ->
+                receive
+                after Cfg#acfg.judge_ms * 4 ->
+                    exit(Self, kill)
+                end
+            end),
             try
                 do_judge(Parent, Ref, Cfg, F, Hash, JM)
             after
-                erlang:cancel_timer(TRef),
                 semaphore_release(Lease)
             end
     end.
@@ -625,14 +645,13 @@ first_available([Name | Rest]) ->
     end.
 
 model_available(Name) when is_binary(Name) ->
+    %% Read-only catalog probe: pick_route/2 mutates LB state (RR cursors,
+    %% inflight counters) and must not be called speculatively. Cooling
+    %% routes are handled by do_proxy's real pick + 503 retry-after.
     case janus_catalog:lookup_model(Name) of
         {ok, #{id := Id, enabled := true}} ->
-            %% Probe through the LB so cooling-down routes are skipped -
-            %% SPEC 7: "in catalog AND pickable by the LB".
-            case catch janus_lb:pick_route(Id, #{}) of
-                {ok, _Route} -> true;
-                _ -> false
-            end;
+            Routes = janus_catalog:routes_for_model(Id),
+            lists:any(fun(#{enabled := E}) -> E end, Routes);
         _ ->
             false
     end;
@@ -760,12 +779,14 @@ breaker_ok(JM) ->
 
 %% acquired | full | pass - release only on 'acquired' so the counter
 %% cannot drift negative when the atomics ref was missing at acquire time.
+%% The lease carries the atomics ref it incremented, so a restart that
+%% installs a fresh ref cannot make a straggler decrement the wrong counter.
 semaphore_acquire(Cfg) ->
     case ets_get(?STATS, '$semaphore') of
         A when is_reference(A) ->
             N = atomics:add_get(A, 1, 1),
             case N =< Cfg#acfg.judge_max_inflight of
-                true -> acquired;
+                true -> {acquired, A};
                 false -> atomics:sub(A, 1, 1), full
             end;
         _ ->
@@ -773,11 +794,8 @@ semaphore_acquire(Cfg) ->
             pass
     end.
 
-semaphore_release(acquired) ->
-    case ets_get(?STATS, '$semaphore') of
-        A when is_reference(A) -> atomics:sub(A, 1, 1);
-        _ -> ok
-    end;
+semaphore_release({acquired, A}) when is_reference(A) ->
+    atomics:sub(A, 1, 1);
 semaphore_release(_) ->
     ok.
 
@@ -801,10 +819,10 @@ normalized() ->
 %% sys.config values arrive as lists; the rest of the module works in
 %% binaries. Normalize once per config fingerprint.
 normalize_raw(Map) when is_map(Map) ->
-    normalize_map(Map);
+    normalize_map(deep_proplist(Map));
 normalize_raw(Proplist) when is_list(Proplist) ->
-    %% sys.config idiomatic proplist form.
-    normalize_map(maps:from_list([KV || KV <- Proplist, is_tuple(KV), tuple_size(KV) =:= 2]));
+    %% sys.config idiomatic proplist form (nested levels included).
+    normalize_map(deep_proplist(maps:from_list([KV || KV <- Proplist, is_tuple(KV), tuple_size(KV) =:= 2])));
 normalize_raw(_Other) ->
     logger:error(#{what => janus_auto_config, message => <<"auto_router must be a map or proplist; ignored">>}),
     #{}.
@@ -830,6 +848,19 @@ to_bin(L) when is_list(L) ->
     end;
 to_bin(M) when is_map(M) -> maps:map(fun(_K, V) -> to_bin(V) end, M);
 to_bin(Other) -> Other.
+
+%% Convert nested proplists to maps: [{fast, [..]}, {big, [..]}] => #{fast => [..]}.
+deep_proplist(M) when is_map(M) ->
+    maps:map(fun(_K, V) -> deep_proplist(V) end, M);
+deep_proplist(L) when is_list(L) ->
+    IsProp = lists:all(fun(T) -> is_tuple(T) andalso tuple_size(T) =:= 2 andalso is_atom(element(1, T)) end, L)
+        andalso L =/= [],
+    case IsProp of
+        true -> maps:from_list([{K, deep_proplist(V)} || {K, V} <- L]);
+        false -> [deep_proplist(X) || X <- L]
+    end;
+deep_proplist(Other) ->
+    Other.
 
 validate(Raw) ->
     Def = default_cfg(),
@@ -1207,13 +1238,19 @@ breaker_lifecycle_test() ->
     breaker_ok(JM),
     ets:delete(?STATS, {breaker_open_until, JM}).
 
+release_twice() ->
+    C = cfg(),
+    {acquired, A} = semaphore_acquire(C),
+    semaphore_release({acquired, A}),
+    semaphore_release({acquired, A}),
+    ok.
+
 semaphore_test() ->
     reclaim_tables(),
     C = cfg(),
-    ?assertEqual(acquired, semaphore_acquire(C)),
-    ?assertEqual(acquired, semaphore_acquire(C)),
-    semaphore_release(acquired),
-    semaphore_release(acquired).
+    ?assertMatch({acquired, _}, semaphore_acquire(C)),
+    ?assertMatch({acquired, _}, semaphore_acquire(C)),
+    ok = release_twice().
 
 openai_part_shape_test() ->
     F = features(#{
