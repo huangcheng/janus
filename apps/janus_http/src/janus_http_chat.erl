@@ -106,18 +106,39 @@ reply_pick_error(Req, State, _Reason) ->
     reply_json(Req, State, 404, error_body(<<"no_route">>, <<"no route for model">>)).
 
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
-  when Status =:= 401; Status =:= 403; Status =:= 429; Status >= 500 ->
+  when Status =:= 401 ->
+    %% Invalid credentials: cool key; escalate to provider when keys exhausted.
+    _ = note_auth_failure(Route, Status),
+    _ = note_route_success(Route),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
+  when Status =:= 403 ->
+    %% Often resource/policy scoped — cool this route only, not the provider.
+    _ = note_key_failure(Route, Headers, Status),
+    _ = note_route_failure(Route, {http, Status}),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
+  when Status =:= 429 ->
     _ = note_key_failure(Route, Headers, Status),
     _ = note_route_success(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 500 ->
+    %% Provider-level fault: skip this provider for all models.
+    _ = note_provider_failure(Route, retry_reason(Headers, Status)),
+    _ = note_route_success(Route),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 400 ->
-    %% Client/request errors: pass through, do not cool the key.
+    %% Client/request errors: pass through, do not cool.
     _ = note_route_success(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) ->
     _ = note_key_success(Route),
+    %% Do not clear provider cooldowns on success — let them expire.
     _ = note_route_success(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
@@ -128,8 +149,9 @@ handle_upstream({error, Reason}, Route, Req, State) ->
     SafeReason = sanitize_upstream_error(Reason),
     case is_transient(Reason) of
         true ->
-            %% Transport failure: cool the route/provider, not the API key.
-            _ = note_route_failure(Route, SafeReason);
+            %% Transport failure: cool the whole provider, not one route.
+            _ = note_provider_failure(Route, SafeReason),
+            _ = note_route_success(Route);
         false ->
             _ = note_route_success(Route)
     end,
@@ -145,11 +167,23 @@ handle_upstream({error, Reason}, Route, Req, State) ->
     end,
     reply_json(Req, State, Status, error_body(<<"upstream_error">>, <<"upstream request failed">>)).
 
+note_auth_failure(Route, Status) ->
+    ProviderId = maps:get(provider_id, Route, undefined),
+    KeyId =
+        case maps:get(provider_key, Route, undefined) of
+            #{id := Id} -> Id;
+            _ -> undefined
+        end,
+    janus_lb:note_auth_failure(ProviderId, KeyId, {auth, Status}).
+
 note_key_failure(Route, Headers, Status) when is_integer(Status) ->
     janus_lb:note_failure(key_target(Route), retry_reason(Headers, Status)).
 
 note_key_success(Route) ->
     janus_lb:note_success(key_target(Route)).
+
+note_provider_failure(Route, Reason) ->
+    janus_lb:note_failure(provider_target(Route), Reason).
 
 note_route_failure(Route, Reason) ->
     janus_lb:note_failure(route_target(Route), Reason).
@@ -232,6 +266,11 @@ error_body(Code, Msg) ->
 key_target(#{provider_key := #{id := Kid}}) ->
     {provider_key, Kid};
 key_target(_) ->
+    undefined.
+
+provider_target(#{provider_id := P}) ->
+    {provider, P};
+provider_target(_) ->
     undefined.
 
 route_target(#{provider_id := P, model_id := M}) ->
