@@ -73,12 +73,15 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
     end.
 
 reply_pick_error(Req, State, all_cooling) ->
+    reply_pick_error(Req, State, {all_cooling, 5000});
+reply_pick_error(Req, State, {all_cooling, Ms}) when is_integer(Ms), Ms > 0 ->
+    Sec = max(1, (Ms + 999) div 1000),
     reply_json(
         Req,
         State,
         503,
         error_body(<<"all_cooling">>, <<"all upstream routes are cooling down">>),
-        #{<<"retry-after">> => <<"5">>}
+        #{<<"retry-after">> => integer_to_binary(Sec)}
     );
 reply_pick_error(Req, State, keys_disabled) ->
     reply_json(
@@ -109,31 +112,31 @@ handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
   when Status =:= 401 ->
     %% Invalid credentials: cool key; escalate to provider when keys exhausted.
     _ = note_auth_failure(Route, Status),
-    _ = note_route_success(Route),
+    _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
   when Status =:= 403 ->
-    %% Often resource/policy scoped — cool this route only, not the provider.
-    _ = note_key_failure(Route, Headers, Status),
-    _ = note_route_failure(Route, {http, Status}),
+    %% Resource/policy scoped — cool this route only (not the key/provider).
+    _ = note_route_failure(Route, retry_reason(Headers, Status)),
+    _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
   when Status =:= 429 ->
     _ = note_key_failure(Route, Headers, Status),
-    _ = note_route_success(Route),
+    _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 500 ->
     %% Provider-level fault: skip this provider for all models.
     _ = note_provider_failure(Route, retry_reason(Headers, Status)),
-    _ = note_route_success(Route),
+    _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 400 ->
     %% Client/request errors: pass through, do not cool.
-    _ = note_route_success(Route),
+    _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) ->
@@ -143,7 +146,7 @@ handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) ->
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
 handle_upstream({error, crashed}, Route, Req, State) ->
-    _ = note_route_success(Route),
+    _ = release_route_inflight(Route),
     reply_json(Req, State, 500, error_body(<<"internal_error">>, <<"upstream call crashed">>));
 handle_upstream({error, Reason}, Route, Req, State) ->
     SafeReason = sanitize_upstream_error(Reason),
@@ -151,9 +154,9 @@ handle_upstream({error, Reason}, Route, Req, State) ->
         true ->
             %% Transport failure: cool the whole provider, not one route.
             _ = note_provider_failure(Route, SafeReason),
-            _ = note_route_success(Route);
+            _ = release_route_inflight(Route);
         false ->
-            _ = note_route_success(Route)
+            _ = release_route_inflight(Route)
     end,
     logger:warning(#{
         what => janus_chat_upstream_error,
@@ -190,6 +193,9 @@ note_route_failure(Route, Reason) ->
 
 note_route_success(Route) ->
     janus_lb:note_success(route_target(Route)).
+
+release_route_inflight(Route) ->
+    janus_lb:release_inflight(route_target(Route)).
 
 retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
     case maps:get(<<"retry-after">>, Headers, undefined) of

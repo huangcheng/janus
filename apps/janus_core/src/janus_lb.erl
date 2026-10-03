@@ -16,7 +16,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([note_failure/2, note_success/1, note_auth_failure/3, pick_route/2]).
+-export([note_failure/2, note_success/1, note_auth_failure/3, release_inflight/1, pick_route/2]).
 -export([
     init/1,
     handle_call/3,
@@ -77,6 +77,13 @@ note_success(undefined) ->
 note_success(Target) ->
     gen_server:cast(?SERVER, {note_success, Target}).
 
+%% @doc Decrement in-flight only — never clears an active cool-down.
+-spec release_inflight(target()) -> ok.
+release_inflight(undefined) ->
+    ok;
+release_inflight(Target) ->
+    gen_server:cast(?SERVER, {release_inflight, Target}).
+
 %% @doc Pick a route for `ModelId`. `Opts` may include `generation`.
 %% Returns `{ok, Route}` or `{error, Reason}`. Weighted RR across
 %% providers that still have a usable key.
@@ -116,6 +123,9 @@ handle_cast({note_auth_failure, ProviderId, KeyId, Reason}, State) ->
 handle_cast({note_success, Target}, State) ->
     do_note_success(Target, State),
     {noreply, State};
+handle_cast({release_inflight, Target}, #state{inflight = Inflight} = State) ->
+    dec_inflight(Target, Inflight),
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -153,7 +163,7 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                     ],
                     case Available of
                         [] ->
-                            {error, all_cooling};
+                            {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}};
                         Candidates ->
                             case pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight) of
                                 {ok, _} = Ok ->
@@ -165,7 +175,12 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                                         reason => Reason,
                                         candidates => length(Candidates)
                                     }),
-                                    Err
+                                    case Reason of
+                                        all_cooling ->
+                                            {error, {all_cooling, remaining_cooldown_ms(Candidates, Cool, Now)}};
+                                        _ ->
+                                            Err
+                                    end
                             end
                     end
             end
@@ -184,14 +199,8 @@ pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight) ->
             {ok, Picked#{provider_key => Key}}
     end.
 
-has_usable_key(#{provider_id := ProviderId} = Route, Cool, Now) ->
-    (not is_cooling(provider_target(Route), Cool, Now)) andalso
-        lists:any(
-            fun(K) ->
-                maps:get(enabled, K, true) andalso not is_cooling(key_target(K), Cool, Now)
-            end,
-            janus_catalog:provider_keys(ProviderId)
-        );
+has_usable_key(#{provider_id := ProviderId}, Cool, Now) ->
+    provider_has_usable_key(ProviderId, Cool, Now);
 has_usable_key(_, _, _) ->
     false.
 
@@ -272,28 +281,29 @@ weighted_rr_pick(CursorKey, Items, Cursors) ->
             lists:nth(Idx + 1, Expanded)
     end.
 
-do_note_failure(Target, Reason, #state{cooldowns = Cool, inflight = Inflight}) ->
+do_note_failure(Target, Reason, #state{cooldowns = Cool}) ->
     Key = normalize_target(Target),
     SafeReason = sanitize_cooldown_reason(Reason),
     Ms = cooldown_ms(SafeReason),
     Now = erlang:monotonic_time(millisecond),
     Until = Now + Ms,
-    %% Never shorten an active cooldown (e.g. auth 60s overwritten by 5xx 5s).
-    FinalUntil =
+    {FinalUntil, FinalReason} =
         case ets:lookup(Cool, Key) of
-            [{_, Existing, _}] when is_integer(Existing), Existing > Now ->
-                max(Existing, Until);
+            [{_, Existing, PrevReason}] when is_integer(Existing), Existing > Now ->
+                case Existing >= Until of
+                    true -> {Existing, PrevReason};
+                    false -> {Until, SafeReason}
+                end;
             [{_, Existing}] when is_integer(Existing), Existing > Now ->
-                max(Existing, Until);
+                {max(Existing, Until), SafeReason};
             _ ->
-                Until
+                {Until, SafeReason}
         end,
-    ets:insert(Cool, {Key, FinalUntil, SafeReason}),
-    dec_inflight(Key, Inflight),
+    ets:insert(Cool, {Key, FinalUntil, FinalReason}),
     logger:info(#{
         what => janus_lb_cooldown,
         target => Key,
-        reason => SafeReason,
+        reason => FinalReason,
         ms => FinalUntil - Now
     }),
     ok.
@@ -301,12 +311,12 @@ do_note_failure(Target, Reason, #state{cooldowns = Cool, inflight = Inflight}) -
 do_note_auth_failure(ProviderId, KeyId, Reason, #state{cooldowns = Cool} = State) ->
     do_note_failure({provider_key, KeyId}, Reason, State),
     Now = erlang:monotonic_time(millisecond),
-    case provider_has_usable_key(ProviderId, Cool, Now) of
+    %% Escalate only when every enabled key is auth-cooled/disabled.
+    %% Rate-limited keys must not trigger a 60s provider blackhole.
+    case provider_has_non_auth_blocked_key(ProviderId, Cool, Now) of
         true ->
             ok;
         false ->
-            %% No keys left on this provider → take the whole provider
-            %% out so every model on it fails over elsewhere.
             do_note_failure({provider, ProviderId}, Reason, State)
     end.
 
@@ -314,6 +324,14 @@ provider_has_usable_key(ProviderId, Cool, Now) ->
     lists:any(
         fun(K) ->
             maps:get(enabled, K, true) andalso not is_cooling(key_target(K), Cool, Now)
+        end,
+        janus_catalog:provider_keys(ProviderId)
+    ).
+
+provider_has_non_auth_blocked_key(ProviderId, Cool, Now) ->
+    lists:any(
+        fun(K) ->
+            maps:get(enabled, K, true) andalso not is_auth_cooling(key_target(K), Cool, Now)
         end,
         janus_catalog:provider_keys(ProviderId)
     ).
@@ -336,6 +354,39 @@ is_cooling(Target, Cool, Now) ->
             false;
         [] ->
             false
+    end.
+
+is_auth_cooling(Target, Cool, Now) ->
+    case ets:lookup(Cool, Target) of
+        [{_, Until, {auth, _}}] when is_integer(Until), Until > Now -> true;
+        _ -> false
+    end.
+
+remaining_cooldown_ms(Routes, Cool, Now) when is_list(Routes) ->
+    Remainings =
+        lists:filtermap(
+            fun(R) ->
+                case cooldown_remaining(provider_target(R), Cool, Now) of
+                    Ms when is_integer(Ms), Ms > 0 -> {true, Ms};
+                    _ ->
+                        case cooldown_remaining(route_target(R), Cool, Now) of
+                            Ms2 when is_integer(Ms2), Ms2 > 0 -> {true, Ms2};
+                            _ -> false
+                        end
+                end
+            end,
+            Routes
+        ),
+    case Remainings of
+        [] -> ?DEFAULT_COOLDOWN_MS;
+        _ -> lists:min(Remainings)
+    end.
+
+cooldown_remaining(Target, Cool, Now) ->
+    case ets:lookup(Cool, Target) of
+        [{_, Until, _}] when is_integer(Until), Until > Now -> Until - Now;
+        [{_, Until}] when is_integer(Until), Until > Now -> Until - Now;
+        _ -> 0
     end.
 
 bump_inflight(Target, Inflight) ->
@@ -391,7 +442,14 @@ cooldown_ms({auth, _}) ->
         false -> ?AUTH_COOLDOWN_MS;
         "" -> ?AUTH_COOLDOWN_MS;
         Val ->
-            try list_to_integer(Val) catch _:_ -> ?AUTH_COOLDOWN_MS end
+            try
+                case list_to_integer(Val) of
+                    Ms when is_integer(Ms), Ms > 0 -> min(Ms, ?MAX_RETRY_AFTER_MS);
+                    _ -> ?AUTH_COOLDOWN_MS
+                end
+            catch
+                _:_ -> ?AUTH_COOLDOWN_MS
+            end
     end;
 cooldown_ms({retry_after, Ms}) when is_integer(Ms), Ms > 0 ->
     min(Ms, ?MAX_RETRY_AFTER_MS);
@@ -402,7 +460,14 @@ cooldown_ms(_Reason) ->
         false -> ?DEFAULT_COOLDOWN_MS;
         "" -> ?DEFAULT_COOLDOWN_MS;
         Val ->
-            try list_to_integer(Val) catch _:_ -> ?DEFAULT_COOLDOWN_MS end
+            try
+                case list_to_integer(Val) of
+                    Ms when is_integer(Ms), Ms > 0 -> Ms;
+                    _ -> ?DEFAULT_COOLDOWN_MS
+                end
+            catch
+                _:_ -> ?DEFAULT_COOLDOWN_MS
+            end
     end.
 
 sanitize_cooldown_reason({auth, N}) when is_integer(N) -> {auth, N};
