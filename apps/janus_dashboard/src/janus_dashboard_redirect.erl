@@ -1,9 +1,9 @@
 %%%-------------------------------------------------------------------
-%%% @doc `/` redirects to the dashboard SPA (the only surface on this
-%%% listener — the data plane lives on its own port).
+%%% @doc `/dashboard` redirects to `/` — the SPA moved to the root;
+%%% kept so existing bookmarks keep working.
 %%% @end
 %%%-------------------------------------------------------------------
--module(janus_dashboard_root).
+-module(janus_dashboard_redirect).
 
 -behaviour(cowboy_handler).
 
@@ -13,7 +13,7 @@ init(Req0, State) ->
     Req = cowboy_req:reply(
         302,
         #{
-            <<"location">> => <<"/dashboard">>,
+            <<"location">> => <<"/">>,
             <<"cache-control">> => <<"no-cache">>
         },
         <<>>,

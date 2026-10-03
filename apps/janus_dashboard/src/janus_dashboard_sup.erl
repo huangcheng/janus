@@ -34,10 +34,10 @@ init([]) ->
         end,
     Dispatch = cowboy_router:compile([
         {'_', [
-            {"/", janus_dashboard_root, []},
-            {"/dashboard/api/[...]", janus_dashboard_api, []},
-            {"/dashboard", janus_dashboard_assets, []},
-            {"/dashboard/[...]", janus_dashboard_assets, []}
+            {"/api/[...]", janus_dashboard_api, []},
+            {"/dashboard", janus_dashboard_redirect, []},
+            {"/", janus_dashboard_assets, []},
+            {"/[...]", janus_dashboard_assets, []}
         ]}
     ]),
     Session = #{

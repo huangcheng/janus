@@ -239,7 +239,7 @@ export function Keys() {
                 Revoke key <span className="font-mono">{modal.revoke.prefix}…</span>?
               </AlertDialogTitle>
               <AlertDialogDescription>
-                DELETE /dashboard/api/keys/{modal.revoke.id} — agents using this key will immediately get{" "}
+                DELETE /api/keys/{modal.revoke.id} — agents using this key will immediately get{" "}
                 <code>401 unauthorized</code>. The HMAC hash is deleted; this cannot be undone.
               </AlertDialogDescription>
             </AlertDialogHeader>
@@ -302,7 +302,7 @@ function CreateKeyModal({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Create key</DialogTitle>
-          <DialogDescription>POST /dashboard/api/keys</DialogDescription>
+          <DialogDescription>POST /api/keys</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <FieldSet>

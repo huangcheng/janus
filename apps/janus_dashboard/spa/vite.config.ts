@@ -3,11 +3,11 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-// Served by Cowboy at /dashboard — keep the base path and build to dist/;
+// Served by Cowboy at / (the dashboard owns this listener); build to dist/.
 // the multi-stage Dockerfile copies dist/ into priv/www of the release.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: '/dashboard/',
+  base: '/',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -25,7 +25,7 @@ export default defineConfig({
     strictPort: true,
     // Dev proxy to a locally running gateway dashboard listener.
     proxy: {
-      '/dashboard/api': {
+      '/api': {
         target: 'http://127.0.0.1:8090',
         changeOrigin: false,
       },

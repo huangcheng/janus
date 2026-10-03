@@ -310,7 +310,7 @@ function AddModelModal({ onClose, onDone }: { onClose: () => void; onDone: (b: a
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add model</DialogTitle>
-          <DialogDescription>POST /dashboard/api/models</DialogDescription>
+          <DialogDescription>POST /api/models</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <Field>
@@ -361,7 +361,7 @@ function AddRouteModal({
           <DialogTitle>
             Add route · <span className="font-mono">{model.name}</span>
           </DialogTitle>
-          <DialogDescription>POST /dashboard/api/models/{model.id}/routes</DialogDescription>
+          <DialogDescription>POST /api/models/{model.id}/routes</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <Field>

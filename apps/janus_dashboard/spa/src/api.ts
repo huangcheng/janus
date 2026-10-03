@@ -1,6 +1,6 @@
 // Dashboard JSON API client: cookie session + CSRF header on mutations.
 
-const BASE = '/dashboard/api'
+const BASE = '/api'
 
 let csrf = ''
 
@@ -33,7 +33,7 @@ export async function api<T = any>(
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   })
   if (res.status === 401) {
-    window.location.href = '/dashboard/login'
+    window.location.href = '/login'
     throw new ApiError('unauthorized', 'unauthorized', 401)
   }
   const data = res.status === 204 ? {} : await res.json().catch(() => ({}))

@@ -257,7 +257,7 @@ export function Providers() {
                 Delete provider <span className="font-mono">{modal.del.name}</span>?
               </AlertDialogTitle>
               <AlertDialogDescription>
-                DELETE /dashboard/api/providers/{modal.del.id} — this removes the provider, its{" "}
+                DELETE /api/providers/{modal.del.id} — this removes the provider, its{" "}
                 <strong>{modal.del.keys.length}</strong> stored key(s) and all of its model routes.
                 Agents calling routed models will get <code>no_route</code> until another provider
                 serves them.
@@ -289,7 +289,7 @@ export function Providers() {
                 <span className="font-mono">{modal.delKey[0].name}</span>?
               </AlertDialogTitle>
               <AlertDialogDescription>
-                DELETE /dashboard/api/provider-keys/{modal.delKey[1].id} — the encrypted credential is
+                DELETE /api/provider-keys/{modal.delKey[1].id} — the encrypted credential is
                 deleted from the database. This cannot be undone.
               </AlertDialogDescription>
             </AlertDialogHeader>
@@ -332,7 +332,7 @@ function AddProviderModal({ onClose, onDone }: { onClose: () => void; onDone: (b
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add provider</DialogTitle>
-          <DialogDescription>POST /dashboard/api/providers</DialogDescription>
+          <DialogDescription>POST /api/providers</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <Field>
@@ -404,7 +404,7 @@ function AddKeyModal({
           <DialogTitle>
             Add key · <span className="font-mono">{provider.name}</span>
           </DialogTitle>
-          <DialogDescription>POST /dashboard/api/providers/{provider.id}/keys</DialogDescription>
+          <DialogDescription>POST /api/providers/{provider.id}/keys</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <Field>
