@@ -165,7 +165,9 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                         [] ->
                             {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}};
                         Candidates ->
-                            case pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight) of
+                            case
+                                pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight)
+                            of
                                 {ok, _} = Ok ->
                                     Ok;
                                 {error, Reason} = Err ->
@@ -177,7 +179,9 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                                     }),
                                     case Reason of
                                         all_cooling ->
-                                            {error, {all_cooling, remaining_cooldown_ms(Candidates, Cool, Now)}};
+                                            {error,
+                                                {all_cooling,
+                                                    remaining_cooldown_ms(Candidates, Cool, Now)}};
                                         _ ->
                                             Err
                                     end
@@ -207,7 +211,8 @@ has_usable_key(_, _, _) ->
 classify_key_failures(Candidates, Cool, Now) ->
     Statuses = [key_status(R, Cool, Now) || R <- Candidates],
     case lists:member(all_cooling, Statuses) of
-        true -> all_cooling;
+        true ->
+            all_cooling;
         false ->
             case lists:member(keys_disabled, Statuses) of
                 true -> keys_disabled;
@@ -273,10 +278,11 @@ weighted_rr_pick(CursorKey, Items, Cursors) ->
             hd(Items);
         _ ->
             Len = length(Expanded),
-            Idx = case ets:lookup(Cursors, CursorKey) of
-                [{_, N}] -> N rem Len;
-                [] -> 0
-            end,
+            Idx =
+                case ets:lookup(Cursors, CursorKey) of
+                    [{_, N}] -> N rem Len;
+                    [] -> 0
+                end,
             ets:insert(Cursors, {CursorKey, Idx + 1}),
             lists:nth(Idx + 1, Expanded)
     end.
@@ -426,21 +432,18 @@ normalize_target({provider_key, _} = T) -> T;
 normalize_target({provider_key, _P, K}) -> {provider_key, K};
 normalize_target({route, _, _} = T) -> T;
 normalize_target({route, _} = T) -> T;
-normalize_target(#{provider_id := _P, key_id := K}) ->
-    {provider_key, K};
-normalize_target(#{provider_id := P, model_id := M}) ->
-    {route, M, P};
-normalize_target(#{provider_id := P}) ->
-    {provider, P};
-normalize_target(#{id := Id}) ->
-    {provider_key, Id};
-normalize_target(Target) ->
-    Target.
+normalize_target(#{provider_id := _P, key_id := K}) -> {provider_key, K};
+normalize_target(#{provider_id := P, model_id := M}) -> {route, M, P};
+normalize_target(#{provider_id := P}) -> {provider, P};
+normalize_target(#{id := Id}) -> {provider_key, Id};
+normalize_target(Target) -> Target.
 
 cooldown_ms({auth, _}) ->
     case os:getenv("JANUS_LB_AUTH_COOLDOWN_MS") of
-        false -> ?AUTH_COOLDOWN_MS;
-        "" -> ?AUTH_COOLDOWN_MS;
+        false ->
+            ?AUTH_COOLDOWN_MS;
+        "" ->
+            ?AUTH_COOLDOWN_MS;
         Val ->
             try
                 case list_to_integer(Val) of
@@ -457,8 +460,10 @@ cooldown_ms(#{retry_after_ms := Ms}) when is_integer(Ms), Ms > 0 ->
     min(Ms, ?MAX_RETRY_AFTER_MS);
 cooldown_ms(_Reason) ->
     case os:getenv("JANUS_LB_COOLDOWN_MS") of
-        false -> ?DEFAULT_COOLDOWN_MS;
-        "" -> ?DEFAULT_COOLDOWN_MS;
+        false ->
+            ?DEFAULT_COOLDOWN_MS;
+        "" ->
+            ?DEFAULT_COOLDOWN_MS;
         Val ->
             try
                 case list_to_integer(Val) of

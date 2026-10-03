@@ -116,7 +116,8 @@ publish(Generation, Tabs) when is_integer(Generation), Generation >= 0, is_map(T
 -spec routes_for_model(model_id()) -> [map()].
 routes_for_model(ModelId) ->
     case table(routes_by_model) of
-        undefined -> [];
+        undefined ->
+            [];
         Tid ->
             case ets:lookup(Tid, ModelId) of
                 [{_, Routes}] -> Routes;
@@ -127,7 +128,8 @@ routes_for_model(ModelId) ->
 -spec lookup_model(binary() | model_id()) -> {ok, map()} | error.
 lookup_model(Key) ->
     case table(models) of
-        undefined -> error;
+        undefined ->
+            error;
         Tid ->
             case ets:lookup(Tid, Key) of
                 [{_, Meta}] -> {ok, Meta};
@@ -138,7 +140,8 @@ lookup_model(Key) ->
 -spec lookup_provider(provider_id()) -> {ok, map()} | error.
 lookup_provider(ProviderId) ->
     case table(providers) of
-        undefined -> error;
+        undefined ->
+            error;
         Tid ->
             case ets:lookup(Tid, ProviderId) of
                 [{_, Meta}] -> {ok, Meta};
@@ -149,7 +152,8 @@ lookup_provider(ProviderId) ->
 -spec lookup_api_key(binary()) -> {ok, map()} | error.
 lookup_api_key(Prefix) when is_binary(Prefix) ->
     case table(api_keys_by_prefix) of
-        undefined -> error;
+        undefined ->
+            error;
         Tid ->
             case ets:lookup(Tid, Prefix) of
                 [{_, Meta}] -> {ok, Meta};
@@ -160,7 +164,8 @@ lookup_api_key(Prefix) when is_binary(Prefix) ->
 -spec provider_keys(provider_id()) -> [map()].
 provider_keys(ProviderId) ->
     case table(provider_keys) of
-        undefined -> [];
+        undefined ->
+            [];
         Tid ->
             case ets:lookup(Tid, ProviderId) of
                 [{_, Keys}] -> Keys;
@@ -186,7 +191,11 @@ delete_tabs(undefined) ->
 delete_tabs(#{catalog := Tabs}) when is_map(Tabs) ->
     maps:foreach(
         fun(_K, Tid) ->
-            try ets:delete(Tid) catch error:badarg -> ok end
+            try
+                ets:delete(Tid)
+            catch
+                error:badarg -> ok
+            end
         end,
         Tabs
     );
@@ -366,6 +375,10 @@ to_pos_int(_, Default) ->
 
 to_int(N, _Default) when is_integer(N) -> N;
 to_int(N, Default) when is_binary(N) ->
-    try binary_to_integer(N) catch _:_ -> Default end;
+    try
+        binary_to_integer(N)
+    catch
+        _:_ -> Default
+    end;
 to_int(_, Default) ->
     Default.

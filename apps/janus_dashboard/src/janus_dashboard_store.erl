@@ -10,16 +10,32 @@
 
 -export([
     %% reads
-    providers/0, provider_keys/1, provider_key_counts/0, models/0, routes/0,
-    agent_keys/0, grants/0, model_name/1, provider_name/1,
+    providers/0,
+    provider_keys/1,
+    provider_key_counts/0,
+    models/0,
+    routes/0,
+    agent_keys/0,
+    grants/0,
+    model_name/1,
+    provider_name/1,
     %% provider mutations
-    add_provider/3, set_provider_enabled/2, delete_provider/1,
-    add_provider_key/3, set_provider_key_enabled/2, delete_provider_key/1,
+    add_provider/3,
+    set_provider_enabled/2,
+    delete_provider/1,
+    add_provider_key/3,
+    set_provider_key_enabled/2,
+    delete_provider_key/1,
     %% model / route mutations
-    add_model/1, set_model_enabled/2,
-    add_route/5, set_route_enabled/3, delete_route/2,
+    add_model/1,
+    set_model_enabled/2,
+    add_route/5,
+    set_route_enabled/3,
+    delete_route/2,
     %% agent key mutations
-    create_agent_key/1, set_agent_key_enabled/2, delete_agent_key/1,
+    create_agent_key/1,
+    set_agent_key_enabled/2,
+    delete_agent_key/1,
     %% catalog
     bump_generation/0
 ]).
@@ -42,8 +58,10 @@ providers() ->
 -spec provider_keys(integer()) -> {ok, [map()]} | {error, term()}.
 provider_keys(ProviderId) ->
     qmap(
-        <<"SELECT id, key_id, weight, enabled FROM provider_keys "
-          "WHERE provider_id = ? ORDER BY id">>,
+        <<
+            "SELECT id, key_id, weight, enabled FROM provider_keys "
+            "WHERE provider_id = ? ORDER BY id"
+        >>,
         [ProviderId],
         [id, key_id, weight, enabled],
         #{enabled => fun truthy/1}
@@ -51,8 +69,15 @@ provider_keys(ProviderId) ->
 
 -spec provider_key_counts() -> {ok, #{integer() => non_neg_integer()}} | {error, term()}.
 provider_key_counts() ->
-    case q(<<"SELECT provider_id, COUNT(*) FROM provider_keys "
-            "GROUP BY provider_id">>, []) of
+    case
+        q(
+            <<
+                "SELECT provider_id, COUNT(*) FROM provider_keys "
+                "GROUP BY provider_id"
+            >>,
+            []
+        )
+    of
         {ok, Rows} ->
             {ok, maps:from_list([{Pid, Cnt} || {Pid, Cnt} <- Rows])};
         {error, Reason} ->
@@ -71,8 +96,10 @@ models() ->
 -spec routes() -> {ok, [map()]} | {error, term()}.
 routes() ->
     qmap(
-        <<"SELECT model_id, provider_id, upstream_model_id, weight, priority, enabled "
-          "FROM model_routes ORDER BY model_id, priority, provider_id">>,
+        <<
+            "SELECT model_id, provider_id, upstream_model_id, weight, priority, enabled "
+            "FROM model_routes ORDER BY model_id, priority, provider_id"
+        >>,
         [],
         [model_id, provider_id, upstream_model_id, weight, priority, enabled],
         #{enabled => fun truthy/1}
@@ -114,19 +141,29 @@ add_provider(Name, BaseUrl, Protocol) when
     is_binary(Name), Name =/= <<>>, is_binary(BaseUrl), is_binary(Protocol)
 ->
     case lists:member(Protocol, ?PROTOCOLS) of
-        false -> {error, invalid_protocol};
+        false ->
+            {error, invalid_protocol};
         true ->
             case http_url(BaseUrl) of
-                false -> {error, invalid_url};
+                false ->
+                    {error, invalid_url};
                 true ->
-                    case q(<<"INSERT INTO providers (name, base_url, protocol, enabled) "
-                            "VALUES (?, ?, ?, 1)">>, [Name, BaseUrl, Protocol]) of
+                    case
+                        q(
+                            <<
+                                "INSERT INTO providers (name, base_url, protocol, enabled) "
+                                "VALUES (?, ?, ?, 1)"
+                            >>,
+                            [Name, BaseUrl, Protocol]
+                        )
+                    of
                         {ok, _} ->
                             case q(<<"SELECT id FROM providers WHERE name = ?">>, [Name]) of
                                 {ok, [{Id}]} -> {ok, Id};
                                 _ -> {error, lookup_failed}
                             end;
-                        {error, _} -> {error, duplicate}
+                        {error, _} ->
+                            {error, duplicate}
                     end
             end
     end;
@@ -135,8 +172,10 @@ add_provider(_, _, _) ->
 
 -spec set_provider_enabled(integer(), boolean()) -> ok | {error, term()}.
 set_provider_enabled(Id, Enabled) when is_boolean(Enabled) ->
-    exec(<<"UPDATE providers SET enabled = ? WHERE id = ?">>,
-        [bool_int(Enabled), Id]).
+    exec(
+        <<"UPDATE providers SET enabled = ? WHERE id = ?">>,
+        [bool_int(Enabled), Id]
+    ).
 
 -spec delete_provider(integer()) -> ok | {error, term()}.
 delete_provider(Id) ->
@@ -144,25 +183,41 @@ delete_provider(Id) ->
 
 -spec add_provider_key(integer(), binary(), pos_integer()) ->
     {ok, integer()} | {error, invalid | encrypt_unavailable | term()}.
-add_provider_key(ProviderId, Secret, Weight)
-    when is_integer(ProviderId), is_binary(Secret), Secret =/= <<>> ->
+add_provider_key(ProviderId, Secret, Weight) when
+    is_integer(ProviderId), is_binary(Secret), Secret =/= <<>>
+->
     case is_pos_int(Weight) of
-        false -> {error, invalid};
+        false ->
+            {error, invalid};
         true ->
             case janus_secrets:encrypt(Secret) of
                 {ok, Cipher} ->
                     {KeyId, _} = janus_crypto_env:active_secrets_key(),
-                    case q(<<"INSERT INTO provider_keys "
-                            "(provider_id, secret_ciphertext, key_id, weight, enabled) "
-                            "VALUES (?, ?, ?, ?, 1)">>,
-                        [ProviderId, Cipher, KeyId, Weight]) of
+                    case
+                        q(
+                            <<
+                                "INSERT INTO provider_keys "
+                                "(provider_id, secret_ciphertext, key_id, weight, enabled) "
+                                "VALUES (?, ?, ?, ?, 1)"
+                            >>,
+                            [ProviderId, Cipher, KeyId, Weight]
+                        )
+                    of
                         {ok, _} ->
-                            case q(<<"SELECT id FROM provider_keys WHERE provider_id = ? "
-                                    "ORDER BY id DESC LIMIT 1">>, [ProviderId]) of
+                            case
+                                q(
+                                    <<
+                                        "SELECT id FROM provider_keys WHERE provider_id = ? "
+                                        "ORDER BY id DESC LIMIT 1"
+                                    >>,
+                                    [ProviderId]
+                                )
+                            of
                                 {ok, [{Id}]} -> {ok, Id};
                                 _ -> {ok, 0}
                             end;
-                        {error, R} -> {error, R}
+                        {error, R} ->
+                            {error, R}
                     end;
                 {error, Reason} ->
                     {error, {encrypt_unavailable, Reason}}
@@ -173,8 +228,10 @@ add_provider_key(_, _, _) ->
 
 -spec set_provider_key_enabled(integer(), boolean()) -> ok | {error, term()}.
 set_provider_key_enabled(Id, Enabled) when is_boolean(Enabled) ->
-    exec(<<"UPDATE provider_keys SET enabled = ? WHERE id = ?">>,
-        [bool_int(Enabled), Id]).
+    exec(
+        <<"UPDATE provider_keys SET enabled = ? WHERE id = ?">>,
+        [bool_int(Enabled), Id]
+    ).
 
 -spec delete_provider_key(integer()) -> ok | {error, term()}.
 delete_provider_key(Id) ->
@@ -204,29 +261,39 @@ set_model_enabled(Id, Enabled) when is_boolean(Enabled) ->
 
 -spec add_route(integer(), integer(), binary() | undefined, pos_integer(), integer()) ->
     ok | {error, invalid | duplicate | term()}.
-add_route(ModelId, ProviderId, Upstream, Weight, Priority)
-    when is_integer(ModelId), is_integer(ProviderId) ->
+add_route(ModelId, ProviderId, Upstream, Weight, Priority) when
+    is_integer(ModelId), is_integer(ProviderId)
+->
     UpstreamNorm = norm_optional(Upstream),
     case is_pos_int(Weight) andalso is_int(Priority) of
-        false -> {error, invalid};
+        false ->
+            {error, invalid};
         true ->
-            exec(<<"INSERT INTO model_routes "
-                   "(model_id, provider_id, upstream_model_id, weight, priority, enabled) "
-                   "VALUES (?, ?, ?, ?, ?, 1)">>,
-                [ModelId, ProviderId, UpstreamNorm, Weight, Priority])
+            exec(
+                <<
+                    "INSERT INTO model_routes "
+                    "(model_id, provider_id, upstream_model_id, weight, priority, enabled) "
+                    "VALUES (?, ?, ?, ?, ?, 1)"
+                >>,
+                [ModelId, ProviderId, UpstreamNorm, Weight, Priority]
+            )
     end;
 add_route(_, _, _, _, _) ->
     {error, invalid}.
 
 -spec set_route_enabled(integer(), integer(), boolean()) -> ok | {error, term()}.
 set_route_enabled(ModelId, ProviderId, Enabled) when is_boolean(Enabled) ->
-    exec(<<"UPDATE model_routes SET enabled = ? WHERE model_id = ? AND provider_id = ?">>,
-        [bool_int(Enabled), ModelId, ProviderId]).
+    exec(
+        <<"UPDATE model_routes SET enabled = ? WHERE model_id = ? AND provider_id = ?">>,
+        [bool_int(Enabled), ModelId, ProviderId]
+    ).
 
 -spec delete_route(integer(), integer()) -> ok | {error, term()}.
 delete_route(ModelId, ProviderId) ->
-    exec(<<"DELETE FROM model_routes WHERE model_id = ? AND provider_id = ?">>,
-        [ModelId, ProviderId]).
+    exec(
+        <<"DELETE FROM model_routes WHERE model_id = ? AND provider_id = ?">>,
+        [ModelId, ProviderId]
+    ).
 
 %%%===================================================================
 %%% Agent key mutations
@@ -236,20 +303,27 @@ delete_route(ModelId, ProviderId) ->
     {ok, Key :: binary(), Prefix :: binary(), integer()} | {error, invalid | term()}.
 create_agent_key(ModelIds) when is_list(ModelIds), ModelIds =/= [] ->
     case lists:all(fun is_pos_int/1, ModelIds) of
-        false -> {error, invalid};
+        false ->
+            {error, invalid};
         true ->
             Key = gen_key(),
             {Prefix, Hash} = janus_api_keys:hash_key(Key),
-            case q(<<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
-                [Prefix, Hash]) of
+            case
+                q(
+                    <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
+                    [Prefix, Hash]
+                )
+            of
                 {ok, _} ->
                     case q(<<"SELECT id FROM api_keys WHERE key_hash = ?">>, [Hash]) of
                         {ok, [{Id}]} ->
                             lists:foreach(
                                 fun(Mid) ->
                                     {ok, _} = q(
-                                        <<"INSERT INTO api_key_models "
-                                          "(api_key_id, model_id) VALUES (?, ?)">>,
+                                        <<
+                                            "INSERT INTO api_key_models "
+                                            "(api_key_id, model_id) VALUES (?, ?)"
+                                        >>,
                                         [Id, Mid]
                                     )
                                 end,
@@ -353,7 +427,7 @@ gen_key() ->
 
 b64url(Bin) ->
     B64 = base64:encode(Bin),
-    << <<(b64c(C))/binary>> || <<C>> <= B64, C =/= $= >>.
+    <<<<(b64c(C))/binary>> || <<C>> <= B64, C =/= $=>>.
 
 b64c($+) -> <<"-">>;
 b64c($/) -> <<"_">>;
@@ -363,25 +437,41 @@ http_url(<<"http://", _/binary>>) -> true;
 http_url(<<"https://", _/binary>>) -> true;
 http_url(_) -> false.
 
-norm_optional(undefined) -> null;
-norm_optional(<<>>) -> null;
+norm_optional(undefined) ->
+    null;
+norm_optional(<<>>) ->
+    null;
 norm_optional(B) when is_binary(B) -> B;
 norm_optional(L) when is_list(L) ->
     case unicode:characters_to_binary(L) of
         B when is_binary(B) -> norm_optional(B);
         _ -> null
     end;
-norm_optional(_) -> null.
+norm_optional(_) ->
+    null.
 
 is_pos_int(N) when is_integer(N), N > 0 -> true;
 is_pos_int(N) when is_binary(N) ->
-    try binary_to_integer(N) > 0 catch _:_ -> false end;
-is_pos_int(_) -> false.
+    try
+        binary_to_integer(N) > 0
+    catch
+        _:_ -> false
+    end;
+is_pos_int(_) ->
+    false.
 
 is_int(N) when is_integer(N) -> true;
 is_int(N) when is_binary(N) ->
-    try begin _ = binary_to_integer(N), true end catch _:_ -> false end;
-is_int(_) -> false.
+    try
+        begin
+            _ = binary_to_integer(N),
+            true
+        end
+    catch
+        _:_ -> false
+    end;
+is_int(_) ->
+    false.
 
 bool_int(true) -> 1;
 bool_int(false) -> 0.

@@ -10,7 +10,12 @@ init(Req0, State) ->
         generation => janus_config:generation(),
         backend => janus_db:select_backend()
     }),
-    Req = cowboy_req:reply(200, #{
-        <<"content-type">> => <<"application/json">>
-    }, Body, Req0),
+    Req = cowboy_req:reply(
+        200,
+        #{
+            <<"content-type">> => <<"application/json">>
+        },
+        Body,
+        Req0
+    ),
     {ok, Req, State}.

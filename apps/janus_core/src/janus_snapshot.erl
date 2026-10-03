@@ -251,7 +251,8 @@ transform_secret_value(Value, decrypt) when is_binary(Value) ->
 transform_secret_value(Value, Op) ->
     walk_sensitive(Value, Op).
 
-is_proplist_or_terms([]) -> true;
+is_proplist_or_terms([]) ->
+    true;
 is_proplist_or_terms([H | T]) when not is_integer(H) ->
     is_proplist_or_terms(T);
 is_proplist_or_terms(_) ->
@@ -298,7 +299,8 @@ snapshot_base_name(NowUs) when is_integer(NowUs), NowUs > 0 ->
     Digits = integer_to_binary(NowUs),
     PadLen = max(0, 20 - byte_size(Digits)),
     binary_to_list(
-        <<"janus-snapshot-", (binary:copy(<<"0">>, PadLen))/binary, Digits/binary, ".jsnp">>).
+        <<"janus-snapshot-", (binary:copy(<<"0">>, PadLen))/binary, Digits/binary, ".jsnp">>
+    ).
 
 ensure_dir(Dir) ->
     case filelib:is_dir(Dir) of
@@ -459,7 +461,9 @@ roundtrip_snapshot_test() ->
     Key = crypto:strong_rand_bytes(32),
     os:putenv("JANUS_SECRETS_KEY", "k1:" ++ base64:encode_to_string(Key)),
     os:putenv("JANUS_API_KEY_PEPPER", "pepper"),
-    Dir = filename:join(temp_root(), "janus-snap-test-" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Dir = filename:join(
+        temp_root(), "janus-snap-test-" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
     os:putenv("JANUS_SNAPSHOT_DIR", Dir),
     os:unsetenv("JANUS_SNAPSHOT_MAX_AGE_SEC"),
     Catalog = #{
@@ -471,14 +475,18 @@ roundtrip_snapshot_test() ->
     ok = write_snapshot(Catalog),
     {ok, Loaded, Meta} = load_latest(),
     ?assertEqual(7, maps:get(generation, Meta)),
-    ?assertEqual(<<"upstream-key">>,
-                 maps:get(secret, hd(maps:get(providers, Loaded)))),
+    ?assertEqual(
+        <<"upstream-key">>,
+        maps:get(secret, hd(maps:get(providers, Loaded)))
+    ),
     ok = file:del_dir_r(Dir).
 
 corrupt_mac_test() ->
     Key = crypto:strong_rand_bytes(32),
     os:putenv("JANUS_SECRETS_KEY", "k1:" ++ base64:encode_to_string(Key)),
-    Dir = filename:join(temp_root(), "janus-snap-bad-" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Dir = filename:join(
+        temp_root(), "janus-snap-bad-" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
     os:putenv("JANUS_SNAPSHOT_DIR", Dir),
     ok = write_snapshot(#{generation => 1, secret => <<"x">>}),
     [Path | _] = list_snapshots(Dir),

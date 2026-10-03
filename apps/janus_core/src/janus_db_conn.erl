@@ -69,13 +69,13 @@ query(Sql) ->
 query(Sql, Params) ->
     gen_server:call(?SERVER, {query, Sql, Params}, infinity).
 
--spec with_tx(fun((janus_db:conn()) -> Result)) -> Result | {error, term()}
-    when Result :: term().
+-spec with_tx(fun((janus_db:conn()) -> Result)) -> Result | {error, term()} when
+    Result :: term().
 with_tx(Fun) when is_function(Fun, 1) ->
     gen_server:call(?SERVER, {with_tx, Fun}, infinity).
 
--spec with_transaction(fun((janus_db:conn()) -> Result)) -> Result | {error, term()}
-    when Result :: term().
+-spec with_transaction(fun((janus_db:conn()) -> Result)) -> Result | {error, term()} when
+    Result :: term().
 with_transaction(Fun) ->
     with_tx(Fun).
 
@@ -204,26 +204,29 @@ forward_notify(Msg) ->
 
 do_fetch_catalog(#state{mod = M, conn = C}) ->
     Queries = [
-        {models,
-            <<"SELECT id, name, enabled FROM models ORDER BY id">>,
-            [id, name, enabled]},
+        {models, <<"SELECT id, name, enabled FROM models ORDER BY id">>, [id, name, enabled]},
         {model_routes,
-            <<"SELECT model_id, provider_id, upstream_model_id, weight, priority, enabled "
-              "FROM model_routes ORDER BY model_id, priority, provider_id">>,
+            <<
+                "SELECT model_id, provider_id, upstream_model_id, weight, priority, enabled "
+                "FROM model_routes ORDER BY model_id, priority, provider_id"
+            >>,
             [model_id, provider_id, upstream_model_id, weight, priority, enabled]},
-        {providers,
-            <<"SELECT id, name, base_url, protocol, enabled FROM providers ORDER BY id">>,
-            [id, name, base_url, protocol, enabled]},
+        {providers, <<"SELECT id, name, base_url, protocol, enabled FROM providers ORDER BY id">>, [
+                id, name, base_url, protocol, enabled
+            ]},
         {provider_keys,
-            <<"SELECT id, provider_id, secret_ciphertext, key_id, weight, enabled "
-              "FROM provider_keys ORDER BY provider_id, id">>,
+            <<
+                "SELECT id, provider_id, secret_ciphertext, key_id, weight, enabled "
+                "FROM provider_keys ORDER BY provider_id, id"
+            >>,
             [id, provider_id, secret_ciphertext, key_id, weight, enabled]},
-        {api_keys,
-            <<"SELECT id, prefix, key_hash, enabled FROM api_keys ORDER BY id">>,
-            [id, prefix, key_hash, enabled]},
+        {api_keys, <<"SELECT id, prefix, key_hash, enabled FROM api_keys ORDER BY id">>, [
+            id, prefix, key_hash, enabled
+        ]},
         {api_key_models,
-            <<"SELECT api_key_id, model_id FROM api_key_models ORDER BY api_key_id, model_id">>,
-            [api_key_id, model_id]}
+            <<"SELECT api_key_id, model_id FROM api_key_models ORDER BY api_key_id, model_id">>, [
+                api_key_id, model_id
+            ]}
     ],
     fetch_all(M, C, Queries, #{}).
 

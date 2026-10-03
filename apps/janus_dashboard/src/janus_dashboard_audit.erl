@@ -25,8 +25,12 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec log(binary() | string(), binary() | string(), binary() | string() | undefined,
-          binary() | string() | undefined) -> ok.
+-spec log(
+    binary() | string(),
+    binary() | string(),
+    binary() | string() | undefined,
+    binary() | string() | undefined
+) -> ok.
 log(Actor, Action, Target, Detail) ->
     gen_server:call(?MODULE, {log, bin(Actor), bin(Action), opt(Target), opt(Detail)}).
 
@@ -77,8 +81,10 @@ terminate(_Reason, _State) ->
 %%%===================================================================
 
 ts() ->
-    Str = calendar:system_time_to_rfc3339(erlang:system_time(second),
-        [{unit, second}, {offset, "Z"}]),
+    Str = calendar:system_time_to_rfc3339(
+        erlang:system_time(second),
+        [{unit, second}, {offset, "Z"}]
+    ),
     unicode:characters_to_binary(Str).
 
 bin(B) when is_binary(B) -> B;

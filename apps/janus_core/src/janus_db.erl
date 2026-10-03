@@ -35,8 +35,10 @@
 -spec select_backend() -> backend().
 select_backend() ->
     case application:get_env(janus, db, #{}) of
-        #{backend := postgres} -> postgres;
-        #{backend := sqlite} -> sqlite;
+        #{backend := postgres} ->
+            postgres;
+        #{backend := sqlite} ->
+            sqlite;
         _ ->
             case {os:getenv("JANUS_DB_URL"), os:getenv("JANUS_DB_HOST")} of
                 {Url, _} when is_list(Url), Url =/= false -> postgres;

@@ -115,12 +115,14 @@ handle_info({notification, _Conn, _Pid, _Channel, <<"janus_config">>}, State) ->
 handle_info({notification, _Conn, _Pid, <<"janus_config">>, _Payload}, State) ->
     {_Reply, NewState} = do_reload(State, notify),
     {noreply, NewState};
-handle_info({epgsql, _Conn, {notification, Channel, _Payload}}, State)
-  when Channel =:= <<"janus_config">>; Channel =:= janus_config ->
+handle_info({epgsql, _Conn, {notification, Channel, _Payload}}, State) when
+    Channel =:= <<"janus_config">>; Channel =:= janus_config
+->
     {_Reply, NewState} = do_reload(State, notify),
     {noreply, NewState};
-handle_info({epgsql, _Conn, {notification, _Pid, Channel, _Payload}}, State)
-  when Channel =:= <<"janus_config">>; Channel =:= janus_config ->
+handle_info({epgsql, _Conn, {notification, _Pid, Channel, _Payload}}, State) when
+    Channel =:= <<"janus_config">>; Channel =:= janus_config
+->
     {_Reply, NewState} = do_reload(State, notify),
     {noreply, NewState};
 handle_info(_Info, State) ->
@@ -264,8 +266,10 @@ call_db(Fun, Args) ->
 
 poll_ms() ->
     case os:getenv("JANUS_CONFIG_POLL_MS") of
-        false -> ?DEFAULT_POLL_MS;
-        "" -> ?DEFAULT_POLL_MS;
+        false ->
+            ?DEFAULT_POLL_MS;
+        "" ->
+            ?DEFAULT_POLL_MS;
         Val ->
             try
                 case list_to_integer(Val) of
@@ -298,7 +302,8 @@ maybe_write_snapshot(Gen, Rows) ->
         {module, janus_snapshot} ->
             Term = snapshot_term(Gen, Rows),
             case janus_snapshot:write_snapshot(Term) of
-                ok -> ok;
+                ok ->
+                    ok;
                 {error, Reason} ->
                     logger:debug(#{what => janus_snapshot_write_skipped, reason => Reason}),
                     ok

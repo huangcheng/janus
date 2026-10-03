@@ -44,8 +44,10 @@ maybe_auto_seed() ->
             ok
     end.
 
-env_truthy(false) -> false;
-env_truthy("") -> false;
+env_truthy(false) ->
+    false;
+env_truthy("") ->
+    false;
 env_truthy(Val) when is_list(Val) ->
     lists:member(string:lowercase(Val), ["1", "true", "yes", "on"]);
 env_truthy(_) ->

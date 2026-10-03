@@ -13,10 +13,11 @@
 
 init(Req0, State) ->
     %% path_info is `undefined` for the exact "/dashboard" route.
-    Segs = case cowboy_req:path_info(Req0) of
-        undefined -> [];
-        L when is_list(L) -> L
-    end,
+    Segs =
+        case cowboy_req:path_info(Req0) of
+            undefined -> [];
+            L when is_list(L) -> L
+        end,
     Req =
         case resolve(segments_safe(Segs)) of
             {ok, RelPath} ->
@@ -31,8 +32,8 @@ init(Req0, State) ->
 %%%===================================================================
 
 segments_safe(Segs) ->
-    lists:all(fun(S) -> is_binary(S) andalso binary:match(S, <<"..">>) =:= nomatch end, Segs)
-        andalso Segs.
+    lists:all(fun(S) -> is_binary(S) andalso binary:match(S, <<"..">>) =:= nomatch end, Segs) andalso
+        Segs.
 
 %% Real files win; anything else falls back to the SPA shell.
 resolve([]) ->
@@ -49,12 +50,18 @@ serve_file(Rel, Req) ->
     Full = filename:join(www_dir(), Rel),
     case file:read_file(Full) of
         {ok, Bin} ->
-            cowboy_req:reply(200, #{
-                <<"content-type">> => mime(Rel),
-                <<"cache-control">> => cache(Rel)
-            }, Bin, Req);
+            cowboy_req:reply(
+                200,
+                #{
+                    <<"content-type">> => mime(Rel),
+                    <<"cache-control">> => cache(Rel)
+                },
+                Bin,
+                Req
+            );
         {error, _} ->
-            Body = <<"Dashboard UI assets are missing; run the SPA build (apps/janus_dashboard/spa)">>,
+            Body =
+                <<"Dashboard UI assets are missing; run the SPA build (apps/janus_dashboard/spa)">>,
             cowboy_req:reply(404, #{<<"content-type">> => <<"text/plain">>}, Body, Req)
     end.
 

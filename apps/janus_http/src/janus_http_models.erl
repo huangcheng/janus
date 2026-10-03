@@ -8,9 +8,14 @@ init(Req0, State) ->
         {ok, _Agent, Req1} ->
             Data = list_models(),
             Body = thoas:encode(#{object => <<"list">>, data => Data}),
-            Req = cowboy_req:reply(200, #{
-                <<"content-type">> => <<"application/json">>
-            }, Body, Req1),
+            Req = cowboy_req:reply(
+                200,
+                #{
+                    <<"content-type">> => <<"application/json">>
+                },
+                Body,
+                Req1
+            ),
             {ok, Req, State};
         {error, ReqErr} ->
             {ok, ReqErr, State}
@@ -25,8 +30,9 @@ list_models() ->
             try
                 lists:filtermap(
                     fun
-                        ({Key, #{id := Id, name := Name, enabled := true}})
-                          when is_binary(Name), Key =:= Name ->
+                        ({Key, #{id := Id, name := Name, enabled := true}}) when
+                            is_binary(Name), Key =:= Name
+                        ->
                             case ets:insert_new(Seen, {Id, true}) of
                                 true ->
                                     {true, #{

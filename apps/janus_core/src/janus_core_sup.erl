@@ -11,25 +11,27 @@ init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
     %% db_conn wired by integrator — start only when module is present.
     %% db_conn → lb → config (config expects fetch_catalog / NOTIFY).
-    Children = db_conn_children() ++ [
-        #{
-            id => janus_lb,
-            start => {janus_lb, start_link, []},
-            restart => permanent,
-            shutdown => 5000,
-            type => worker,
-            modules => [janus_lb]
-        },
+    Children =
+        db_conn_children() ++
+            [
+                #{
+                    id => janus_lb,
+                    start => {janus_lb, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [janus_lb]
+                },
 
-        #{
-            id => janus_config,
-            start => {janus_config, start_link, []},
-            restart => permanent,
-            shutdown => 5000,
-            type => worker,
-            modules => [janus_config]
-        }
-    ],
+                #{
+                    id => janus_config,
+                    start => {janus_config, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [janus_config]
+                }
+            ],
     {ok, {SupFlags, Children}}.
 
 db_conn_children() ->

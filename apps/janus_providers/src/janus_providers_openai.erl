@@ -26,7 +26,9 @@ user_agent() ->
     | {error, term()}.
 chat_completions(Route, Body, ReqMap) when is_map(Route), is_binary(Body), is_map(ReqMap) ->
     case resolve_upstream(Route, ReqMap) of
-        {ok, #{host := Host, port := Port, path := Path, tls := Tls, token := Token, body := OutBody}} ->
+        {ok, #{
+            host := Host, port := Port, path := Path, tls := Tls, token := Token, body := OutBody
+        }} ->
             do_post(Host, Port, Path, Tls, Token, OutBody);
         {error, _} = Err ->
             Err
@@ -85,9 +87,12 @@ decrypt_key(_) ->
 
 parse_base(Url) ->
     case uri_string:parse(Url) of
-        #{scheme := Scheme, host := Host} = U
-          when Scheme =:= <<"https">>; Scheme =:= <<"http">>;
-               Scheme =:= "https"; Scheme =:= "http" ->
+        #{scheme := Scheme, host := Host} = U when
+            Scheme =:= <<"https">>;
+            Scheme =:= <<"http">>;
+            Scheme =:= "https";
+            Scheme =:= "http"
+        ->
             Tls = scheme_tls(Scheme),
             Port =
                 case maps:get(port, U, undefined) of
@@ -96,11 +101,12 @@ parse_base(Url) ->
                     P -> P
                 end,
             Path0 = maps:get(path, U, <<"/">>),
-            Path = case Path0 of
-                <<>> -> <<"">>;
-                <<"/">> -> <<"">>;
-                Pth -> iolist_to_binary(Pth)
-            end,
+            Path =
+                case Path0 of
+                    <<>> -> <<"">>;
+                    <<"/">> -> <<"">>;
+                    Pth -> iolist_to_binary(Pth)
+                end,
             HostBin = iolist_to_binary(Host),
             {ok, binary_to_list(HostBin), Port, Path, Tls};
         Other ->
@@ -112,18 +118,28 @@ scheme_tls("https") -> true;
 scheme_tls(_) -> false.
 
 join_path(Base, Suffix) ->
-    B = case Base of
-        <<>> -> <<>>;
-        _ ->
-            case binary:last(iolist_to_binary(Base)) of
-                $/ -> binary:part(iolist_to_binary(Base), 0, byte_size(iolist_to_binary(Base)) - 1);
-                _ -> iolist_to_binary(Base)
-            end
-    end,
+    B =
+        case Base of
+            <<>> ->
+                <<>>;
+            _ ->
+                case binary:last(iolist_to_binary(Base)) of
+                    $/ ->
+                        binary:part(
+                            iolist_to_binary(Base), 0, byte_size(iolist_to_binary(Base)) - 1
+                        );
+                    _ ->
+                        iolist_to_binary(Base)
+                end
+        end,
     <<B/binary, Suffix/binary>>.
 
 do_post(Host, Port, Path, Tls, Token, Body) ->
-    Transport = case Tls of true -> tls; false -> tcp end,
+    Transport =
+        case Tls of
+            true -> tls;
+            false -> tcp
+        end,
     Opts = #{
         transport => Transport,
         tls_opts => [{verify, verify_none}],

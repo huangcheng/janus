@@ -40,8 +40,9 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 -spec login(binary(), binary()) ->
-    {ok, Token :: binary(), Csrf :: binary()} | {error, locked, pos_integer()} |
-    {error, invalid | not_configured}.
+    {ok, Token :: binary(), Csrf :: binary()}
+    | {error, locked, pos_integer()}
+    | {error, invalid | not_configured}.
 login(Password, Ip) when is_binary(Password), is_binary(Ip) ->
     ensure_table(),
     case locked(Ip) of
@@ -99,7 +100,8 @@ init([]) ->
     ensure_table(),
     _ = erlang:send_after(?PRUNE_MS, self(), prune),
     case password_configured() of
-        true -> ok;
+        true ->
+            ok;
         false ->
             logger:warning(#{
                 what => janus_dashboard_no_password,
@@ -133,8 +135,11 @@ ensure_table() ->
         undefined ->
             try
                 ets:new(?TAB, [
-                    named_table, set, public,
-                    {read_concurrency, true}, {write_concurrency, true}
+                    named_table,
+                    set,
+                    public,
+                    {read_concurrency, true},
+                    {write_concurrency, true}
                 ])
             catch
                 error:badarg -> ok
@@ -188,12 +193,14 @@ prune() ->
     end.
 
 %% session row: {Token, Csrf, ExpiresAt, Ip}
-prune_row({Token, _Csrf, ExpiresAt, _Ip}, Now)
-    when is_binary(Token), is_integer(ExpiresAt) ->
+prune_row({Token, _Csrf, ExpiresAt, _Ip}, Now) when
+    is_binary(Token), is_integer(ExpiresAt)
+->
     ExpiresAt =< Now;
 %% failure row: {<<"fail|…">>, Fails, WindowStart, LockUntil}
-prune_row({<<"fail|", _/binary>>, _Fails, Ws, Lu}, Now)
-    when is_integer(Ws), is_integer(Lu) ->
+prune_row({<<"fail|", _/binary>>, _Fails, Ws, Lu}, Now) when
+    is_integer(Ws), is_integer(Lu)
+->
     max(Ws, Lu) + window() < Now;
 prune_row(_, _) ->
     false.
@@ -235,7 +242,7 @@ now_sec() ->
 
 b64url(Bin) when is_binary(Bin) ->
     B64 = base64:encode(Bin),
-    << <<(b64url_char(C))/binary>> || <<C>> <= B64, C =/= $= >>.
+    <<<<(b64url_char(C))/binary>> || <<C>> <= B64, C =/= $=>>.
 
 b64url_char($+) -> <<"-">>;
 b64url_char($/) -> <<"_">>;
@@ -252,8 +259,12 @@ login_lockout_test() ->
     ok = application:set_env(janus_dashboard, password, <<"pw-test-123">>),
     try
         Ip = <<"10.9.9.9">>,
-        [begin {error, invalid} = login(<<"wrong">>, Ip) end
-         || _ <- lists:seq(1, 5)],
+        [
+            begin
+                {error, invalid} = login(<<"wrong">>, Ip)
+            end
+         || _ <- lists:seq(1, 5)
+        ],
         {error, locked, _} = login(<<"pw-test-123">>, Ip),
         %% a different IP is unaffected
         {ok, _, _} = login(<<"pw-test-123">>, <<"10.9.9.8">>)

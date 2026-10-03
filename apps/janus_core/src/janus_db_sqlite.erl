@@ -74,12 +74,14 @@ get_generation(Server) ->
 -spec cas_generation(pid(), non_neg_integer()) ->
     {ok, non_neg_integer()} | {error, conflict | term()}.
 cas_generation(Server, Expected) when is_integer(Expected), Expected >= 0 ->
-    case with_tx(Server, fun(_C) ->
-        case erlang:get(?TX_KEY(Server)) of
-            undefined -> {error, missing_tx_conn};
-            Raw -> do_cas(Raw, Expected)
-        end
-    end) of
+    case
+        with_tx(Server, fun(_C) ->
+            case erlang:get(?TX_KEY(Server)) of
+                undefined -> {error, missing_tx_conn};
+                Raw -> do_cas(Raw, Expected)
+            end
+        end)
+    of
         {ok, _} = Ok -> Ok;
         {error, _} = Err -> Err;
         Other -> {error, {unexpected_cas_result, Other}}
@@ -133,7 +135,8 @@ to_path_string(Path) when is_binary(Path) -> binary_to_list(Path).
 
 ensure_parent_dir(PathStr) ->
     case filename:dirname(PathStr) of
-        "." -> ok;
+        "." ->
+            ok;
         Dir ->
             case filelib:ensure_dir(filename:join(Dir, "dummy")) of
                 ok -> ok;
@@ -143,16 +146,19 @@ ensure_parent_dir(PathStr) ->
 
 do_query(Conn, Sql, Params) ->
     SqlBin = iolist_to_binary(Sql),
-    Result = case Params of
-        [] -> esqlite3:q(Conn, SqlBin);
-        _ -> esqlite3:q(Conn, SqlBin, Params)
-    end,
+    Result =
+        case Params of
+            [] -> esqlite3:q(Conn, SqlBin);
+            _ -> esqlite3:q(Conn, SqlBin, Params)
+        end,
     normalize_esqlite(Result).
 
-normalize_esqlite({error, _} = Err) -> Err;
+normalize_esqlite({error, _} = Err) ->
+    Err;
 normalize_esqlite(Rows) when is_list(Rows) ->
     {ok, [normalize_row(R) || R <- Rows]};
-normalize_esqlite(Other) -> {error, {unexpected_esqlite_result, Other}}.
+normalize_esqlite(Other) ->
+    {error, {unexpected_esqlite_result, Other}}.
 
 normalize_row(Row) when is_tuple(Row) -> Row;
 normalize_row(Row) when is_list(Row) -> list_to_tuple(Row);
@@ -168,7 +174,8 @@ run_with_tx(Conn, Fun, Server) ->
                     Err;
                 Result ->
                     case esqlite3:exec(Conn, <<"COMMIT">>) of
-                        ok -> Result;
+                        ok ->
+                            Result;
                         {error, CommitErr} ->
                             _ = esqlite3:exec(Conn, <<"ROLLBACK">>),
                             {error, CommitErr}
@@ -180,28 +187,38 @@ run_with_tx(Conn, Fun, Server) ->
             after
                 erlang:erase(?TX_KEY(Server))
             end;
-        {error, BeginErr} -> {error, BeginErr}
+        {error, BeginErr} ->
+            {error, BeginErr}
     end.
 
 do_cas(Conn, Expected) ->
-    Sql = <<"UPDATE config_meta "
-            "SET config_generation = config_generation + 1 "
-            "WHERE id = 1 AND config_generation = ?">>,
+    Sql = <<
+        "UPDATE config_meta "
+        "SET config_generation = config_generation + 1 "
+        "WHERE id = 1 AND config_generation = ?"
+    >>,
     case normalize_esqlite(esqlite3:q(Conn, Sql, [Expected])) of
         {ok, _} ->
             case esqlite3:changes(Conn) of
                 1 ->
-                    case do_query(Conn,
-                                  <<"SELECT config_generation FROM config_meta WHERE id = 1">>,
-                                  []) of
+                    case
+                        do_query(
+                            Conn,
+                            <<"SELECT config_generation FROM config_meta WHERE id = 1">>,
+                            []
+                        )
+                    of
                         {ok, [{NewGen}]} when is_integer(NewGen) -> {ok, NewGen};
                         {ok, Other} -> {error, {unexpected_cas_row, Other}};
                         {error, _} = Err -> Err
                     end;
-                0 -> {error, conflict};
-                N -> {error, {unexpected_cas_changes, N}}
+                0 ->
+                    {error, conflict};
+                N ->
+                    {error, {unexpected_cas_changes, N}}
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 do_migrate(Conn) ->
@@ -211,13 +228,16 @@ do_migrate(Conn) ->
                 {ok, Files} -> apply_migrations(Conn, Files);
                 {error, _} = Err -> Err
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 ensure_migrations_table(Conn) ->
-    Sql = <<"CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version TEXT PRIMARY KEY, "
-            "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))">>,
+    Sql = <<
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version TEXT PRIMARY KEY, "
+        "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+    >>,
     case esqlite3:exec(Conn, Sql) of
         ok -> ok;
         {error, _} = Err -> Err
@@ -230,9 +250,11 @@ migration_files() ->
                 {ok, Names} ->
                     SqlNames = lists:sort([N || N <- Names, lists:suffix(".sql", N)]),
                     {ok, [{filename:basename(N, ".sql"), filename:join(Dir, N)} || N <- SqlNames]};
-                {error, Reason} -> {error, {list_migrations, Reason}}
+                {error, Reason} ->
+                    {error, {list_migrations, Reason}}
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 migrations_dir() ->
@@ -243,13 +265,16 @@ migrations_dir() ->
                 true -> {ok, Candidate};
                 false -> {error, {priv_dir, janus_core}}
             end;
-        Priv -> {ok, filename:join([Priv, "migrations", "sqlite"])}
+        Priv ->
+            {ok, filename:join([Priv, "migrations", "sqlite"])}
     end.
 
-apply_migrations(_Conn, []) -> ok;
+apply_migrations(_Conn, []) ->
+    ok;
 apply_migrations(Conn, [{Version, Path} | Rest]) ->
     case is_applied(Conn, Version) of
-        {ok, true} -> apply_migrations(Conn, Rest);
+        {ok, true} ->
+            apply_migrations(Conn, Rest);
         {ok, false} ->
             case file:read_file(Path) of
                 {ok, Sql} ->
@@ -257,14 +282,21 @@ apply_migrations(Conn, [{Version, Path} | Rest]) ->
                         ok -> apply_migrations(Conn, Rest);
                         {error, _} = Err -> Err
                     end;
-                {error, Reason} -> {error, {read_migration, Path, Reason}}
+                {error, Reason} ->
+                    {error, {read_migration, Path, Reason}}
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 is_applied(Conn, Version) ->
-    case do_query(Conn, <<"SELECT 1 FROM schema_migrations WHERE version = ?">>,
-                  [list_to_binary(Version)]) of
+    case
+        do_query(
+            Conn,
+            <<"SELECT 1 FROM schema_migrations WHERE version = ?">>,
+            [list_to_binary(Version)]
+        )
+    of
         {ok, [_ | _]} -> {ok, true};
         {ok, []} -> {ok, false};
         {error, _} = Err -> Err
@@ -279,7 +311,8 @@ apply_one(Conn, Version, Sql) ->
                     case normalize_esqlite(esqlite3:q(Conn, Ins, [list_to_binary(Version)])) of
                         {ok, _} ->
                             case esqlite3:exec(Conn, <<"COMMIT">>) of
-                                ok -> ok;
+                                ok ->
+                                    ok;
                                 {error, Reason} ->
                                     _ = esqlite3:exec(Conn, <<"ROLLBACK">>),
                                     {error, Reason}
@@ -292,13 +325,15 @@ apply_one(Conn, Version, Sql) ->
                     _ = esqlite3:exec(Conn, <<"ROLLBACK">>),
                     {error, {migration_failed, Version, Reason}}
             end;
-        {error, Reason} -> {error, Reason}
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 exec_script(Conn, Sql) when is_binary(Sql) ->
     exec_stmts(Conn, split_sql(Sql)).
 
-exec_stmts(_Conn, []) -> ok;
+exec_stmts(_Conn, []) ->
+    ok;
 exec_stmts(Conn, [Stmt | Rest]) ->
     case esqlite3:exec(Conn, Stmt) of
         ok -> exec_stmts(Conn, Rest);
@@ -318,25 +353,30 @@ split_sql(Sql) ->
         Parts
     ).
 
-strip_leading_sql_comments(<<>>) -> <<>>;
+strip_leading_sql_comments(<<>>) ->
+    <<>>;
 strip_leading_sql_comments(<<"--", Rest/binary>>) ->
     case binary:split(Rest, <<"\n">>) of
         [_Comment, After] -> strip_leading_sql_comments(trim_sql_left(After));
         [_] -> <<>>
     end;
-strip_leading_sql_comments(Bin) -> Bin.
+strip_leading_sql_comments(Bin) ->
+    Bin.
 
 trim_sql(Bin) -> trim_sql_right(trim_sql_left(Bin)).
 
 trim_sql_left(<<C, Rest/binary>>) when C =:= $\s; C =:= $\t; C =:= $\n; C =:= $\r ->
     trim_sql_left(Rest);
-trim_sql_left(Bin) -> Bin.
+trim_sql_left(Bin) ->
+    Bin.
 
-trim_sql_right(<<>>) -> <<>>;
+trim_sql_right(<<>>) ->
+    <<>>;
 trim_sql_right(Bin) ->
     Size = byte_size(Bin),
     case binary:at(Bin, Size - 1) of
         C when C =:= $\s; C =:= $\t; C =:= $\n; C =:= $\r ->
             trim_sql_right(binary:part(Bin, 0, Size - 1));
-        _ -> Bin
+        _ ->
+            Bin
     end.

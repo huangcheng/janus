@@ -72,12 +72,14 @@ get_generation(Server) ->
 -spec cas_generation(pid(), non_neg_integer()) ->
     {ok, non_neg_integer()} | {error, conflict | term()}.
 cas_generation(Server, Expected) when is_integer(Expected), Expected >= 0 ->
-    case with_tx(Server, fun(_C) ->
-        case erlang:get(?TX_KEY(Server)) of
-            Raw when is_pid(Raw) -> do_cas(Raw, Expected);
-            _ -> {error, missing_tx_conn}
-        end
-    end) of
+    case
+        with_tx(Server, fun(_C) ->
+            case erlang:get(?TX_KEY(Server)) of
+                Raw when is_pid(Raw) -> do_cas(Raw, Expected);
+                _ -> {error, missing_tx_conn}
+            end
+        end)
+    of
         {ok, NewGen} = Ok when is_integer(NewGen) ->
             _ = call(Server, {notify, integer_to_binary(NewGen)}),
             Ok;
@@ -142,12 +144,15 @@ connect(#{url := Url} = Opts) ->
     end;
 connect(Opts) ->
     Host = maps:get(host, Opts, "127.0.0.1"),
-    Keys = [username, password, database, port, ssl, ssl_opts, tcp_opts, timeout, async, codecs, nulls],
+    Keys = [
+        username, password, database, port, ssl, ssl_opts, tcp_opts, timeout, async, codecs, nulls
+    ],
     CO0 = maps:with(Keys, Opts),
-    CO1 = case maps:is_key(username, CO0) of
-        true -> CO0;
-        false -> CO0#{username => "janus"}
-    end,
+    CO1 =
+        case maps:is_key(username, CO0) of
+            true -> CO0;
+            false -> CO0#{username => "janus"}
+        end,
     CO2 = maps:map(fun ensure_connect_value/2, CO1#{host => Host}),
     case epgsql:connect(CO2) of
         {ok, Conn} = Ok ->
@@ -161,23 +166,33 @@ connect(Opts) ->
 ensure_connect_value(port, V) when is_integer(V) -> V;
 ensure_connect_value(port, V) when is_list(V) -> list_to_integer(V);
 ensure_connect_value(port, V) when is_binary(V) -> binary_to_integer(V);
-ensure_connect_value(K, V) when K =:= async; K =:= ssl; K =:= ssl_opts;
-                                 K =:= tcp_opts; K =:= timeout; K =:= codecs; K =:= nulls ->
+ensure_connect_value(K, V) when
+    K =:= async;
+    K =:= ssl;
+    K =:= ssl_opts;
+    K =:= tcp_opts;
+    K =:= timeout;
+    K =:= codecs;
+    K =:= nulls
+->
     V;
 ensure_connect_value(_K, V) when is_binary(V) -> binary_to_list(V);
 ensure_connect_value(_K, V) when is_list(V) -> V;
-ensure_connect_value(_K, V) -> V.
+ensure_connect_value(_K, V) ->
+    V.
 
 parse_url(Url) when is_binary(Url) -> parse_url(binary_to_list(Url));
 parse_url(Url) when is_list(Url) ->
     case uri_string:parse(Url) of
-        #{scheme := Scheme, host := Host} = U
-          when Scheme =:= "postgres"; Scheme =:= "postgresql" ->
+        #{scheme := Scheme, host := Host} = U when
+            Scheme =:= "postgres"; Scheme =:= "postgresql"
+        ->
             {User, Pass} = split_userinfo(maps:get(userinfo, U, "")),
-            Port = case maps:get(port, U, undefined) of
-                undefined -> 5432;
-                P -> P
-            end,
+            Port =
+                case maps:get(port, U, undefined) of
+                    undefined -> 5432;
+                    P -> P
+                end,
             {ok, #{
                 host => Host,
                 port => Port,
@@ -185,19 +200,26 @@ parse_url(Url) when is_list(Url) ->
                 password => Pass,
                 database => path_to_db(maps:get(path, U, "/janus"))
             }};
-        #{scheme := _} -> {error, {invalid_db_url, Url}};
-        {error, Reason, _} -> {error, {invalid_db_url, Reason}};
-        Other -> {error, {invalid_db_url, Other}}
+        #{scheme := _} ->
+            {error, {invalid_db_url, Url}};
+        {error, Reason, _} ->
+            {error, {invalid_db_url, Reason}};
+        Other ->
+            {error, {invalid_db_url, Other}}
     end.
 
 path_to_db("/" ++ Rest) ->
-    case Rest of "" -> "janus"; Db -> Db end;
+    case Rest of
+        "" -> "janus";
+        Db -> Db
+    end;
 path_to_db(Path) when is_list(Path) ->
     path_to_db("/" ++ string:trim(Path, leading, "/"));
 path_to_db(Path) when is_binary(Path) ->
     path_to_db(binary_to_list(Path)).
 
-split_userinfo("") -> {"janus", "janus"};
+split_userinfo("") ->
+    {"janus", "janus"};
 split_userinfo(UserInfo) when is_list(UserInfo) ->
     case string:split(UserInfo, ":", leading) of
         [U] -> {uri_decode(U), ""};
@@ -215,28 +237,38 @@ uri_decode(S) ->
 
 do_query(Conn, Sql, Params) ->
     SqlBin = iolist_to_binary(Sql),
-    Result = case Params of
-        [] -> epgsql:squery(Conn, SqlBin);
-        _ -> epgsql:equery(Conn, SqlBin, Params)
-    end,
+    Result =
+        case Params of
+            [] -> epgsql:squery(Conn, SqlBin);
+            _ -> epgsql:equery(Conn, SqlBin, Params)
+        end,
     normalize_epgsql(Result).
 
-normalize_epgsql({ok, _Columns, Rows}) -> {ok, Rows};
-normalize_epgsql({ok, _Count}) -> {ok, []};
-normalize_epgsql({ok, _Count, _Columns, Rows}) -> {ok, Rows};
-normalize_epgsql({error, Reason}) -> {error, Reason};
+normalize_epgsql({ok, _Columns, Rows}) ->
+    {ok, Rows};
+normalize_epgsql({ok, _Count}) ->
+    {ok, []};
+normalize_epgsql({ok, _Count, _Columns, Rows}) ->
+    {ok, Rows};
+normalize_epgsql({error, Reason}) ->
+    {error, Reason};
 normalize_epgsql(List) when is_list(List) ->
     case lists:search(fun is_error_tuple/1, List) of
-        {value, {error, Reason}} -> {error, Reason};
+        {value, {error, Reason}} ->
+            {error, Reason};
         false ->
-            {ok, lists:flatten([
-                case R of
-                    {ok, _Cols, Rows} -> Rows;
-                    {ok, _Count, _Cols, Rows} -> Rows;
-                    _ -> []
-                end || R <- List])}
+            {ok,
+                lists:flatten([
+                    case R of
+                        {ok, _Cols, Rows} -> Rows;
+                        {ok, _Count, _Cols, Rows} -> Rows;
+                        _ -> []
+                    end
+                 || R <- List
+                ])}
     end;
-normalize_epgsql(Other) -> {error, {unexpected_epgsql_result, Other}}.
+normalize_epgsql(Other) ->
+    {error, {unexpected_epgsql_result, Other}}.
 
 is_error_tuple({error, _}) -> true;
 is_error_tuple(_) -> false.
@@ -251,11 +283,13 @@ run_with_tx(Conn, Fun, Server) ->
                     Err;
                 Result ->
                     case epgsql:squery(Conn, <<"COMMIT">>) of
-                        {ok, [], []} -> Result;
+                        {ok, [], []} ->
+                            Result;
                         {error, CommitErr} ->
                             _ = epgsql:squery(Conn, <<"ROLLBACK">>),
                             {error, CommitErr};
-                        Other -> {error, {unexpected_commit_result, Other}}
+                        Other ->
+                            {error, {unexpected_commit_result, Other}}
                     end
             catch
                 Class:CatchReason:Stack ->
@@ -264,15 +298,19 @@ run_with_tx(Conn, Fun, Server) ->
             after
                 erlang:erase(?TX_KEY(Server))
             end;
-        {error, BeginErr} -> {error, BeginErr};
-        Other -> {error, {unexpected_begin_result, Other}}
+        {error, BeginErr} ->
+            {error, BeginErr};
+        Other ->
+            {error, {unexpected_begin_result, Other}}
     end.
 
 do_cas(Conn, Expected) ->
-    Sql = <<"UPDATE config_meta "
-            "SET config_generation = config_generation + 1 "
-            "WHERE id = 1 AND config_generation = $1 "
-            "RETURNING config_generation">>,
+    Sql = <<
+        "UPDATE config_meta "
+        "SET config_generation = config_generation + 1 "
+        "WHERE id = 1 AND config_generation = $1 "
+        "RETURNING config_generation"
+    >>,
     case do_query(Conn, Sql, [Expected]) of
         {ok, [{NewGen}]} when is_integer(NewGen) -> {ok, NewGen};
         {ok, []} -> {error, conflict};
@@ -288,7 +326,8 @@ do_notify(Conn, Payload) when is_binary(Payload) ->
                 {error, Reason} -> {error, Reason};
                 Other -> {error, {unexpected_notify_result, Other}}
             end;
-        nomatch -> {error, invalid_notify_payload}
+        nomatch ->
+            {error, invalid_notify_payload}
     end.
 
 do_listen(Conn, Channel) ->
@@ -300,7 +339,8 @@ do_listen(Conn, Channel) ->
                 {error, Reason} -> {error, Reason};
                 Other -> {error, {unexpected_listen_result, Other}}
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 validate_channel(Channel) when is_binary(Channel) ->
@@ -316,13 +356,16 @@ do_migrate(Conn) ->
                 {ok, Files} -> apply_migrations(Conn, Files);
                 {error, _} = Err -> Err
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 ensure_migrations_table(Conn) ->
-    Sql = <<"CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version TEXT PRIMARY KEY, "
-            "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())">>,
+    Sql = <<
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version TEXT PRIMARY KEY, "
+        "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+    >>,
     case do_query(Conn, Sql, []) of
         {ok, _} -> ok;
         {error, _} = Err -> Err
@@ -335,9 +378,11 @@ migration_files() ->
                 {ok, Names} ->
                     SqlNames = lists:sort([N || N <- Names, lists:suffix(".sql", N)]),
                     {ok, [{filename:basename(N, ".sql"), filename:join(Dir, N)} || N <- SqlNames]};
-                {error, Reason} -> {error, {list_migrations, Reason}}
+                {error, Reason} ->
+                    {error, {list_migrations, Reason}}
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 migrations_dir() ->
@@ -348,13 +393,16 @@ migrations_dir() ->
                 true -> {ok, Candidate};
                 false -> {error, {priv_dir, janus_core}}
             end;
-        Priv -> {ok, filename:join([Priv, "migrations", "postgres"])}
+        Priv ->
+            {ok, filename:join([Priv, "migrations", "postgres"])}
     end.
 
-apply_migrations(_Conn, []) -> ok;
+apply_migrations(_Conn, []) ->
+    ok;
 apply_migrations(Conn, [{Version, Path} | Rest]) ->
     case is_applied(Conn, Version) of
-        {ok, true} -> apply_migrations(Conn, Rest);
+        {ok, true} ->
+            apply_migrations(Conn, Rest);
         {ok, false} ->
             case file:read_file(Path) of
                 {ok, Sql} ->
@@ -362,14 +410,21 @@ apply_migrations(Conn, [{Version, Path} | Rest]) ->
                         ok -> apply_migrations(Conn, Rest);
                         {error, _} = Err -> Err
                     end;
-                {error, Reason} -> {error, {read_migration, Path, Reason}}
+                {error, Reason} ->
+                    {error, {read_migration, Path, Reason}}
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 is_applied(Conn, Version) ->
-    case do_query(Conn, <<"SELECT 1 FROM schema_migrations WHERE version = $1">>,
-                  [list_to_binary(Version)]) of
+    case
+        do_query(
+            Conn,
+            <<"SELECT 1 FROM schema_migrations WHERE version = $1">>,
+            [list_to_binary(Version)]
+        )
+    of
         {ok, [_ | _]} -> {ok, true};
         {ok, []} -> {ok, false};
         {error, _} = Err -> Err
@@ -384,11 +439,13 @@ apply_one(Conn, Version, Sql) ->
                     case do_query(Conn, Ins, [list_to_binary(Version)]) of
                         {ok, _} ->
                             case epgsql:squery(Conn, <<"COMMIT">>) of
-                                {ok, [], []} -> ok;
+                                {ok, [], []} ->
+                                    ok;
                                 {error, Reason} ->
                                     _ = epgsql:squery(Conn, <<"ROLLBACK">>),
                                     {error, Reason};
-                                Other -> {error, {unexpected_commit_result, Other}}
+                                Other ->
+                                    {error, {unexpected_commit_result, Other}}
                             end;
                         {error, Reason} ->
                             _ = epgsql:squery(Conn, <<"ROLLBACK">>),
@@ -398,6 +455,8 @@ apply_one(Conn, Version, Sql) ->
                     _ = epgsql:squery(Conn, <<"ROLLBACK">>),
                     {error, {migration_failed, Version, Reason}}
             end;
-        {error, Reason} -> {error, Reason};
-        Other -> {error, {unexpected_begin_result, Other}}
+        {error, Reason} ->
+            {error, Reason};
+        Other ->
+            {error, {unexpected_begin_result, Other}}
     end.

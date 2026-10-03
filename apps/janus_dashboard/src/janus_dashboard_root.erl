@@ -10,8 +10,13 @@
 -export([init/2]).
 
 init(Req0, State) ->
-    Req = cowboy_req:reply(302, #{
-        <<"location">> => <<"/dashboard">>,
-        <<"cache-control">> => <<"no-cache">>
-    }, <<>>, Req0),
+    Req = cowboy_req:reply(
+        302,
+        #{
+            <<"location">> => <<"/dashboard">>,
+            <<"cache-control">> => <<"no-cache">>
+        },
+        <<>>,
+        Req0
+    ),
     {ok, Req, State}.

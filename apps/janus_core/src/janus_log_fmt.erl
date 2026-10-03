@@ -17,8 +17,7 @@ format(#{level := Level, msg := Msg, meta := Meta}, _Config) ->
     Ts = format_ts(maps:get(time, Meta, undefined)),
     Fields = msg_fields(Msg) ++ meta_fields(Meta),
     Line = [Ts, <<" ">>, level_str(Level), <<" ">>, fields_str(Fields)],
-    [unicode:characters_to_binary(Line), <<"
-">>].
+    [unicode:characters_to_binary(Line), <<"\n">>].
 
 fields_str(Fields) ->
     Parts = [field_str(K, V) || {K, V} <- Fields],

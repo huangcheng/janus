@@ -169,8 +169,7 @@ parse_keyring_ordered(Str) ->
                     Id = list_to_binary(string:trim(IdStr)),
                     case decode_key_b64(string:trim(B64)) of
                         {ok, Key} -> {true, {Id, Key}};
-                        {error, Reason} ->
-                            error({janus_boot_fail, bad_secrets_key, Id, Reason})
+                        {error, Reason} -> error({janus_boot_fail, bad_secrets_key, Id, Reason})
                     end;
                 _ ->
                     error({janus_boot_fail, bad_JANUS_SECRETS_KEY_format, Part})

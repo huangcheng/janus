@@ -74,9 +74,11 @@ decrypt(EnvelopeBin) when is_binary(EnvelopeBin) ->
         {ok, #{key_id := KeyId, iv := IV, tag := Tag, ciphertext := CT}} ->
             case janus_crypto_env:secrets_key(KeyId) of
                 {ok, Key} ->
-                    case crypto:crypto_one_time_aead(
-                             aes_256_gcm, Key, IV, CT, KeyId, Tag, false
-                         ) of
+                    case
+                        crypto:crypto_one_time_aead(
+                            aes_256_gcm, Key, IV, CT, KeyId, Tag, false
+                        )
+                    of
                         Plain when is_binary(Plain) ->
                             {ok, Plain};
                         error ->
@@ -115,8 +117,8 @@ encode_envelope(#{
     true = KeyIdLen =< 16#ffff,
     true = IvLen =< 16#ff,
     true = TagLen =< 16#ff,
-    <<?MAGIC, ?VERSION:8, KeyIdLen:16, KeyId/binary, IvLen:8, IV/binary, TagLen:8,
-      Tag/binary, CT/binary>>.
+    <<?MAGIC, ?VERSION:8, KeyIdLen:16, KeyId/binary, IvLen:8, IV/binary, TagLen:8, Tag/binary,
+        CT/binary>>.
 
 -spec decode_envelope(binary()) -> {ok, envelope()} | {error, term()}.
 decode_envelope(<<?MAGIC, ?VERSION:8, KeyIdLen:16, Rest/binary>>) when KeyIdLen > 0 ->

@@ -140,8 +140,12 @@ already_applied(Mod, Conn, sqlite, Version) ->
 apply_one(Mod, Conn, Dialect, Path, Version) ->
     case file:read_file(Path) of
         {ok, Bin} ->
-            logger:info(#{what => janus_migrate_apply, dialect => Dialect,
-                          version => Version, file => Path}),
+            logger:info(#{
+                what => janus_migrate_apply,
+                dialect => Dialect,
+                version => Version,
+                file => Path
+            }),
             Fun = fun(C) ->
                 case Mod:exec_script(C, Bin) of
                     ok ->

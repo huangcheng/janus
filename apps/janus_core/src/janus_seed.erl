@@ -151,16 +151,20 @@ apply_provider(#{name := Name, base_url := Base, protocol := Proto, keys := Keys
 
 required_bin(Map, Key) ->
     case map_get(Map, Key, undefined) of
-        undefined -> error({missing_field, Key});
-        <<>> -> error({empty_field, Key});
-        "" -> error({empty_field, Key});
+        undefined ->
+            error({missing_field, Key});
+        <<>> ->
+            error({empty_field, Key});
+        "" ->
+            error({empty_field, Key});
         V when is_binary(V) -> V;
         V when is_list(V) ->
             case io_lib:char_list(V) of
                 true -> bin(V);
                 false -> error({bad_field, Key})
             end;
-        _Other -> error({bad_field, Key})
+        _Other ->
+            error({bad_field, Key})
     end.
 
 required_bin_value(V, _Label) when is_binary(V), V =/= <<>> -> V;
@@ -169,7 +173,8 @@ required_bin_value(V, Label) when is_list(V), V =/= "" ->
         true -> bin(V);
         false -> error({bad_field, Label})
     end;
-required_bin_value(_, Label) -> error({bad_field, Label}).
+required_bin_value(_, Label) ->
+    error({bad_field, Label}).
 
 required_secret(V, _Label) when is_binary(V), V =/= <<>> -> V;
 required_secret(V, Label) when is_list(V), V =/= "" ->
@@ -177,7 +182,8 @@ required_secret(V, Label) when is_list(V), V =/= "" ->
         true -> bin(V);
         false -> error({bad_field, Label})
     end;
-required_secret(_, Label) -> error({bad_field, Label}).
+required_secret(_, Label) ->
+    error({bad_field, Label}).
 
 %% Encrypt first, then DELETE+INSERT in one backend transaction.
 replace_provider_keys(ProviderId, Keys) ->
@@ -197,27 +203,31 @@ replace_provider_keys(ProviderId, Keys) ->
     {ok, Mod, Conn} = janus_db_conn:conn(),
     DelSql = sql(<<"DELETE FROM provider_keys WHERE provider_id = ?">>),
     InsSql = sql(
-        <<"INSERT INTO provider_keys "
-          "(provider_id, secret_ciphertext, key_id, weight, enabled) "
-          "VALUES (?, ?, ?, 1, 1)">>
+        <<
+            "INSERT INTO provider_keys "
+            "(provider_id, secret_ciphertext, key_id, weight, enabled) "
+            "VALUES (?, ?, ?, 1, 1)"
+        >>
     ),
-    case Mod:with_tx(Conn, fun(C) ->
-        case Mod:query(C, DelSql, [ProviderId]) of
-            {ok, _} ->
-                lists:foreach(
-                    fun({Cipher, KeyId}) ->
-                        case Mod:query(C, InsSql, [ProviderId, Cipher, KeyId]) of
-                            {ok, _} -> ok;
-                            {error, Reason} -> error({insert_provider_key, Reason})
-                        end
-                    end,
-                    Encrypted
-                ),
-                ok;
-            {error, Reason} ->
-                {error, {delete_provider_keys, Reason}}
-        end
-    end) of
+    case
+        Mod:with_tx(Conn, fun(C) ->
+            case Mod:query(C, DelSql, [ProviderId]) of
+                {ok, _} ->
+                    lists:foreach(
+                        fun({Cipher, KeyId}) ->
+                            case Mod:query(C, InsSql, [ProviderId, Cipher, KeyId]) of
+                                {ok, _} -> ok;
+                                {error, Reason} -> error({insert_provider_key, Reason})
+                            end
+                        end,
+                        Encrypted
+                    ),
+                    ok;
+                {error, Reason} ->
+                    {error, {delete_provider_keys, Reason}}
+            end
+        end)
+    of
         ok ->
             ok;
         {error, Reason} ->
@@ -229,18 +239,22 @@ replace_provider_keys(ProviderId, Keys) ->
 upsert_provider(Name, Base, Proto) ->
     case q(<<"SELECT id FROM providers WHERE name = ?">>, [Name]) of
         {ok, [{Id}]} ->
-            case q(
-                     <<"UPDATE providers SET base_url = ?, protocol = ?, enabled = 1 WHERE id = ?">>,
-                     [Base, Proto, Id]
-                 ) of
+            case
+                q(
+                    <<"UPDATE providers SET base_url = ?, protocol = ?, enabled = 1 WHERE id = ?">>,
+                    [Base, Proto, Id]
+                )
+            of
                 {ok, _} -> Id;
                 {error, Reason} -> error({update_provider, Reason})
             end;
         {ok, []} ->
-            case q(
-                     <<"INSERT INTO providers (name, base_url, protocol, enabled) VALUES (?, ?, ?, 1)">>,
-                     [Name, Base, Proto]
-                 ) of
+            case
+                q(
+                    <<"INSERT INTO providers (name, base_url, protocol, enabled) VALUES (?, ?, ?, 1)">>,
+                    [Name, Base, Proto]
+                )
+            of
                 {ok, _} -> ok;
                 {error, Reason} -> error({insert_provider, Reason})
             end,
@@ -270,19 +284,25 @@ upsert_model(Name) ->
     end.
 
 ensure_route(ModelId, ProviderId) ->
-    case q(
-             <<"SELECT 1 FROM model_routes WHERE model_id = ? AND provider_id = ?">>,
-             [ModelId, ProviderId]
-         ) of
+    case
+        q(
+            <<"SELECT 1 FROM model_routes WHERE model_id = ? AND provider_id = ?">>,
+            [ModelId, ProviderId]
+        )
+    of
         {ok, [_ | _]} ->
             ok;
         {ok, []} ->
-            case q(
-                     <<"INSERT INTO model_routes "
-                       "(model_id, provider_id, upstream_model_id, weight, priority, enabled) "
-                       "VALUES (?, ?, NULL, 1, 0, 1)">>,
-                     [ModelId, ProviderId]
-                 ) of
+            case
+                q(
+                    <<
+                        "INSERT INTO model_routes "
+                        "(model_id, provider_id, upstream_model_id, weight, priority, enabled) "
+                        "VALUES (?, ?, NULL, 1, 0, 1)"
+                    >>,
+                    [ModelId, ProviderId]
+                )
+            of
                 {ok, _} -> ok;
                 {error, Reason} -> error({insert_route, Reason})
             end;
@@ -298,10 +318,12 @@ maybe_seed_agent_key(Raw) when is_binary(Raw) ->
         {ok, [_ | _]} ->
             ok;
         {ok, []} ->
-            case q(
-                     <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
-                     [Prefix, Hash]
-                 ) of
+            case
+                q(
+                    <<"INSERT INTO api_keys (prefix, key_hash, enabled) VALUES (?, ?, 1)">>,
+                    [Prefix, Hash]
+                )
+            of
                 {ok, _} -> ok;
                 {error, Reason} -> error({seed_agent_key, Reason})
             end;
@@ -310,16 +332,25 @@ maybe_seed_agent_key(Raw) when is_binary(Raw) ->
     end.
 
 -spec sanitize_error(term()) -> term().
-sanitize_error({bad_providers, _}) -> bad_providers;
-sanitize_error({bad_provider, _}) -> bad_provider;
-sanitize_error({bad_field, Key, _}) -> {bad_field, Key};
-sanitize_error({bad_field, Key}) -> {bad_field, Key};
-sanitize_error({missing_field, Key}) -> {missing_field, Key};
-sanitize_error({empty_field, Key}) -> {empty_field, Key};
-sanitize_error({bad_protocol, _}) -> bad_protocol;
-sanitize_error({read, Path, Reason}) -> {read, Path, sanitize_error(Reason)};
-sanitize_error({Class, Reason, _Stack})
-  when Class =:= error; Class =:= throw; Class =:= exit ->
+sanitize_error({bad_providers, _}) ->
+    bad_providers;
+sanitize_error({bad_provider, _}) ->
+    bad_provider;
+sanitize_error({bad_field, Key, _}) ->
+    {bad_field, Key};
+sanitize_error({bad_field, Key}) ->
+    {bad_field, Key};
+sanitize_error({missing_field, Key}) ->
+    {missing_field, Key};
+sanitize_error({empty_field, Key}) ->
+    {empty_field, Key};
+sanitize_error({bad_protocol, _}) ->
+    bad_protocol;
+sanitize_error({read, Path, Reason}) ->
+    {read, Path, sanitize_error(Reason)};
+sanitize_error({Class, Reason, _Stack}) when
+    Class =:= error; Class =:= throw; Class =:= exit
+->
     {Class, sanitize_error(Reason)};
 sanitize_error(Reason) when is_atom(Reason) -> Reason;
 sanitize_error(Reason) when is_tuple(Reason), tuple_size(Reason) >= 1 ->
@@ -384,10 +415,12 @@ bin(L) when is_list(L) ->
                 Bin when is_binary(Bin) -> Bin;
                 _ -> error(bad_field_value)
             end;
-        false -> error(bad_field_value)
+        false ->
+            error(bad_field_value)
     end;
 bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
-bin(_) -> error(bad_field_value).
+bin(_) ->
+    error(bad_field_value).
 
 to_list(P) when is_list(P) -> P;
 to_list(P) when is_binary(P) -> binary_to_list(P).

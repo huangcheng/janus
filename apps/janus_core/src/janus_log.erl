@@ -35,7 +35,11 @@ setup() ->
 level() ->
     case os:getenv("JANUS_LOG_LEVEL") of
         Val when is_list(Val), Val =/= [] ->
-            try list_to_existing_atom(Val) catch _:_ -> ?DEFAULT_LEVEL end;
+            try
+                list_to_existing_atom(Val)
+            catch
+                _:_ -> ?DEFAULT_LEVEL
+            end;
         _ ->
             application:get_env(kernel, logger_level, ?DEFAULT_LEVEL)
     end.
@@ -61,8 +65,10 @@ add_stdout_handler() ->
 maybe_add_file_handler() ->
     case log_dir() of
         undefined ->
-            logger:info(#{what => janus_log_file_disabled,
-                hint => "set JANUS_LOG_DIR to enable rotating file logs"});
+            logger:info(#{
+                what => janus_log_file_disabled,
+                hint => "set JANUS_LOG_DIR to enable rotating file logs"
+            });
         Dir ->
             File = filename:join(Dir, "janus.log"),
             case filelib:ensure_dir(File) of
@@ -80,10 +86,12 @@ maybe_add_file_handler() ->
                     },
                     case logger:add_handler(janus_file, logger_disk_log_h, Config) of
                         ok ->
-                            logger:info(#{what => janus_log_file_enabled,
+                            logger:info(#{
+                                what => janus_log_file_enabled,
                                 file => File,
                                 max_bytes => max_bytes(),
-                                retained_files => max_files()});
+                                retained_files => max_files()
+                            });
                         {error, already_present} ->
                             ok;
                         {error, Reason} ->
@@ -91,8 +99,11 @@ maybe_add_file_handler() ->
                             logger:warning(#{what => janus_log_file_failed, reason => Reason})
                     end;
                 {error, Reason} ->
-                    logger:warning(#{what => janus_log_dir_unwritable,
-                        dir => Dir, reason => Reason})
+                    logger:warning(#{
+                        what => janus_log_dir_unwritable,
+                        dir => Dir,
+                        reason => Reason
+                    })
             end
     end.
 
@@ -111,10 +122,14 @@ max_files() ->
 int_env(Name, Default) ->
     case os:getenv(Name) of
         Val when is_list(Val), Val =/= [] ->
-            try list_to_integer(Val) catch _:_ -> Default end;
-        _ -> Default
+            try
+                list_to_integer(Val)
+            catch
+                _:_ -> Default
+            end;
+        _ ->
+            Default
     end.
-
 
 %% sasl emits progress reports as {report, ...} without our `what` key;
 %% drop them so the file stays signal-only.

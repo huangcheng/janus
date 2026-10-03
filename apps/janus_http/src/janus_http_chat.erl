@@ -17,7 +17,12 @@ init(Req0, State) ->
                 {ok, Body, Req2} ->
                     handle_body(Body, Agent, Req2, State);
                 {more, _, Req2} ->
-                    reply_json(Req2, State, 413, error_body(<<"request_too_large">>, <<"body exceeds limit">>))
+                    reply_json(
+                        Req2,
+                        State,
+                        413,
+                        error_body(<<"request_too_large">>, <<"body exceeds limit">>)
+                    )
             end;
         {error, ReqErr} ->
             {ok, ReqErr, State}
@@ -29,21 +34,40 @@ handle_body(Body, Agent, Req, State) ->
             Model = maps:get(<<"model">>, Map, undefined),
             case Model of
                 undefined ->
-                    reply_json(Req, State, 400, error_body(<<"invalid_request">>, <<"model required">>));
+                    reply_json(
+                        Req, State, 400, error_body(<<"invalid_request">>, <<"model required">>)
+                    );
                 Model when is_binary(Model), Model =/= <<>> ->
                     case model_allowed(Agent, Model) of
                         false ->
-                            reply_json(Req, State, 403, error_body(<<"model_not_allowed">>, <<"model not in allowlist">>));
+                            reply_json(
+                                Req,
+                                State,
+                                403,
+                                error_body(<<"model_not_allowed">>, <<"model not in allowlist">>)
+                            );
                         true ->
                             proxy_chat(Model, Body, Map, Req, State)
                     end;
                 _ ->
-                    reply_json(Req, State, 400, error_body(<<"invalid_request">>, <<"model must be a non-empty string">>))
+                    reply_json(
+                        Req,
+                        State,
+                        400,
+                        error_body(<<"invalid_request">>, <<"model must be a non-empty string">>)
+                    )
             end;
         {ok, _} ->
-            reply_json(Req, State, 400, error_body(<<"invalid_json">>, <<"request body must be a JSON object">>));
+            reply_json(
+                Req,
+                State,
+                400,
+                error_body(<<"invalid_json">>, <<"request body must be a JSON object">>)
+            );
         {error, _} ->
-            reply_json(Req, State, 400, error_body(<<"invalid_json">>, <<"request body must be JSON">>))
+            reply_json(
+                Req, State, 400, error_body(<<"invalid_json">>, <<"request body must be JSON">>)
+            )
     end.
 
 proxy_chat(ModelName, Body, Map, Req, State) ->
@@ -61,8 +85,15 @@ proxy_chat(ModelName, Body, Map, Req, State) ->
                 }
             });
         {error, no_route} ->
-            reply_json(Req, State, 404, error_body(<<"no_route">>,
-                <<"auto-router tier unconfigured/unavailable">>))
+            reply_json(
+                Req,
+                State,
+                404,
+                error_body(
+                    <<"no_route">>,
+                    <<"auto-router tier unconfigured/unavailable">>
+                )
+            )
     end.
 
 do_proxy(ModelName, Body, Map, Req, State) ->
@@ -127,22 +158,25 @@ reply_pick_error(Req, State, catalog_not_ready) ->
 reply_pick_error(Req, State, _Reason) ->
     reply_json(Req, State, 404, error_body(<<"no_route">>, <<"no route for model">>)).
 
-handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
-  when Status =:= 401 ->
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when
+    Status =:= 401
+->
     %% Invalid credentials: cool key; escalate to provider when keys exhausted.
     _ = note_auth_failure(Route, Status),
     _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
-handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
-  when Status =:= 403 ->
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when
+    Status =:= 403
+->
     %% Resource/policy scoped — cool this route only (not the key/provider).
     _ = note_route_failure(Route, retry_reason(Headers, Status)),
     _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
     {ok, Req2, State};
-handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State)
-  when Status =:= 429 ->
+handle_upstream({ok, Status, Headers, RespBody}, Route, Req, State) when
+    Status =:= 429
+->
     _ = note_key_failure(Route, Headers, Status),
     _ = release_route_inflight(Route),
     Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
@@ -185,10 +219,11 @@ handle_upstream({error, Reason}, Route, Req, State) ->
         provider_id => maps:get(provider_id, Route, undefined),
         model_id => maps:get(model_id, Route, undefined)
     }),
-    Status = case Reason of
-        provider_disabled -> 503;
-        _ -> 502
-    end,
+    Status =
+        case Reason of
+            provider_disabled -> 503;
+            _ -> 502
+        end,
     reply_json(Req, State, Status, error_body(<<"upstream_error">>, <<"upstream request failed">>)).
 
 note_auth_failure(Route, Status) ->
@@ -271,13 +306,15 @@ resolve_model(Name) when is_binary(Name), Name =/= <<>> ->
 resolve_model(_) ->
     error.
 
-model_allowed(#{model_ids := all}, _) -> true;
+model_allowed(#{model_ids := all}, _) ->
+    true;
 model_allowed(#{model_ids := Ids}, ModelName) when is_list(Ids) ->
     case janus_catalog:lookup_model(ModelName) of
         {ok, #{id := Id}} -> lists:member(Id, Ids);
         error -> false
     end;
-model_allowed(_, _) -> true.
+model_allowed(_, _) ->
+    true.
 
 filter_headers(Headers) when is_map(Headers) ->
     maps:with([<<"content-type">>], Headers);

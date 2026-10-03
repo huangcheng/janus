@@ -12,7 +12,12 @@ init(Req0, State) ->
             code => <<"janus_wip">>
         }
     }),
-    Req = cowboy_req:reply(501, #{
-        <<"content-type">> => <<"application/json">>
-    }, Body, Req0),
+    Req = cowboy_req:reply(
+        501,
+        #{
+            <<"content-type">> => <<"application/json">>
+        },
+        Body,
+        Req0
+    ),
     {ok, Req, State}.

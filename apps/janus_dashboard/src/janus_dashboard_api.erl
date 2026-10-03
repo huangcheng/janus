@@ -33,7 +33,11 @@ init(Req0, State) ->
                 }),
                 reply_json(
                     500,
-                    #{error => #{code => <<"internal_error">>, message => <<"dashboard api crashed">>}},
+                    #{
+                        error => #{
+                            code => <<"internal_error">>, message => <<"dashboard api crashed">>
+                        }
+                    },
                     Req0
                 )
         end,
@@ -44,7 +48,8 @@ init(Req0, State) ->
 %%%===================================================================
 
 %% session
-route(<<"POST">>, [<<"session">>], Req) -> handle_login(Req);
+route(<<"POST">>, [<<"session">>], Req) ->
+    handle_login(Req);
 route(<<"GET">>, [<<"session">>], Req) ->
     with_session(Req, fun(Csrf) -> reply_json(200, #{csrf => Csrf}, Req) end);
 route(<<"DELETE">>, [<<"session">>], Req) ->
@@ -52,11 +57,9 @@ route(<<"DELETE">>, [<<"session">>], Req) ->
         logout_cookie(Req),
         reply_json(200, #{ok => true}, Req)
     end);
-
 %% overview
 route(<<"GET">>, [<<"overview">>], Req) ->
     with_session(Req, fun(_Csrf) -> handle_overview(Req) end);
-
 %% providers
 route(<<"GET">>, [<<"providers">>], Req) ->
     with_session(Req, fun(_Csrf) -> handle_providers_get(Req) end);
@@ -70,7 +73,6 @@ route(<<"DELETE">>, [<<"providers">>, Id], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_delete(provider, Id, Req) end);
 route(<<"POST">>, [<<"providers">>, Id, <<"keys">>], Req) ->
     with_mutating_session(Req, fun(Body, _) -> handle_provider_key_add(Id, Body, Req) end);
-
 %% provider keys
 route(<<"POST">>, [<<"provider-keys">>, Id, <<"disable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle(provider_key, Id, false, Req) end);
@@ -78,7 +80,6 @@ route(<<"POST">>, [<<"provider-keys">>, Id, <<"enable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle(provider_key, Id, true, Req) end);
 route(<<"DELETE">>, [<<"provider-keys">>, Id], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_delete(provider_key, Id, Req) end);
-
 %% models & routes
 route(<<"GET">>, [<<"models">>], Req) ->
     with_session(Req, fun(_Csrf) -> handle_models_get(Req) end);
@@ -96,7 +97,6 @@ route(<<"POST">>, [<<"models">>, Id, <<"routes">>, Pid, <<"enable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle_route(Id, Pid, true, Req) end);
 route(<<"DELETE">>, [<<"models">>, Id, <<"routes">>, Pid], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_route_delete(Id, Pid, Req) end);
-
 %% agent keys
 route(<<"GET">>, [<<"keys">>], Req) ->
     with_session(Req, fun(_Csrf) -> handle_keys_get(Req) end);
@@ -108,7 +108,6 @@ route(<<"POST">>, [<<"keys">>, Id, <<"enable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle(agent_key, Id, true, Req) end);
 route(<<"DELETE">>, [<<"keys">>, Id], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_delete(agent_key, Id, Req) end);
-
 %% catalog & audit
 route(<<"POST">>, [<<"catalog">>, <<"reload">>], Req) ->
     with_mutating_session(Req, fun(_, _) ->
@@ -125,7 +124,6 @@ route(<<"GET">>, [<<"audit">>], Req) ->
         N = query_int(Req, <<"limit">>, 50),
         reply_json(200, #{events => janus_dashboard_audit:recent(N)}, Req)
     end);
-
 route(_, _, Req) ->
     reply_json(
         404,
@@ -146,8 +144,12 @@ handle_login(Req) ->
                     audit(Actor, <<"auth.login">>, undefined, <<"password ok">>),
                     reply_json(200, #{csrf => Csrf}, set_cookie(Req, Token));
                 {error, locked, RetrySec} ->
-                    audit(Actor, <<"auth.lockout">>, undefined,
-                        <<"retry after ", (integer_to_binary(RetrySec))/binary, "s">>),
+                    audit(
+                        Actor,
+                        <<"auth.lockout">>,
+                        undefined,
+                        <<"retry after ", (integer_to_binary(RetrySec))/binary, "s">>
+                    ),
                     reply_json(
                         429,
                         #{
@@ -164,7 +166,11 @@ handle_login(Req) ->
                     audit(Actor, <<"auth.login_failed">>, undefined, <<"bad password">>),
                     reply_json(
                         401,
-                        #{error => #{code => <<"invalid_credentials">>, message => <<"wrong password">>}},
+                        #{
+                            error => #{
+                                code => <<"invalid_credentials">>, message => <<"wrong password">>
+                            }
+                        },
                         Req
                     );
                 {error, not_configured} ->
@@ -173,7 +179,8 @@ handle_login(Req) ->
                         #{
                             error => #{
                                 code => <<"not_configured">>,
-                                message => <<"JANUS_DASHBOARD_PASSWORD is not set; logins disabled">>
+                                message =>
+                                    <<"JANUS_DASHBOARD_PASSWORD is not set; logins disabled">>
                             }
                         },
                         Req
@@ -249,16 +256,29 @@ handle_provider_key_add(IdBin, Body, Req) ->
     Weight = pos_int_or(maps:get(<<"weight">>, Body, 1), 1),
     case parse_id(IdBin) of
         {ok, Id} ->
-            case {janus_dashboard_store:provider_name(Id),
-                  janus_dashboard_store:add_provider_key(Id, Secret, Weight)} of
+            case
+                {
+                    janus_dashboard_store:provider_name(Id),
+                    janus_dashboard_store:add_provider_key(Id, Secret, Weight)
+                }
+            of
                 {{ok, Name}, {ok, KeyId}} ->
                     mutate(<<"provider_key.add">>, Name, Req),
                     reply_json(201, #{id => KeyId}, Req);
                 {_, {error, {encrypt_unavailable, _}}} ->
-                    err(503, <<"secrets_unavailable">>,
-                        <<"JANUS_SECRETS_KEY not configured on this node">>, Req);
+                    err(
+                        503,
+                        <<"secrets_unavailable">>,
+                        <<"JANUS_SECRETS_KEY not configured on this node">>,
+                        Req
+                    );
                 {_, {error, invalid}} ->
-                    err(400, <<"invalid">>, <<"expected {\"secret\": \"sk-...\", \"weight\": 1}">>, Req);
+                    err(
+                        400,
+                        <<"invalid">>,
+                        <<"expected {\"secret\": \"sk-...\", \"weight\": 1}">>,
+                        Req
+                    );
                 {_, {error, Reason}} ->
                     err(500, <<"db_error">>, Reason, Req)
             end;
@@ -361,8 +381,12 @@ handle_keys_get(Req) ->
         lists:foldl(
             fun(G, Acc) ->
                 Kid = maps:get(api_key_id, G),
-                maps:update_with(Kid, fun(L) -> [maps:get(model_id, G) | L] end,
-                    [maps:get(model_id, G)], Acc)
+                maps:update_with(
+                    Kid,
+                    fun(L) -> [maps:get(model_id, G) | L] end,
+                    [maps:get(model_id, G)],
+                    Acc
+                )
             end,
             #{},
             Grants
@@ -380,13 +404,19 @@ handle_keys_get(Req) ->
     reply_json(200, #{keys => Rows}, Req).
 
 handle_key_create(Body, Req) ->
-    RawIds = case maps:get(<<"model_ids">>, Body, undefined) of
-        L when is_list(L) -> [I || I <- L, is_integer(I)];
-        _ -> []
-    end,
+    RawIds =
+        case maps:get(<<"model_ids">>, Body, undefined) of
+            L when is_list(L) -> [I || I <- L, is_integer(I)];
+            _ -> []
+        end,
     case valid_model_ids(RawIds) of
         false ->
-            err(400, <<"invalid">>, <<"model_ids must be a non-empty list of existing model ids">>, Req);
+            err(
+                400,
+                <<"invalid">>,
+                <<"model_ids must be a non-empty list of existing model ids">>,
+                Req
+            );
         true ->
             case janus_dashboard_store:create_agent_key(RawIds) of
                 {ok, Key, Prefix, _Id} ->
@@ -394,7 +424,12 @@ handle_key_create(Body, Req) ->
                     %% the ONLY response that ever carries the plaintext key
                     reply_json(201, #{key => Key, prefix => Prefix, model_ids => RawIds}, Req);
                 {error, invalid} ->
-                    err(400, <<"invalid">>, <<"model_ids must be a non-empty list of integers">>, Req);
+                    err(
+                        400,
+                        <<"invalid">>,
+                        <<"model_ids must be a non-empty list of integers">>,
+                        Req
+                    );
                 {error, Reason} ->
                     err(500, <<"db_error">>, Reason, Req)
             end
@@ -495,17 +530,20 @@ audit(Actor, Action, Target, Detail) ->
     ok.
 
 route_target(ModelId, ProviderId) ->
-    M = case janus_dashboard_store:model_name(ModelId) of
-        {ok, Mn} -> Mn;
-        _ -> integer_to_binary(ModelId)
-    end,
-    P = case janus_dashboard_store:provider_name(ProviderId) of
-        {ok, Pn} -> Pn;
-        _ -> integer_to_binary(ProviderId)
-    end,
+    M =
+        case janus_dashboard_store:model_name(ModelId) of
+            {ok, Mn} -> Mn;
+            _ -> integer_to_binary(ModelId)
+        end,
+    P =
+        case janus_dashboard_store:provider_name(ProviderId) of
+            {ok, Pn} -> Pn;
+            _ -> integer_to_binary(ProviderId)
+        end,
     <<M/binary, " -> ", P/binary>>.
 
-valid_model_ids([]) -> false;
+valid_model_ids([]) ->
+    false;
 valid_model_ids(Ids) ->
     case janus_dashboard_store:models() of
         {ok, Models} ->

@@ -58,11 +58,12 @@ init([]) ->
     },
     Listener = #{
         id => janus_dashboard_listener,
-        start => {cowboy, start_clear, [
-            janus_dashboard_listener,
-            [{port, Port}, {ip, Bind}],
-            #{env => #{dispatch => Dispatch}}
-        ]},
+        start =>
+            {cowboy, start_clear, [
+                janus_dashboard_listener,
+                [{port, Port}, {ip, Bind}],
+                #{env => #{dispatch => Dispatch}}
+            ]},
         restart => permanent,
         shutdown => 5000,
         type => worker,
