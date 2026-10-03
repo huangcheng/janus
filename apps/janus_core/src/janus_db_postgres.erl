@@ -63,7 +63,11 @@ listen(Server, Channel) when is_binary(Channel) ->
 -spec get_generation(pid()) -> {ok, non_neg_integer()} | {error, term()}.
 get_generation(Server) ->
     case query(Server, <<"SELECT config_generation FROM config_meta WHERE id = 1">>, []) of
-        {ok, [{Gen}]} when is_integer(Gen), Gen >= 0 -> {ok, Gen};
+        {ok, [{Gen}]} ->
+            case to_non_neg_int(Gen) of
+                {ok, N} -> {ok, N};
+                error -> {error, {unexpected_generation_row, [{Gen}]}}
+            end;
         {ok, []} -> {error, missing_config_meta};
         {ok, Other} -> {error, {unexpected_generation_row, Other}};
         {error, _} = Err -> Err
@@ -236,13 +240,10 @@ uri_decode(S) ->
     end.
 
 do_query(Conn, Sql, Params) ->
+    %% Always use equery so integer/boolean columns keep typed values.
+    %% squery returns every cell as a binary (breaks get_generation/1, etc.).
     SqlBin = iolist_to_binary(Sql),
-    Result =
-        case Params of
-            [] -> epgsql:squery(Conn, SqlBin);
-            _ -> epgsql:equery(Conn, SqlBin, Params)
-        end,
-    normalize_epgsql(Result).
+    normalize_epgsql(epgsql:equery(Conn, SqlBin, Params)).
 
 normalize_epgsql({ok, _Columns, Rows}) ->
     {ok, Rows};
@@ -312,11 +313,30 @@ do_cas(Conn, Expected) ->
         "RETURNING config_generation"
     >>,
     case do_query(Conn, Sql, [Expected]) of
-        {ok, [{NewGen}]} when is_integer(NewGen) -> {ok, NewGen};
+        {ok, [{NewGen}]} ->
+            case to_non_neg_int(NewGen) of
+                {ok, N} -> {ok, N};
+                error -> {error, {unexpected_cas_row, [{NewGen}]}}
+            end;
         {ok, []} -> {error, conflict};
         {error, _} = Err -> Err;
         Other -> {error, {unexpected_cas_row, Other}}
     end.
+
+%% epgsql squery returns int8/bigint as binaries; equery usually returns integers.
+to_non_neg_int(N) when is_integer(N), N >= 0 -> {ok, N};
+to_non_neg_int(B) when is_binary(B) ->
+    try
+        N = binary_to_integer(B),
+        case N >= 0 of
+            true -> {ok, N};
+            false -> error
+        end
+    catch
+        _:_ -> error
+    end;
+to_non_neg_int(_) ->
+    error.
 
 do_notify(Conn, Payload) when is_binary(Payload) ->
     case re:run(Payload, <<"^[0-9]+$">>, [{capture, none}]) of

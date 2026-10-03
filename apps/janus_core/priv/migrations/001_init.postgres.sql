@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     id BIGSERIAL PRIMARY KEY,
     prefix TEXT NOT NULL,
     key_hash BYTEA NOT NULL,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    -- INTEGER 0/1 (not BOOLEAN): app SQL is SQLite-shaped (`enabled = 1`).
+    enabled SMALLINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS providers (
     base_url TEXT NOT NULL,
     protocol TEXT NOT NULL
         CHECK (protocol IN ('openai_chat', 'anthropic_messages', 'openai_responses')),
-    enabled BOOLEAN NOT NULL DEFAULT TRUE
+    enabled SMALLINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS provider_keys (
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
     secret_ciphertext BYTEA NOT NULL,
     key_id TEXT NOT NULL,
     weight INTEGER NOT NULL DEFAULT 1 CHECK (weight >= 0),
-    enabled BOOLEAN NOT NULL DEFAULT TRUE
+    enabled SMALLINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
 );
 
 CREATE INDEX IF NOT EXISTS provider_keys_provider_id_idx ON provider_keys (provider_id);
@@ -50,7 +51,7 @@ CREATE INDEX IF NOT EXISTS provider_keys_provider_id_idx ON provider_keys (provi
 CREATE TABLE IF NOT EXISTS models (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE
+    enabled SMALLINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS api_key_models (
@@ -66,7 +67,7 @@ CREATE TABLE IF NOT EXISTS model_routes (
     upstream_model_id TEXT,
     weight INTEGER NOT NULL DEFAULT 1 CHECK (weight >= 0),
     priority INTEGER NOT NULL DEFAULT 0,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE
+    enabled SMALLINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
 );
 
 CREATE INDEX IF NOT EXISTS model_routes_model_id_idx ON model_routes (model_id);
