@@ -30,6 +30,17 @@ init([]) ->
                     shutdown => 5000,
                     type => worker,
                     modules => [janus_config]
+                },
+
+                %% Provider model-list sync (poll /models, upsert new
+                %% names as disabled rows; interval env-configurable).
+                #{
+                    id => janus_model_sync,
+                    start => {janus_model_sync, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [janus_model_sync]
                 }
             ],
     {ok, {SupFlags, Children}}.

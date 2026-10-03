@@ -109,6 +109,11 @@ route(<<"POST">>, [<<"keys">>, Id, <<"enable">>], Req) ->
 route(<<"DELETE">>, [<<"keys">>, Id], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_delete(agent_key, Id, Req) end);
 %% catalog & audit
+route(<<"POST">>, [<<"models">>, <<"sync">>], Req) ->
+    with_mutating_session(Req, fun(_, _) -> sync_models(Req) end);
+route(<<"GET">>, [<<"models">>, <<"sync">>, <<"status">>], Req) ->
+    with_session(Req, fun(_Csrf) -> sync_status(Req) end);
+%% catalog & audit
 route(<<"POST">>, [<<"catalog">>, <<"reload">>], Req) ->
     with_mutating_session(Req, fun(_, _) ->
         case janus_dashboard_store:bump_generation() of
@@ -371,6 +376,18 @@ handle_route_delete(ModelIdBin, PidBin, Req) ->
         _ ->
             err(400, <<"bad_id">>, <<"invalid ids">>, Req)
     end.
+
+sync_models(Req) ->
+    case catch janus_model_sync:sync_now() of
+        {ok, Result} ->
+            mutate(<<"model_sync.run">>, undefined, Req),
+            reply_json(200, Result, Req);
+        Other ->
+            err(500, <<"sync_failed">>, Other, Req)
+    end.
+
+sync_status(Req) ->
+    reply_json(200, janus_model_sync:status(), Req).
 
 handle_keys_get(Req) ->
     {ok, Keys} = janus_dashboard_store:agent_keys(),
