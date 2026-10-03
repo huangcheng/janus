@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, lazy, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   createRootRoute,
@@ -12,15 +12,21 @@ import '@fontsource-variable/geist'
 import '@fontsource-variable/geist-mono'
 import './index.css'
 import { api, setCsrf } from './api'
-import { AppToaster } from './components'
-import { Audit, Dashboard, Keys, Login, Models, Providers } from './pages'
+import { AppToaster, Loading } from './components'
+
+const Login = lazy(() => import('./pages/login').then((m) => ({ default: m.Login })))
+const Dashboard = lazy(() => import('./pages/dashboard').then((m) => ({ default: m.Dashboard })))
+const Providers = lazy(() => import('./pages/providers').then((m) => ({ default: m.Providers })))
+const Models = lazy(() => import('./pages/models').then((m) => ({ default: m.Models })))
+const Keys = lazy(() => import('./pages/keys').then((m) => ({ default: m.Keys })))
+const Audit = lazy(() => import('./pages/audit').then((m) => ({ default: m.Audit })))
 
 const rootRoute = createRootRoute({
   component: () => (
-    <>
+    <Suspense fallback={<Loading />}>
       <Outlet />
       <AppToaster />
-    </>
+    </Suspense>
   ),
 })
 
