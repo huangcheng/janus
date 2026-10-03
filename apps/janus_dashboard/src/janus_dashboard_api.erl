@@ -113,6 +113,8 @@ route(<<"POST">>, [<<"models">>, <<"sync">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> sync_models(Req) end);
 route(<<"GET">>, [<<"models">>, <<"sync">>, <<"status">>], Req) ->
     with_session(Req, fun(_Csrf) -> sync_status(Req) end);
+route(<<"PUT">>, [<<"models">>, <<"sync">>, <<"interval">>], Req) ->
+    with_mutating_session(Req, fun(Body, _) -> sync_set_interval(Body, Req) end);
 %% catalog & audit
 route(<<"POST">>, [<<"catalog">>, <<"reload">>], Req) ->
     with_mutating_session(Req, fun(_, _) ->
@@ -377,6 +379,18 @@ handle_route_delete(ModelIdBin, PidBin, Req) ->
             err(400, <<"bad_id">>, <<"invalid ids">>, Req)
     end.
 
+sync_set_interval(Body, Req) ->
+    Raw = maps:get(<<"interval_sec">>, Body, undefined),
+    case Raw of
+        N when is_integer(N), N >= 0, N =< 2_592_000 ->
+            {ok, Set} = janus_model_sync:set_interval(N),
+            mutate(<<"model_sync.set_interval">>, undefined, Req),
+            reply_json(200, #{interval_sec => Set, ok => true}, Req);
+        _ ->
+            err(400, <<"invalid">>,
+                <<"interval_sec must be an integer 0..2592000 (0 = manual only)">>, Req)
+    end.
+
 sync_models(Req) ->
     case catch janus_model_sync:sync_now() of
         {ok, Result} ->
@@ -387,7 +401,8 @@ sync_models(Req) ->
     end.
 
 sync_status(Req) ->
-    reply_json(200, janus_model_sync:status(), Req).
+    S = janus_model_sync:status(),
+    reply_json(200, S#{interval_sec => janus_model_sync:interval()}, Req).
 
 handle_keys_get(Req) ->
     {ok, Keys} = janus_dashboard_store:agent_keys(),

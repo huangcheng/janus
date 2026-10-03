@@ -25,7 +25,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([sync_now/0, status/0]).
+-export([sync_now/0, status/0, set_interval/1, interval/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
@@ -56,6 +56,22 @@ status() ->
     catch exit:{noproc, _} -> #{enabled => false}
     end.
 
+%% Runtime interval change (seconds); 0 = manual-only. The os env value
+%% remains the boot default — the dashboard override persists in app env
+%% so it survives a worker restart but not a node restart (env wins).
+-spec set_interval(non_neg_integer()) -> {ok, non_neg_integer()}.
+set_interval(Secs) when is_integer(Secs), Secs >= 0 ->
+    ok = application:set_env(janus, model_sync_interval_sec, Secs),
+    gen_server:call(?SERVER, reschedule),
+    {ok, Secs}.
+
+-spec interval() -> non_neg_integer().
+interval() ->
+    case interval_sec() of
+        N when is_integer(N), N >= 0 -> N;
+        _ -> 0
+    end.
+
 %%%===================================================================
 %%% gen_server
 %%%===================================================================
@@ -74,6 +90,8 @@ handle_call(sync_now, _From, State) ->
     {reply, {ok, Result}, State#state{last_run = Result}};
 handle_call(status, _From, State) ->
     {reply, status_map(State), State};
+handle_call(reschedule, _From, State) ->
+    {reply, ok, maybe_start_timer(State)};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
@@ -223,11 +241,16 @@ upsert_model(Name) ->
 %%%===================================================================
 
 interval_sec() ->
-    case os:getenv("JANUS_MODEL_SYNC_INTERVAL_SEC") of
-        Val when is_list(Val), Val =/= [] ->
-            (catch list_to_integer(Val));
+    %% Dashboard-set app env wins over the boot-time os env default.
+    case application:get_env(janus, model_sync_interval_sec, undefined) of
+        N when is_integer(N), N >= 0 -> N;
         _ ->
-            application:get_env(janus, model_sync_interval_sec, ?DEFAULT_INTERVAL)
+            case os:getenv("JANUS_MODEL_SYNC_INTERVAL_SEC") of
+                Val when is_list(Val), Val =/= [] ->
+                    (catch list_to_integer(Val));
+                _ ->
+                    ?DEFAULT_INTERVAL
+            end
     end.
 
 sync_on_start() ->
