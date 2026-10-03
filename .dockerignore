@@ -1,0 +1,16 @@
+# Keep the build context lean — the SPA stage only needs spa/package*.json
+# and spa sources; the release stage needs rebar/apps/config.
+.git
+_build
+data
+docs
+design
+.cursor
+scripts
+priv
+apps/janus_admin/spa/node_modules
+apps/janus_admin/spa/dist
+apps/janus_admin/priv/www
+*.beam
+erl_crash.dump
+docker-compose.yml

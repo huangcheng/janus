@@ -29,3 +29,5 @@ docs/
 apps/janus_admin/spa/node_modules/
 apps/janus_admin/spa/dist/
 data/
+# SPA build output lands here via Docker (COPY --from=spa); never commit it.
+apps/janus_admin/priv/www/

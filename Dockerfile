@@ -3,9 +3,8 @@ FROM node:22-alpine AS spa
 WORKDIR /spa
 # Use a registry mirror reachable from CN networks when the default is slow.
 RUN npm config set registry https://registry.npmmirror.com --location=global || true
-COPY apps/janus_admin/spa/package.json ./
-# No lockfile committed yet: install from the manifest.
-RUN npm install --no-audit --no-fund
+COPY apps/janus_admin/spa/package.json apps/janus_admin/spa/package-lock.json* ./
+RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 COPY apps/janus_admin/spa/tsconfig.json apps/janus_admin/spa/vite.config.ts apps/janus_admin/spa/index.html ./
 COPY apps/janus_admin/spa/public ./public
 COPY apps/janus_admin/spa/src ./src
