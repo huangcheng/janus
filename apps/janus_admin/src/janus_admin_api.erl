@@ -180,7 +180,7 @@ handle_login(Req) ->
                     )
             end;
         _ ->
-            err(400, <<"bad_request">>, <<"expected {\"password\": \"…\"}">>, Req)
+            err(400, <<"bad_request">>, <<"expected {\"password\": \"...\"}">>, Req)
     end.
 
 handle_overview(Req) ->
@@ -258,7 +258,7 @@ handle_provider_key_add(IdBin, Body, Req) ->
                     err(503, <<"secrets_unavailable">>,
                         <<"JANUS_SECRETS_KEY not configured on this node">>, Req);
                 {_, {error, invalid}} ->
-                    err(400, <<"invalid">>, <<"expected {\"secret\": \"sk-…\", \"weight\": 1}">>, Req);
+                    err(400, <<"invalid">>, <<"expected {\"secret\": \"sk-...\", \"weight\": 1}">>, Req);
                 {_, {error, Reason}} ->
                     err(500, <<"db_error">>, Reason, Req)
             end;
@@ -390,7 +390,7 @@ handle_key_create(Body, Req) ->
         true ->
             case janus_admin_store:create_agent_key(RawIds) of
                 {ok, Key, Prefix, _Id} ->
-                    mutate(<<"agent_key.create">>, <<Prefix/binary, "…">>, Req),
+                    mutate(<<"agent_key.create">>, <<Prefix/binary, "...">>, Req),
                     %% the ONLY response that ever carries the plaintext key
                     reply_json(201, #{key => Key, prefix => Prefix, model_ids => RawIds}, Req);
                 {error, invalid} ->
@@ -503,7 +503,7 @@ route_target(ModelId, ProviderId) ->
         {ok, Pn} -> Pn;
         _ -> integer_to_binary(ProviderId)
     end,
-    <<M/binary, " → ", P/binary>>.
+    <<M/binary, " -> ", P/binary>>.
 
 valid_model_ids([]) -> false;
 valid_model_ids(Ids) ->
