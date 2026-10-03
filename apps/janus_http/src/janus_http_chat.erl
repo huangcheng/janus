@@ -47,6 +47,25 @@ handle_body(Body, Agent, Req, State) ->
     end.
 
 proxy_chat(ModelName, Body, Map, Req, State) ->
+    case janus_auto:maybe_route(ModelName, Map) of
+        {ok, Target} ->
+            do_proxy(Target, Body, Map#{<<"model">> => Target}, Req, State);
+        pass ->
+            do_proxy(ModelName, Body, Map, Req, State);
+        {error, request_too_large} ->
+            reply_json(Req, State, 400, #{
+                error => #{
+                    message => <<"estimated context exceeds max_ctx_tokens">>,
+                    type => <<"invalid_request_error">>,
+                    code => <<"request_too_large">>
+                }
+            });
+        {error, no_route} ->
+            reply_json(Req, State, 404, error_body(<<"no_route">>,
+                <<"auto-router tier unconfigured/unavailable">>))
+    end.
+
+do_proxy(ModelName, Body, Map, Req, State) ->
     case resolve_model(ModelName) of
         {ok, ModelId} ->
             case janus_lb:pick_route(ModelId, #{}) of

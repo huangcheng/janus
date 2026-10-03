@@ -21,6 +21,14 @@ init([]) ->
             modules => [janus_lb]
         },
         #{
+            id => janus_auto,
+            start => {janus_auto, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [janus_auto]
+        },
+        #{
             id => janus_config,
             start => {janus_config, start_link, []},
             restart => permanent,
