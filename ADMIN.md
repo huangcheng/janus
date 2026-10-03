@@ -54,38 +54,24 @@ data plane :8080  unchanged (janus_http)
 
 ## Local development
 
-Docker runs the *release* (no hot reload). For day-to-day dev, split the two
-planes: SPA on Vite (full HMR), backend stays in a container and only
-restarts when Erlang code changes.
+Docker runs the *release* (no hot reload) — that build is only for preview
+and deployment. For day-to-day work there is **one command**:
 
 ```bash
-# terminal 1 — backend (rebuild only when Erlang changes; SPA stage is cached)
-docker run -d --name janus-dev \
-  -p 127.0.0.1:8080:8080 -p 127.0.0.1:8090:8090 \
-  -e JANUS_SECRETS_KEY="k1:$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")" \
-  -e JANUS_API_KEY_PEPPER=dev-pepper \
-  -e JANUS_ADMIN_PASSWORD=dev \
-  janus:admin-ui
-
-# terminal 2 — SPA with hot reload
 cd apps/janus_admin/spa
-npm install
 npm run dev
-# open http://127.0.0.1:3000/admin
+# predev hook starts the janus-dev backend container if needed, then Vite
+# comes up with HMR. Open http://127.0.0.1:3000/admin  (password: dev)
 ```
 
-How it fits together:
-
-- Vite serves the SPA at `127.0.0.1:3000/admin` (router `basepath:
-  '/admin'`; port pinned to 3000 because Windows often reserves the 5xxx
-  range for Hyper-V) with HMR — edits appear instantly, no rebuild.
-- `vite.config.ts` proxies `/admin/api/*` to `127.0.0.1:8090` (the
-  container's admin plane). Cookies and CSRF flow through the proxy, so
-  login works exactly like production.
-- Erlang changes: `docker build -t janus:admin-ui . && docker rm -f janus-dev`
-  + rerun the command above (the Erlang compile layer is what rebuilds;
-  it's a couple of minutes, the SPA stage stays cached).
-- Need a fresh DB? `docker rm -f janus-dev` wipes the container's SQLite.
+- Frontend edits appear instantly via Vite HMR — Docker is untouched.
+- Backend (Erlang) changes are the only thing that needs
+  `docker build -t janus:admin-ui .` (+ `docker rm -f janus-dev` so the
+  predev hook recreates it).
+- `vite.config.ts` proxies `/admin/api/*` to the container's admin plane
+  (`127.0.0.1:8090`); cookies and CSRF behave exactly like production.
+- The `8090` container port serves the *built* SPA — use it when you want
+  to preview what ships, not while iterating.
 
 Why not `rebar3 shell` natively on this machine: the host Erlang install has
 a broken `bin/erl` (multi-erts in-place upgrade mismatch — invoke
