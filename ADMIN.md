@@ -71,13 +71,14 @@ docker run -d --name janus-dev \
 cd apps/janus_admin/spa
 npm install
 npm run dev
-# open http://localhost:5173/admin
+# open http://127.0.0.1:3000/admin
 ```
 
 How it fits together:
 
-- Vite serves the SPA at `:5173/admin` (router `basepath: '/admin'`) with
-  HMR — edits appear instantly, no rebuild.
+- Vite serves the SPA at `127.0.0.1:3000/admin` (router `basepath:
+  '/admin'`; port pinned to 3000 because Windows often reserves the 5xxx
+  range for Hyper-V) with HMR — edits appear instantly, no rebuild.
 - `vite.config.ts` proxies `/admin/api/*` to `127.0.0.1:8090` (the
   container's admin plane). Cookies and CSRF flow through the proxy, so
   login works exactly like production.

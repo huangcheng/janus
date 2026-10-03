@@ -12,6 +12,10 @@ export default defineConfig({
     sourcemap: false,
   },
   server: {
+    // Windows often reserves the 5xxx range (Hyper-V); pin a stable port.
+    host: '127.0.0.1',
+    port: 3000,
+    strictPort: true,
     // Dev proxy to a locally running gateway admin listener.
     proxy: {
       '/admin/api': {
