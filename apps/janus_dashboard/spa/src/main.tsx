@@ -19,6 +19,7 @@ const Dashboard = lazy(() => import('./pages/dashboard').then((m) => ({ default:
 const Providers = lazy(() => import('./pages/providers').then((m) => ({ default: m.Providers })))
 const Models = lazy(() => import('./pages/models').then((m) => ({ default: m.Models })))
 const Keys = lazy(() => import('./pages/keys').then((m) => ({ default: m.Keys })))
+const Logs = lazy(() => import('./pages/logs').then((m) => ({ default: m.Logs })))
 const Audit = lazy(() => import('./pages/audit').then((m) => ({ default: m.Audit })))
 
 const rootRoute = createRootRoute({
@@ -57,11 +58,12 @@ const indexRoute = createRoute({ getParentRoute: () => authLayout, path: '/', co
 const providersRoute = createRoute({ getParentRoute: () => authLayout, path: '/providers', component: Providers })
 const modelsRoute = createRoute({ getParentRoute: () => authLayout, path: '/models', component: Models })
 const keysRoute = createRoute({ getParentRoute: () => authLayout, path: '/keys', component: Keys })
+const logsRoute = createRoute({ getParentRoute: () => authLayout, path: '/logs', component: Logs })
 const auditRoute = createRoute({ getParentRoute: () => authLayout, path: '/audit', component: Audit })
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
-  authLayout.addChildren([indexRoute, providersRoute, modelsRoute, keysRoute, auditRoute]),
+  authLayout.addChildren([indexRoute, providersRoute, modelsRoute, keysRoute, logsRoute, auditRoute]),
 ])
 
 const router = createRouter({ routeTree, basepath: '/' })

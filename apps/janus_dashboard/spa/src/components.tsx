@@ -9,8 +9,7 @@ import {
   LogOut,
   Moon,
   ScrollText,
-  Sun,
-} from "lucide-react"
+  Sun, Terminal } from "lucide-react"
 
 import { api } from "./api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -74,7 +73,8 @@ const NAV = [
   { to: "/providers", icon: ArrowLeftRight, label: "Providers & keys" },
   { to: "/models", icon: Hash, label: "Models & routes" },
   { to: "/keys", icon: KeyRound, label: "Agent keys" },
-  { to: "/audit", icon: ScrollText, label: "Audit log" },
+  { to: "/logs", icon: Terminal, label: "Logs" },
+    { to: "/audit", icon: ScrollText, label: "Audit log" },
 ] as const
 
 function AppSidebar() {

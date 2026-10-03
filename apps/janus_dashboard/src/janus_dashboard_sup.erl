@@ -40,6 +40,14 @@ init([]) ->
             {"/[...]", janus_dashboard_assets, []}
         ]}
     ]),
+    LogTail = #{
+        id => janus_log_tail,
+        start => {janus_log_tail, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_log_tail]
+    },
     Session = #{
         id => janus_dashboard_session,
         start => {janus_dashboard_session, start_link, []},
@@ -74,7 +82,7 @@ init([]) ->
         bind => inet:ntoa(Bind),
         port => Port
     }),
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [Session, Audit, Listener]}}.
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [LogTail, Session, Audit, Listener]}}.
 
 parse_ip(Bin) when is_binary(Bin) ->
     parse_ip(binary_to_list(Bin));

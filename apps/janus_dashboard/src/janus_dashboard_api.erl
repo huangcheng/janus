@@ -126,6 +126,8 @@ route(<<"POST">>, [<<"catalog">>, <<"reload">>], Req) ->
                 err(500, <<"reload_failed">>, Reason, Req)
         end
     end);
+route(<<"GET">>, [<<"logs">>], Req) ->
+    with_session(Req, fun(_Csrf) -> handle_logs_get(Req) end);
 route(<<"GET">>, [<<"audit">>], Req) ->
     with_session(Req, fun(_Csrf) ->
         N = query_int(Req, <<"limit">>, 50),
@@ -390,6 +392,21 @@ sync_set_interval(Body, Req) ->
             err(400, <<"invalid">>,
                 <<"interval_sec must be an integer 0..2592000 (0 = manual only)">>, Req)
     end.
+
+handle_logs_get(Req) ->
+    Limit = query_int(Req, <<"limit">>, 200),
+    Level = case cowboy_req:parse_qs(Req) of
+        Qs when is_list(Qs) ->
+            case lists:keyfind(<<"level">>, 1, Qs) of
+                {<<"level">>, <<"warn">>} -> warning;
+                {<<"level">>, <<"error">>} -> error;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end,
+    {ok, Events, Count} = janus_log_tail:recent(Limit, Level),
+    reply_json(200, #{events => Events, total => Count}, Req).
 
 sync_models(Req) ->
     case catch janus_model_sync:sync_now() of
