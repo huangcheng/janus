@@ -4,6 +4,7 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
+    _ = janus_log:setup(),
     case janus_core_sup:start_link() of
         {ok, _Pid} = Ok ->
             maybe_auto_seed(),

@@ -180,6 +180,8 @@ handle_upstream({error, Reason}, Route, Req, State) ->
     logger:warning(#{
         what => janus_chat_upstream_error,
         reason => SafeReason,
+        provider => route_provider_name(Route),
+        model => route_model_name(Route),
         provider_id => maps:get(provider_id, Route, undefined),
         model_id => maps:get(model_id, Route, undefined)
     }),
@@ -247,6 +249,19 @@ sanitize_upstream_error({Tag, Sub}) when is_atom(Tag), is_atom(Sub) -> {Tag, Sub
 sanitize_upstream_error({Tag, N}) when is_atom(Tag), is_integer(N) -> {Tag, N};
 sanitize_upstream_error({Tag, _}) when is_atom(Tag) -> Tag;
 sanitize_upstream_error(_) -> upstream_error.
+
+route_provider_name(Route) ->
+    case janus_catalog:lookup_provider(maps:get(provider_id, Route, undefined)) of
+        {ok, #{name := N}} -> N;
+        _ -> maps:get(provider_id, Route, undefined)
+    end.
+
+route_model_name(Route) ->
+    Mid = maps:get(model_id, Route, undefined),
+    case janus_catalog:lookup_model(Mid) of
+        {ok, #{name := N}} -> N;
+        _ -> Mid
+    end.
 
 resolve_model(Name) when is_binary(Name), Name =/= <<>> ->
     case janus_catalog:lookup_model(Name) of
