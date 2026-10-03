@@ -10,46 +10,50 @@
 :root {
   color-scheme: light;
   /* surfaces & text */
-  --bg: #F4F6F9;
+  --bg: #EDF0F5;
   --surface: #FFFFFF;
-  --surface-2: #EEF1F6;
-  --hairline: #E3E8F0;
-  --hairline-soft: #EBEFF5;
-  --text: #1A2330;
-  --muted: #59667A;
-  --faint: #8B95A6;
+  --surface-2: #F2F5F9;
+  --hairline: #DCE2EC;
+  --hairline-soft: #E7EBF2;
+  --text: #131C2B;
+  --muted: #4E5D71;
+  --faint: #8593A8;
   /* accents */
-  --accent: #1F6FEB;
-  --ok: #0E9F6E;
+  --accent: #1B66E3;
+  --ok: #0B8A5F;
   --warn: #8A6116;
-  --danger: #D64545;
-  --off-fg: #74808F;
+  --danger: #CE3B3B;
+  --off-fg: #6E7A8C;
   /* tinted soft fills (pills, tags, flashes) */
-  --ok-soft: rgba(14, 159, 110, 0.10);
-  --ok-line: rgba(14, 159, 110, 0.30);
+  --ok-soft: rgba(11, 138, 95, 0.10);
+  --ok-line: rgba(11, 138, 95, 0.30);
   --warn-soft: rgba(178, 127, 11, 0.10);
   --warn-line: rgba(178, 127, 11, 0.32);
-  --danger-soft: rgba(214, 69, 69, 0.08);
-  --danger-line: rgba(214, 69, 69, 0.30);
-  --off-soft: rgba(116, 128, 143, 0.10);
-  --off-line: rgba(116, 128, 143, 0.28);
-  --accent-soft: rgba(31, 111, 235, 0.08);
-  --accent-line: rgba(31, 111, 235, 0.26);
+  --danger-soft: rgba(206, 59, 59, 0.08);
+  --danger-line: rgba(206, 59, 59, 0.30);
+  --off-soft: rgba(110, 122, 140, 0.10);
+  --off-line: rgba(110, 122, 140, 0.28);
+  --accent-soft: rgba(27, 102, 227, 0.08);
+  --accent-line: rgba(27, 102, 227, 0.28);
   /* chrome */
-  --mesh-1: rgba(47, 124, 246, 0.07);
-  --mesh-2: rgba(92, 200, 255, 0.05);
-  --sidebar-bg: rgba(255, 255, 255, 0.80);
+  --mesh-1: rgba(37, 99, 235, 0.10);
+  --mesh-2: rgba(56, 189, 248, 0.10);
+  --sidebar-bg: rgba(255, 255, 255, 0.86);
   --panel-grad-a: #FFFFFF;
-  --panel-grad-b: #F8FAFC;
+  --panel-grad-b: #FAFCFE;
   --panel-inset: rgba(255, 255, 255, 0.9);
-  --scrim: rgba(15, 23, 42, 0.38);
+  --scrim: rgba(15, 23, 42, 0.40);
   --scrim-blur: 6px;
-  --input-bg: #FBFCFE;
+  --input-bg: #FFFFFF;
+  --input-inset: inset 0 1px 2px rgba(16, 24, 40, 0.05);
   --toast-bg: rgba(255, 255, 255, 0.97);
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
-  --shadow-modal: 0 32px 80px rgba(16, 24, 40, 0.18);
-  --shadow-login: 0 24px 60px rgba(16, 24, 40, 0.12);
-  --logo-shadow: 0 4px 12px rgba(16, 24, 40, 0.12);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 4px 16px rgba(16, 24, 40, 0.06);
+  --shadow-card-hover: 0 2px 4px rgba(16, 24, 40, 0.06), 0 10px 28px rgba(16, 24, 40, 0.10);
+  --shadow-modal: 0 4px 8px rgba(16, 24, 40, 0.06), 0 32px 80px rgba(16, 24, 40, 0.22);
+  --shadow-login: 0 2px 4px rgba(16, 24, 40, 0.04), 0 24px 64px rgba(16, 24, 40, 0.14);
+  --shadow-btn: 0 1px 2px rgba(16, 24, 40, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --shadow-primary: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 4px 14px rgba(27, 102, 227, 0.28);
+  --logo-shadow: 0 1px 3px rgba(16, 24, 40, 0.18), 0 4px 10px rgba(16, 24, 40, 0.10);
   --icon-radius: 9px;
   --radius-lg: 18px;
   --radius: 12px;
@@ -96,8 +100,11 @@
   --input-bg: rgba(5, 6, 9, 0.7);
   --toast-bg: rgba(12, 15, 21, 0.96);
   --shadow-card: none;
+  --shadow-card-hover: none;
   --shadow-modal: 0 48px 120px rgba(0, 0, 0, 0.6);
   --shadow-login: 0 40px 90px rgba(0, 0, 0, 0.55);
+  --shadow-btn: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --shadow-primary: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 6px 20px rgba(47, 124, 246, 0.35);
   --logo-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
 }
 
@@ -217,9 +224,9 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
   border-radius: 999px; border: 1px solid var(--hairline);
   background: var(--surface); color: var(--text);
   font-size: 13px; font-weight: 600; padding: 8px 16px;
-  cursor: pointer; font-family: inherit; box-shadow: var(--shadow-card);
+  cursor: pointer; font-family: inherit; box-shadow: var(--shadow-btn);
   transition: border-color 120ms var(--ease-out),
-    background-color 120ms var(--ease-out),
+    background-color 120ms var(--ease-out), box-shadow 150ms var(--ease-out),
     transform 120ms var(--ease-out), opacity 120ms var(--ease-out);
 }
 .btn:active { transform: scale(0.97); }
@@ -228,6 +235,7 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
 .btn.primary {
   background: linear-gradient(180deg, #3d8bff 0%, #2467e8 100%);
   border-color: rgba(120, 175, 255, .55); color: #fff;
+  box-shadow: var(--shadow-primary);
 }
 .btn.danger { color: var(--danger); border-color: var(--danger-line); background: transparent; box-shadow: none; }
 .btn.small { padding: 4px 12px; font-size: 12px; font-weight: 550; }
@@ -236,7 +244,7 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
   .btn:hover { border-color: var(--accent-line); background-color: var(--accent-soft); }
   .btn.primary:hover { background: linear-gradient(180deg, #4d97ff 0%, #2b6ff0 100%); }
   .btn.danger:hover { border-color: var(--danger); background-color: var(--danger-soft); }
-  .nav a:hover { background: var(--surface); color: var(--text); }
+  .nav a:hover { background: var(--accent-soft); color: var(--text); }
 }
 
 /* ---------- cards ---------- */
@@ -249,10 +257,15 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
   border-radius: var(--radius-lg); padding: 2px;
   background: var(--surface); border: 1px solid var(--hairline-soft);
   box-shadow: var(--shadow-card);
-  transition: transform 150ms var(--ease-out), border-color 150ms var(--ease-out);
+  transition: transform 150ms var(--ease-out), border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {
-  .stat:hover { transform: translateY(-1px); border-color: var(--hairline); }
+  .stat:hover {
+    transform: translateY(-1px);
+    border-color: var(--hairline);
+    box-shadow: var(--shadow-card-hover);
+  }
 }
 .stat .inner {
   border-radius: calc(var(--radius-lg) - 2px);
@@ -338,7 +351,8 @@ input[type="text"], input[type="password"], input[type="number"], select, textar
   width: 100%; margin-top: 6px;
   background: var(--input-bg);
   border: 1px solid var(--hairline); border-radius: var(--radius-sm);
-  color: var(--text); font-family: inherit; font-size: 13px; padding: 8px 12px;
+  color: var(--text); font-family: inherit; font-size: 13px; padding: 9px 12px;
+  box-shadow: var(--input-inset, none);
   transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
 }
 textarea { font-family: var(--mono); resize: vertical; }
@@ -467,14 +481,17 @@ input:focus, select:focus, textarea:focus {
 .login-card .inner {
   border-radius: 22px;
   background: linear-gradient(180deg, var(--panel-grad-a), var(--panel-grad-b));
-  padding: 32px 30px 26px;
+  padding: 34px 30px 26px;
 }
-.login-card .logo { padding: 0 0 14px; }
-.login-card h1 { font-size: 18px; margin: 6px 0 3px; font-weight: 700; }
-.login-card .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
-.login-card label.f { margin-top: 16px; }
-.login-card .btn { width: 100%; justify-content: center; margin-top: 20px; padding: 10px; }
-.login-foot { margin-top: 20px; font-size: 11.5px; color: var(--faint); line-height: 1.7; }
+.login-card .logo { padding: 0 0 18px; align-items: center; }
+.login-card .logo img { width: 44px; height: 44px; border-radius: 12px; }
+.login-card .logo .logo-name { font-size: 19px; }
+.login-card h1 { font-size: 19px; margin: 10px 0 3px; font-weight: 700; letter-spacing: -0.01em; }
+.login-card .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+.login-card label.f { margin-top: 18px; }
+.login-card input { padding: 10px 13px; }
+.login-card .btn { width: 100%; justify-content: center; margin-top: 22px; padding: 11px; font-size: 14px; }
+.login-foot { margin-top: 22px; font-size: 11.5px; color: var(--faint); line-height: 1.7; }
 .login-theme-toggle { position: absolute; top: 20px; right: 20px; }
 
 /* ---------- misc ---------- */

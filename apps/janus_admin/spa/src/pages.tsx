@@ -66,8 +66,7 @@ export function Login() {
             </button>
           </form>
           <div className="login-foot">
-            Single operator password — set via <code>JANUS_ADMIN_PASSWORD</code>.<br />
-            5 failed attempts lock the source IP for 15&nbsp;min · sessions expire after 12&nbsp;h.
+            Password from <code>JANUS_ADMIN_PASSWORD</code> · 5 failed attempts lock the IP 15&nbsp;min · session 12&nbsp;h
           </div>
         </div>
       </main>
