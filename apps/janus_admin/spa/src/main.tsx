@@ -10,16 +10,17 @@ import {
 } from '@tanstack/react-router'
 import '@fontsource-variable/geist'
 import '@fontsource-variable/geist-mono'
-import './styles.css'
+import './index.css'
 import { api, setCsrf } from './api'
-import { ToastHost } from './components'
+import { AppToaster } from './components'
 import { Audit, Dashboard, Keys, Login, Models, Providers } from './pages'
 
 const rootRoute = createRootRoute({
   component: () => (
-    <ToastHost>
+    <>
       <Outlet />
-    </ToastHost>
+      <AppToaster />
+    </>
   ),
 })
 

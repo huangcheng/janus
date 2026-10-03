@@ -1,22 +1,52 @@
-// Shared UI components: layout chrome, modal (with mirrored exit),
-// toasts, pills, small bits.
+import { ReactNode, useCallback, useEffect, useState } from "react"
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router"
+import {
+  ArrowLeftRight,
+  CircleAlert,
+  Hash,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  Moon,
+  ScrollText,
+  Sun,
+} from "lucide-react"
 
-import { ReactNode, useEffect, useRef, useState, createContext, useContext, useCallback } from 'react'
-import { Link, useNavigate } from '@tanstack/react-router'
-import { api } from './api'
-import { Icon, IconName } from './icons'
+import { api } from "./api"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar"
+import { Toaster } from "@/components/ui/sonner"
 
 // ---------- theme ----------
 
 export function useTheme() {
-  const [theme, setTheme] = useState<string>(
-    () => document.documentElement.dataset.theme || 'light',
+  const [theme, setTheme] = useState<"light" | "dark">(() =>
+    document.documentElement.classList.contains("dark") ? "dark" : "light",
   )
   const toggle = useCallback(() => {
     setTheme((cur) => {
-      const next = cur === 'light' ? 'dark' : 'light'
-      document.documentElement.dataset.theme = next
-      try { localStorage.setItem('janus-theme', next) } catch { /* ignore */ }
+      const next = cur === "light" ? "dark" : "light"
+      document.documentElement.classList.toggle("dark", next === "dark")
+      try {
+        localStorage.setItem("janus-theme", next)
+      } catch {}
       return next
     })
   }, [])
@@ -26,187 +56,157 @@ export function useTheme() {
 export function ThemeToggle() {
   const { theme, toggle } = useTheme()
   return (
-    <button className="btn small" onClick={toggle} title="Switch theme">
-      <Icon name={theme === 'light' ? 'moon' : 'sun'} /> {theme === 'light' ? 'Dark' : 'Light'}
-    </button>
+    <Button variant="ghost" size="icon" onClick={toggle} aria-label="Toggle theme">
+      {theme === "light" ? <Moon /> : <Sun />}
+    </Button>
   )
 }
 
-const NAV: { to: string; ico: IconName; label: string }[] = [
-  { to: '/', ico: 'dashboard', label: 'Dashboard' },
-  { to: '/providers', ico: 'routes', label: 'Providers & keys' },
-  { to: '/models', ico: 'models', label: 'Models & routes' },
-  { to: '/keys', ico: 'key', label: 'Agent keys' },
-  { to: '/audit', ico: 'audit', label: 'Audit log' },
-]
+export function AppToaster() {
+  const { theme } = useTheme()
+  return <Toaster theme={theme} />
+}
 
-export function Layout({ children, title, eyebrow, sub }: {
-  children: ReactNode
-  title: string
-  eyebrow: string
-  sub?: string
-}) {
+// ---------- shell ----------
+
+const NAV = [
+  { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/providers", icon: ArrowLeftRight, label: "Providers & keys" },
+  { to: "/models", icon: Hash, label: "Models & routes" },
+  { to: "/keys", icon: KeyRound, label: "Agent keys" },
+  { to: "/audit", icon: ScrollText, label: "Audit log" },
+] as const
+
+function AppSidebar() {
   const nav = useNavigate()
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
   const [gen, setGen] = useState<number | null>(null)
 
   useEffect(() => {
-    api('/overview').then((o) => setGen(o.generation)).catch(() => {})
+    api("/overview")
+      .then((o) => setGen(o.generation))
+      .catch(() => {})
   }, [])
 
   const signOut = async () => {
-    try { await api('/session', { method: 'DELETE' }) } catch { /* ignore */ }
-    nav({ to: '/login' })
+    try {
+      await api("/session", { method: "DELETE" })
+    } catch {}
+    nav({ to: "/login" })
   }
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div className="logo">
-          <img src={`${import.meta.env.BASE_URL}icon.png`} alt="Janus" />
-          <div>
-            <div className="logo-name">Janus</div>
-            <div className="logo-sub">gateway console</div>
+    <Sidebar>
+      <SidebarHeader>
+        <div className="flex items-center gap-2 px-2 py-1">
+          <img
+            src={`${import.meta.env.BASE_URL}icon.png`}
+            alt="Janus"
+            className="size-8 rounded-md"
+          />
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold">Janus</span>
+            <span className="text-xs text-muted-foreground">gateway console</span>
           </div>
         </div>
-        <nav className="nav">
-          <span className="nav-label">Console</span>
-          {NAV.map((n) => (
-            <Link key={n.to} to={n.to} activeProps={{ className: 'active' }}>
-              <Icon name={n.ico} /> {n.label}
-            </Link>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <div className="row"><span>data plane</span><span className="val">:8080</span></div>
-          <div className="row"><span>admin plane</span><span className="val">:8090</span></div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-            <ThemeToggle />
-            <button className="btn small danger" onClick={signOut}>Sign out</button>
+      </SidebarHeader>
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarGroupLabel>Console</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {NAV.map((n) => (
+                <SidebarMenuItem key={n.to}>
+                  <SidebarMenuButton
+                    asChild
+                    isActive={n.to === "/" ? pathname === "/" : pathname.startsWith(n.to)}
+                  >
+                    <Link to={n.to}>
+                      <n.icon />
+                      <span>{n.label}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+      <SidebarFooter>
+        <div className="flex flex-col gap-1 px-2 py-1 text-xs text-muted-foreground">
+          <div className="flex items-center justify-between">
+            <span>data plane</span>
+            <span className="font-mono">:8080</span>
           </div>
-        </div>
-      </aside>
-      <main className="main">
-        <div className="topbar">
-          <div>
-            <span className="eyebrow">{eyebrow}</span>
-            <h1>{title}</h1>
-            {sub && <div className="sub">{sub}</div>}
+          <div className="flex items-center justify-between">
+            <span>admin plane</span>
+            <span className="font-mono">:8090</span>
           </div>
-          <div className="spacer" />
           {gen !== null && (
-            <span className="gen-badge"><span className="dot" />gen {gen}</span>
+            <div className="flex items-center justify-between">
+              <span>catalog</span>
+              <span className="font-mono">gen {gen}</span>
+            </div>
           )}
         </div>
-        {children}
-      </main>
-    </div>
+        <Button variant="outline" size="sm" onClick={signOut}>
+          <LogOut />
+          Sign out
+        </Button>
+      </SidebarFooter>
+    </Sidebar>
   )
 }
 
-// ---------- modal with mirrored exit ----------
-
-export function Modal({ title, sub, danger, onClose, children, footer }: {
-  title: ReactNode
-  sub?: ReactNode
-  danger?: boolean
-  onClose: () => void
+export function Layout({
+  children,
+  title,
+  description,
+  actions,
+}: {
   children: ReactNode
-  footer: ReactNode
+  title: string
+  description?: string
+  actions?: ReactNode
 }) {
-  const [closing, setClosing] = useState(false)
-
-  const close = useCallback(() => {
-    setClosing(true)
-    setTimeout(onClose, 190)
-  }, [onClose])
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [close])
-
   return (
-    <div className={`overlay${closing ? ' closing' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}>
-      <div className={`modal${danger ? ' danger' : ''}`} role="dialog" aria-modal="true">
-        <div className="inner">
-          <div className="modal-head">
-            {danger && <div className="warn-ico"><Icon name="alert" /></div>}
-            <div className="titles">
-              <h3>{title}</h3>
-              {sub && <div className="sub">{sub}</div>}
-            </div>
-            <button className="modal-close" onClick={close} aria-label="Close"><Icon name="x" /></button>
+    <SidebarProvider>
+      <AppSidebar />
+      <SidebarInset>
+        <header className="flex min-h-16 flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-3 md:px-6">
+          <SidebarTrigger className="-ml-1" />
+          <Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
+            {description && <p className="text-sm text-muted-foreground">{description}</p>}
           </div>
-          <div className="modal-body">{children}</div>
-          <div className="modal-foot">{footer}</div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ---------- toasts ----------
-
-type Toast = { id: number; kind: 'ok' | 'err'; text: string; closing?: boolean }
-
-const ToastCtx = createContext<(kind: 'ok' | 'err', text: string) => void>(() => {})
-
-export function useToast() {
-  return useContext(ToastCtx)
-}
-
-export function ToastHost({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const idRef = useRef(0)
-
-  const push = useCallback((kind: 'ok' | 'err', text: string) => {
-    const id = ++idRef.current
-    setToasts((t) => [...t, { id, kind, text }])
-    setTimeout(() => {
-      // mirror the entrance: fade out first, then drop
-      setToasts((t) => t.map((x) => (x.id === id ? { ...x, closing: true } : x)))
-      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 190)
-    }, 3400)
-  }, [])
-
-  return (
-    <ToastCtx.Provider value={push}>
-      {children}
-      <div className="toasts">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast ${t.kind}${t.closing ? ' closing' : ''}`}>{t.text}</div>
-        ))}
-      </div>
-    </ToastCtx.Provider>
+          {actions}
+          <ThemeToggle />
+        </header>
+        <div className="flex min-w-0 flex-1 flex-col gap-4 p-4 md:p-6">{children}</div>
+      </SidebarInset>
+    </SidebarProvider>
   )
 }
 
 // ---------- bits ----------
 
-export function Pill({ enabled, warn }: { enabled: boolean; warn?: string }) {
-  if (warn) return <span className="pill warn">{warn}</span>
-  return enabled
-    ? <span className="pill ok">enabled</span>
-    : <span className="pill off">disabled</span>
-}
-
 export function Loading() {
-  return <div style={{ display: 'grid', placeItems: 'center', padding: 60 }}><div className="spin" /></div>
+  return (
+    <div className="flex flex-col gap-2">
+      <Skeleton className="h-8 w-full" />
+      <Skeleton className="h-8 w-full" />
+      <Skeleton className="h-8 w-full" />
+    </div>
+  )
 }
 
 export function ErrorFlash({ message }: { message: string }) {
-  return <div className="flash err">{message}</div>
-}
-
-export function Row({ index, children }: { index: number; children: ReactNode }) {
-  const ref = useRef<HTMLTableRowElement>(null)
-  // staggered mount; delay is cleared afterwards so hover stays instant
-  useEffect(() => {
-    const t = setTimeout(() => {
-      if (ref.current) ref.current.style.transitionDelay = '0ms'
-    }, 500 + Math.min(index, 10) * 40)
-    return () => clearTimeout(t)
-  }, [index])
-  return <tr ref={ref} style={{ transitionDelay: `${Math.min(index, 10) * 40}ms` }}>{children}</tr>
+  return (
+    <Alert variant="destructive">
+      <CircleAlert />
+      <AlertTitle>Request failed</AlertTitle>
+      <AlertDescription>{message}</AlertDescription>
+    </Alert>
+  )
 }

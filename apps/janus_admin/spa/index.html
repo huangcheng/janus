@@ -9,11 +9,10 @@
   <script>
     // Set the theme before first paint to avoid a flash; light is default.
     try {
-      document.documentElement.dataset.theme =
-        localStorage.getItem('janus-theme') || 'light'
-    } catch (e) {
-      document.documentElement.dataset.theme = 'light'
-    }
+      if (localStorage.getItem('janus-theme') === 'dark') {
+        document.documentElement.classList.add('dark')
+      }
+    } catch (e) {}
   </script>
 </head>
 <body>
