@@ -5,6 +5,32 @@ import { ReactNode, useEffect, useRef, useState, createContext, useContext, useC
 import { Link, useNavigate } from '@tanstack/react-router'
 import { api } from './api'
 
+// ---------- theme ----------
+
+export function useTheme() {
+  const [theme, setTheme] = useState<string>(
+    () => document.documentElement.dataset.theme || 'light',
+  )
+  const toggle = useCallback(() => {
+    setTheme((cur) => {
+      const next = cur === 'light' ? 'dark' : 'light'
+      document.documentElement.dataset.theme = next
+      try { localStorage.setItem('janus-theme', next) } catch { /* ignore */ }
+      return next
+    })
+  }, [])
+  return { theme, toggle }
+}
+
+export function ThemeToggle() {
+  const { theme, toggle } = useTheme()
+  return (
+    <button className="btn small" onClick={toggle} title="Switch theme">
+      {theme === 'light' ? '🌙 Dark' : '☀ Light'}
+    </button>
+  )
+}
+
 const NAV = [
   { to: '/', ico: '▦', label: 'Dashboard' },
   { to: '/providers', ico: '⇉', label: 'Providers & keys' },
@@ -52,9 +78,10 @@ export function Layout({ children, title, eyebrow, sub }: {
         <div className="sidebar-footer">
           <div className="row"><span>data plane</span><span className="val">:8080</span></div>
           <div className="row"><span>admin plane</span><span className="val">:8090</span></div>
-          <button className="btn small danger" style={{ marginTop: 12 }} onClick={signOut}>
-            Sign out
-          </button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+            <ThemeToggle />
+            <button className="btn small danger" onClick={signOut}>Sign out</button>
+          </div>
         </div>
       </aside>
       <main className="main">

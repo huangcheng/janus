@@ -3,7 +3,7 @@
 import { FormEvent, Fragment, useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { api, setCsrf } from './api'
-import { Layout, Loading, Modal, Pill, Row, ErrorFlash, useToast } from './components'
+import { Layout, Loading, Modal, Pill, Row, ErrorFlash, ThemeToggle, useToast } from './components'
 
 type Provider = { id: number; name: string; base_url: string; protocol: string; enabled: boolean; keys: KeyMeta[] }
 type KeyMeta = { id: number; key_id: string; weight: number; enabled: boolean }
@@ -37,6 +37,7 @@ export function Login() {
 
   return (
     <div className="login-wrap">
+      <div className="login-theme-toggle"><ThemeToggle /></div>
       <main className="login-card">
         <div className="inner">
           <div className="logo">
