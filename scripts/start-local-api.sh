@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Compile and run Janus from source in WSL (SQLite + dashboard on :8090).
 set -euo pipefail
-cd /mnt/f/Janus
-ENV_FILE="${JANUS_LOCAL_ENV:-/mnt/f/Janus/data/local.env}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+ENV_FILE="${JANUS_LOCAL_ENV:-$ROOT/data/local.env}"
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "missing $ENV_FILE — copy scripts/local.env.example" >&2
   exit 1

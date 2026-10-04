@@ -332,19 +332,19 @@ handle_provider_model_add(IdBin, Body, Req) ->
     Name = maps:get(<<"name">>, Body, undefined),
     case parse_id(IdBin) of
         {ok, Id} ->
-            case
-                {
-                    janus_dashboard_store:provider_name(Id),
-                    janus_dashboard_store:add_provider_model(Id, Name)
-                }
-            of
-                {{ok, PName}, {ok, Mid}} ->
-                    mutate(<<"provider_model.add">>, PName, Req),
-                    reply_json(201, #{id => Mid, name => Name}, Req);
-                {_, {error, Code}} when Code =:= duplicate; Code =:= invalid ->
-                    err(400, atom_to_binary(Code, utf8), pick_msg(Code), Req);
-                {_, {error, Reason}} ->
-                    err(500, <<"db_error">>, Reason, Req)
+            case janus_dashboard_store:provider_name(Id) of
+                {ok, PName} ->
+                    case janus_dashboard_store:add_provider_model(Id, Name) of
+                        {ok, Mid} ->
+                            mutate(<<"provider_model.add">>, PName, Req),
+                            reply_json(201, #{id => Mid, name => Name}, Req);
+                        {error, Code} when Code =:= duplicate; Code =:= invalid ->
+                            err(400, atom_to_binary(Code, utf8), pick_msg(Code), Req);
+                        {error, Reason} ->
+                            err(500, <<"db_error">>, Reason, Req)
+                    end;
+                {error, not_found} ->
+                    err(404, <<"not_found">>, <<"provider not found">>, Req)
             end;
         error ->
             err(400, <<"bad_id">>, <<"invalid provider id">>, Req)

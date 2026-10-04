@@ -287,8 +287,11 @@ add_provider_model(ProviderId, Name) when
                 {ok, [{Id}]} -> {ok, Id};
                 _ -> {error, lookup_failed}
             end;
-        {error, _} ->
-            {error, duplicate}
+        {error, Reason} ->
+            case unique_error(Reason) of
+                true -> {error, duplicate};
+                false -> {error, Reason}
+            end
     end;
 add_provider_model(_, _) ->
     {error, invalid}.
@@ -564,6 +567,12 @@ rewrite_pg([$? | Rest], N, Acc) ->
 rewrite_pg([C | Rest], N, Acc) ->
     rewrite_pg(Rest, N, [C | Acc]).
 
+unique_error(Reason) ->
+    Bin = iolist_to_binary(io_lib:format("~p", [Reason])),
+    binary:match(Bin, <<"UNIQUE">>) =/= nomatch orelse
+        binary:match(Bin, <<"unique_violation">>) =/= nomatch orelse
+        binary:match(Bin, <<"23505">>) =/= nomatch.
+
 %%%===================================================================
 %%% Tests
 %%%===================================================================
@@ -589,5 +598,10 @@ rewrite_pg_test() ->
         <<"SELECT a FROM t WHERE x = $1 AND y = $2">>,
         rewrite_pg(<<"SELECT a FROM t WHERE x = ? AND y = ?">>)
     ).
+
+unique_error_test() ->
+    ?assert(unique_error({error, unique_violation})),
+    ?assert(unique_error("UNIQUE constraint failed: provider_models.name")),
+    ?assertNot(unique_error({error, timeout})).
 
 -endif.
