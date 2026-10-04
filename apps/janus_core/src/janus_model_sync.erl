@@ -24,7 +24,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([sync_now/0, status/0, set_interval/1, interval/0]).
+-export([sync_now/0, status/0, set_interval/1, interval/0, unique_violation/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
@@ -291,6 +291,7 @@ upsert_listing(ProviderId, Name) ->
     end.
 
 %% Concurrent sync_tick + sync_now can race the unique name index.
+-spec unique_violation(term()) -> boolean().
 unique_violation(Reason) ->
     Flatten = flatten_term(Reason),
     lists:member(unique_violation, Flatten) orelse
