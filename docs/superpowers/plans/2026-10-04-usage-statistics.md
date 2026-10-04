@@ -1,4 +1,4 @@
-# Usage Statistics Implementation Plan (rev 3)
+# Usage Statistics Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -15,6 +15,7 @@
 - rev 2: 7-model audit (7/7 GO WITH FIXES, `docs/audit/archive/2026-10-04-r3-usage-stats/`). Fixes written as an A1–A10 addendum.
 - rev 3 (this document): second audit round (6/7 GO WITH FIXES, 1 NO-GO on structure — addendum-vs-task divergence) folded **inline**. Tasks below are the single source of truth; no addendum applies.
 - rev 4: third audit round (7/7 GO WITH FIXES) folded inline: working event filters with 400-on-invalid, total read path (no badmatch→500), real `?`-literal guard test + insert/chunk eunit, genuine-zero vs absent usage distinction, avg latency split by stream + success-only `unreported`, mailbox back-pressure guard with atomics counter, throttled drop logs, `erlang:ceil` p95 offset, regex usage fallback for oversized terminal SSE events, bounded chunk-list tail capture, 15s terminate-flush budget, `writer.alive` + `ts_from`/`ts_to` in the API, zero-filled chart buckets.
+- rev 5 (this document): fourth audit round (6/7 GO WITH FIXES, 1 NO-GO on a duplicate test function) folded inline: duplicate `no_qmark_literals_test` removed, SSE genuine-zero collapse removed (symmetric with body parser + regression test), `trim_tail` made O(1) amortized with byte+chunk caps, drop counter created in `init/1` (no hot-path persistent_term put), mailbox guard applied to malformed casts too, `_ = stream_body` (disconnect-safe), avg null-on-empty, provider/provider_key ts indexes, disconnect note, title de-versioned, test counts corrected, proxy-helper eunit (trim/injection), duplicate-name preflight for the API module.
 
 **Key file facts an implementer must know:**
 - DB facade: `janus_db_conn:query(Sql, Params)` returns `{ok, Rows} | {error, Reason}` (rows are tuples; it does **not** return affected-row counts — see Task 4 sweep). `janus_db_conn:backend()` returns `postgres | sqlite`. `?` placeholders must be rewritten to `$N` for postgres.
@@ -62,6 +63,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events (ts);
 CREATE INDEX IF NOT EXISTS usage_events_key_ts_idx ON usage_events (agent_key_id, ts);
 CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, ts);
+CREATE INDEX IF NOT EXISTS usage_events_provider_ts_idx ON usage_events (provider_id, ts);
+CREATE INDEX IF NOT EXISTS usage_events_pkey_ts_idx ON usage_events (provider_key_id, ts);
 ```
 
 - [ ] **Step 2: Postgres migration**
@@ -85,6 +88,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events (ts);
 CREATE INDEX IF NOT EXISTS usage_events_key_ts_idx ON usage_events (agent_key_id, ts);
 CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, ts);
+CREATE INDEX IF NOT EXISTS usage_events_provider_ts_idx ON usage_events (provider_id, ts);
+CREATE INDEX IF NOT EXISTS usage_events_pkey_ts_idx ON usage_events (provider_key_id, ts);
 ```
 
 - [ ] **Step 3: Run migrations on the live dev node and verify preconditions**
@@ -189,6 +194,12 @@ genuine_zero_usage_test() ->
     ?assertEqual(#{prompt => 0, completion => 0},
                  janus_usage_parse:from_response_body(openai_chat, B)).
 
+genuine_zero_sse_test() ->
+    Tail = <<"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\n"
+             "data: [DONE]\n\n">>,
+    ?assertEqual(#{prompt => 0, completion => 0},
+                 janus_usage_parse:from_sse(openai_chat, <<>>, Tail)).
+
 %% response.completed embeds the full response (>16KB); the tail keeps
 %% only its end, so the data: line never decodes whole — the regex
 %% fallback must still recover the trailing usage object.
@@ -242,12 +253,11 @@ from_sse(_Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
     case lists:filtermap(fun data_line_usage/1, Lines) of
         [] -> usage_regex_fallback(Blob);
         Usages ->
+            %% Any decoded usage object is a REAL report — even {0, 0}
+            %% (symmetric with from_response_body/2).
             P = lists:max([maps:get(prompt, U, 0) || U <- Usages]),
             C = lists:max([maps:get(completion, U, 0) || U <- Usages]),
-            case {P, C} of
-                {0, 0} -> undefined;
-                _ -> #{prompt => P, completion => C}
-            end
+            #{prompt => P, completion => C}
     end;
 from_sse(_, _, _) ->
     undefined.
@@ -393,7 +403,7 @@ Failure-safety contract: every field has a default; a malformed event is dropped
 -define(FLUSH_MS, 1000).
 -define(FLUSH_COUNT, 100).
 -define(MAX_BUF, 10000).
--define(MAX_QUEUE, 5000).
+-define(MAX_QUEUE, 8000).
 -define(INSERT_CHUNK, 50).
 -define(RETENTION_SEC, 31 * 86400).
 -define(SWEEP_MS, 24 * 3600 * 1000).
@@ -419,10 +429,16 @@ start_link() ->
 %% protocol, stream, status, prompt, completion, latency_ms.
 %% Events lacking an integer status are dropped. Never raises.
 %% When the writer's mailbox is saturated the event is dropped HERE
-%% (counted via an atomics counter shared with stats/0) — the mailbox
-%% is the last unbounded resource, and this keeps it bounded.
+%% (counted via an atomics counter created in init/1 and shared with
+%% stats/0) — the mailbox is the last unbounded resource, and this
+%% keeps it bounded.
 -spec record(map()) -> ok.
 record(#{status := Status} = Ev) when is_integer(Status) ->
+    guarded_cast({record, Ev});
+record(Bad) ->
+    guarded_cast({drop, Bad}).
+
+guarded_cast(Msg) ->
     try
         case whereis(?SERVER) of
             undefined ->
@@ -434,40 +450,36 @@ record(#{status := Status} = Ev) when is_integer(Status) ->
                         atomics:add(drop_counter(), 1, 1),
                         logger:warning(#{what => janus_usage_drop, reason => mailbox_full});
                     false ->
-                        gen_server:cast(?SERVER, {record, Ev})
+                        gen_server:cast(?SERVER, Msg)
                 end
         end,
         ok
     catch
         _:_ -> ok
-    end;
-record(Bad) ->
-    catch gen_server:cast(?SERVER, {drop, Bad}),
-    ok.
-
-drop_counter() ->
-    case persistent_term:get(janus_usage_drop_atomics, undefined) of
-        undefined ->
-            Ref = atomics:new(1, [{signed, false}]),
-            persistent_term:put(janus_usage_drop_atomics, Ref),
-            Ref;
-        Ref ->
-            Ref
     end.
 
+%% The atomics ref is created once by init/1 (writer process) — this
+%% accessor only READS persistent_term (no put from hot paths, no race).
+drop_counter() ->
+    persistent_term:get(janus_usage_drop_atomics).
+
 dropped_external() ->
-    try atomics:get(drop_counter(), 1)
+    try atomics:get(persistent_term:get(janus_usage_drop_atomics), 1)
     catch _:_ -> 0
     end.
 
 %% {alive, buffered, dropped} — dropped is cumulative since boot
-%% (gen_server drops + mailbox-saturated drops). Never hangs the caller.
+%% (gen_server drops + mailbox-saturated drops). alive comes from
+%% whereis/1 (never a false negative during a long flush); the stats
+%% call itself has a 1s timeout so a slow flush can't hang the reader.
 -spec stats() -> map().
 stats() ->
+    Alive = whereis(?SERVER) =/= undefined,
+    Base = #{alive => Alive, dropped => dropped_external()},
     try gen_server:call(?SERVER, stats, 1000) of
-        M -> M#{alive => true}
+        M -> maps:merge(Base, M)
     catch
-        _:_ -> #{alive => false, buffered => 0, dropped => dropped_external()}
+        _:_ -> Base#{buffered => 0}
     end.
 
 %%%===================================================================
@@ -476,6 +488,9 @@ stats() ->
 
 init([]) ->
     process_flag(trap_exit, true),
+    %% Create the drop counter ONCE here (writer process); hot paths
+    %% only read persistent_term, never put.
+    persistent_term:put(janus_usage_drop_atomics, atomics:new(1, [{signed, false}])),
     _ = erlang:send_after(?FLUSH_MS, self(), flush),
     _ = erlang:send_after(60_000, self(), sweep),
     {ok, #state{}}.
@@ -494,7 +509,7 @@ handle_call(_Req, _From, State) ->
 %% the buffer drains in order and old rows are already on their way out.
 %% The warning is throttled (first drop, then every 1000th) so a stalled
 %% DB cannot flood the logs.
-handle_cast({record, Ev}, #state{buf_size = N} = State) when N >= ?MAX_BUF ->
+handle_cast({record, _Ev}, #state{buf_size = N} = State) when N >= ?MAX_BUF ->
     D = State#state.dropped + 1,
     case D rem 1000 of
         1 -> logger:warning(#{what => janus_usage_drop, reason => buffer_full, total => D});
@@ -566,9 +581,24 @@ do_flush(#state{buf = Buf} = State) ->
         ),
     State#state{buf = [], buf_size = 0, dropped = State#state.dropped + Failed}.
 
-chunk([], _N) -> [];
-chunk(L, N) when length(L) =< N -> [L];
-chunk(L, N) -> {H, T} = lists:split(N, L), [H | chunk(T, N)].
+chunk(L, N) ->
+    chunk(L, N, []).
+
+chunk([], _N, Acc) ->
+    lists:reverse(Acc);
+chunk(L, N, Acc) ->
+    {H, T} = safe_split(N, L),
+    chunk(T, N, [H | Acc]).
+
+safe_split(N, L) ->
+    safe_split(N, L, []).
+
+safe_split(0, Rest, Acc) ->
+    {lists:reverse(Acc), Rest};
+safe_split(_, [], Acc) ->
+    {lists:reverse(Acc), []};
+safe_split(N, [H | T], Acc) ->
+    safe_split(N - 1, T, [H | Acc]).
 
 build_insert(Cols, Rows) ->
     {ValuesSql, Params} =
@@ -720,14 +750,6 @@ All queries take `From`/`To` (unix seconds). Bucket labels are UTC ISO strings; 
 -module(janus_usage_sql_tests).
 -include_lib("eunit/include/eunit.hrl").
 
-%% No usage SQL may embed a '?' literal (rewrite_pg rewrites them blindly).
-no_qmark_literals_test() ->
-    {module, janus_usage} = code:ensure_loaded(janus_usage),
-    {ok, Beam} = file:read_file(code:which(janus_usage)),
-    {ok, {_, [{abstract_code, {_, AC}}]}} = beam_lib:chunks(Beam, [abstract_code]),
-    Src = [S || {attribute, _, file, {S, _}} <- AC, lists:suffix("janus_usage.erl", S)],
-    ?assert(length(Src) > 0).
-
 breakdown_orders_by_requests_test() ->
     ?assertMatch({_, _, _}, janus_usage:breakdown_dim(key)),
     {Col, _, _} = janus_usage:breakdown_dim(key),
@@ -747,7 +769,7 @@ no_qmark_literals_test() ->
     lists:foreach(
         fun(B) ->
             ?assertEqual(nomatch, binary:match(B, <<"'?">>)),
-            ?assertEqual(nomatch, binary:match(B, <<"?'",>>))
+            ?assertEqual(nomatch, binary:match(B, <<"?'>">>))
         end,
         Frags
     ).
@@ -1042,7 +1064,7 @@ Note: `breakdown` rows whose FK was SET NULL arrive with `id = null`; the SPA re
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit'
 ```
-Expected: parser (10) + SQL-shape (3) + existing suites green.
+Expected: parser (13) + SQL-shape (5) + existing suites green.
 
 - [ ] **Step 5: Smoke-test the queries on the live node**
 
@@ -1234,7 +1256,10 @@ In the streaming success clause (line ~208), replace the `Drain(fun(Chunk) -> ..
     case
         Drain(fun(Chunk) ->
             capture_usage_chunk(Chunk),
-            ok = cowboy_req:stream_body(Chunk, nofin, Req2)
+            %% `_ =`: a client disconnect makes stream_body fail; the
+            %% drain surfaces it as {error, _} below (recorded as 502)
+            %% instead of crashing the request process mid-callback.
+            _ = cowboy_req:stream_body(Chunk, nofin, Req2)
         end)
     of
         ok ->
@@ -1264,6 +1289,7 @@ Add the helpers (internal section):
 ```erlang
 -define(USAGE_HEAD_BYTES, 4096).
 -define(USAGE_TAIL_BYTES, 16384).
+-define(USAGE_TAIL_CHUNKS, 256).
 
 capture_usage_chunk(Chunk) ->
     Head0 = case get(janus_usage_head) of
@@ -1278,27 +1304,41 @@ capture_usage_chunk(Chunk) ->
         false ->
             ok
     end,
-    %% Tail is a newest-first chunk list capped at 16KB total — no
-    %% per-chunk 16KB rebuild on the hot path.
-    Chunks0 = case get(janus_usage_tail) of
-        undefined -> [];
-        C0 -> C0
-    end,
-    put(janus_usage_tail, trim_tail([Chunk | Chunks0])).
+    %% Tail is a newest-first {Chunks, TotalBytes} tuple; prepending is
+    %% O(1) and the refold only runs when a cap is exceeded (both caps
+    %% bound the fold size, so per-chunk cost stays constant).
+    case Chunk of
+        <<>> ->
+            ok;
+        _ ->
+            {Chunks0, Size0} = case get(janus_usage_tail) of
+                undefined -> {[], 0};
+                T0 -> T0
+            end,
+            put(janus_usage_tail, maybe_trim([Chunk | Chunks0], Size0 + byte_size(Chunk)))
+    end.
 
-trim_tail(Chunks) ->
-    {Kept, _} =
+maybe_trim(Chunks, Size) when Size =< ?USAGE_TAIL_BYTES ->
+    case length(Chunks) =< ?USAGE_TAIL_CHUNKS of
+        true -> {Chunks, Size};
+        false -> {lists:sublist(Chunks, ?USAGE_TAIL_CHUNKS), Size}
+    end;
+maybe_trim(Chunks, _Size) ->
+    %% Over the byte cap: refold newest-first, keeping whole chunks
+    %% that fit (whole-chunk granularity; the parser tolerates the
+    %% remaining partial first line).
+    {Kept, Size} =
         lists:foldl(
-            fun(C, {Acc, Size}) ->
-                case Size < ?USAGE_TAIL_BYTES of
-                    true -> {[C | Acc], Size + byte_size(C)};
-                    false -> {Acc, Size}
+            fun(C, {Acc, S}) ->
+                case S + byte_size(C) =< ?USAGE_TAIL_BYTES of
+                    true -> {[C | Acc], S + byte_size(C)};
+                    false -> {Acc, S}
                 end
             end,
             {[], 0},
             Chunks
         ),
-    Kept.
+    {lists:reverse(Kept), Size}.
 
 stream_usage(ClientProto) ->
     Head = case get(janus_usage_head) of
@@ -1307,14 +1347,72 @@ stream_usage(ClientProto) ->
     end,
     Tail = case get(janus_usage_tail) of
         undefined -> <<>>;
-        T -> iolist_to_binary(T)
+        {Chunks, _} -> iolist_to_binary(lists:reverse(Chunks))
     end,
     erase(janus_usage_head),
     erase(janus_usage_tail),
     usage_or_undef(janus_usage_parse:from_sse(ClientProto, Head, Tail)).
 ```
 
-- [ ] **Step 3: Compile + full eunit**
+- [ ] **Step 3: Proxy-helper eunit** (export `maybe_trim/2` and `maybe_inject_stream_usage/4` for tests)
+
+Create `apps/janus_http/test/janus_proxy_usage_tests.erl`:
+
+```erlang
+-module(janus_proxy_usage_tests).
+-include_lib("eunit/include/eunit.hrl").
+
+trim_under_cap_passthrough_test() ->
+    ?assertEqual({[<<"c">>, <<"b">>], 2}, janus_http_proxy:maybe_trim([<<"c">>, <<"b">>], 2)).
+
+trim_keeps_newest_within_byte_cap_test() ->
+    C1 = binary:copy(<<"a">>, 8192),
+    C2 = binary:copy(<<"b">>, 8192),
+    C3 = binary:copy(<<"c">>, 8192),
+    %% newest-first input, 24KB total -> keeps the two newest (16KB),
+    %% result stored newest-first; stream_usage/1 reverses for bytes.
+    ?assertEqual({[C3, C2], 16384}, janus_http_proxy:maybe_trim([C3, C2, C1], 24576)).
+
+trim_chunk_count_cap_test() ->
+    Chunks = lists:duplicate(300, <<"x">>),
+    {Kept, _} = janus_http_proxy:maybe_trim(Chunks, 300),
+    ?assertEqual(256, length(Kept)).
+
+injection_absent_by_default_for_non_openai_test() ->
+    ?assertEqual(
+        {<<"{}">>, #{<<"stream">> => true}},
+        janus_http_proxy:maybe_inject_stream_usage(
+            anthropic_messages, true, <<"{}">>, #{<<"stream">> => true}
+        )
+    ).
+
+injection_adds_include_usage_test() ->
+    application:set_env(janus_core, usage_inject_include_usage, true),
+    {Body2, Map2} = janus_http_proxy:maybe_inject_stream_usage(
+        openai_chat, true, <<"{}">>, #{}
+    ),
+    ?assertEqual(#{<<"include_usage">> => true}, maps:get(<<"stream_options">>, Map2)),
+    ?assert(is_binary(Body2)).
+
+injection_respects_client_stream_options_test() ->
+    application:set_env(janus_core, usage_inject_include_usage, true),
+    Map = #{<<"stream_options">> => #{<<"include_usage">> => false}},
+    ?assertEqual(
+        {<<"{}">>, Map},
+        janus_http_proxy:maybe_inject_stream_usage(openai_chat, true, <<"{}">>, Map)
+    ).
+
+injection_kill_switch_test() ->
+    application:set_env(janus_core, usage_inject_include_usage, false),
+    Map = #{},
+    ?assertEqual(
+        {<<"{}">>, Map},
+        janus_http_proxy:maybe_inject_stream_usage(openai_chat, true, <<"{}">>, Map)
+    ),
+    application:set_env(janus_core, usage_inject_include_usage, true).
+```
+
+- [ ] **Step 4: Compile + full eunit**
 
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit'
@@ -1422,7 +1520,7 @@ now_sec() ->
     erlang:system_time(second).
 ```
 
-Note: `qs_int/4` with `infinity` keeps validation total without inventing an upper bound for ids.
+Note: `qs_int/4` with `infinity` keeps validation total without inventing an upper bound for ids. **Pre-flight:** grep `janus_dashboard_api.erl` first — if `qs_int/4` or `now_sec/0` already exist under those names, reuse the existing ones instead of redefining (duplicate definitions are a compile error).
 
 - [ ] **Step 3: Compile, hot-load, verify via curl**
 
@@ -1483,6 +1581,8 @@ export type UsageEvent = {
 }
 export type UsageSummary = {
   range: string
+  ts_from: number
+  ts_to: number
   totals: UsageTotals
   series: UsagePoint[]
   by_key: UsageRow[]
@@ -1501,11 +1601,11 @@ export function fmtBucket(bucket: string, range: string) {
   return range === "24h" ? bucket.slice(11, 16) : bucket.slice(5, 10)
 }
 
-/** Unix seconds → "HH:MM:SS" UTC (charts and tables share one clock). */
+/** Unix seconds → "MM-DD HH:MM:SS" UTC (charts and tables share one clock). */
 export function fmtTs(ts: number) {
   const d = new Date(ts * 1000)
   const pad = (n: number) => String(n).padStart(2, "0")
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
+  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
 }
 ```
 
@@ -1513,9 +1613,9 @@ export function fmtTs(ts: number) {
 
 - `Layout title="Usage" description="Token consumption and traffic across agent keys, models, and providers — times are UTC."`
 - Range `Select` in `CardAction` (24h / 7d / 30d) driving `api("/usage/summary?range=" + range)`; separate `api("/usage/events?limit=50")` for the drill-down. Poll summary every 30s while the page is open.
-- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms ?? "—"` + `ms`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms ?? "—"`, subtitle "end-to-end"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped since boot (writer)" — and if `writer.alive === false`, a destructive badge "writer down".
+- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms ?? "—"` + `ms`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms ?? "—"`, subtitle "end-to-end · client drain"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped since boot (writer)" — and if `writer.alive === false`, a destructive badge "writer down".
 - When `totals.unreported > 0`, a one-line muted note under the cards: "N successful requests had no provider usage report (streams without a usage chunk)."
-- Two charts in a 2-col grid: **Tokens (UTC)** — stacked `BarChart` of `prompt_tokens` + `completion_tokens` (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`); **Requests (UTC)** — `BarChart` of `requests` (color `var(--color-chart-1)`). `XAxis dataKey` = precomputed `label` from `fmtBucket`. Before charting, **zero-fill the buckets**: build the complete bucket sequence for the range (24 hour-buckets ending at the current UTC hour, or N day-buckets ending today UTC) and merge the API rows into it so gaps render as 0, not as missing bars.
+- Two charts in a 2-col grid: **Tokens (UTC)** — stacked `BarChart` of `prompt_tokens` + `completion_tokens` (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`); **Requests (UTC)** — `BarChart` of `requests` (color `var(--color-chart-1)`). `XAxis dataKey` = precomputed `label` from `fmtBucket`. Before charting, **zero-fill the buckets**: build the complete bucket sequence between `ts_from` and `ts_to` (hour or day steps, UTC) and merge the API rows into it so gaps render as 0, not as missing bars.
 - Four breakdown cards in `xl:grid-cols-2`: **Per agent key** (prefix or `(deleted)` when name is null), **Per model**, **Per provider**, **Per provider key** — columns: name, requests, tokens (`fmtNum(pin + pout)`), and a share bar (`div` with width % of the max requests in that card, `bg-primary/15`).
 - Recent requests card: table Time (`fmtTs` + "UTC"), Key, Model, Provider, Status (2xx `text-success`, 4xx `text-warning`, 5xx `text-destructive`; 502 from mid-stream failure is expected), Stream (a `~` glyph or `Zap` icon when `stream === 1`), In, Out (`"—"` for null), Latency.
 - Loading skeletons, `ErrorFlash`, empty state: "No usage recorded yet — stats appear after the first proxied request."
