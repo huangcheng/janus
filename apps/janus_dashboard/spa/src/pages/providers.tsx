@@ -62,7 +62,9 @@ export function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [error, setError] = useState("")
   const [loaded, setLoaded] = useState(false)
-  const [expanded, setExpanded] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState<{ id: number; section: "keys" | "models" } | null>(
+    null,
+  )
   const [modal, setModal] = useState<
     | "add"
     | { addKey: Provider }
@@ -186,12 +188,39 @@ export function Providers() {
                           <Button
                             variant="ghost"
                             size="xs"
-                            onClick={() => setExpanded(expanded === p.id ? null : p.id)}
+                            onClick={() =>
+                              setExpanded(
+                                expanded?.id === p.id && expanded.section === "keys"
+                                  ? null
+                                  : { id: p.id, section: "keys" },
+                              )
+                            }
                           >
                             {p.keys.length} {p.keys.length === 1 ? "key" : "keys"}
-                            {" · "}
-                            {(p.models ?? []).length} {(p.models ?? []).length === 1 ? "model" : "models"}
-                            {expanded === p.id ? <ChevronDown /> : <ChevronRight />}
+                            {expanded?.id === p.id && expanded.section === "keys" ? (
+                              <ChevronDown />
+                            ) : (
+                              <ChevronRight />
+                            )}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            onClick={() =>
+                              setExpanded(
+                                expanded?.id === p.id && expanded.section === "models"
+                                  ? null
+                                  : { id: p.id, section: "models" },
+                              )
+                            }
+                          >
+                            {(p.models ?? []).length}{" "}
+                            {(p.models ?? []).length === 1 ? "model" : "models"}
+                            {expanded?.id === p.id && expanded.section === "models" ? (
+                              <ChevronDown />
+                            ) : (
+                              <ChevronRight />
+                            )}
                           </Button>
                           <Button
                             variant="ghost"
@@ -204,10 +233,11 @@ export function Providers() {
                         </div>
                       </TableCell>
                     </TableRow>
-                    {expanded === p.id && (
+                    {expanded?.id === p.id && (
                       <TableRow className="bg-muted/30 hover:bg-muted/30">
                         <TableCell colSpan={5}>
                           <div className="flex flex-col gap-4 rounded-lg border border-border/70 bg-background p-4 shadow-sm">
+                            {expanded.section === "keys" && (
                             <div className="flex flex-col gap-2">
                               <div className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
                                 Keys · {p.keys.length}
@@ -220,11 +250,14 @@ export function Providers() {
                                   <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
                                     {k.key_id}
                                   </span>
-                                  <Badge variant="outline" className="font-mono text-[11px] tabular-nums">
-                                    w{k.weight}
-                                  </Badge>
-                                  <StateBadge enabled={k.enabled} />
+                                  <span
+                                    className="text-xs text-muted-foreground tabular-nums"
+                                    title="Traffic share when several keys are enabled on this provider (weighted round-robin)"
+                                  >
+                                    weight {k.weight}
+                                  </span>
                                   <div className="flex-1" />
+                                  <StateBadge enabled={k.enabled} />
                                   <Button
                                     variant="outline"
                                     size="xs"
@@ -263,9 +296,11 @@ export function Providers() {
                                 </Button>
                               </div>
                             </div>
+                            )}
+                            {expanded.section === "models" && (
                             <ProviderListings
                               provider={p}
-                              filter={expanded === p.id ? listingFilter : ""}
+                              filter={expanded?.id === p.id ? listingFilter : ""}
                               onFilter={setListingFilter}
                               onToggle={(m) =>
                                 act(
@@ -279,6 +314,7 @@ export function Providers() {
                               }
                               onAdd={() => setModal({ addModel: p })}
                             />
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
