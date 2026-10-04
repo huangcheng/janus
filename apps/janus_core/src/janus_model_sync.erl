@@ -280,7 +280,7 @@ unique_violation(Reason) ->
             fun
                 (B) when is_binary(B) -> binary:match(B, <<"UNIQUE">>) =/= nomatch;
                 (L) when is_list(L) ->
-                    is_integer(hd([0 | L])) andalso string:find(L, "UNIQUE") =/= nomatch;
+                    L =/= [] andalso is_integer(hd(L)) andalso string:find(L, "UNIQUE") =/= nomatch;
                 (_) ->
                     false
             end,
