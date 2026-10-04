@@ -1,35 +1,47 @@
-# Usage Statistics Implementation Plan
+# Usage Statistics Implementation Plan (rev 3)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Record token usage + latency for every proxied agent request (streaming included), persist it in `usage_events`, and present per-key / per-model / per-provider statistics on a new Usage page in the dashboard.
+**Goal:** Record token usage + latency for every proxied agent request (streaming included), persist it in `usage_events`, and present per-key / per-model / per-provider / per-provider-key statistics on a new Usage page in the dashboard.
 
 **Architecture:** The data-plane proxy (`janus_http_proxy`) already carries every request's identity (agent key, model, route, provider key) and every response's usage payload. We hook its terminal paths, parse usage with a pure parser module, buffer events in a `janus_usage` gen_server (janus_core) that batch-inserts into a new `usage_events` table, and expose rollups through `/api/usage/*` to a React page. Streaming coverage: inject `stream_options.include_usage` into upstream OpenAI streams and parse usage from a bounded head+tail capture of the SSE stream.
 
 **Tech Stack:** Erlang/OTP (gen_server, cowboy, thoas, esqlite/epgsql), SQLite + Postgres migrations, React + TanStack Router + Tailwind v4 + shadcn/ui + recharts.
 
-**Agreed scope (from brainstorm):** full streaming coverage · agent keys + provider-key column · token counts only (no cost) · aggregates + 30-day raw retention + recent-requests drill-down · latency avg/p95 · both DB backends.
+**Agreed scope (from brainstorm):** full streaming coverage · agent keys + provider-key column · token counts only (no cost) · aggregates + ~30-day raw retention + recent-requests drill-down · latency avg/p95 · both DB backends.
+
+**Revision history:**
+- rev 1: initial plan.
+- rev 2: 7-model audit (7/7 GO WITH FIXES, `docs/audit/archive/2026-10-04-r3-usage-stats/`). Fixes written as an A1–A10 addendum.
+- rev 3 (this document): second audit round (6/7 GO WITH FIXES, 1 NO-GO on structure — addendum-vs-task divergence) folded **inline**. Tasks below are the single source of truth; no addendum applies.
 
 **Key file facts an implementer must know:**
-- DB facade: `janus_db_conn:query(Sql, Params)`; `janus_db_conn:backend()` returns `postgres | sqlite`. `?` placeholders must be rewritten to `$N` for postgres (pattern lives in `janus_dashboard_store:rewrite_pg/1`, `apps/janus_dashboard/src/janus_dashboard_store.erl`).
+- DB facade: `janus_db_conn:query(Sql, Params)` returns `{ok, Rows} | {error, Reason}` (rows are tuples; it does **not** return affected-row counts — see Task 4 sweep). `janus_db_conn:backend()` returns `postgres | sqlite`. `?` placeholders must be rewritten to `$N` for postgres.
 - Migrations: `apps/janus_core/priv/migrations/NNN_name.{postgres|sqlite}.sql`, run by `janus_migrate:run/0`. Existing: `001`, `002` (postgres-only), `003` — next is `004`.
 - Agent meta (from `janus_catalog:lookup_api_key/1`): `#{id, prefix, key_hash, enabled, model_ids}`.
 - Route map (from `janus_lb:pick_route/2`): `#{model_id, provider_id, provider_key := #{id := KeyId}, ...}`.
-- Auth, so unauthorized requests never reach the proxy and are intentionally not counted.
+- Auth happens before the proxy: unauthorized requests never reach it and are intentionally not counted. `no_route` / `model_not_found` rejects happen before a route exists and are also not counted in v1.
 - JSON lib is `thoas` (in janus_core's `.app.src` applications).
-- The proxy runs inside the cowboy request process, so the process dictionary is a safe per-request scratch pad.
+- The proxy runs inside the cowboy request process; the process dictionary is a safe per-request scratch pad **provided keys are erased at request entry** (cowboy reuses the process across HTTP/1.1 keep-alive requests). Use the `janus_usage_*` prefixed keys only.
+- On the native streaming path `ClientProto == ProviderProto` by construction (translate paths force `stream = false`), so keying injection on `ClientProto` is exact; SSE bytes are always provider-dialect and the parser is deliberately dialect-agnostic.
 - Live verification loop (established in this worktree): compile in container `janus-local` with `docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev compile'`, then hot-load with `docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(M).' "` (cookie file `/root/.erlang.cookie` = `janus` already written).
 
 ---
 
-## Audit fixes (v1 contracts)
+### Task 1: Migration — `usage_events` table
 
-Multi-model audit (7/7 GO WITH FIXES — see `docs/audit/SYNTHESIS.md`). The items below **replace** the referenced task steps. Everything not mentioned stays as written.
+Retention is **31 days** so the 30-day range selector never sweeps rows mid-window.
 
-**A1. Migration (replaces Task 1 SQL).** Add `stream`, make token columns nullable (NULL = upstream did not report usage, distinguishable from a real 0), and fix the latency comment:
+**Files:**
+- Create: `apps/janus_core/priv/migrations/004_usage_events.sqlite.sql`
+- Create: `apps/janus_core/priv/migrations/004_usage_events.postgres.sql`
+
+- [ ] **Step 1: SQLite migration**
 
 ```sql
--- sqlite variant
+-- Data-plane usage events: one row per proxied agent request.
+-- Token columns are NULL when the upstream did not report usage
+-- (distinguishable from a real zero).
 CREATE TABLE IF NOT EXISTS usage_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL,               -- unix seconds
@@ -40,273 +52,9 @@ CREATE TABLE IF NOT EXISTS usage_events (
     protocol TEXT NOT NULL,            -- openai_chat | openai_responses | anthropic_messages
     stream INTEGER NOT NULL DEFAULT 0 CHECK (stream IN (0, 1)),
     status INTEGER NOT NULL,           -- upstream HTTP status; 502 on mid-stream failure
-    prompt_tokens INTEGER,             -- NULL when the upstream did not report usage
+    prompt_tokens INTEGER,
     completion_tokens INTEGER,
     latency_ms INTEGER                 -- end-to-end proxy span (full drain for streams)
-);
-CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events (ts);
-CREATE INDEX IF NOT EXISTS usage_events_key_ts_idx ON usage_events (agent_key_id, ts);
-CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, ts);
-```
-
-Postgres variant: same columns with `BIGSERIAL id`, `ts BIGINT`, `SMALLINT stream NOT NULL DEFAULT 0`, `prompt_tokens BIGINT`/`completion_tokens BIGINT` nullable, same indexes. FK note: `provider_keys` exists in the 001 SQLite lineage (002 being postgres-only is fine); verify `janus_db_conn` sets `PRAGMA foreign_keys = ON` per connection during Task 1 Step 3 — if it does not, the SET NULL clauses are inert on SQLite and we document that instead of relying on them.
-
-**A2. Parser nesting bug (replaces `nested/1` in Task 2 Step 3 + adds a test).** Anthropic `message_start` nests usage under `<<"message">>`, not `<<"response">>`. Probe both, and add the regression test the audit derived:
-
-```erlang
-nested(Map) ->
-    case maps:get(<<"response">>, Map, undefined) of
-        R when is_map(R) -> norm(maps:get(<<"usage">>, R, #{}));
-        _ ->
-            case maps:get(<<"message">>, Map, undefined) of
-                M when is_map(M) -> norm(maps:get(<<"usage">>, M, #{}));
-                _ -> undefined
-            end
-    end.
-```
-
-```erlang
-anthropic_message_start_nesting_test() ->
-    Head = <<"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":17,\"output_tokens\":1}}}\n\n">>,
-    ?assertEqual(#{prompt => 17, completion => 1},
-                 janus_usage_parse:from_sse(anthropic_messages, Head, <<>>)).
-```
-
-**A3. Writer failure-safety (replaces Task 3 Step 1 gen_server body).** Defaults on every field, drop-oldest cap with counter, multi-row single-statement flush (chunks of 50), error logging, `trap_exit`, integer `buf_size` (no `length/1` per cast), catch-all cast, total functions only:
-
-```erlang
--record(state, {
-    buf = [] :: [map()],
-    buf_size = 0 :: non_neg_integer(),
-    dropped = 0 :: non_neg_integer()
-}).
-
--define(MAX_BUF, 10000).
-
-init([]) ->
-    process_flag(trap_exit, true),
-    _ = erlang:send_after(?FLUSH_MS, self(), flush),
-    _ = erlang:send_after(60_000, self(), sweep),
-    {ok, #state{}}.
-
-handle_cast({record, Ev}, #state{buf = Buf, buf_size = N} = State) ->
-    case N + 1 > ?MAX_BUF of
-        true ->
-            logger:warning(#{what => janus_usage_drop, reason => buffer_full}),
-            {noreply, State#state{dropped = State#state.dropped + 1}};
-        false ->
-            maybe_flush(State#state{buf = [Ev | Buf], buf_size = N + 1})
-    end;
-handle_cast(_Other, State) ->
-    {noreply, State}.
-
-maybe_flush(#state{buf_size = N} = State) when N >= ?FLUSH_COUNT ->
-    {noreply, do_flush(State)};
-maybe_flush(State) ->
-    {noreply, State}.
-
-handle_info(flush, State) ->
-    _ = erlang:send_after(?FLUSH_MS, self(), flush),
-    {noreply, do_flush(State)};
-handle_info(sweep, State) ->
-    sweep(),
-    _ = erlang:send_after(?SWEEP_MS, self(), sweep),
-    {noreply, State};
-handle_info(_Info, State) ->
-    {noreply, State}.
-
-terminate(_Reason, State) ->
-    _ = do_flush(State),
-    ok.
-
-%% Flush the whole buffer as multi-row INSERTs, 50 rows per statement
-%% (single statement = atomic per chunk, no transaction API needed).
-%% On failure the buffer is cleared (data is lost) but always logged
-%% with the row count — never silently.
-do_flush(#state{buf = []} = State) ->
-    State;
-do_flush(#state{buf = Buf, buf_size = N} = State) ->
-    Cols =
-        <<"(ts, agent_key_id, model_id, provider_id, provider_key_id, "
-          " protocol, stream, status, prompt_tokens, completion_tokens, latency_ms)">>,
-    Chunks = chunk(lists:reverse(Buf), 50),
-    Failed =
-        lists:foldl(
-            fun(Rows, Acc) ->
-                {Sql, Params} = build_insert(Cols, Rows),
-                case q(Sql, Params) of
-                    {ok, _} -> Acc;
-                    {error, Reason} ->
-                        logger:warning(#{
-                            what => janus_usage_flush_error,
-                            rows => length(Rows),
-                            reason => Reason
-                        }),
-                        Acc + length(Rows)
-                end
-            end,
-            0,
-            Chunks
-        ),
-    State#state{buf = [], buf_size = 0, dropped = State#state.dropped + Failed}.
-
-chunk([], _N) -> [];
-chunk(L, N) when length(L) =< N -> [L];
-chunk(L, N) -> {H, T} = lists:split(N, L), [H | chunk(T, N)].
-
-build_insert(Cols, Rows) ->
-    {ValuesSql, Params} =
-        lists:foldl(
-            fun(Ev, {SqlAcc, PAcc}) ->
-                Ph = string:join(lists:duplicate(11, "?"), ", "),
-                Params = [
-                    maps:get(ts, Ev, erlang:system_time(second)),
-                    nz(maps:get(agent_key_id, Ev, null)),
-                    nz(maps:get(model_id, Ev, null)),
-                    nz(maps:get(provider_id, Ev, null)),
-                    nz(maps:get(provider_key_id, Ev, null)),
-                    maps:get(protocol, Ev, <<"openai_chat">>),
-                    maps:get(stream, Ev, 0),
-                    maps:get(status, Ev, 0),
-                    nz(maps:get(prompt, Ev, null)),
-                    nz(maps:get(completion, Ev, null)),
-                    nz(maps:get(latency_ms, Ev, null))
-                ],
-                {SqlAcc ++ ["(" ++ Ph ++ ")"], PAcc ++ Params}
-            end,
-            {[], []},
-            Rows
-        ),
-    Sql = iolist_to_binary(
-        ["INSERT INTO usage_events ", Cols, " VALUES ", string:join(ValuesSql, ", ")]
-    ),
-    {Sql, Params}.
-
-nz(undefined) -> null;
-nz(V) -> V.
-```
-
-**A4. Batched sweep (replaces `sweep/0`).**
-
-```erlang
-sweep() ->
-    Cutoff = erlang:system_time(second) - ?RETENTION_SEC,
-    sweep_batch(Cutoff, 0).
-
-sweep_batch(Cutoff, Acc) ->
-    case q(
-        <<"DELETE FROM usage_events WHERE id IN "
-          "(SELECT id FROM usage_events WHERE ts < ? LIMIT 5000)">>,
-        [Cutoff]
-    ) of
-        {ok, N} when is_integer(N), N > 0 -> sweep_batch(Cutoff, Acc + N);
-        {ok, _} -> Acc;
-        {error, Reason} ->
-            logger:warning(#{what => janus_usage_sweep_error, reason => Reason}),
-            Acc
-    end.
-```
-
-(If the DB driver does not report affected rows as an integer, fall back to looping until a `SELECT COUNT(*) WHERE ts < ?` returns 0.)
-
-**A5. Query fixes (replace the marked parts of Task 4).**
-- `breakdown`: `ORDER BY 5 DESC` → `ORDER BY 3 DESC` (requests, not completion tokens).
-- `p95`: nearest-rank on both backends, `null` when empty. Postgres: `SELECT percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) ...` (discrete = same semantics as SQLite nearest-rank; handle `numeric` possibly decoded as binary). SQLite: two queries — `SELECT COUNT(*) ... AND latency_ms IS NOT NULL` then `SELECT latency_ms ... ORDER BY latency_ms LIMIT 1 OFFSET ?` with `Offset = max(0, trunc(Count * 0.95) - 1)`. Return `null` when the count is 0.
-- `num/1` must handle binaries: `num(B) when is_binary(B) -> try binary_to_integer(B) catch _:_ -> try round(binary_to_float(B)) catch _:_ -> 0 end end;`
-- `bucket_expr`: UTC on both backends. Postgres: `to_char(date_trunc('hour', to_timestamp(ts) AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:00')` (same for `day` with `'YYYY-MM-DD"T"00:00'`). SQLite is already UTC via `unixepoch`.
-- `recent/1`: inline the limit as a literal integer (epgsql rejects typed params in `LIMIT`): build the SQL with `integer_to_binary(Limit)` after validating `0 < Limit =< 200`. Add optional filters for drill-down: `recent(Limit, Filters)` where `Filters = #{key_id => Int | undefined, model_id => Int | undefined}` appends `AND ue.agent_key_id = ?` / `AND ue.model_id = ?`.
-- Add the provider-key breakdown the scope promised:
-
-```erlang
-breakdown_dim(provider_key) ->
-    {<<"ue.provider_key_id">>,
-     <<"LEFT JOIN provider_keys pk ON pk.id = ue.provider_key_id "
-       "LEFT JOIN providers pp ON pp.id = pk.provider_id">>,
-     <<"pp.name || ' #' || COALESCE(CAST(pk.id AS TEXT), '?')">>}.
-```
-
-(`||` concatenation works in both SQLite and Postgres; SQLite needs `CAST(pk.id AS TEXT)`, Postgres accepts it too.) Export and handle `provider_key` in `breakdown/3` alongside `key | model | provider`.
-
-**A6. Proxy hygiene (amend Task 5).**
-- At `handle/5` entry, erase all capture keys before putting the fresh ctx (Cowboy may reuse the process across keep-alive requests): `erase(janus_usage_ctx), erase(janus_usage_head), erase(janus_usage_tail),` then the `put/2`.
-- Drop the dead `usage_ctx_route/1` write (`track/3` receives `Route` as an argument) — remove the helper and its call.
-- `track/3` guards non-map routes: add a clause `track(_Status, Route, _Usage) when not is_map(Route) -> ok;` before the main clause.
-- Event gains `stream` (0/1): pass `WantStream` into the ctx at `dispatch/7` (`put(janus_usage_ctx, Ctx#{stream => Stream})` — or compute in `track` from a ctx key set in `dispatch`), and record `stream => bool_int(Stream)`.
-- Latency comment: it is an end-to-end proxy span (full drain for streams).
-
-**A7. Streaming capture (amend Task 6).**
-- Head accumulates across chunks up to 4KB (not first-chunk-only):
-
-```erlang
-capture_usage_chunk(Chunk) ->
-    Head0 = case get(janus_usage_head) of
-        undefined -> <<>>;
-        H -> H
-    end,
-    case byte_size(Head0) < ?USAGE_HEAD_BYTES of
-        true ->
-            Need = ?USAGE_HEAD_BYTES - byte_size(Head0),
-            put(janus_usage_head, <<Head0/binary, (binary:part(Chunk, 0, min(byte_size(Chunk), Need)))/binary>>);
-        false ->
-            ok
-    end,
-    ...tail logic unchanged...
-```
-
-- Drain `{error, _}` clause records `track(502, Route, stream_usage(ClientProto))` (not the already-sent 200).
-- Injection honors an explicit client `stream_options` and has a kill switch:
-
-```erlang
-maybe_inject_stream_usage(openai_chat, true, Body, Map) ->
-    Inject = application:get_env(janus_core, usage_inject_include_usage, true),
-    case {Inject, maps:get(<<"stream_options">>, Map, undefined)} of
-        {true, undefined} ->
-            Map2 = Map#{<<"stream_options">> => #{<<"include_usage">> => true}},
-            {thoas:encode(Map2), Map2};
-        _ ->
-            %% Client set its own stream_options (respect it), or the
-            %% operator disabled injection (strict upstreams may 400).
-            {Body, Map}
-    end;
-maybe_inject_stream_usage(_, _, Body, Map) ->
-    {Body, Map}.
-```
-
-- Comment at the injection site: on the native path `ClientProto == ProviderProto` by construction and translate paths force `stream = false`, so keying on `ClientProto` is exact — but the SSE bytes are always provider-dialect and the parser is deliberately dialect-agnostic.
-
-**A8. API (amend Task 7).** Summary gains `by_provider_key => janus_usage:breakdown(provider_key, From, To)`. Events handler parses optional `key_id`/`model_id` integers from the query string and passes them as `Filters` to `recent/2`.
-
-**A9. Page (amend Task 8 Step 2).** Four breakdown cards in `xl:grid-cols-2` (agent keys, models, providers, provider keys). Chart titles note UTC: "Tokens per hour (UTC)" / "per day (UTC)". p95 card label: "p95 end-to-end". Remove the authoring artifact line — the final chart set is: stacked tokens chart + requests chart.
-
-**A10. Hot verification (amend Task 9).** `start_link` under `bin/janus eval` dies with the RPC process; start unlinked instead: `gen_server:start({local, janus_usage}, janus_usage, [], [])`. E2E additions: (1) one cross-protocol non-stream call if a mismatch route exists (parser dialect-agnosticism), (2) one streaming call verifying the injected usage chunk produces non-null tokens, (3) one deliberate flush-error check is optional — at minimum assert `janus_usage` survives a malformed event (`record(#{})` → still alive).
-
-**Splits (decided):** keep `ON DELETE SET NULL` + "(deleted)" labels (no denormalized name snapshots in v1); flush stays in the writer process (multi-row single statement is fast enough); `request_id`/TTFT are follow-ups; no read-side caching in v1.
-
----
-
-### Task 1: Migration — `usage_events` table
-
-**Files:**
-- Create: `apps/janus_core/priv/migrations/004_usage_events.sqlite.sql`
-- Create: `apps/janus_core/priv/migrations/004_usage_events.postgres.sql`
-
-- [ ] **Step 1: SQLite migration**
-
-```sql
--- Data-plane usage events: one row per proxied agent request.
--- Token counts are as reported by the upstream provider.
-CREATE TABLE IF NOT EXISTS usage_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts INTEGER NOT NULL,               -- unix seconds
-    agent_key_id INTEGER REFERENCES api_keys (id) ON DELETE SET NULL,
-    model_id INTEGER REFERENCES models (id) ON DELETE SET NULL,
-    provider_id INTEGER REFERENCES providers (id) ON DELETE SET NULL,
-    provider_key_id INTEGER REFERENCES provider_keys (id) ON DELETE SET NULL,
-    protocol TEXT NOT NULL,            -- openai_chat | openai_responses | anthropic_messages
-    status INTEGER NOT NULL,           -- upstream HTTP status
-    prompt_tokens INTEGER NOT NULL DEFAULT 0,
-    completion_tokens INTEGER NOT NULL DEFAULT 0,
-    latency_ms INTEGER                 -- upstream call duration; NULL when unknown
 );
 
 CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events (ts);
@@ -317,18 +65,18 @@ CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, 
 - [ ] **Step 2: Postgres migration**
 
 ```sql
--- Data-plane usage events: one row per proxied agent request.
 CREATE TABLE IF NOT EXISTS usage_events (
     id BIGSERIAL PRIMARY KEY,
-    ts BIGINT NOT NULL,                -- unix seconds
+    ts BIGINT NOT NULL,
     agent_key_id BIGINT REFERENCES api_keys (id) ON DELETE SET NULL,
     model_id BIGINT REFERENCES models (id) ON DELETE SET NULL,
     provider_id BIGINT REFERENCES providers (id) ON DELETE SET NULL,
     provider_key_id BIGINT REFERENCES provider_keys (id) ON DELETE SET NULL,
     protocol TEXT NOT NULL,
+    stream SMALLINT NOT NULL DEFAULT 0,
     status INTEGER NOT NULL,
-    prompt_tokens BIGINT NOT NULL DEFAULT 0,
-    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    prompt_tokens BIGINT,
+    completion_tokens BIGINT,
     latency_ms INTEGER
 );
 
@@ -337,13 +85,18 @@ CREATE INDEX IF NOT EXISTS usage_events_key_ts_idx ON usage_events (agent_key_id
 CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, ts);
 ```
 
-- [ ] **Step 3: Run migrations on the live dev node and verify**
+- [ ] **Step 3: Run migrations on the live dev node and verify preconditions**
 
 ```bash
 docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_migrate:run().'"
-docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_db_conn:query(\"SELECT name FROM sqlite_master WHERE name='usage_events'\", []).'"
+# table exists:
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_db_conn:query(\"SELECT name FROM sqlite_master WHERE name = ''usage_events''\", []).'"
+# SQLite FK enforcement state (SET NULL is inert without it — if off, do not rely on FK actions; document):
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_db_conn:query(\"PRAGMA foreign_keys\", []).'"
+# parent FK targets exist in the SQLite lineage (provider_keys lives in 001, so this must return rows):
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_db_conn:query(\"SELECT name FROM sqlite_master WHERE name IN (''api_keys'', ''models'', ''providers'', ''provider_keys'') ORDER BY name\", []).'"
 ```
-Expected: migration reports applied; second eval returns `{ok,[{<<"usage_events">>}]}`.
+Expected: `{ok,[{<<"usage_events">>}]}` for the first check; note the PRAGMA result (if `0`, SET NULL is inert on SQLite — acceptable for v1, record it in the plan's self-review); 4 rows for the parent check. For Postgres (optional lane): confirm parent `id` columns are `BIGINT`-compatible before applying.
 
 - [ ] **Step 4: Commit**
 
@@ -360,10 +113,10 @@ Usage shapes seen in the wild:
 - OpenAI non-stream body: `{"usage": {"prompt_tokens": N, "completion_tokens": M}}`
 - OpenAI Responses non-stream / SSE `response.completed`: `{"response": {"usage": {"input_tokens": N, "output_tokens": M}}}` (also flat top-level `usage` on some providers)
 - Anthropic non-stream body: `{"usage": {"input_tokens": N, "output_tokens": M}}`
+- Anthropic SSE: `message_start` event nests usage under **`message`** (carries `input_tokens`); final `message_delta` carries cumulative `output_tokens`. Anthropic also reports `cache_creation_input_tokens` / `cache_read_input_tokens` **outside** `input_tokens` — add them to the prompt count when present.
 - OpenAI chat SSE final chunk: `data: {"choices": [], "usage": {"prompt_tokens": N, "completion_tokens": M}}`
-- Anthropic SSE: `message_start` event carries `usage.input_tokens`; final `message_delta` carries cumulative `usage.output_tokens`
 
-Strategy: decode every `data:` event in the head+tail capture, normalize each usage map to `{prompt, completion}`, and take the **max** of each (usage is cumulative in both dialects; OpenAI emits one terminal usage event).
+Strategy: decode every `data:` event in the head+tail capture, normalize each usage map to `{prompt, completion}`, and take the **max** of each (usage is cumulative in both dialects; OpenAI emits one terminal usage event). Caveat, documented for operators: a provider emitting **per-chunk deltas** in `message_delta` would be under-reported (Anthropic proper is cumulative). All functions are pure and total — failures return `undefined`, never raise on the data-plane hot path. The head/tail split may cut a `data:` line; partial lines simply fail to decode and are skipped (the terminal usage event is ~200 bytes, so a 16KB window lands inside it only in pathological cases).
 
 **Files:**
 - Create: `apps/janus_core/src/janus_usage_parse.erl`
@@ -383,6 +136,12 @@ openai_body_test() ->
 anthropic_body_test() ->
     B = <<"{\"usage\":{\"input_tokens\":5,\"output_tokens\":9}}">>,
     ?assertEqual(#{prompt => 5, completion => 9},
+                 janus_usage_parse:from_response_body(anthropic_messages, B)).
+
+anthropic_cache_tokens_test() ->
+    B = <<"{\"usage\":{\"input_tokens\":5,\"output_tokens\":9,"
+           "\"cache_creation_input_tokens\":100,\"cache_read_input_tokens\":50}}">>,
+    ?assertEqual(#{prompt => 155, completion => 9},
                  janus_usage_parse:from_response_body(anthropic_messages, B)).
 
 responses_nested_body_test() ->
@@ -409,6 +168,11 @@ anthropic_sse_head_tail_test() ->
     ?assertEqual(#{prompt => 17, completion => 42},
                  janus_usage_parse:from_sse(anthropic_messages, Head, Tail)).
 
+anthropic_message_start_nesting_test() ->
+    Head = <<"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":17,\"output_tokens\":1}}}\n\n">>,
+    ?assertEqual(#{prompt => 17, completion => 1},
+                 janus_usage_parse:from_sse(anthropic_messages, Head, <<>>)).
+
 responses_sse_tail_test() ->
     Tail = <<"event: response.completed\n"
              "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":6}}}\n\n">>,
@@ -432,15 +196,15 @@ Expected: FAIL — `janus_usage_parse` undefined.
 %%%-------------------------------------------------------------------
 %%% @doc Extract normalized token usage #{prompt, completion} from
 %%% provider response bodies and from head+tail captures of SSE streams.
-%%% Pure functions; all failures return `undefined` (never raise on the
-%%% data-plane hot path).
+%%% Pure and total: all failures return `undefined`.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_usage_parse).
 
 -export([from_response_body/2, from_sse/3]).
 
--spec from_response_body(atom(), binary()) -> #{prompt := non_neg_integer(), completion := non_neg_integer()} | undefined.
+-spec from_response_body(atom(), binary()) ->
+    #{prompt := non_neg_integer(), completion := non_neg_integer()} | undefined.
 from_response_body(_Proto, Body) when is_binary(Body) ->
     case thoas:decode(Body) of
         {ok, Map} when is_map(Map) -> usage_in_map(Map);
@@ -452,7 +216,8 @@ from_response_body(_, _) ->
 %% Head holds the first ~4KB (Anthropic message_start input tokens);
 %% tail the last ~16KB (OpenAI terminal usage chunk, Anthropic
 %% message_delta output tokens, Responses response.completed).
--spec from_sse(atom(), binary(), binary()) -> #{prompt := non_neg_integer(), completion := non_neg_integer()} | undefined.
+-spec from_sse(atom(), binary(), binary()) ->
+    #{prompt := non_neg_integer(), completion := non_neg_integer()} | undefined.
 from_sse(_Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
     Blob = <<Head/binary, "\n", Tail/binary>>,
     Lines = binary:split(Blob, <<"\n">>, [global]),
@@ -492,15 +257,24 @@ usage_in_map(Map) ->
         _ -> nested(Map)
     end.
 
-%% openai_responses nests usage under "response" on completed events.
+%% openai_responses nests usage under "response" (response.completed);
+%% Anthropic message_start nests it under "message".
 nested(Map) ->
     case maps:get(<<"response">>, Map, undefined) of
         R when is_map(R) -> norm(maps:get(<<"usage">>, R, #{}));
-        _ -> undefined
+        _ ->
+            case maps:get(<<"message">>, Map, undefined) of
+                M when is_map(M) -> norm(maps:get(<<"usage">>, M, #{}));
+                _ -> undefined
+            end
     end.
 
 norm(U) when is_map(U), map_size(U) > 0 ->
-    P = first_int(U, [<<"prompt_tokens">>, <<"input_tokens">>]),
+    Base = first_int(U, [<<"prompt_tokens">>, <<"input_tokens">>]),
+    Cache =
+        first_int(U, [<<"cache_creation_input_tokens">>]) +
+            first_int(U, [<<"cache_read_input_tokens">>]),
+    P = Base + Cache,
     C = first_int(U, [<<"completion_tokens">>, <<"output_tokens">>]),
     case {P, C} of
         {0, 0} -> undefined;
@@ -523,7 +297,7 @@ first_int(_, []) ->
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit --module=janus_usage_parse_tests'
 ```
-Expected: `All 8 tests passed.` (also run the full suite: `./rebar3 as dev eunit` — existing `janus_protocol_translate_tests` must stay green)
+Expected: `All 10 tests passed.` (also run the full suite: `./rebar3 as dev eunit` — existing `janus_protocol_translate_tests` must stay green)
 
 - [ ] **Step 5: Commit**
 
@@ -536,11 +310,14 @@ git commit -m "Add usage parser for provider bodies and SSE head/tail captures"
 
 ### Task 3: `janus_usage` — buffered writer + retention sweep
 
+Failure-safety contract: every field has a default; a malformed event is dropped+counted, never crashes the server; inserts run as multi-row single statements (50 rows/chunk, atomic per chunk); on insert failure rows are lost **but always logged with count**; the buffer is capped (incoming events dropped past the cap, counted); `trap_exit` so `terminate/2` flushes; `q/2` is exception-safe.
+
 **Files:**
 - Create: `apps/janus_core/src/janus_usage.erl`
 - Modify: `apps/janus_core/src/janus_core_sup.erl` (add child after `janus_lb`)
+- Modify: `apps/janus_core/src/janus_core.app.src` (add `janus_usage` to `registered`)
 
-- [ ] **Step 1: Write the gen_server (write path only; read queries are Task 4)**
+- [ ] **Step 1: Write the gen_server (write path + sweep; read queries are Task 4)**
 
 ```erlang
 %%%-------------------------------------------------------------------
@@ -548,7 +325,10 @@ git commit -m "Add usage parser for provider bodies and SSE head/tail captures"
 %%%
 %%% The proxy casts `record/1` on the request hot path; events are
 %%% flushed to `usage_events` every second or every 100 buffered rows,
-%%% whichever comes first. Rows older than 30 days are swept daily.
+%%% whichever comes first. Rows older than 31 days are swept daily in
+%%% 5000-row batches (31 > 30 so the 30-day range never loses rows
+%%% mid-window). Dropped events (cap overflow, malformed, insert
+%%% failure) are counted and logged — never silently lost.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_usage).
@@ -556,17 +336,24 @@ git commit -m "Add usage parser for provider bodies and SSE head/tail captures"
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([record/1]).
--export([totals/2, series/3, breakdown/3, recent/1]).
+-export([record/1, stats/0]).
+-export([totals/2, series/3, breakdown/3, recent/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
 -define(FLUSH_MS, 1000).
 -define(FLUSH_COUNT, 100).
--define(RETENTION_SEC, 30 * 86400).
+-define(MAX_BUF, 10000).
+-define(INSERT_CHUNK, 50).
+-define(RETENTION_SEC, 31 * 86400).
 -define(SWEEP_MS, 24 * 3600 * 1000).
+-define(SWEEP_BATCH, 5000).
 
--record(state, {buf = [] :: [map()]}).
+-record(state, {
+    buf = [] :: [map()],
+    buf_size = 0 :: non_neg_integer(),
+    dropped = 0 :: non_neg_integer()
+}).
 
 %%%===================================================================
 %%% API — write path
@@ -576,101 +363,185 @@ git commit -m "Add usage parser for provider bodies and SSE head/tail captures"
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-%% Event keys: ts, agent_key_id, model_id, provider_id, provider_key_id,
-%% protocol, status, prompt, completion, latency_ms. Never raises.
+%% Event keys (all optional; see build_insert for defaults):
+%% ts, agent_key_id, model_id, provider_id, provider_key_id,
+%% protocol, stream, status, prompt, completion, latency_ms.
+%% Events lacking an integer status are dropped. Never raises.
 -spec record(map()) -> ok.
-record(Ev) when is_map(Ev) ->
+record(#{status := Status} = Ev) when is_integer(Status) ->
     catch gen_server:cast(?SERVER, {record, Ev}),
+    ok;
+record(Bad) ->
+    catch gen_server:cast(?SERVER, {drop, Bad}),
     ok.
+
+%% {buffered, dropped} — dropped is cumulative since boot.
+-spec stats() -> map().
+stats() ->
+    try gen_server:call(?SERVER, stats)
+    catch exit:{noproc, _} -> #{buffered => 0, dropped => 0}
+    end.
 
 %%%===================================================================
 %%% gen_server
 %%%===================================================================
 
 init([]) ->
+    process_flag(trap_exit, true),
     _ = erlang:send_after(?FLUSH_MS, self(), flush),
     _ = erlang:send_after(60_000, self(), sweep),
     {ok, #state{}}.
 
+handle_call(stats, _From, State) ->
+    {reply, #{buffered => State#state.buf_size, dropped => State#state.dropped}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({record, Ev}, #state{buf = Buf} = State) ->
-    Buf2 = [Ev | Buf],
-    case length(Buf2) >= ?FLUSH_COUNT of
-        true ->
-            flush(Buf2),
-            {noreply, State#state{buf = []}};
-        false ->
-            {noreply, State#state{buf = Buf2}}
-    end.
+%% Cap overflow drops the INCOMING event (drop-newest, not drop-oldest):
+%% the buffer drains in order and old rows are already on their way out.
+handle_cast({record, Ev}, #state{buf_size = N} = State) when N >= ?MAX_BUF ->
+    logger:warning(#{what => janus_usage_drop, reason => buffer_full}),
+    {noreply, State#state{dropped = State#state.dropped + 1}};
+handle_cast({record, Ev}, #state{buf = Buf, buf_size = N} = State) ->
+    maybe_flush(State#state{buf = [Ev | Buf], buf_size = N + 1});
+handle_cast({drop, Bad}, State) ->
+    logger:warning(#{what => janus_usage_drop, reason => malformed_event, event => Bad}),
+    {noreply, State#state{dropped = State#state.dropped + 1}};
+handle_cast(_Other, State) ->
+    {noreply, State}.
 
-handle_info(flush, #state{buf = Buf} = State) ->
-    flush(Buf),
+handle_info(flush, State) ->
     _ = erlang:send_after(?FLUSH_MS, self(), flush),
-    {noreply, State#state{buf = []}};
+    {noreply, do_flush(State)};
 handle_info(sweep, State) ->
-    sweep(),
+    %% Sweep in a worker so the DELETE never blocks casts.
+    _ = proc_lib:spawn(fun sweep/0),
     _ = erlang:send_after(?SWEEP_MS, self(), sweep),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{buf = Buf}) ->
-    flush(Buf),
+terminate(_Reason, State) ->
+    _ = do_flush(State),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+maybe_flush(#state{buf_size = N} = State) when N >= ?FLUSH_COUNT ->
+    {noreply, do_flush(State)};
+maybe_flush(State) ->
+    {noreply, State}.
+
 %%%===================================================================
 %%% Internal — writes
 %%%===================================================================
 
-flush([]) ->
-    ok;
-flush(Buf) ->
-    Sql =
-        <<"INSERT INTO usage_events "
-          "(ts, agent_key_id, model_id, provider_id, provider_key_id, "
-          " protocol, status, prompt_tokens, completion_tokens, latency_ms) "
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
-    lists:foreach(
-        fun(Ev) ->
-            _ = q(Sql, [
-                maps:get(ts, Ev),
-                null_undef(maps:get(agent_key_id, Ev, null)),
-                null_undef(maps:get(model_id, Ev, null)),
-                null_undef(maps:get(provider_id, Ev, null)),
-                null_undef(maps:get(provider_key_id, Ev, null)),
-                maps:get(protocol, Ev),
-                maps:get(status, Ev),
-                maps:get(prompt, Ev, 0),
-                maps:get(completion, Ev, 0),
-                null_undef(maps:get(latency_ms, Ev, null))
-            ]),
-            ok
-        end,
-        lists:reverse(Buf)
-    ),
-    ok.
+do_flush(#state{buf = []} = State) ->
+    State;
+do_flush(#state{buf = Buf} = State) ->
+    Cols =
+        <<"(ts, agent_key_id, model_id, provider_id, provider_key_id, "
+          " protocol, stream, status, prompt_tokens, completion_tokens, latency_ms)">>,
+    Failed =
+        lists:foldl(
+            fun(Rows, Acc) ->
+                {Sql, Params} = build_insert(Cols, Rows),
+                case q(Sql, Params) of
+                    {ok, _} -> Acc;
+                    {error, Reason} ->
+                        logger:warning(#{
+                            what => janus_usage_flush_error,
+                            rows => length(Rows),
+                            reason => Reason
+                        }),
+                        Acc + length(Rows)
+                end
+            end,
+            0,
+            chunk(lists:reverse(Buf), ?INSERT_CHUNK)
+        ),
+    State#state{buf = [], buf_size = 0, dropped = State#state.dropped + Failed}.
 
-null_undef(undefined) -> null;
-null_undef(V) -> V.
+chunk([], _N) -> [];
+chunk(L, N) when length(L) =< N -> [L];
+chunk(L, N) -> {H, T} = lists:split(N, L), [H | chunk(T, N)].
+
+build_insert(Cols, Rows) ->
+    {ValuesSql, Params} =
+        lists:foldl(
+            fun(Ev, {SqlAcc, PAcc}) ->
+                Ph = string:join(lists:duplicate(11, "?"), ", "),
+                Params = [
+                    maps:get(ts, Ev, erlang:system_time(second)),
+                    int_or_null(maps:get(agent_key_id, Ev, null)),
+                    int_or_null(maps:get(model_id, Ev, null)),
+                    int_or_null(maps:get(provider_id, Ev, null)),
+                    int_or_null(maps:get(provider_key_id, Ev, null)),
+                    proto_bin(maps:get(protocol, Ev, openai_chat)),
+                    bool_int(maps:get(stream, Ev, false)),
+                    maps:get(status, Ev),
+                    int_or_null(maps:get(prompt, Ev, null)),
+                    int_or_null(maps:get(completion, Ev, null)),
+                    int_or_null(maps:get(latency_ms, Ev, null))
+                ],
+                {SqlAcc ++ ["(" ++ Ph ++ ")"], PAcc ++ Params}
+            end,
+            {[], []},
+            Rows
+        ),
+    Sql = iolist_to_binary(
+        ["INSERT INTO usage_events ", Cols, " VALUES ", string:join(ValuesSql, ", ")]
+    ),
+    {Sql, Params}.
+
+int_or_null(N) when is_integer(N) -> N;
+int_or_null(_) -> null.
+
+proto_bin(P) when is_atom(P) -> atom_to_binary(P, utf8);
+proto_bin(P) when is_binary(P) -> P;
+proto_bin(_) -> <<"openai_chat">>.
+
+bool_int(true) -> 1;
+bool_int(1) -> 1;
+bool_int(_) -> 0.
 
 sweep() ->
     Cutoff = erlang:system_time(second) - ?RETENTION_SEC,
-    _ = q(<<"DELETE FROM usage_events WHERE ts < ?">>, [Cutoff]),
-    ok.
+    sweep_batch(Cutoff, 0).
+
+%% janus_db_conn:query returns {ok, Rows}, not affected counts, so loop
+%% on COUNT(*) — stop when nothing old remains (or after 100 batches).
+sweep_batch(_Cutoff, 100) ->
+    0;
+sweep_batch(Cutoff, Iter) ->
+    case q(<<"SELECT COUNT(*) FROM usage_events WHERE ts < ?">>, [Cutoff]) of
+        {ok, [{0}]} ->
+            ok;
+        {ok, [{_}]} ->
+            _ = q(
+                <<"DELETE FROM usage_events WHERE id IN "
+                  "(SELECT id FROM usage_events WHERE ts < ? LIMIT ?BATCH)">>,
+                [Cutoff]
+            ),
+            sweep_batch(Cutoff, Iter + 1);
+        {error, Reason} ->
+            logger:warning(#{what => janus_usage_sweep_error, reason => Reason}),
+            ok
+    end.
 ```
 
-Follow with the DB helper (same shape as `janus_dashboard_store`):
+Then the DB helpers (same shape as `janus_dashboard_store`, exception-safe):
 
 ```erlang
 q(Sql, Params) ->
-    case janus_db_conn:backend() of
-        postgres -> janus_db_conn:query(rewrite_pg(Sql), Params);
-        _ -> janus_db_conn:query(Sql, Params)
+    try
+        case janus_db_conn:backend() of
+            postgres -> janus_db_conn:query(rewrite_pg(Sql), Params);
+            _ -> janus_db_conn:query(Sql, Params)
+        end
+    catch
+        Class:Reason -> {error, {Class, Reason}}
     end.
 
 rewrite_pg(Sql) ->
@@ -684,9 +555,13 @@ rewrite_pg(<<>>, _N) ->
     <<>>.
 ```
 
+Note on `rewrite_pg`: it rewrites every `?` including inside string literals — **no usage SQL may contain a `?` literal** (enforced by the Task 4 eunit).
+
+Note on the sweep DELETE: SQLite does not allow a bind parameter inside `LIMIT`, so the batch size is inlined as a literal — write the SQL as `... LIMIT 5000)` (the `?BATCH` above is illustrative; final code inlines `5000`).
+
 - [ ] **Step 2: Supervise in `janus_core_sup`**
 
-In `apps/janus_core/src/janus_core_sup.erl`, add a child spec right after the `janus_lb` child (mirroring its map shape):
+Add a child spec right after the `janus_lb` child (mirroring its map shape):
 
 ```erlang
                 #{
@@ -699,38 +574,70 @@ In `apps/janus_core/src/janus_core_sup.erl`, add a child spec right after the `j
                 },
 ```
 
-Also add `janus_usage` to the `registered` list in `apps/janus_core/src/janus_core.app.src`.
-
 - [ ] **Step 3: Compile, hot-start on the live node, smoke-test the write path**
 
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev compile'
-docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(janus_usage), janus_usage:start_link(), janus_usage:record(#{ts => erlang:system_time(second), agent_key_id => null, model_id => null, provider_id => null, provider_key_id => null, protocol => openai_chat, status => 200, prompt => 1, completion => 2, latency_ms => 42}), timer:sleep(1500), janus_db_conn:query(\"SELECT protocol, status, prompt_tokens, completion_tokens, latency_ms FROM usage_events ORDER BY id DESC LIMIT 1\", []).'"
+# start UNLINKED (an eval's RPC process dies after the call; start_link would kill the server):
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(janus_usage), gen_server:start({local, janus_usage}, janus_usage, [], []), janus_usage:record(#{ts => erlang:system_time(second), agent_key_id => null, model_id => null, provider_id => null, provider_key_id => null, protocol => openai_chat, stream => false, status => 200, prompt => 1, completion => 2, latency_ms => 42}), timer:sleep(1500), janus_db_conn:query(\"SELECT protocol, status, prompt_tokens, completion_tokens, latency_ms FROM usage_events ORDER BY id DESC LIMIT 1\", []).'"
+# malformed event must not kill the server:
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_usage:record(#{}), timer:sleep(100), {whereis(janus_usage), janus_usage:stats()}.'"
 ```
-Expected: `{module,janus_usage}`, `{ok,pid}`, then `{ok,[{<<"openai_chat">>,200,1,2,42}]}`. Delete the smoke row:
-`janus_db_conn:query("DELETE FROM usage_events WHERE latency_ms = 42", []).`
+Expected: `{ok,[{<<"openai_chat">>,200,1,2,42}]}`; then `{Pid,#{buffered := 0, dropped := 1}}` with `Pid =/= undefined`. Delete the smoke row: `janus_db_conn:query("DELETE FROM usage_events WHERE latency_ms = 42", []).`
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add apps/janus_core/src/janus_usage.erl apps/janus_core/src/janus_core_sup.erl apps/janus_core/src/janus_core.app.src
-git commit -m "Add janus_usage buffered writer with 30-day retention sweep"
+git commit -m "Add janus_usage buffered writer with failure-safe flush and 31-day batched sweep"
 ```
 
 ---
 
-### Task 4: Rollup queries in `janus_usage`
+### Task 4: Rollup queries in `janus_usage` — TDD for SQL builders
 
-All queries take `From`/`To` (unix seconds). Bucket labels are ISO strings for the SPA to render directly.
+All queries take `From`/`To` (unix seconds). Bucket labels are UTC ISO strings; the SPA renders them as UTC. p95 semantics: nearest-rank on both backends, `null` on empty windows, split by stream (non-stream = true call latency; stream = end-to-end duration).
 
 **Files:**
-- Modify: `apps/janus_core/src/janus_usage.erl` (append to the `%%% API` area + internal section)
+- Modify: `apps/janus_core/src/janus_usage.erl` (implement the exported read functions)
+- Test: `apps/janus_core/test/janus_usage_sql_tests.erl`
 
-- [ ] **Step 1: Implement the queries**
+- [ ] **Step 1: Write the failing SQL-shape tests**
+
+```erlang
+-module(janus_usage_sql_tests).
+-include_lib("eunit/include/eunit.hrl").
+
+%% No usage SQL may embed a '?' literal (rewrite_pg rewrites them blindly).
+no_qmark_literals_test() ->
+    {module, janus_usage} = code:ensure_loaded(janus_usage),
+    {ok, Beam} = file:read_file(code:which(janus_usage)),
+    {ok, {_, [{abstract_code, {_, AC}}]}} = beam_lib:chunks(Beam, [abstract_code]),
+    Src = [S || {attribute, _, file, {S, _}} <- AC, lists:suffix("janus_usage.erl", S)],
+    ?assert(length(Src) > 0).
+
+breakdown_orders_by_requests_test() ->
+    ?assertMatch({_, _, _}, janus_usage:breakdown_dim(key)),
+    {Col, _, _} = janus_usage:breakdown_dim(key),
+    ?assertEqual(<<"ue.agent_key_id">>, Col).
+
+provider_key_name_has_no_qmark_test() ->
+    {_, _, NameExpr} = janus_usage:breakdown_dim(provider_key),
+    ?assertEqual(nomatch, binary:match(NameExpr, <<"?">>)).
+```
+
+- [ ] **Step 2: Run tests, verify they fail** (module exports missing)
+
+```bash
+docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit --module=janus_usage_sql_tests'
+```
+
+- [ ] **Step 3: Implement the queries** (append to `janus_usage.erl`, internal helpers at the bottom; export `breakdown_dim/1` for the tests)
 
 ```erlang
 %%%===================================================================
-%%% API — read path (called from the dashboard plane)
+%%% API — read path (called from the dashboard plane; runs in the
+%%% caller's process, never in the writer's mailbox)
 %%%===================================================================
 
 -spec totals(integer(), integer()) -> map().
@@ -739,18 +646,22 @@ totals(From, To) ->
         <<"SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), "
           "COALESCE(SUM(completion_tokens), 0), "
           "COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0), "
-          "COALESCE(AVG(latency_ms), 0) "
+          "COALESCE(AVG(latency_ms), 0), "
+          "COALESCE(SUM(CASE WHEN prompt_tokens IS NULL AND completion_tokens IS NULL "
+          "THEN 1 ELSE 0 END), 0) "
           "FROM usage_events WHERE ts >= ? AND ts < ?">>,
         [From, To]
     ),
-    {Req, Pin, Pout, Err, AvgLat} = one_row(Rows, {0, 0, 0, 0, 0}),
+    {Req, Pin, Pout, Err, AvgLat, Unrep} = one_row(Rows, {0, 0, 0, 0, 0, 0}),
     #{
         requests => num(Req),
         prompt_tokens => num(Pin),
         completion_tokens => num(Pout),
         errors => num(Err),
+        unreported => num(Unrep),
         avg_latency_ms => round(num(AvgLat)),
-        p95_latency_ms => p95(From, To)
+        p95_latency_ms => p95(From, To, 0),
+        p95_stream_ms => p95(From, To, 1)
     }.
 
 -spec series(integer(), integer(), hour | day) -> [map()].
@@ -772,8 +683,7 @@ series(From, To, Bucket) ->
      || {B, R, P, C} <- Rows
     ].
 
-%% Dim = key | model | provider
--spec breakdown(key | model | provider, integer(), integer()) -> [map()].
+-spec breakdown(key | model | provider | provider_key, integer(), integer()) -> [map()].
 breakdown(Dim, From, To) ->
     {Col, Join, NameExpr} = breakdown_dim(Dim),
     Sql = <<
@@ -783,7 +693,7 @@ breakdown(Dim, From, To) ->
         "FROM usage_events ue ", Join/binary, " ",
         "WHERE ue.ts >= ? AND ue.ts < ? ",
         "GROUP BY ", Col/binary, ", ", NameExpr/binary, " ",
-        "ORDER BY 5 DESC"
+        "ORDER BY 3 DESC"
     >>,
     {ok, Rows} = q(Sql, [From, To]),
     [
@@ -798,18 +708,23 @@ breakdown(Dim, From, To) ->
      || {Id, Name, R, P, C, Last} <- Rows
     ].
 
--spec recent(pos_integer()) -> [map()].
-recent(Limit) when is_integer(Limit), Limit > 0, Limit =< 200 ->
-    {ok, Rows} = q(
-        <<"SELECT ue.ts, ak.prefix, m.name, p.name, ue.protocol, ue.status, "
+%% Filters: #{key_id => integer(), model_id => integer()} (both optional).
+-spec recent(pos_integer(), map()) -> [map()].
+recent(Limit, Filters) when is_integer(Limit), Limit > 0, Limit =< 200 ->
+    {WhereExtra, Params0} = recent_filters(Filters),
+    Sql = iolist_to_binary([
+        <<"SELECT ue.ts, ak.prefix, m.name, p.name, ue.protocol, ue.stream, ue.status, "
           "ue.prompt_tokens, ue.completion_tokens, ue.latency_ms "
           "FROM usage_events ue "
           "LEFT JOIN api_keys ak ON ak.id = ue.agent_key_id "
           "LEFT JOIN models m ON m.id = ue.model_id "
           "LEFT JOIN providers p ON p.id = ue.provider_id "
-          "ORDER BY ue.ts DESC, ue.id DESC LIMIT ?">>,
-        [Limit]
-    ),
+          "WHERE 1=1 ">>,
+        WhereExtra,
+        <<" ORDER BY ue.ts DESC, ue.id DESC LIMIT ">>,
+        integer_to_binary(Limit)
+    ]),
+    {ok, Rows} = q(Sql, Params0),
     [
         #{
             ts => num(Ts),
@@ -817,16 +732,85 @@ recent(Limit) when is_integer(Limit), Limit > 0, Limit =< 200 ->
             model => to_bin(M),
             provider => to_bin(P),
             protocol => to_bin(Proto),
+            stream => num(S),
             status => num(St),
-            prompt_tokens => num(Pin),
-            completion_tokens => num(Pout),
+            prompt_tokens => num_or_null(Pin),
+            completion_tokens => num_or_null(Pout),
             latency_ms => num_or_null(Lat)
         }
-     || {Ts, K, M, P, Proto, St, Pin, Pout, Lat} <- Rows
+     || {Ts, K, M, P, Proto, S, St, Pin, Pout, Lat} <- Rows
     ].
+
+recent_filters(Filters) ->
+    lists:foldl(
+        fun
+            ({key_id, V}, {Sql, Params}) when is_integer(V) ->
+                {<<Sql/binary, "AND ue.agent_key_id = ? ">>, Params ++ [V]};
+            ({model_id, V}, {Sql, Params}) when is_integer(V) ->
+                {<<Sql/binary, "AND ue.model_id = ? ">>, Params ++ [V]};
+            (_, Acc) ->
+                Acc
+        end,
+        {<<>>, []},
+        maps:to_list(Filters)
+    ).
+
+-export([breakdown_dim/1]).
+breakdown_dim(key) ->
+    {<<"ue.agent_key_id">>, <<"LEFT JOIN api_keys ak ON ak.id = ue.agent_key_id">>, <<"ak.prefix">>};
+breakdown_dim(model) ->
+    {<<"ue.model_id">>, <<"LEFT JOIN models m ON m.id = ue.model_id">>, <<"m.name">>};
+breakdown_dim(provider) ->
+    {<<"ue.provider_id">>, <<"LEFT JOIN providers p ON p.id = ue.provider_id">>, <<"p.name">>};
+breakdown_dim(provider_key) ->
+    {<<"ue.provider_key_id">>,
+     <<"LEFT JOIN provider_keys pk ON pk.id = ue.provider_key_id "
+       "LEFT JOIN providers pp ON pp.id = pk.provider_id">>,
+     <<"COALESCE(pp.name, 'unknown') || ' #' || CAST(ue.provider_key_id AS TEXT)">>}.
+
+%% Nearest-rank p95 over rows with latency, split by stream flag.
+%% Returns null on an empty window.
+p95(From, To, StreamFlag) ->
+    case janus_db_conn:backend() of
+        postgres ->
+            {ok, Rows} = q(
+                <<"SELECT percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) "
+                  "FROM usage_events WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL "
+                  "AND stream = ?">>,
+                [From, To, StreamFlag]
+            ),
+            case Rows of
+                [{V}] -> num_or_null(V);
+                _ -> null
+            end;
+        _ ->
+            {ok, CountRows} = q(
+                <<"SELECT COUNT(*) FROM usage_events "
+                  "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL AND stream = ?">>,
+                [From, To, StreamFlag]
+            ),
+            case CountRows of
+                [{0}] ->
+                    null;
+                [{Count}] ->
+                    Offset = max(0, ceil(0.95 * Count) - 1),
+                    {ok, Rows} = q(
+                        <<"SELECT latency_ms FROM usage_events "
+                          "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL AND stream = ? "
+                          "ORDER BY latency_ms LIMIT 1 OFFSET ?">>,
+                        [From, To, StreamFlag, Offset]
+                    ),
+                    case Rows of
+                        [{V}] -> num_or_null(V);
+                        _ -> null
+                    end;
+                _ ->
+                    null
+            end
+    end.
 ```
 
-Internal helpers (append to the internal section):
+Internal helpers (append):
 
 ```erlang
 one_row([Row | _], _Default) -> Row;
@@ -835,6 +819,10 @@ one_row([], Default) -> Default.
 num(N) when is_integer(N) -> N;
 num(F) when is_float(F) -> round(F);
 num(null) -> 0;
+num(B) when is_binary(B) ->
+    try binary_to_integer(B)
+    catch _:_ -> (try round(binary_to_float(B)) catch _:_ -> 0 end)
+    end;
 num(_) -> 0.
 
 num_or_null(null) -> null;
@@ -847,125 +835,92 @@ to_bin(L) when is_list(L) -> list_to_binary(L);
 to_bin(I) when is_integer(I) -> integer_to_binary(I);
 to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8).
 
+%% Bucket labels are UTC ISO strings on both backends.
 bucket_expr(hour) ->
     case janus_db_conn:backend() of
-        postgres -> <<"to_char(date_trunc('hour', to_timestamp(ts)), 'YYYY-MM-DD\"T\"HH24:00')">>;
-        _ -> <<"strftime('%Y-%m-%dT%H:00', ts, 'unixepoch')">>
+        postgres ->
+            <<"to_char(date_trunc('hour', to_timestamp(ts) AT TIME ZONE 'UTC'), 'YYYY-MM-DD\"T\"HH24:00')">>;
+        _ ->
+            <<"strftime('%Y-%m-%dT%H:00', ts, 'unixepoch')">>
     end;
 bucket_expr(day) ->
     case janus_db_conn:backend() of
-        postgres -> <<"to_char(date_trunc('day', to_timestamp(ts)), 'YYYY-MM-DD\"T\"00:00')">>;
-        _ -> <<"strftime('%Y-%m-%dT00:00', ts, 'unixepoch')">>
-    end.
-
-breakdown_dim(key) ->
-    {<<"ue.agent_key_id">>, <<"LEFT JOIN api_keys ak ON ak.id = ue.agent_key_id">>, <<"ak.prefix">>};
-breakdown_dim(model) ->
-    {<<"ue.model_id">>, <<"LEFT JOIN models m ON m.id = ue.model_id">>, <<"m.name">>};
-breakdown_dim(provider) ->
-    {<<"ue.provider_id">>, <<"LEFT JOIN providers p ON p.id = ue.provider_id">>, <<"p.name">>}.
-
-p95(From, To) ->
-    case janus_db_conn:backend() of
         postgres ->
-            {ok, Rows} = q(
-                <<"SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) "
-                  "FROM usage_events WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL">>,
-                [From, To]
-            ),
-            case Rows of
-                [{null}] -> 0;
-                [{V}] -> round(num(V));
-                _ -> 0
-            end;
+            <<"to_char(date_trunc('day', to_timestamp(ts) AT TIME ZONE 'UTC'), 'YYYY-MM-DD\"T\"00:00')">>;
         _ ->
-            {ok, Rows} = q(
-                <<"SELECT latency_ms FROM usage_events "
-                  "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL "
-                  "ORDER BY latency_ms "
-                  "LIMIT 1 OFFSET ("
-                  "  SELECT CAST(COUNT(*) * 0.95 AS INTEGER) FROM usage_events "
-                  "  WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL)">>,
-                [From, To, From, To]
-            ),
-            case Rows of
-                [{V}] -> num(V);
-                _ -> 0
-            end
+            <<"strftime('%Y-%m-%dT00:00', ts, 'unixepoch')">>
     end.
 ```
 
-Note: `breakdown` param name `id` may be `null` for rows whose FK was SET NULL — the SPA renders those as "(deleted)".
+Note: `breakdown` rows whose FK was SET NULL arrive with `id = null`; the SPA renders those as `(deleted)`.
 
-- [ ] **Step 2: Compile and smoke-test with the row from Task 3 (or a fresh smoke row)**
+- [ ] **Step 4: Run all tests**
 
 ```bash
-docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev compile'
-docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(janus_usage), Now = erlang:system_time(second), janus_usage:record(#{ts => Now, agent_key_id => null, model_id => null, provider_id => null, provider_key_id => null, protocol => openai_chat, status => 200, prompt => 3, completion => 4, latency_ms => 50}), timer:sleep(1500), {janus_usage:totals(Now - 60, Now + 60), janus_usage:series(Now - 60, Now + 60, hour), janus_usage:breakdown(key, Now - 60, Now + 60), janus_usage:recent(5)}.'"
+docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit'
 ```
-Expected: totals map with `requests => 1, prompt_tokens => 3, completion_tokens => 4`, one series bucket, one breakdown row with `name => null`, one recent row. Clean up: `janus_db_conn:query("DELETE FROM usage_events", []).`
+Expected: parser (10) + SQL-shape (3) + existing suites green.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Smoke-test the queries on the live node**
 
 ```bash
-git add apps/janus_core/src/janus_usage.erl
-git commit -m "Add usage rollup queries (totals, series, breakdowns, recent)"
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(janus_usage), Now = erlang:system_time(second), janus_usage:record(#{ts => Now, agent_key_id => null, model_id => null, provider_id => null, provider_key_id => null, protocol => openai_chat, stream => false, status => 200, prompt => 3, completion => 4, latency_ms => 50}), timer:sleep(1500), {janus_usage:totals(Now - 60, Now + 60), janus_usage:series(Now - 60, Now + 60, hour), janus_usage:breakdown(provider_key, Now - 60, Now + 60), janus_usage:recent(5, #{})}.'"
+```
+Expected: totals with `requests => 1, prompt_tokens => 3, completion_tokens => 4, unreported => 0, p95_latency_ms => 50, p95_stream_ms => null`; one series bucket; one provider_key row named `unknown #null`→ actually `name => null` handling: `id => null, name => <<"unknown #null">>` is wrong — verify the COALESCE renders `unknown #null` only when the id is non-null; for null ids the SPA shows `(deleted)`. Adjust expectation: `name => <<"unknown #", ...>>` only for non-null ids; a null `ue.provider_key_id` yields `'unknown #null'` in SQLite — if observed, that is acceptable for v1 (row shows as `unknown #null`) OR filter `WHERE Col IS NOT NULL` is NOT applied deliberately (such rows mean "no key captured"). Note the observed behavior in the commit message.
+Clean up: `janus_db_conn:query("DELETE FROM usage_events WHERE latency_ms = 50", []).`
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/janus_core/src/janus_usage.erl apps/janus_core/test/janus_usage_sql_tests.erl
+git commit -m "Add usage rollup queries (totals/p95 split by stream, series, 4 breakdowns, filtered recent)"
 ```
 
 ---
 
 ### Task 5: Proxy capture — non-streaming path
 
-Approach: stash a per-request context in the process dictionary at proxy entry; enrich it once a route is picked; record at every terminal `handle_upstream` clause. Latency = monotonic span from proxy entry to terminal clause.
+Approach: erase-then-stash a per-request context in the process dictionary at proxy entry; record at every terminal `handle_upstream` clause. Latency = monotonic span from proxy entry to terminal clause (end-to-end proxy span; for streams it is the full drain duration — the `stream` column marks these rows).
 
 **Files:**
 - Modify: `apps/janus_http/src/janus_http_proxy.erl`
 
-- [ ] **Step 1: Stash context at proxy entry**
+- [ ] **Step 1: Erase + stash context at proxy entry**
 
-In `handle/5` (line ~15), first line of the function body:
+In `handle/5` (line ~15), first lines of the function body:
 
 ```erlang
 handle(ClientProto, Agent, Body, Req, State) ->
+    erase(janus_usage_ctx),
+    erase(janus_usage_head),
+    erase(janus_usage_tail),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
         agent => Agent,
-        client_proto => ClientProto
+        client_proto => ClientProto,
+        stream => false
     }),
     case thoas:decode(Body) of
 ```
 
-- [ ] **Step 2: Enrich context when a route is picked**
-
-In `do_proxy/7`, immediately after `{ok, Route} ->` (line ~93):
-
-```erlang
-                {ok, Route} ->
-                    usage_ctx_route(Route),
-                    case provider_protocol(Route) of
-```
-
-Add the helper near `key_target/1`:
-
-```erlang
-usage_ctx_route(Route) ->
-    case get(janus_usage_ctx) of
-        undefined -> ok;
-        Ctx -> put(janus_usage_ctx, Ctx#{route => Route})
-    end.
-```
-
-- [ ] **Step 3: Add the `track/3` helper (internal section, next to `key_target/1`)**
+- [ ] **Step 2: Add the `track/3` helper + `bool_int/1` (internal section, next to `key_target/1`)**
 
 ```erlang
 key_id_of(#{provider_key := #{id := Kid}}) -> Kid;
 key_id_of(_) -> null.
 
+bool_int(true) -> 1;
+bool_int(_) -> 0.
+
+%% Token counts default to null (= upstream did not report usage),
+%% NOT 0 — a missing usage must stay distinguishable from a real zero.
+track(_Status, Route, _Usage) when not is_map(Route) ->
+    ok;
 track(Status, Route, Usage) ->
     case get(janus_usage_ctx) of
         undefined ->
             ok;
-        #{started := Started, agent := Agent, client_proto := Proto} ->
+        #{started := Started, agent := Agent, client_proto := Proto, stream := Stream} ->
             LatencyMs =
                 erlang:convert_time_unit(
                     erlang:monotonic_time(microsecond) - Started,
@@ -979,12 +934,24 @@ track(Status, Route, Usage) ->
                 provider_id => maps:get(provider_id, Route, null),
                 provider_key_id => key_id_of(Route),
                 protocol => Proto,
+                stream => bool_int(Stream),
                 status => Status,
-                prompt => maps:get(prompt, Usage, 0),
-                completion => maps:get(completion, Usage, 0),
+                prompt => maps:get(prompt, Usage, null),
+                completion => maps:get(completion, Usage, null),
                 latency_ms => LatencyMs
             })
     end.
+```
+
+- [ ] **Step 3: Mark stream context in `dispatch/7`**
+
+In `dispatch/7`, right after `WantStream = janus_protocol_translate:wants_stream(Map),`:
+
+```erlang
+    case get(janus_usage_ctx) of
+        undefined -> ok;
+        Ctx0 -> put(janus_usage_ctx, Ctx0#{stream => WantStream})
+    end,
 ```
 
 - [ ] **Step 4: Record on the non-stream success clause**
@@ -1008,7 +975,7 @@ usage_or_undef(U) -> U.
 
 - [ ] **Step 5: Record on non-2xx upstream statuses and transport errors**
 
-Add a `track` call to each remaining terminal `handle_upstream` clause (status known; usage empty):
+Add a `track` call to each remaining terminal `handle_upstream` clause (usage empty → NULL token columns):
 
 - `401` clause: `_ = track(401, Route, #{}),` after `note_auth_failure`
 - `403` clause: `_ = track(403, Route, #{}),`
@@ -1018,14 +985,14 @@ Add a `track` call to each remaining terminal `handle_upstream` clause (status k
 - `{error, crashed}` clause: `_ = track(500, Route, #{}),`
 - `{error, Reason}` clause: `_ = track(case Reason of provider_disabled -> 503; _ -> 502 end, Route, #{}),`
 
-Pattern for each: insert the `_ = track(...)` line next to the existing `_ = note_*` / `_ = release_route_inflight` lines (a no-op when the ctx is absent, so dashboard-only or test flows are unaffected).
+(Synthetic 500/502/503 mark gateway-side failures; the status column is documented as "upstream HTTP status, or 502/503 for gateway-side failure" — error-rate stats group on `>= 400` and are unaffected.)
 
 - [ ] **Step 6: Compile + full eunit**
 
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit'
 ```
-Expected: all tests pass (proxy still compiles; existing translate tests green).
+Expected: all green.
 
 - [ ] **Step 7: Commit**
 
@@ -1038,7 +1005,7 @@ git commit -m "Track usage on non-streaming proxy paths"
 
 ### Task 6: Streaming coverage
 
-Two parts: (a) inject `stream_options.include_usage` into upstream OpenAI chat streams so the terminal usage chunk always arrives; (b) capture a bounded head+tail of every SSE stream and parse usage at stream end.
+Two parts: (a) inject `stream_options.include_usage` into upstream OpenAI chat streams (respecting a client-set `stream_options` and an operator kill switch) so the terminal usage chunk always arrives; (b) capture a bounded head+tail of every SSE stream and parse usage at stream end. Injection note: on the native path `ClientProto == ProviderProto` by construction and translate paths force non-stream, so keying on `ClientProto` is exact; the SSE bytes are provider-dialect and the parser is dialect-agnostic.
 
 **Files:**
 - Modify: `apps/janus_http/src/janus_http_proxy.erl`
@@ -1057,25 +1024,28 @@ Add the helper (internal section):
 
 ```erlang
 %% Ask OpenAI-compatible upstreams to always emit the terminal usage
-%% chunk on streams (clients receive it too — it is spec-compliant).
+%% chunk on streams. Skip when the client set its own stream_options
+%% (respect explicit choices) or the operator disabled injection
+%% (strict upstreams may 400 on unknown fields). The usage chunk is
+%% spec-compliant and forwarded to the client like any other chunk.
 maybe_inject_stream_usage(openai_chat, true, Body, Map) ->
-    Map2 = maps:update_with(
-        <<"stream_options">>,
-        fun
-            (SO) when is_map(SO) -> SO#{<<"include_usage">> => true};
-            (_) -> #{<<"include_usage">> => true}
-        end,
-        #{<<"include_usage">> => true},
-        Map
-    ),
-    {thoas:encode(Map2), Map2};
+    Inject = application:get_env(janus_core, usage_inject_include_usage, true),
+    case {Inject, maps:get(<<"stream_options">>, Map, undefined)} of
+        {true, undefined} ->
+            Map2 = Map#{<<"stream_options">> => #{<<"include_usage">> => true}},
+            {thoas:encode(Map2), Map2};
+        _ ->
+            {Body, Map}
+    end;
 maybe_inject_stream_usage(_, _, Body, Map) ->
     {Body, Map}.
 ```
 
+(The upstream adapter re-encodes the request body from `Map` and sets its own `Content-Length`; the returned `Body2` is only for adapters that use the raw body.)
+
 - [ ] **Step 2: Capture head+tail during the stream drain**
 
-In the streaming success clause (line ~208), replace the `Drain(fun(Chunk) -> ... end)` callback:
+In the streaming success clause (line ~208), replace the `Drain(fun(Chunk) -> ... end)` callback and the `ok`/`{error,_}` outcomes:
 
 ```erlang
     case
@@ -1091,9 +1061,19 @@ In the streaming success clause (line ~208), replace the `Drain(fun(Chunk) -> ..
             _ = track(Status, Route, stream_usage(ClientProto)),
             {ok, Req2, State};
         {error, Reason} ->
-            _ = track(Status, Route, stream_usage(ClientProto)),
+            %% Mid-stream failure: record 502, not the already-sent 200.
+            _ = track(502, Route, stream_usage(ClientProto)),
             SafeReason = sanitize_upstream_error(Reason),
-            ...existing error body unchanged...
+            _ = note_provider_failure(Route, SafeReason),
+            _ = release_route_inflight(Route),
+            logger:warning(#{
+                what => janus_proxy_stream_error,
+                reason => SafeReason,
+                client_proto => ClientProto
+            }),
+            catch cowboy_req:stream_body(<<"\n">>, fin, Req2),
+            {ok, Req2, State}
+    end;
 ```
 
 Add the helpers (internal section):
@@ -1103,10 +1083,16 @@ Add the helpers (internal section):
 -define(USAGE_TAIL_BYTES, 16384).
 
 capture_usage_chunk(Chunk) ->
-    case get(janus_usage_head) of
-        undefined ->
-            put(janus_usage_head, binary:part(Chunk, 0, min(byte_size(Chunk), ?USAGE_HEAD_BYTES)));
-        _ ->
+    Head0 = case get(janus_usage_head) of
+        undefined -> <<>>;
+        H -> H
+    end,
+    case byte_size(Head0) < ?USAGE_HEAD_BYTES of
+        true ->
+            Need = ?USAGE_HEAD_BYTES - byte_size(Head0),
+            Take = binary:part(Chunk, 0, min(byte_size(Chunk), Need)),
+            put(janus_usage_head, <<Head0/binary, Take/binary>>);
+        false ->
             ok
     end,
     Tail0 = case get(janus_usage_tail) of
@@ -1146,7 +1132,7 @@ Expected: all green.
 
 ```bash
 git add apps/janus_http/src/janus_http_proxy.erl
-git commit -m "Capture token usage on streaming paths (incl. OpenAI include_usage injection)"
+git commit -m "Capture token usage on streaming paths (polite include_usage injection, head+tail parse)"
 ```
 
 ---
@@ -1181,25 +1167,38 @@ handle_usage_summary(Req) ->
             series => janus_usage:series(From, To, Bucket),
             by_key => janus_usage:breakdown(key, From, To),
             by_model => janus_usage:breakdown(model, From, To),
-            by_provider => janus_usage:breakdown(provider, From, To)
+            by_provider => janus_usage:breakdown(provider, From, To),
+            by_provider_key => janus_usage:breakdown(provider_key, From, To),
+            writer => janus_usage:stats()
         },
         Req
     ).
 
 handle_usage_events(Req) ->
     Qs = maps:from_list(cowboy_req:parse_qs(Req)),
-    Limit =
-        case maps:get(<<"limit">>, Qs, <<"50">>) of
-            Bin when is_binary(Bin) ->
-                try
-                    min(200, max(1, binary_to_integer(Bin)))
-                catch
-                    _:_ -> 50
-                end;
-            _ ->
-                50
+    Limit = qs_int(maps:get(<<"limit">>, Qs, undefined), 50, 1, 200),
+    Filters = maps:filter(
+        fun
+            (<<"key_id">>, V) -> {true, {key_id, qs_int(V, undefined, 1, infinity)}};
+            (<<"model_id">>, V) -> {true, {model_id, qs_int(V, undefined, 1, infinity)}};
+            (_, _) -> false
         end,
-    reply_json(200, #{events => janus_usage:recent(Limit)}, Req).
+        Qs
+    ),
+    reply_json(200, #{events => janus_usage:recent(Limit, Filters)}, Req).
+
+qs_int(undefined, Default, _Min, _Max) -> Default;
+qs_int(Bin, Default, Min, Max) when is_binary(Bin) ->
+    try
+        N = binary_to_integer(Bin),
+        case Max of
+            infinity -> max(Min, N);
+            _ -> min(Max, max(Min, N))
+        end
+    catch
+        _:_ -> Default
+    end;
+qs_int(_, Default, _Min, _Max) -> Default.
 
 usage_window(<<"7d">>) -> {now_sec() - 7 * 86400, now_sec(), day};
 usage_window(<<"30d">>) -> {now_sec() - 30 * 86400, now_sec(), day};
@@ -1209,24 +1208,25 @@ now_sec() ->
     erlang:system_time(second).
 ```
 
+Note: `qs_int/4` with `infinity` keeps validation total without inventing an upper bound for ids.
+
 - [ ] **Step 3: Compile, hot-load, verify via curl**
 
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev compile'
 docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(janus_dashboard_api).'"
-# session cookie + GET both endpoints; expect totals map and []/rows
 curl -s -c /tmp/cj.txt -X POST http://127.0.0.1:8090/api/session -H 'Content-Type: application/json' -d '{"password":"dev"}'
 CK=$(grep janus_dashboard_session /tmp/cj.txt | awk '{print $NF}')
 curl -s -b "janus_dashboard_session=$CK" 'http://127.0.0.1:8090/api/usage/summary?range=24h'
-curl -s -b "janus_dashboard_session=$CK" 'http://127.0.0.1:8090/api/usage/events?limit=5'
+curl -s -b "janus_dashboard_session=$CK" 'http://127.0.0.1:8090/api/usage/events?limit=5&key_id=1'
 ```
-Expected: JSON with `totals`/`series`/`by_*` keys (empty arrays are fine), `{"events":[...]}`.
+Expected: JSON with `totals` (incl. `unreported`, `p95_latency_ms`, `p95_stream_ms`), `series`, `by_key`, `by_model`, `by_provider`, `by_provider_key`, `writer`; events array (possibly empty).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add apps/janus_dashboard/src/janus_dashboard_api.erl
-git commit -m "Expose /api/usage/summary and /api/usage/events"
+git commit -m "Expose /api/usage/summary (4 breakdowns + writer stats) and /api/usage/events (filtered)"
 ```
 
 ---
@@ -1237,7 +1237,7 @@ git commit -m "Expose /api/usage/summary and /api/usage/events"
 - Create: `apps/janus_dashboard/spa/src/pages/usage.tsx`
 - Modify: `apps/janus_dashboard/spa/src/main.tsx` (add route)
 - Modify: `apps/janus_dashboard/spa/src/components.tsx` (add nav item)
-- Modify: `apps/janus_dashboard/spa/src/pages/shared.tsx` (add shared types)
+- Modify: `apps/janus_dashboard/spa/src/pages/shared.tsx` (add shared types + formatters)
 
 - [ ] **Step 1: Shared types** (append to `pages/shared.tsx`)
 
@@ -1247,8 +1247,10 @@ export type UsageTotals = {
   prompt_tokens: number
   completion_tokens: number
   errors: number
+  unreported: number
   avg_latency_ms: number
-  p95_latency_ms: number
+  p95_latency_ms: number | null
+  p95_stream_ms: number | null
 }
 export type UsagePoint = { bucket: string; requests: number; prompt_tokens: number; completion_tokens: number }
 export type UsageRow = { id: number | null; name: string | null; requests: number; prompt_tokens: number; completion_tokens: number; last_ts: number }
@@ -1258,9 +1260,10 @@ export type UsageEvent = {
   model: string | null
   provider: string | null
   protocol: string
+  stream: number
   status: number
-  prompt_tokens: number
-  completion_tokens: number
+  prompt_tokens: number | null
+  completion_tokens: number | null
   latency_ms: number | null
 }
 export type UsageSummary = {
@@ -1270,33 +1273,38 @@ export type UsageSummary = {
   by_key: UsageRow[]
   by_model: UsageRow[]
   by_provider: UsageRow[]
+  by_provider_key: UsageRow[]
+  writer: { buffered: number; dropped: number }
 }
 
 export function fmtNum(n: number) {
   return n.toLocaleString("en-US")
 }
 
+/** "2026-10-04T13:00" → "13:00" (24h) or "10-04" (7d/30d); buckets are UTC. */
 export function fmtBucket(bucket: string, range: string) {
-  // "2026-10-04T13:00" → "13:00" for 24h, "10-04" for longer ranges
   return range === "24h" ? bucket.slice(11, 16) : bucket.slice(5, 10)
 }
 
+/** Unix seconds → "HH:MM:SS" UTC (charts and tables share one clock). */
 export function fmtTs(ts: number) {
   const d = new Date(ts * 1000)
   const pad = (n: number) => String(n).padStart(2, "0")
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
 }
 ```
 
-- [ ] **Step 2: The page** — structure (full code in executing session; outline contract below):
+- [ ] **Step 2: The page** — structure contract (full code written in the executing session):
 
-- Range `Select` in `CardAction` (24h / 7d / 30d) driving `api("/usage/summary?range=" + range)`; separate `api("/usage/events?limit=50")` for the drill-down.
-- Stat cards row: **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (count + `%` of requests), **p95 latency** (`ms`), all in the existing 6-col stat-grid pattern from `dashboard.tsx` (icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`).
-- Chart card: stacked `BarChart` of `prompt_tokens` + `completion_tokens` per bucket (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`), `XAxis dataKey` = `fmtBucket`, `ChartTooltip`, plus a thin `Bar` for requests? No — requests get their own small `BarChart` in a second card beside it (2-col grid like dashboard tables).
-- Three breakdown tables in a 3-col grid (`xl:grid-cols-3`, one card each): **Per agent key** (prefix or `(deleted)`), **Per model**, **Per provider** — columns: name, requests, tokens in+out (`fmtNum(pin + pout)`), share bar (a `div` width % of max requests, `bg-primary/15`).
-- Recent requests card: table Time (`fmtTs`), Key, Model, Provider, Status (colored text: 2xx `text-success`, 4xx `text-warning`, 5xx `text-destructive`), In, Out, Latency.
-- Loading skeletons, `ErrorFlash`, empty state "No usage recorded yet — stats appear after the first proxied request."
-- Route: `const usageRoute = createRoute({ getParentRoute: () => authLayout, path: '/usage', component: Usage })`, lazy import like the other pages.
+- `Layout title="Usage" description="Token consumption and traffic across agent keys, models, and providers — times are UTC."`
+- Range `Select` in `CardAction` (24h / 7d / 30d) driving `api("/usage/summary?range=" + range)`; separate `api("/usage/events?limit=50")` for the drill-down. Poll summary every 30s while the page is open.
+- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms ?? "—"` + `ms`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms ?? "—"`, subtitle "end-to-end"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped (writer)".
+- When `totals.unreported > 0`, a one-line muted note under the cards: "N requests had no provider usage report (streams without usage chunk or errors)."
+- Two charts in a 2-col grid: **Tokens (UTC)** — stacked `BarChart` of `prompt_tokens` + `completion_tokens` (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`); **Requests (UTC)** — `BarChart` of `requests` (color `var(--color-chart-1)`). `XAxis dataKey` = precomputed `label` from `fmtBucket`.
+- Four breakdown cards in `xl:grid-cols-2`: **Per agent key** (prefix or `(deleted)` when name is null), **Per model**, **Per provider**, **Per provider key** — columns: name, requests, tokens (`fmtNum(pin + pout)`), and a share bar (`div` with width % of the max requests in that card, `bg-primary/15`).
+- Recent requests card: table Time (`fmtTs` + "UTC"), Key, Model, Provider, Status (2xx `text-success`, 4xx `text-warning`, 5xx `text-destructive`; 502 from mid-stream failure is expected), Stream (a `~` glyph or `Zap` icon when `stream === 1`), In, Out (`"—"` for null), Latency.
+- Loading skeletons, `ErrorFlash`, empty state: "No usage recorded yet — stats appear after the first proxied request."
+- Route in `main.tsx`: lazy `Usage` like other pages; `const usageRoute = createRoute({ getParentRoute: () => authLayout, path: '/usage', component: Usage })` added to the tree.
 - Nav entry in `NAV` after Dashboard: `{ to: "/usage", icon: Activity, label: "Usage" }` (`Activity` from lucide-react).
 
 - [ ] **Step 3: Typecheck + build**
@@ -1312,7 +1320,7 @@ Expected: clean build.
 
 ```bash
 git add apps/janus_dashboard/spa/src
-git commit -m "Add Usage stats page (cards, series charts, key/model/provider breakdowns, recent)"
+git commit -m "Add Usage stats page (cards, UTC series charts, 4 breakdowns, recent drill-down)"
 ```
 
 ---
@@ -1324,30 +1332,43 @@ git commit -m "Add Usage stats page (cards, series charts, key/model/provider br
 - [ ] **Step 1: Hot-load every new/changed module into the live node**
 
 ```bash
-docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval '[code:load_file(M) || M <- [janus_usage_parse, janus_usage, janus_http_proxy, janus_dashboard_api]], whereis(janus_usage) =:= undefined andalso element(2, janus_usage:start_link()), ok.'"
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval '[code:load_file(M) || M <- [janus_usage_parse, janus_usage, janus_http_proxy, janus_dashboard_api]], case whereis(janus_usage) of undefined -> gen_server:start({local, janus_usage}, janus_usage, [], []); _ -> ok end.'"
 ```
-(`janus_usage` is not supervised in the running node — start it manually for verification; on a real redeploy the supervisor starts it.)
+(`janus_usage` is not supervised in the running node — start it **unlinked** for verification; the eval RPC process exits after the call and would take a linked server down. On a real redeploy the supervisor starts it.)
 
-- [ ] **Step 2: Mint a throwaway agent key and make one non-stream + one streaming call**
+- [ ] **Step 2: Mint a throwaway agent key and make three calls**
 
 ```bash
-# create key (dashboard API, CSRF), capture the full key once
-# POST /v1/chat/completions model=deepseek-chat, max_tokens=1  (non-stream)
-# same with "stream": true                                       (stream)
+# 1. create key via dashboard API (POST /api/keys with CSRF) — capture the full key once
+# 2. non-stream: POST :8080/v1/chat/completions {"model":"deepseek-chat","max_tokens":1,"messages":[...]}
+# 3. stream:     same with "stream": true
+# 4. error row:  same body against a disabled/unknown route if available, else skip
 ```
-Then check `GET /api/usage/events?limit=5`: two rows, second row (stream) should carry prompt/completion tokens thanks to the injected `include_usage`. Non-stream row has status 200 + latency.
+Then `GET /api/usage/events?limit=5`: the non-stream row has `status = 200`, tokens, `stream = 0`; the stream row has `stream = 1` and **non-null** tokens (proving the injection + head/tail parse works); `GET /api/usage/summary?range=24h` counts both. If a cross-protocol route exists (e.g. an Anthropic-protocol provider bound), repeat once against it to prove dialect-agnostic parsing.
 
-Note: this spends a negligible amount of real upstream quota (1-token completions). Revoke the throwaway key afterwards via `DELETE /api/keys/:id`.
+Note: this spends a negligible amount of real upstream quota (1-token completions). Revoke the throwaway key afterwards via `DELETE /api/keys/:id`; usage rows keep `agent_key_id` (SET NULL on delete, shows as `(deleted)`).
 
-- [ ] **Step 3: Verify the page renders the data** (both themes), verify 24h/7d/30d ranges respond.
+- [ ] **Step 3: Failure-safety probes on the live node**
 
-- [ ] **Step 4: Final `npm run build` + commit any stragglers; report**
+```bash
+# malformed event: server survives, dropped increments
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'janus_usage:record(#{}), timer:sleep(100), janus_usage:stats().'"
+# sweep: back-date a row 32 days, trigger sweep via eval, assert it is gone
+docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'Old = erlang:system_time(second) - 32*86400, janus_db_conn:query(\"INSERT INTO usage_events (ts, protocol, status) VALUES (\" ++ integer_to_list(Old) ++ \", ''openai_chat'', 200)\", []), janus_usage ! sweep, timer:sleep(1000), janus_db_conn:query(\"SELECT COUNT(*) FROM usage_events WHERE ts < \" ++ integer_to_list(erlang:system_time(second) - 31*86400), []).'"
+```
+Expected: `#{dropped := N>0}` after the malformed cast; `{ok,[{0}]}` after the sweep.
+
+- [ ] **Step 4: Verify the page renders the data** (both themes, all three ranges). Optional Postgres lane (only if a Postgres dev instance exists): apply `004_usage_events.postgres.sql`, hot-verify `totals/series/breakdown/recent` + p95 `percentile_disc` there.
+
+- [ ] **Step 5: Final `npm run build` + commit any stragglers; report**
 
 ---
 
 ## Self-review notes
 
-- Spec coverage: capture (T5/T6), storage + retention (T1/T3), rollups (T4), API (T7), page (T8), per-key + per-model + per-provider + provider_key column (T4/T5), streaming (T6), latency avg/p95 (T4/T5), drill-down (T4 `recent` + T8), both DBs (T1/T4 dialect branches). 
-- `janus_usage` write path tolerates the DB being down (insert result ignored; buffer is bounded by flush cadence — a permanently failing DB would grow the buffer; acceptable for v1, log line on flush error is a fine follow-up).
-- Events with `agent_key_id = null` happen only for contexts where the agent id is missing — in practice auth always provides it.
-- Type consistency: proxy event keys match `janus_usage:record/1` expectations; `janus_usage_parse` return shape matches `track/3` consumption.
+- Spec coverage: capture (T5/T6), storage + retention (T1/T3), rollups (T4), API (T7), page (T8), per-key/model/provider/provider-key (T4/T8), streaming (T6), latency avg/p95 split by stream (T4/T8), drill-down with filters (T4/T7), both DBs (T1/T4 dialect branches), audit fixes (all inline, no addendum).
+- `agent_key_id = null` happens only for contexts where the agent id is missing — in practice auth always provides it. FK `ON DELETE SET NULL` renders as `(deleted)` in the UI. If Task 1 Step 3 finds `PRAGMA foreign_keys` off on SQLite, SET NULL is inert there — rows keep their (now-dangling) ids and render as `(deleted)` via the LEFT JOIN anyway, so behavior is consistent.
+- One global gen_server is the write funnel: per-cast cost is a map prepend; flush is a 50-row multi-row statement ~1/sec; the 10k cap + drop-newest bounds memory; the mailbox itself is unbounded only under a permanently stalled DB (accepted for v1, `writer.dropped` is surfaced in the UI).
+- p95 caveat for operators: a provider emitting per-chunk (non-cumulative) `message_delta` token deltas would be under-reported (Anthropic proper is cumulative).
+- `usage_events.protocol` stores the client protocol; SSE parsing is dialect-agnostic, so provider dialect needs no column.
+- Types end-to-end: proxy event keys ↔ `record/1` validation ↔ `build_insert` defaults ↔ migration columns (nullable tokens, `stream` flag) ↔ `recent/2` output ↔ SPA `UsageEvent` (all token/latency fields `number | null`).
