@@ -15,7 +15,7 @@
 -module(janus_lb).
 -behaviour(gen_server).
 
--export([start_link/0]).
+-export([start_link/0, cooling_count/0]).
 -export([note_failure/2, note_success/1, note_auth_failure/3, release_inflight/1, pick_route/2]).
 -export([
     init/1,
@@ -482,3 +482,17 @@ sanitize_cooldown_reason({retry_after, Ms}) when is_integer(Ms) -> {retry_after,
 sanitize_cooldown_reason({Tag, Sub}) when is_atom(Tag), is_atom(Sub) -> {Tag, Sub};
 sanitize_cooldown_reason({Tag, _}) when is_atom(Tag) -> Tag;
 sanitize_cooldown_reason(_) -> failure.
+
+
+%% Count routes currently in cooldown (for /stats reporting).
+cooling_count() ->
+    try
+        Now = erlang:system_time(millisecond),
+        Tid = janus_lb_cooldowns,
+        ets:foldl(
+            fun({_Key, Until}, Acc) when is_integer(Until) ->
+                    case Until > Now of true -> Acc + 1; false -> Acc end;
+               (_, Acc) -> Acc
+            end, 0, Tid)
+    catch _:_ -> 0
+    end.

@@ -35,6 +35,8 @@ init([]) ->
     Dispatch = cowboy_router:compile([
         {'_', [
             {"/healthz", janus_http_health, []},
+            {"/stats", janus_gateway_stats, []},
+            {"/stats/[...]", janus_gateway_stats, []},
             {"/api/[...]", janus_dashboard_api, []},
             {"/dashboard", janus_dashboard_redirect, []},
             {"/", janus_dashboard_assets, []},
