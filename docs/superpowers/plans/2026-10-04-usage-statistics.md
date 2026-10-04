@@ -16,6 +16,7 @@
 - rev 3 (this document): second audit round (6/7 GO WITH FIXES, 1 NO-GO on structure — addendum-vs-task divergence) folded **inline**. Tasks below are the single source of truth; no addendum applies.
 - rev 4: third audit round (7/7 GO WITH FIXES) folded inline: working event filters with 400-on-invalid, total read path (no badmatch→500), real `?`-literal guard test + insert/chunk eunit, genuine-zero vs absent usage distinction, avg latency split by stream + success-only `unreported`, mailbox back-pressure guard with atomics counter, throttled drop logs, `erlang:ceil` p95 offset, regex usage fallback for oversized terminal SSE events, bounded chunk-list tail capture, 15s terminate-flush budget, `writer.alive` + `ts_from`/`ts_to` in the API, zero-filled chart buckets.
 - rev 5 (this document): fourth audit round (6/7 GO WITH FIXES, 1 NO-GO on a duplicate test function) folded inline: duplicate `no_qmark_literals_test` removed, SSE genuine-zero collapse removed (symmetric with body parser + regression test), `trim_tail` made O(1) amortized with byte+chunk caps, drop counter created in `init/1` (no hot-path persistent_term put), mailbox guard applied to malformed casts too, `_ = stream_body` (disconnect-safe), avg null-on-empty, provider/provider_key ts indexes, disconnect note, title de-versioned, test counts corrected, proxy-helper eunit (trim/injection), duplicate-name preflight for the API module.
+- rev 6 (this document): fifth audit round (4× GO WITH FIXES, 1 NO-GO on `proc_lib:spawn/1`; deepseek reply lost to provider failure, glm confirmed small items) folded inline: `erlang:spawn` + crash-logged sweep worker, avg truly null-on-empty (COALESCE dropped), `maybe_trim` Size recomputed after chunk-cap sublist, `track`/`note_*` hoisted above the fin frame, `_ = stream_body(fin)`, writer-down drops counted + mailbox-full log throttled, `key_id_of` fallback + `is_map(Agent)` guard, filter ids < 1 rejected with 400 (no clamping), bucket-floored `usage_window`, p95 count guard relaxed via `num/1`, `(stream, latency_ms)` index, Task 2/6 numbering corrected, `usage_inject_include_usage` operator docs, responses-dialect no-injection note, FK-id assertions in E2E.
 
 **Key file facts an implementer must know:**
 - DB facade: `janus_db_conn:query(Sql, Params)` returns `{ok, Rows} | {error, Reason}` (rows are tuples; it does **not** return affected-row counts — see Task 4 sweep). `janus_db_conn:backend()` returns `postgres | sqlite`. `?` placeholders must be rewritten to `$N` for postgres.
@@ -65,6 +66,7 @@ CREATE INDEX IF NOT EXISTS usage_events_key_ts_idx ON usage_events (agent_key_id
 CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, ts);
 CREATE INDEX IF NOT EXISTS usage_events_provider_ts_idx ON usage_events (provider_id, ts);
 CREATE INDEX IF NOT EXISTS usage_events_pkey_ts_idx ON usage_events (provider_key_id, ts);
+CREATE INDEX IF NOT EXISTS usage_events_stream_latency_idx ON usage_events (stream, latency_ms);
 ```
 
 - [ ] **Step 2: Postgres migration**
@@ -90,6 +92,7 @@ CREATE INDEX IF NOT EXISTS usage_events_key_ts_idx ON usage_events (agent_key_id
 CREATE INDEX IF NOT EXISTS usage_events_model_ts_idx ON usage_events (model_id, ts);
 CREATE INDEX IF NOT EXISTS usage_events_provider_ts_idx ON usage_events (provider_id, ts);
 CREATE INDEX IF NOT EXISTS usage_events_pkey_ts_idx ON usage_events (provider_key_id, ts);
+CREATE INDEX IF NOT EXISTS usage_events_stream_latency_idx ON usage_events (stream, latency_ms);
 ```
 
 - [ ] **Step 3: Run migrations on the live dev node and verify preconditions**
@@ -355,7 +358,7 @@ first_int(_, []) ->
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit --module=janus_usage_parse_tests'
 ```
-Expected: `All 12 tests passed.` (also run the full suite: `./rebar3 as dev eunit` — existing `janus_protocol_translate_tests` must stay green)
+Expected: `All 13 tests passed.` (also run the full suite: `./rebar3 as dev eunit` — existing `janus_protocol_translate_tests` must stay green)
 
 - [ ] **Step 5: Commit**
 
@@ -442,13 +445,19 @@ guarded_cast(Msg) ->
     try
         case whereis(?SERVER) of
             undefined ->
+                %% Writer down (restarting): count the loss — the
+                %% "never silently lost" contract applies here too.
+                atomics:add(drop_counter(), 1, 1),
                 ok;
             Pid ->
                 {message_queue_len, Q} = erlang:process_info(Pid, message_queue_len),
                 case Q >= ?MAX_QUEUE of
                     true ->
-                        atomics:add(drop_counter(), 1, 1),
-                        logger:warning(#{what => janus_usage_drop, reason => mailbox_full});
+                        D = atomics:add_get(drop_counter(), 1, 1),
+                        case D rem 1000 of
+                            1 -> logger:warning(#{what => janus_usage_drop, reason => mailbox_full, total => D});
+                            _ -> ok
+                        end;
                     false ->
                         gen_server:cast(?SERVER, Msg)
                 end
@@ -532,8 +541,14 @@ handle_info(flush, State) ->
     _ = erlang:send_after(?FLUSH_MS, self(), flush),
     {noreply, do_flush(State)};
 handle_info(sweep, State) ->
-    %% Sweep in a worker so the DELETE never blocks casts.
-    _ = proc_lib:spawn(fun sweep/0),
+    %% Sweep in a worker so the DELETE never blocks casts; the worker
+    %% must not die silently on a DB error.
+    _ = erlang:spawn(fun() ->
+        try sweep()
+        catch Class:Reason ->
+            logger:warning(#{what => janus_usage_sweep_crashed, class => Class, reason => Reason})
+        end
+    end),
     _ = erlang:send_after(?SWEEP_MS, self(), sweep),
     {noreply, State};
 handle_info(_Info, State) ->
@@ -821,23 +836,23 @@ totals(From, To) ->
         <<"SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), "
           "COALESCE(SUM(completion_tokens), 0), "
           "COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0), "
-          "COALESCE(AVG(CASE WHEN stream = 0 THEN latency_ms END), 0), "
-          "COALESCE(AVG(CASE WHEN stream = 1 THEN latency_ms END), 0), "
+          "AVG(CASE WHEN stream = 0 THEN latency_ms END), "
+          "AVG(CASE WHEN stream = 1 THEN latency_ms END), "
           "COALESCE(SUM(CASE WHEN prompt_tokens IS NULL AND completion_tokens IS NULL "
           "AND status < 400 THEN 1 ELSE 0 END), 0) "
           "FROM usage_events WHERE ts >= ? AND ts < ?">>,
     case q(Sql, [From, To]) of
         {ok, Rows} ->
             {Req, Pin, Pout, Err, AvgNs, AvgS, Unrep} =
-                one_row(Rows, {0, 0, 0, 0, 0, 0, 0}),
+                one_row(Rows, {0, 0, 0, 0, null, null, 0}),
             #{
                 requests => num(Req),
                 prompt_tokens => num(Pin),
                 completion_tokens => num(Pout),
                 errors => num(Err),
                 unreported => num(Unrep),
-                avg_latency_ms => round(num(AvgNs)),
-                avg_stream_ms => round(num(AvgS)),
+                avg_latency_ms => num_or_null(AvgNs),
+                avg_stream_ms => num_or_null(AvgS),
                 p95_latency_ms => p95(From, To, 0),
                 p95_stream_ms => p95(From, To, 1)
             };
@@ -849,8 +864,8 @@ totals(From, To) ->
                 completion_tokens => 0,
                 errors => 0,
                 unreported => 0,
-                avg_latency_ms => 0,
-                avg_stream_ms => 0,
+                avg_latency_ms => null,
+                avg_stream_ms => null,
                 p95_latency_ms => null,
                 p95_stream_ms => null
             }
@@ -997,17 +1012,22 @@ p95(From, To, StreamFlag) ->
             ) of
                 {ok, [{0}]} ->
                     null;
-                {ok, [{Count}]} when is_integer(Count), Count > 0 ->
-                    %% erlang:ceil/1 returns an integer (safe as a bind param).
-                    Offset = max(0, erlang:ceil(0.95 * Count) - 1),
-                    case q(
-                        <<"SELECT latency_ms FROM usage_events "
-                          "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL AND stream = ? "
-                          "ORDER BY latency_ms LIMIT 1 OFFSET ?">>,
-                        [From, To, StreamFlag, Offset]
-                    ) of
-                        {ok, [{V}]} -> num_or_null(V);
-                        _ -> null
+                {ok, [{Count0}]} ->
+                    case num(Count0) of
+                        0 ->
+                            null;
+                        Count ->
+                            %% erlang:ceil/1 returns an integer (safe as a bind param).
+                            Offset = max(0, erlang:ceil(0.95 * Count) - 1),
+                            case q(
+                                <<"SELECT latency_ms FROM usage_events "
+                                  "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL AND stream = ? "
+                                  "ORDER BY latency_ms LIMIT 1 OFFSET ?">>,
+                                [From, To, StreamFlag, Offset]
+                            ) of
+                                {ok, [{V}]} -> num_or_null(V);
+                                _ -> null
+                            end
                     end;
                 _ ->
                     null
@@ -1112,6 +1132,7 @@ handle(ClientProto, Agent, Body, Req, State) ->
 
 ```erlang
 key_id_of(#{provider_key := #{id := Kid}}) -> Kid;
+key_id_of(#{provider_key := _}) -> null;
 key_id_of(_) -> null.
 
 bool_int(true) -> 1;
@@ -1125,7 +1146,8 @@ track(Status, Route, Usage) ->
     case get(janus_usage_ctx) of
         undefined ->
             ok;
-        #{started := Started, agent := Agent, client_proto := Proto, stream := Stream} ->
+        #{started := Started, agent := Agent, client_proto := Proto, stream := Stream}
+        when is_map(Agent) ->
             LatencyMs =
                 erlang:convert_time_unit(
                     erlang:monotonic_time(microsecond) - Started,
@@ -1144,7 +1166,9 @@ track(Status, Route, Usage) ->
                 prompt => maps:get(prompt, Usage, null),
                 completion => maps:get(completion, Usage, null),
                 latency_ms => LatencyMs
-            })
+            });
+        _ ->
+            ok
     end.
 ```
 
@@ -1263,10 +1287,12 @@ In the streaming success clause (line ~208), replace the `Drain(fun(Chunk) -> ..
         end)
     of
         ok ->
-            ok = cowboy_req:stream_body(<<>>, fin, Req2),
+            %% Record BEFORE the final frame so a dying client can
+            %% never cost us the usage row.
             _ = note_key_success(Route),
             _ = note_route_success(Route),
             _ = track(Status, Route, stream_usage(ClientProto)),
+            _ = cowboy_req:stream_body(<<>>, fin, Req2),
             {ok, Req2, State};
         {error, Reason} ->
             %% Mid-stream failure: record 502, not the already-sent 200.
@@ -1320,8 +1346,11 @@ capture_usage_chunk(Chunk) ->
 
 maybe_trim(Chunks, Size) when Size =< ?USAGE_TAIL_BYTES ->
     case length(Chunks) =< ?USAGE_TAIL_CHUNKS of
-        true -> {Chunks, Size};
-        false -> {lists:sublist(Chunks, ?USAGE_TAIL_CHUNKS), Size}
+        true ->
+            {Chunks, Size};
+        false ->
+            Kept = lists:sublist(Chunks, ?USAGE_TAIL_CHUNKS),
+            {Kept, lists:sum([byte_size(C) || C <- Kept])}
     end;
 maybe_trim(Chunks, _Size) ->
     %% Over the byte cap: refold newest-first, keeping whole chunks
@@ -1419,12 +1448,14 @@ docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE
 ```
 Expected: all green.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add apps/janus_http/src/janus_http_proxy.erl
+git add apps/janus_http/src/janus_http_proxy.erl apps/janus_http/test/janus_proxy_usage_tests.erl
 git commit -m "Capture token usage on streaming paths (polite include_usage injection, head+tail parse)"
 ```
+
+Note on `openai_responses` streams: no injection is needed there — the Responses dialect always terminates with a `response.completed` event carrying usage (covered by the parser + regex fallback). Injection exists only for `openai_chat`, where usage is opt-in via `stream_options`.
 
 ---
 
@@ -1479,6 +1510,8 @@ handle_usage_events(Req) ->
 
 %% Builds #{key_id => integer(), model_id => integer()} — the exact
 %% shape recent/2's recent_filters/1 matches on (atom keys, int values).
+%% Ids below 1 are rejected, not clamped (a clamped 0 would silently
+%% show key 1's data).
 usage_filters(Qs) ->
     lists:foldl(
         fun
@@ -1489,9 +1522,11 @@ usage_filters(Qs) ->
                     undefined ->
                         Acc;
                     Bin ->
-                        case qs_int(Bin, undefined, 1, infinity) of
-                            undefined -> {error, Param};
-                            N -> Acc#{Field => N}
+                        try binary_to_integer(Bin) of
+                            N when is_integer(N), N >= 1 -> Acc#{Field => N};
+                            _ -> {error, Param}
+                        catch
+                            _:_ -> {error, Param}
                         end
                 end
         end,
@@ -1512,9 +1547,17 @@ qs_int(Bin, Default, Min, Max) when is_binary(Bin) ->
     end;
 qs_int(_, Default, _Min, _Max) -> Default.
 
-usage_window(<<"7d">>) -> {now_sec() - 7 * 86400, now_sec(), day};
-usage_window(<<"30d">>) -> {now_sec() - 30 * 86400, now_sec(), day};
-usage_window(_) -> {now_sec() - 86400, now_sec(), hour}.
+%% ts_from is floored to the bucket boundary so zero-filled series have
+%% exactly 24 / 7 / 30 buckets.
+usage_window(<<"7d">>) -> {floor_day(now_sec() - 6 * 86400), now_sec(), day};
+usage_window(<<"30d">>) -> {floor_day(now_sec() - 29 * 86400), now_sec(), day};
+usage_window(_) -> {floor_hour(now_sec() - 23 * 3600), now_sec(), hour}.
+
+floor_hour(Ts) ->
+    Ts - (Ts rem 3600).
+
+floor_day(Ts) ->
+    Ts - (Ts rem 86400).
 
 now_sec() ->
     erlang:system_time(second).
@@ -1560,8 +1603,8 @@ export type UsageTotals = {
   completion_tokens: number
   errors: number
   unreported: number
-  avg_latency_ms: number
-  avg_stream_ms: number
+  avg_latency_ms: number | null
+  avg_stream_ms: number | null
   p95_latency_ms: number | null
   p95_stream_ms: number | null
 }
@@ -1613,7 +1656,7 @@ export function fmtTs(ts: number) {
 
 - `Layout title="Usage" description="Token consumption and traffic across agent keys, models, and providers — times are UTC."`
 - Range `Select` in `CardAction` (24h / 7d / 30d) driving `api("/usage/summary?range=" + range)`; separate `api("/usage/events?limit=50")` for the drill-down. Poll summary every 30s while the page is open.
-- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms ?? "—"` + `ms`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms ?? "—"`, subtitle "end-to-end · client drain"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped since boot (writer)" — and if `writer.alive === false`, a destructive badge "writer down".
+- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms != null ? totals.p95_latency_ms + " ms" : "—"`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms != null ? totals.p95_stream_ms + " ms" : "—"`, subtitle "end-to-end · client drain"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped since writer start" — and if `writer.alive === false`, a destructive badge "writer down".
 - When `totals.unreported > 0`, a one-line muted note under the cards: "N successful requests had no provider usage report (streams without a usage chunk)."
 - Two charts in a 2-col grid: **Tokens (UTC)** — stacked `BarChart` of `prompt_tokens` + `completion_tokens` (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`); **Requests (UTC)** — `BarChart` of `requests` (color `var(--color-chart-1)`). `XAxis dataKey` = precomputed `label` from `fmtBucket`. Before charting, **zero-fill the buckets**: build the complete bucket sequence between `ts_from` and `ts_to` (hour or day steps, UTC) and merge the API rows into it so gaps render as 0, not as missing bars.
 - Four breakdown cards in `xl:grid-cols-2`: **Per agent key** (prefix or `(deleted)` when name is null), **Per model**, **Per provider**, **Per provider key** — columns: name, requests, tokens (`fmtNum(pin + pout)`), and a share bar (`div` with width % of the max requests in that card, `bg-primary/15`).
@@ -1659,9 +1702,22 @@ docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval '[code:l
 # 3. stream:     same with "stream": true
 # 4. error row:  same body against a disabled/unknown route if available, else skip
 ```
-Then `GET /api/usage/events?limit=5`: the non-stream row has `status = 200`, tokens, `stream = 0`; the stream row has `stream = 1` and **non-null** tokens (proving the injection + head/tail parse works); `GET /api/usage/summary?range=24h` counts both. If a cross-protocol route exists (e.g. an Anthropic-protocol provider bound), repeat once against it to prove dialect-agnostic parsing.
+Then `GET /api/usage/events?limit=5`: the non-stream row has `status = 200`, tokens, `stream = 0`; the stream row has `stream = 1` and **non-null** tokens (proving the injection + head/tail parse works); `GET /api/usage/summary?range=24h` counts both. **Assert both rows carry non-null `agent_key_id`, `model_id`, `provider_id`, `provider_key_id`** (catches any id-type mismatch that would degrade every breakdown to `(deleted)`). If a cross-protocol route exists (e.g. an Anthropic-protocol provider bound), repeat once against it to prove dialect-agnostic parsing.
 
 Note: this spends a negligible amount of real upstream quota (1-token completions). Revoke the throwaway key afterwards via `DELETE /api/keys/:id`; usage rows keep `agent_key_id` (SET NULL on delete, shows as `(deleted)`).
+
+- [ ] **Step 2b: Operator docs for the kill switch**
+
+Append to `scripts/local.env.example`:
+
+```bash
+# Set to 0 to stop injecting stream_options.include_usage into upstream
+# OpenAI chat streams (usage capture on streams then depends on the
+# client requesting usage themselves). Default: on.
+# JANUS_USAGE_INJECT_INCLUDE_USAGE=1
+```
+
+and one line to `DASHBOARD.md`'s env section noting the same (app env `janus_core.usage_inject_include_usage`, default true; set via `JANUS_USAGE_INJECT_INCLUDE_USAGE` if the release maps it, else `-e`/app env).
 
 - [ ] **Step 3: Failure-safety probes on the live node**
 
