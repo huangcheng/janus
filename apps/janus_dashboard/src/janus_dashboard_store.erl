@@ -13,6 +13,8 @@
     providers/0,
     provider_keys/1,
     provider_key_counts/0,
+    provider_models/0,
+    provider_models/1,
     models/0,
     routes/0,
     agent_keys/0,
@@ -26,6 +28,9 @@
     add_provider_key/3,
     set_provider_key_enabled/2,
     delete_provider_key/1,
+    add_provider_model/2,
+    set_provider_model_enabled/2,
+    delete_provider_model/1,
     %% model / route mutations
     add_model/1,
     set_model_enabled/2,
@@ -83,6 +88,30 @@ provider_key_counts() ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+-spec provider_models() -> {ok, [map()]} | {error, term()}.
+provider_models() ->
+    qmap(
+        <<
+            "SELECT id, provider_id, name, enabled FROM provider_models "
+            "ORDER BY provider_id, name"
+        >>,
+        [],
+        [id, provider_id, name, enabled],
+        #{enabled => fun truthy/1}
+    ).
+
+-spec provider_models(integer()) -> {ok, [map()]} | {error, term()}.
+provider_models(ProviderId) ->
+    qmap(
+        <<
+            "SELECT id, provider_id, name, enabled FROM provider_models "
+            "WHERE provider_id = ? ORDER BY name"
+        >>,
+        [ProviderId],
+        [id, provider_id, name, enabled],
+        #{enabled => fun truthy/1}
+    ).
 
 -spec models() -> {ok, [map()]} | {error, term()}.
 models() ->
@@ -236,6 +265,41 @@ set_provider_key_enabled(Id, Enabled) when is_boolean(Enabled) ->
 -spec delete_provider_key(integer()) -> ok | {error, term()}.
 delete_provider_key(Id) ->
     exec(<<"DELETE FROM provider_keys WHERE id = ?">>, [Id]).
+
+-spec add_provider_model(integer(), binary()) ->
+    {ok, integer()} | {error, invalid | duplicate | term()}.
+add_provider_model(ProviderId, Name) when
+    is_integer(ProviderId), is_binary(Name), Name =/= <<>>
+->
+    case
+        q(
+            <<"INSERT INTO provider_models (provider_id, name, enabled) VALUES (?, ?, 1)">>,
+            [ProviderId, Name]
+        )
+    of
+        {ok, _} ->
+            case
+                q(
+                    <<"SELECT id FROM provider_models WHERE provider_id = ? AND name = ?">>,
+                    [ProviderId, Name]
+                )
+            of
+                {ok, [{Id}]} -> {ok, Id};
+                _ -> {error, lookup_failed}
+            end;
+        {error, _} ->
+            {error, duplicate}
+    end;
+add_provider_model(_, _) ->
+    {error, invalid}.
+
+-spec set_provider_model_enabled(integer(), boolean()) -> ok | {error, term()}.
+set_provider_model_enabled(Id, Enabled) when is_boolean(Enabled) ->
+    exec(<<"UPDATE provider_models SET enabled = ? WHERE id = ?">>, [bool_int(Enabled), Id]).
+
+-spec delete_provider_model(integer()) -> ok | {error, term()}.
+delete_provider_model(Id) ->
+    exec(<<"DELETE FROM provider_models WHERE id = ?">>, [Id]).
 
 %%%===================================================================
 %%% Model / route mutations

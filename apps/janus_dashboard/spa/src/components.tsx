@@ -3,7 +3,7 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router"
 import {
   ArrowLeftRight,
   CircleAlert,
-  Hash,
+  GitBranch,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -71,7 +71,7 @@ export function AppToaster() {
 const NAV = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/providers", icon: ArrowLeftRight, label: "Providers & keys" },
-  { to: "/models", icon: Hash, label: "Models & routes" },
+  { to: "/router", icon: GitBranch, label: "Router" },
   { to: "/keys", icon: KeyRound, label: "Agent keys" },
   { to: "/logs", icon: Terminal, label: "Logs" },
     { to: "/audit", icon: ScrollText, label: "Audit log" },

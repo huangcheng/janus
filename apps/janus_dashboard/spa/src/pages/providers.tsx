@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react"
-import { ChevronDown, ChevronRight, Lock, Plus, X } from "lucide-react"
+import { ChevronDown, ChevronRight, Lock, Plus, RefreshCw, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "../api"
 import { ErrorFlash, Layout, Loading } from "../components"
@@ -55,7 +55,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
-import { KeyMeta, Provider, StateBadge } from "./shared"
+import { KeyMeta, Provider, ProviderModel, StateBadge } from "./shared"
 
 export function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
@@ -63,8 +63,15 @@ export function Providers() {
   const [loaded, setLoaded] = useState(false)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [modal, setModal] = useState<
-    "add" | { addKey: Provider } | { del: Provider } | { delKey: [Provider, KeyMeta] } | null
+    | "add"
+    | { addKey: Provider }
+    | { addModel: Provider }
+    | { del: Provider }
+    | { delKey: [Provider, KeyMeta] }
+    | null
   >(null)
+  const [syncing, setSyncing] = useState(false)
+  const [listingFilter, setListingFilter] = useState("")
 
   const load = () =>
     api("/providers")
@@ -95,6 +102,25 @@ export function Providers() {
       `${p.name} ${p.enabled ? "disabled" : "enabled"}`,
     )
 
+  const listingsSupported = providers.some((p) => Array.isArray(p.models))
+
+  const syncNow = async () => {
+    if (!listingsSupported) {
+      toast.error("This gateway build still syncs into the old global models table. Deploy the new backend before Sync.")
+      return
+    }
+    setSyncing(true)
+    try {
+      const r = await api("/models/sync", { method: "POST", body: {} })
+      toast.success(`Sync done — ${r.models_added ?? 0} new listing(s), ${r.errors ?? 0} error(s)`)
+      await load()
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   return (
     <Layout
       title="Providers & keys"
@@ -105,9 +131,14 @@ export function Providers() {
         <CardHeader>
           <CardTitle>Providers</CardTitle>
           <CardDescription>
-            provider secrets are write-only — never displayed or exported
+            provider secrets are write-only — never displayed or exported.
+            Model lists live under each vendor; bind them on Router.
           </CardDescription>
-          <CardAction>
+          <CardAction className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={syncing || !listingsSupported} onClick={syncNow}>
+              <RefreshCw className={syncing ? "animate-spin" : undefined} />
+              {syncing ? "Syncing…" : "Sync models"}
+            </Button>
             <Button size="sm" onClick={() => setModal("add")}>
               <Plus />
               Add provider
@@ -157,6 +188,8 @@ export function Providers() {
                             onClick={() => setExpanded(expanded === p.id ? null : p.id)}
                           >
                             {p.keys.length} {p.keys.length === 1 ? "key" : "keys"}
+                            {" · "}
+                            {(p.models ?? []).length} {(p.models ?? []).length === 1 ? "model" : "models"}
                             {expanded === p.id ? <ChevronDown /> : <ChevronRight />}
                           </Button>
                           <Button variant="ghost" size="xs" onClick={() => setModal({ del: p })}>
@@ -168,52 +201,71 @@ export function Providers() {
                     {expanded === p.id && (
                       <TableRow className="bg-muted/50 hover:bg-muted/50">
                         <TableCell colSpan={5}>
-                          <div className="flex flex-col gap-2">
-                            {p.keys.length === 0 && (
-                              <span className="text-sm text-muted-foreground">no keys</span>
-                            )}
-                            {p.keys.map((k) => (
-                              <div key={k.id} className="flex items-center gap-3">
-                                <span className="font-mono text-sm">{k.key_id}</span>
-                                <span className="text-xs text-muted-foreground">w{k.weight}</span>
-                                <StateBadge enabled={k.enabled} />
-                                <div className="flex-1" />
+                          <div className="flex flex-col gap-4">
+                            <div className="flex flex-col gap-2">
+                              <div className="text-xs font-medium text-muted-foreground">Keys</div>
+                              {p.keys.length === 0 && (
+                                <span className="text-sm text-muted-foreground">no keys</span>
+                              )}
+                              {p.keys.map((k) => (
+                                <div key={k.id} className="flex items-center gap-3">
+                                  <span className="font-mono text-sm">{k.key_id}</span>
+                                  <span className="text-xs text-muted-foreground">w{k.weight}</span>
+                                  <StateBadge enabled={k.enabled} />
+                                  <div className="flex-1" />
+                                  <Button
+                                    variant="outline"
+                                    size="xs"
+                                    onClick={() =>
+                                      act(
+                                        () =>
+                                          api(
+                                            `/provider-keys/${k.id}/${k.enabled ? "disable" : "enable"}`,
+                                            { method: "POST", body: {} },
+                                          ),
+                                        "key updated",
+                                      )
+                                    }
+                                  >
+                                    {k.enabled ? "Disable" : "Enable"}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    aria-label={`Remove key ${k.key_id}`}
+                                    onClick={() => setModal({ delKey: [p, k] })}
+                                  >
+                                    <X />
+                                  </Button>
+                                </div>
+                              ))}
+                              <div className="flex justify-end">
                                 <Button
                                   variant="outline"
                                   size="xs"
-                                  onClick={() =>
-                                    act(
-                                      () =>
-                                        api(
-                                          `/provider-keys/${k.id}/${k.enabled ? "disable" : "enable"}`,
-                                          { method: "POST", body: {} },
-                                        ),
-                                      "key updated",
-                                    )
-                                  }
+                                  onClick={() => setModal({ addKey: p })}
                                 >
-                                  {k.enabled ? "Disable" : "Enable"}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  aria-label={`Remove key ${k.key_id}`}
-                                  onClick={() => setModal({ delKey: [p, k] })}
-                                >
-                                  <X />
+                                  <Plus />
+                                  Add key
                                 </Button>
                               </div>
-                            ))}
-                            <div className="flex justify-end">
-                              <Button
-                                variant="outline"
-                                size="xs"
-                                onClick={() => setModal({ addKey: p })}
-                              >
-                                <Plus />
-                                Add key
-                              </Button>
                             </div>
+                            <ProviderListings
+                              provider={p}
+                              filter={expanded === p.id ? listingFilter : ""}
+                              onFilter={setListingFilter}
+                              onToggle={(m) =>
+                                act(
+                                  () =>
+                                    api(
+                                      `/provider-models/${m.id}/${m.enabled ? "disable" : "enable"}`,
+                                      { method: "POST", body: {} },
+                                    ),
+                                  "listing updated",
+                                )
+                              }
+                              onAdd={() => setModal({ addModel: p })}
+                            />
                           </div>
                         </TableCell>
                       </TableRow>
@@ -245,6 +297,21 @@ export function Providers() {
             act(async () => {
               await api(`/providers/${modal.addKey.id}/keys`, { method: "POST", body })
             }, "key encrypted & stored")
+          }
+        />
+      )}
+
+      {modal && typeof modal === "object" && "addModel" in modal && (
+        <AddListingModal
+          provider={modal.addModel}
+          onClose={() => setModal(null)}
+          onDone={(name) =>
+            act(async () => {
+              await api(`/providers/${modal.addModel.id}/models`, {
+                method: "POST",
+                body: { name },
+              })
+            }, "listing added")
           }
         />
       )}
@@ -440,6 +507,114 @@ function AddKeyModal({
           <Button disabled={!secret} onClick={() => onDone({ secret, weight })}>
             <Lock />
             Encrypt & store
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ProviderListings({
+  provider,
+  filter,
+  onFilter,
+  onToggle,
+  onAdd,
+}: {
+  provider: Provider
+  filter: string
+  onFilter: (v: string) => void
+  onToggle: (m: ProviderModel) => void
+  onAdd: () => void
+}) {
+  const listings = provider.models ?? []
+  const q = filter.trim().toLowerCase()
+  const shown = q ? listings.filter((m) => m.name.toLowerCase().includes(q)) : listings
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <div className="text-xs font-medium text-muted-foreground">Models</div>
+        <span className="text-xs text-muted-foreground">{listings.length}</span>
+        <div className="flex-1" />
+        {listings.length > 8 && (
+          <Input
+            className="h-8 max-w-56"
+            placeholder="Filter…"
+            value={filter}
+            onChange={(e) => onFilter(e.target.value)}
+          />
+        )}
+        <Button variant="outline" size="xs" onClick={onAdd}>
+          <Plus />
+          Add model
+        </Button>
+      </div>
+      {listings.length === 0 && (
+        <span className="text-sm text-muted-foreground">
+          no listings — Sync models or add one by name
+        </span>
+      )}
+      {listings.length > 0 && (
+        <div className="max-h-64 overflow-y-auto rounded-md border bg-background">
+          {shown.map((m) => (
+            <div key={m.id} className="flex items-center gap-3 border-b px-3 py-1.5 last:border-b-0">
+              <span className="font-mono text-sm">{m.name}</span>
+              <div className="flex-1" />
+              <StateBadge enabled={m.enabled} />
+              <Button variant="outline" size="xs" onClick={() => onToggle(m)}>
+                {m.enabled ? "Disable" : "Enable"}
+              </Button>
+            </div>
+          ))}
+          {shown.length === 0 && (
+            <div className="px-3 py-4 text-center text-sm text-muted-foreground">no match</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AddListingModal({
+  provider,
+  onClose,
+  onDone,
+}: {
+  provider: Provider
+  onClose: () => void
+  onDone: (name: string) => void
+}) {
+  const [name, setName] = useState("")
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Add model · <span className="font-mono">{provider.name}</span>
+          </DialogTitle>
+          <DialogDescription>
+            Inventory only — this does not make the name callable until you bind it on Router.
+          </DialogDescription>
+        </DialogHeader>
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="listing-name">Upstream model id</FieldLabel>
+            <Input
+              id="listing-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="qwen-turbo"
+              autoFocus
+            />
+          </Field>
+        </FieldGroup>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={!name.trim()} onClick={() => onDone(name.trim())}>
+            <Plus />
+            Add
           </Button>
         </DialogFooter>
       </DialogContent>

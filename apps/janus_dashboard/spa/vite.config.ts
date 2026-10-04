@@ -3,6 +3,13 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+function rewriteCookiesForLocalDev(cookie) {
+  return cookie
+    .replace(/;\s*Secure/gi, '')
+    .replace(/;\s*Domain=[^;]*/gi, '')
+    .replace(/;\s*SameSite=None/gi, '; SameSite=Lax')
+}
+
 // Served by Cowboy at / (the dashboard owns this listener); build to dist/.
 // the multi-stage Dockerfile copies dist/ into priv/www of the release.
 export default defineConfig({
@@ -23,11 +30,20 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 3000,
     strictPort: true,
-    // Dev proxy to a locally running gateway dashboard listener.
+    // Default: local janus-dev on :8090. Set JANUS_DASHBOARD_PROXY to
+    // https://janus.noveo.cn to HMR the SPA against the live stack (no Docker rebuild).
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8090',
-        changeOrigin: false,
+        target: process.env.JANUS_DASHBOARD_PROXY || 'http://127.0.0.1:8090',
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            const cookies = proxyRes.headers['set-cookie']
+            if (cookies) {
+              proxyRes.headers['set-cookie'] = cookies.map(rewriteCookiesForLocalDev)
+            }
+          })
+        },
       },
     },
   },

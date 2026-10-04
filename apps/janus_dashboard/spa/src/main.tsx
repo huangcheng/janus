@@ -17,7 +17,7 @@ import { AppToaster, Loading } from './components'
 const Login = lazy(() => import('./pages/login').then((m) => ({ default: m.Login })))
 const Dashboard = lazy(() => import('./pages/dashboard').then((m) => ({ default: m.Dashboard })))
 const Providers = lazy(() => import('./pages/providers').then((m) => ({ default: m.Providers })))
-const Models = lazy(() => import('./pages/models').then((m) => ({ default: m.Models })))
+const RouterPage = lazy(() => import('./pages/router').then((m) => ({ default: m.RouterPage })))
 const Keys = lazy(() => import('./pages/keys').then((m) => ({ default: m.Keys })))
 const Logs = lazy(() => import('./pages/logs').then((m) => ({ default: m.Logs })))
 const Audit = lazy(() => import('./pages/audit').then((m) => ({ default: m.Audit })))
@@ -56,14 +56,21 @@ const authLayout = createRoute({
 
 const indexRoute = createRoute({ getParentRoute: () => authLayout, path: '/', component: Dashboard })
 const providersRoute = createRoute({ getParentRoute: () => authLayout, path: '/providers', component: Providers })
-const modelsRoute = createRoute({ getParentRoute: () => authLayout, path: '/models', component: Models })
+const routerRoute = createRoute({ getParentRoute: () => authLayout, path: '/router', component: RouterPage })
+const modelsRoute = createRoute({
+  getParentRoute: () => authLayout,
+  path: '/models',
+  beforeLoad: () => {
+    throw redirect({ to: '/router' })
+  },
+})
 const keysRoute = createRoute({ getParentRoute: () => authLayout, path: '/keys', component: Keys })
 const logsRoute = createRoute({ getParentRoute: () => authLayout, path: '/logs', component: Logs })
 const auditRoute = createRoute({ getParentRoute: () => authLayout, path: '/audit', component: Audit })
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
-  authLayout.addChildren([indexRoute, providersRoute, modelsRoute, keysRoute, logsRoute, auditRoute]),
+  authLayout.addChildren([indexRoute, providersRoute, routerRoute, modelsRoute, keysRoute, logsRoute, auditRoute]),
 ])
 
 const router = createRouter({ routeTree, basepath: '/' })

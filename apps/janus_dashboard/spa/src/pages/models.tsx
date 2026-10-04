@@ -43,7 +43,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Model, Provider, StateBadge } from "./shared"
+import { Model, Provider, ProviderBadges, StateBadge } from "./shared"
 
 export function Models() {
   const [models, setModels] = useState<Model[]>([])
@@ -125,6 +125,7 @@ export function Models() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Model</TableHead>
+                  <TableHead>Providers</TableHead>
                   <TableHead>State</TableHead>
                   <TableHead>Routes</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -135,6 +136,9 @@ export function Models() {
                   <Fragment key={m.id}>
                     <TableRow>
                       <TableCell className="font-mono font-medium">{m.name}</TableCell>
+                      <TableCell>
+                        <ProviderBadges routes={m.routes} />
+                      </TableCell>
                       <TableCell>
                         <StateBadge enabled={m.enabled} />
                       </TableCell>
@@ -176,7 +180,7 @@ export function Models() {
                     </TableRow>
                     {expanded === m.id && (
                       <TableRow className="bg-muted/50 hover:bg-muted/50">
-                        <TableCell colSpan={4}>
+                        <TableCell colSpan={5}>
                           <Table>
                             <TableHeader>
                               <TableRow>

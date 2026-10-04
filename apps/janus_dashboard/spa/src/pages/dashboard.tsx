@@ -109,8 +109,8 @@ export function Dashboard() {
         { label: "Serving generation", value: data.generation },
         { label: "DB backend", value: String(data.backend) },
         { label: "Providers", value: data.counts.providers },
-        { label: "Models", value: data.counts.models },
-        { label: "Routes", value: data.counts.routes },
+        { label: "Listings", value: data.counts.listings ?? data.counts.models },
+        { label: "Bindings", value: data.counts.routes },
         { label: "Agent keys", value: data.counts.agent_keys },
       ]
     : []

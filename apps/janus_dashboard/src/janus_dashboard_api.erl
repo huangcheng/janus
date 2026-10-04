@@ -60,6 +60,9 @@ route(<<"DELETE">>, [<<"session">>], Req) ->
 %% overview
 route(<<"GET">>, [<<"overview">>], Req) ->
     with_session(Req, fun(_Csrf) -> handle_overview(Req) end);
+%% auto-router
+route(<<"GET">>, [<<"auto">>], Req) ->
+    with_session(Req, fun(_Csrf) -> handle_auto_get(Req) end);
 %% providers
 route(<<"GET">>, [<<"providers">>], Req) ->
     with_session(Req, fun(_Csrf) -> handle_providers_get(Req) end);
@@ -73,6 +76,14 @@ route(<<"DELETE">>, [<<"providers">>, Id], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_delete(provider, Id, Req) end);
 route(<<"POST">>, [<<"providers">>, Id, <<"keys">>], Req) ->
     with_mutating_session(Req, fun(Body, _) -> handle_provider_key_add(Id, Body, Req) end);
+route(<<"POST">>, [<<"providers">>, Id, <<"models">>], Req) ->
+    with_mutating_session(Req, fun(Body, _) -> handle_provider_model_add(Id, Body, Req) end);
+route(<<"POST">>, [<<"provider-models">>, Id, <<"disable">>], Req) ->
+    with_mutating_session(Req, fun(_, _) -> toggle(provider_model, Id, false, Req) end);
+route(<<"POST">>, [<<"provider-models">>, Id, <<"enable">>], Req) ->
+    with_mutating_session(Req, fun(_, _) -> toggle(provider_model, Id, true, Req) end);
+route(<<"DELETE">>, [<<"provider-models">>, Id], Req) ->
+    with_mutating_session(Req, fun(_, _) -> handle_delete(provider_model, Id, Req) end);
 %% provider keys
 route(<<"POST">>, [<<"provider-keys">>, Id, <<"disable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle(provider_key, Id, false, Req) end);
@@ -202,6 +213,7 @@ handle_login(Req) ->
 handle_overview(Req) ->
     {ok, Providers} = janus_dashboard_store:providers(),
     {ok, Models} = janus_dashboard_store:models(),
+    {ok, Listings} = janus_dashboard_store:provider_models(),
     {ok, Routes} = janus_dashboard_store:routes(),
     {ok, Keys} = janus_dashboard_store:agent_keys(),
     {ok, KeyCounts} = janus_dashboard_store:provider_key_counts(),
@@ -223,6 +235,7 @@ handle_overview(Req) ->
             counts => #{
                 providers => length(Providers),
                 models => length(Models),
+                listings => length(Listings),
                 routes => length(Routes),
                 agent_keys => length(Keys)
             },
@@ -232,17 +245,37 @@ handle_overview(Req) ->
         Req
     ).
 
+handle_auto_get(Req) ->
+    Snapshot =
+        try
+            _ = code:ensure_loaded(janus_auto),
+            janus_auto:snapshot()
+        catch
+            _:_ ->
+                #{
+                    configured => false,
+                    model => <<"janus-auto">>,
+                    judge_model => null,
+                    default_tier => <<"fast">>,
+                    tiers => #{fast => [], big => [], flagship => []},
+                    stats => #{}
+                }
+        end,
+    reply_json(200, Snapshot, Req).
+
 handle_providers_get(Req) ->
     {ok, Providers} = janus_dashboard_store:providers(),
-    ProvidersWithKeys =
+    ProvidersWithKids =
         lists:map(
             fun(P) ->
-                {ok, Keys} = janus_dashboard_store:provider_keys(maps:get(id, P)),
-                P#{keys => Keys}
+                Pid = maps:get(id, P),
+                {ok, Keys} = janus_dashboard_store:provider_keys(Pid),
+                {ok, Listings} = janus_dashboard_store:provider_models(Pid),
+                P#{keys => Keys, models => Listings}
             end,
             Providers
         ),
-    reply_json(200, #{providers => ProvidersWithKeys}, Req).
+    reply_json(200, #{providers => ProvidersWithKids}, Req).
 
 handle_provider_add(Body, Req) ->
     Name = maps:get(<<"name">>, Body, undefined),
@@ -288,6 +321,28 @@ handle_provider_key_add(IdBin, Body, Req) ->
                         <<"expected {\"secret\": \"sk-...\", \"weight\": 1}">>,
                         Req
                     );
+                {_, {error, Reason}} ->
+                    err(500, <<"db_error">>, Reason, Req)
+            end;
+        error ->
+            err(400, <<"bad_id">>, <<"invalid provider id">>, Req)
+    end.
+
+handle_provider_model_add(IdBin, Body, Req) ->
+    Name = maps:get(<<"name">>, Body, undefined),
+    case parse_id(IdBin) of
+        {ok, Id} ->
+            case
+                {
+                    janus_dashboard_store:provider_name(Id),
+                    janus_dashboard_store:add_provider_model(Id, Name)
+                }
+            of
+                {{ok, PName}, {ok, Mid}} ->
+                    mutate(<<"provider_model.add">>, PName, Req),
+                    reply_json(201, #{id => Mid, name => Name}, Req);
+                {_, {error, Code}} when Code =:= duplicate; Code =:= invalid ->
+                    err(400, atom_to_binary(Code, utf8), pick_msg(Code), Req);
                 {_, {error, Reason}} ->
                     err(500, <<"db_error">>, Reason, Req)
             end;
@@ -517,6 +572,7 @@ toggle(Kind, IdBin, Enabled, Req) ->
                 case Kind of
                     provider -> janus_dashboard_store:set_provider_enabled(Id, Enabled);
                     provider_key -> janus_dashboard_store:set_provider_key_enabled(Id, Enabled);
+                    provider_model -> janus_dashboard_store:set_provider_model_enabled(Id, Enabled);
                     model -> janus_dashboard_store:set_model_enabled(Id, Enabled);
                     agent_key -> janus_dashboard_store:set_agent_key_enabled(Id, Enabled)
                 end,
@@ -539,6 +595,7 @@ handle_delete(Kind, IdBin, Req) ->
                 case Kind of
                     provider -> janus_dashboard_store:delete_provider(Id);
                     provider_key -> janus_dashboard_store:delete_provider_key(Id);
+                    provider_model -> janus_dashboard_store:delete_provider_model(Id);
                     agent_key -> janus_dashboard_store:delete_agent_key(Id)
                 end,
             case Result of

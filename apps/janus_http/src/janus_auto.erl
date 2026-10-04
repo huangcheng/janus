@@ -15,7 +15,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([maybe_route/2, stats/0]).
+-export([maybe_route/2, stats/0, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(CACHE, janus_auto_cache).
@@ -84,6 +84,48 @@ stats() ->
     catch
         _:_ -> #{}
     end.
+
+%% Dashboard-safe view of auto-router config + counters.
+-spec snapshot() -> map().
+snapshot() ->
+    Cfg =
+        try
+            normalized()
+        catch
+            _:_ -> default_cfg()
+        end,
+    Tiers = Cfg#acfg.tiers,
+    Fast = maps:get(fast, Tiers, []),
+    Big = maps:get(big, Tiers, []),
+    Flagship = maps:get(flagship, Tiers, []),
+    #{
+        configured => Fast =/= [] orelse Big =/= [] orelse Flagship =/= [],
+        model => Cfg#acfg.model,
+        judge_model =>
+            case Cfg#acfg.judge_model of
+                undefined -> null;
+                J -> J
+            end,
+        default_tier => atom_to_binary(Cfg#acfg.default_tier, utf8),
+        tiers => #{
+            fast => Fast,
+            big => Big,
+            flagship => Flagship
+        },
+        stats => json_stats(stats())
+    }.
+
+json_stats(Map) when is_map(Map) ->
+    maps:from_list([{stat_key(K), V} || {K, V} <- maps:to_list(Map), is_integer(V)]);
+json_stats(_) ->
+    #{}.
+
+stat_key({routed, T}) when is_atom(T) ->
+    <<"routed_", (atom_to_binary(T, utf8))/binary>>;
+stat_key(A) when is_atom(A) ->
+    atom_to_binary(A, utf8);
+stat_key(Other) ->
+    iolist_to_binary(io_lib:format("~p", [Other])).
 
 %%%===================================================================
 %%% gen_server (owns cache/aux/stats tables + semaphore atomics)

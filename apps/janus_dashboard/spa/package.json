@@ -6,6 +6,8 @@
   "scripts": {
     "predev": "node scripts/ensure-backend.mjs",
     "dev": "vite",
+    "dev:local": "node scripts/dev-local.mjs",
+    "dev:remote": "node scripts/dev-remote.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

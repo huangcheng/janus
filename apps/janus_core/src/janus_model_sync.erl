@@ -2,12 +2,11 @@
 %%% @doc Periodic provider model-list synchronization.
 %%%
 %%% Providers (DashScope, Ark, StepFun, ...) refresh their model
-%%% catalogs continuously; Janus's models table does not follow. This
-%%% worker polls each enabled provider's OpenAI-compatible
-%%% `GET /v1/models` (via the provider's base_url + keys through the
-%%% existing catalog) and upserts newly seen model names as disabled
-%%% rows — visible in the dashboard for one-click routing, never
-%%% auto-enabled (an un-routed model would 404 anyway).
+%%% catalogs continuously; Janus's public `models` table does not follow.
+%%% This worker polls each enabled provider's OpenAI-compatible
+%%% `GET /v1/models` and upserts names into `provider_models` (inventory
+%%% under that vendor). Agent-facing names are created only when bound
+%%% on the Router page.
 %%%
 %%% Config (`janus` app env / os env):
 %%%   - JANUS_MODEL_SYNC_INTERVAL_SEC — poll period, default 21600 (6h);
@@ -154,7 +153,7 @@ sync_provider(ProviderId) ->
         {ok, Names} when is_list(Names) ->
             {Added, UpsertErrs} = lists:foldl(
                 fun(Name, {A, E}) ->
-                    case upsert_model(Name) of
+                    case upsert_listing(ProviderId, Name) of
                         created -> {A + 1, E};
                         exists -> {A, E};
                         {error, _} -> {A, E + 1}
@@ -236,17 +235,24 @@ decode_model_names(Body) ->
         _:_ -> {error, decode_crashed}
     end.
 
-%% Insert-only when unseen (name is unique); existing rows untouched so
-%% manual enable/disable/routing decisions are never clobbered.
-%% New rows are disabled (enabled=0) until an operator routes them.
-upsert_model(Name) ->
-    case janus_db_conn:query(<<"SELECT 1 FROM models WHERE name = ?">>, [Name]) of
+%% Insert-only into this provider's inventory. Does not create a public
+%% model name — Router bindings stay explicit.
+upsert_listing(ProviderId, Name) ->
+    case
+        janus_db_conn:query(
+            <<"SELECT 1 FROM provider_models WHERE provider_id = ? AND name = ?">>,
+            [ProviderId, Name]
+        )
+    of
         {ok, [_ | _]} ->
             exists;
         {ok, []} ->
-            case janus_db_conn:query(
-                <<"INSERT INTO models (name, enabled) VALUES (?, 0)">>, [Name]
-            ) of
+            case
+                janus_db_conn:query(
+                    <<"INSERT INTO provider_models (provider_id, name, enabled) VALUES (?, ?, 1)">>,
+                    [ProviderId, Name]
+                )
+            of
                 {ok, _} ->
                     created;
                 {error, Reason} ->
@@ -256,6 +262,7 @@ upsert_model(Name) ->
                         false ->
                             logger:warning(#{
                                 what => janus_model_sync_upsert_failed,
+                                provider_id => ProviderId,
                                 model => Name,
                                 reason => Reason
                             }),
@@ -265,6 +272,7 @@ upsert_model(Name) ->
         {error, Reason} ->
             logger:warning(#{
                 what => janus_model_sync_lookup_failed,
+                provider_id => ProviderId,
                 model => Name,
                 reason => Reason
             }),
