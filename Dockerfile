@@ -33,5 +33,6 @@ USER janus
 ENV JANUS_SQLITE_PATH=/var/lib/janus/janus.db
 # 8080 = data plane, 8090 = dashboard plane (bind to loopback or put Caddy in front)
 EXPOSE 8080 8090
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/healthz || wget -qO- http://127.0.0.1:8090/healthz || exit 1
 CMD ["bin/janus", "foreground"]

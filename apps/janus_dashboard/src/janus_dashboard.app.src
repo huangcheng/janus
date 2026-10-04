@@ -3,7 +3,7 @@
     {vsn, "0.1.0"},
     {registered, []},
     {mod, {janus_dashboard_app, []}},
-    {applications, [kernel, stdlib, crypto, cowboy, thoas, janus_core]},
+    {applications, [kernel, stdlib, crypto, cowboy, thoas, janus_core, janus_http]},
     {env, []},
     {modules, []},
     {licenses, ["MIT"]},

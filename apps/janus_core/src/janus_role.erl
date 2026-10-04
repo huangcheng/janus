@@ -20,19 +20,10 @@ role() ->
     case os_role() of
         {ok, Role} ->
             Role;
+        {error, Bad} ->
+            erlang:error({invalid_janus_role, Bad});
         undefined ->
-            case application:get_env(janus_core, role, all) of
-                gateway -> gateway;
-                dashboard -> dashboard;
-                all -> all;
-                Other ->
-                    logger:warning(#{
-                        what => janus_role_unknown,
-                        value => Other,
-                        using => all
-                    }),
-                    all
-            end
+            app_role()
     end.
 
 -spec serves_http() -> boolean().
@@ -51,15 +42,51 @@ os_role() ->
             undefined
     end.
 
+app_role() ->
+    case first_app_role([janus, janus_core]) of
+        undefined -> all;
+        Role -> Role
+    end.
+
+first_app_role([]) ->
+    undefined;
+first_app_role([App | Rest]) ->
+    case application:get_env(App, role, undefined) of
+        undefined -> first_app_role(Rest);
+        Value -> decode_app_role(Value)
+    end.
+
+decode_app_role(gateway) ->
+    gateway;
+decode_app_role(dashboard) ->
+    dashboard;
+decode_app_role(all) ->
+    all;
+decode_app_role(<<"gateway">>) ->
+    gateway;
+decode_app_role(<<"dashboard">>) ->
+    dashboard;
+decode_app_role(<<"all">>) ->
+    all;
+decode_app_role("gateway") ->
+    gateway;
+decode_app_role("dashboard") ->
+    dashboard;
+decode_app_role("all") ->
+    all;
+decode_app_role(Other) ->
+    erlang:error({invalid_janus_role, Other}).
+
 parse("gateway") ->
     {ok, gateway};
 parse("dashboard") ->
     {ok, dashboard};
 parse("all") ->
     {ok, all};
+parse("") ->
+    undefined;
 parse(Other) ->
-    logger:warning(#{what => janus_role_unknown, value => Other, using => all}),
-    {ok, all}.
+    {error, Other}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -84,6 +111,14 @@ get_test_() ->
                 ?assertEqual(dashboard, janus_role:role()),
                 ?assertNot(janus_role:serves_http()),
                 ?assert(janus_role:serves_dashboard())
+            end},
+            {"invalid env crashes", fun() ->
+                os:putenv("JANUS_ROLE", "gatway"),
+                ?assertError({invalid_janus_role, "gatway"}, janus_role:role())
+            end},
+            {"whitespace-only falls through", fun() ->
+                os:putenv("JANUS_ROLE", "   "),
+                ?assertEqual(all, janus_role:role())
             end}
         ]
     end}.
