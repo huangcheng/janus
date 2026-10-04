@@ -494,3 +494,18 @@ apply_one(Conn, Version, Sql) ->
         Other ->
             {error, {unexpected_begin_result, Other}}
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+rewrite_placeholders_test() ->
+    ?assertEqual(
+        <<"SELECT a FROM t WHERE x = $1 AND y = $2">>,
+        rewrite_placeholders(<<"SELECT a FROM t WHERE x = ? AND y = ?">>)
+    ),
+    ?assertEqual(
+        <<"SELECT 1 FROM schema_migrations WHERE version = $1">>,
+        rewrite_placeholders(<<"SELECT 1 FROM schema_migrations WHERE version = $1">>)
+    ).
+
+-endif.

@@ -250,12 +250,17 @@ upsert_model(Name) ->
                 {ok, _} ->
                     created;
                 {error, Reason} ->
-                    logger:warning(#{
-                        what => janus_model_sync_upsert_failed,
-                        model => Name,
-                        reason => Reason
-                    }),
-                    {error, Reason}
+                    case unique_violation(Reason) of
+                        true ->
+                            exists;
+                        false ->
+                            logger:warning(#{
+                                what => janus_model_sync_upsert_failed,
+                                model => Name,
+                                reason => Reason
+                            }),
+                            {error, Reason}
+                    end
             end;
         {error, Reason} ->
             logger:warning(#{
@@ -265,6 +270,29 @@ upsert_model(Name) ->
             }),
             {error, Reason}
     end.
+
+%% Concurrent sync_tick + sync_now can race the unique name index.
+unique_violation(Reason) ->
+    Flatten = flatten_term(Reason),
+    lists:member(unique_violation, Flatten) orelse
+        lists:member(<<"23505">>, Flatten) orelse
+        lists:any(
+            fun
+                (B) when is_binary(B) -> binary:match(B, <<"UNIQUE">>) =/= nomatch;
+                (L) when is_list(L) ->
+                    is_integer(hd([0 | L])) andalso string:find(L, "UNIQUE") =/= nomatch;
+                (_) ->
+                    false
+            end,
+            Flatten
+        ).
+
+flatten_term(T) when is_tuple(T) ->
+    lists:append([flatten_term(X) || X <- tuple_to_list(T)]);
+flatten_term(L) when is_list(L), L =/= [], not is_integer(hd(L)) ->
+    lists:append([flatten_term(X) || X <- L]);
+flatten_term(T) ->
+    [T].
 
 %%%===================================================================
 %% Timer / config
@@ -317,3 +345,14 @@ rtrim(S, Ch) ->
         [Ch | Rest] -> lists:reverse(Rest);
         _ -> S
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+unique_violation_test() ->
+    ?assert(unique_violation({error, unique_violation})),
+    ?assert(unique_violation({error, {error, <<"23505">>, <<"unique_violation">>}})),
+    ?assert(unique_violation("UNIQUE constraint failed: models.name")),
+    ?assertNot(unique_violation({error, timeout})).
+
+-endif.
