@@ -8,9 +8,9 @@ design
 .cursor
 scripts
 priv
-apps/janus_admin/spa/node_modules
-apps/janus_admin/spa/dist
-apps/janus_admin/priv/www
+apps/janus_dashboard/spa/node_modules
+apps/janus_dashboard/spa/dist
+apps/janus_dashboard/priv/www
 *.beam
 erl_crash.dump
 docker-compose.yml
