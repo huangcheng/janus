@@ -93,6 +93,8 @@ route(<<"POST">>, [<<"provider-keys">>, Id, <<"disable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle(provider_key, Id, false, Req) end);
 route(<<"POST">>, [<<"provider-keys">>, Id, <<"enable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle(provider_key, Id, true, Req) end);
+route(<<"POST">>, [<<"provider-keys">>, Id, <<"weight">>], Req) ->
+    with_mutating_session(Req, fun(Body, _) -> handle_provider_key_weight(Id, Body, Req) end);
 route(<<"DELETE">>, [<<"provider-keys">>, Id], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_delete(provider_key, Id, Req) end);
 %% models & routes
@@ -110,6 +112,8 @@ route(<<"POST">>, [<<"models">>, Id, <<"routes">>, Pid, <<"disable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle_route(Id, Pid, false, Req) end);
 route(<<"POST">>, [<<"models">>, Id, <<"routes">>, Pid, <<"enable">>], Req) ->
     with_mutating_session(Req, fun(_, _) -> toggle_route(Id, Pid, true, Req) end);
+route(<<"POST">>, [<<"models">>, Id, <<"routes">>, Pid, <<"rebalance">>], Req) ->
+    with_mutating_session(Req, fun(Body, _) -> handle_route_rebalance(Id, Pid, Body, Req) end);
 route(<<"DELETE">>, [<<"models">>, Id, <<"routes">>, Pid], Req) ->
     with_mutating_session(Req, fun(_, _) -> handle_route_delete(Id, Pid, Req) end);
 %% agent keys
@@ -460,6 +464,41 @@ toggle_route(ModelIdBin, PidBin, Enabled, Req) ->
             end;
         _ ->
             err(400, <<"bad_id">>, <<"invalid ids">>, Req)
+    end.
+
+handle_provider_key_weight(IdBin, Body, Req) ->
+    Weight = maps:get(<<"weight">>, Body, undefined),
+    case parse_id(IdBin) of
+        {ok, Id} ->
+            case janus_dashboard_store:set_provider_key_weight(Id, Weight) of
+                ok ->
+                    mutate(<<"provider_key.weight">>, undefined, Req),
+                    reply_json(200, #{ok => true}, Req);
+                {error, invalid} ->
+                    err(400, <<"invalid">>, <<"weight must be a positive integer">>, Req);
+                {error, Reason} ->
+                    err(500, <<"db_error">>, Reason, Req)
+            end;
+        error ->
+            err(400, <<"bad_id">>, <<"invalid provider key id">>, Req)
+    end.
+
+handle_route_rebalance(MidBin, PidBin, Body, Req) ->
+    Weight = pos_int_or(maps:get(<<"weight">>, Body, 1), 1),
+    Priority = int_or(maps:get(<<"priority">>, Body, 0), 0),
+    case {parse_id(MidBin), parse_id(PidBin)} of
+        {{ok, Mid}, {ok, Pid}} ->
+            case janus_dashboard_store:set_route_tuning(Mid, Pid, Weight, Priority) of
+                ok ->
+                    mutate(<<"route.rebalance">>, route_target(Mid, Pid), Req),
+                    reply_json(200, #{ok => true}, Req);
+                {error, invalid} ->
+                    err(400, <<"invalid">>, <<"weight must be a positive integer">>, Req);
+                {error, Reason} ->
+                    err(500, <<"db_error">>, Reason, Req)
+            end;
+        _ ->
+            err(400, <<"bad_id">>, <<"invalid model or provider id">>, Req)
     end.
 
 handle_route_delete(ModelIdBin, PidBin, Req) ->

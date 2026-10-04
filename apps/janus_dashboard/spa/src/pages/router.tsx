@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Plus, X } from "lucide-react"
+import { Plus, SlidersHorizontal, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "../api"
 import { ErrorFlash, Layout, Loading } from "../components"
@@ -73,6 +73,7 @@ export function RouterPage() {
   const [busy, setBusy] = useState(false)
   const [bindOpen, setBindOpen] = useState(false)
   const [confirmUnbind, setConfirmUnbind] = useState(false)
+  const [tune, setTune] = useState<BindingRow | null>(null)
 
   const load = () =>
     Promise.all([api("/models"), api("/providers")])
@@ -291,6 +292,10 @@ export function RouterPage() {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
+                          <Button variant="ghost" size="xs" onClick={() => setTune(r)}>
+                            <SlidersHorizontal />
+                            Tune
+                          </Button>
                           <Button
                             variant="outline"
                             size="xs"
@@ -401,6 +406,24 @@ export function RouterPage() {
         </AlertDialog>
       )}
 
+      {tune && (
+        <TuneDialog
+          row={tune}
+          onClose={() => setTune(null)}
+          onSave={async (weight, priority) => {
+            await act(
+              () =>
+                api(`/models/${tune.route.model_id}/routes/${tune.route.provider_id}/rebalance`, {
+                  method: "POST",
+                  body: { weight, priority },
+                }),
+              "binding updated",
+            )
+            setTune(null)
+          }}
+        />
+      )}
+
       {bindOpen && (
         <BindModal
           models={models}
@@ -431,6 +454,73 @@ export function RouterPage() {
         />
       )}
     </Layout>
+  )
+}
+
+function TuneDialog({
+  row,
+  onClose,
+  onSave,
+}: {
+  row: BindingRow
+  onClose: () => void
+  onSave: (weight: number, priority: number) => void
+}) {
+  const [weight, setWeight] = useState(row.route.weight)
+  const [priority, setPriority] = useState(row.route.priority)
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Adjust binding</DialogTitle>
+          <DialogDescription>
+            <span className="font-mono">{row.model.name}</span>
+            {" → "}
+            {row.route.provider_name ?? row.route.provider_id}
+            {" / "}
+            <span className="font-mono">
+              {upstreamLabel(row.route.upstream_model_id, row.model.name)}
+            </span>
+          </DialogDescription>
+        </DialogHeader>
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="tune-weight">Weight</FieldLabel>
+            <Input
+              id="tune-weight"
+              type="number"
+              min={1}
+              value={weight}
+              autoFocus
+              onChange={(e) => setWeight(Math.max(1, Number(e.target.value) || 1))}
+            />
+            <FieldDescription>
+              Traffic share within the same priority (weighted round-robin).
+            </FieldDescription>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="tune-priority">Priority</FieldLabel>
+            <Input
+              id="tune-priority"
+              type="number"
+              value={priority}
+              onChange={(e) => setPriority(Number(e.target.value) || 0)}
+            />
+            <FieldDescription>
+              Lower priorities are tried first; failover moves to the next one.
+            </FieldDescription>
+          </Field>
+        </FieldGroup>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={weight < 1} onClick={() => onSave(weight, priority)}>
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

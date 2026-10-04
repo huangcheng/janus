@@ -27,6 +27,7 @@
     delete_provider/1,
     add_provider_key/3,
     set_provider_key_enabled/2,
+    set_provider_key_weight/2,
     delete_provider_key/1,
     add_provider_model/2,
     set_provider_model_enabled/2,
@@ -36,6 +37,7 @@
     set_model_enabled/2,
     add_route/5,
     set_route_enabled/3,
+    set_route_tuning/4,
     delete_route/2,
     %% agent key mutations
     create_agent_key/1,
@@ -262,6 +264,15 @@ set_provider_key_enabled(Id, Enabled) when is_boolean(Enabled) ->
         [bool_int(Enabled), Id]
     ).
 
+-spec set_provider_key_weight(integer(), pos_integer()) -> ok | {error, invalid | term()}.
+set_provider_key_weight(Id, Weight) ->
+    case is_pos_int(Weight) of
+        false ->
+            {error, invalid};
+        true ->
+            exec(<<"UPDATE provider_keys SET weight = ? WHERE id = ?">>, [Weight, Id])
+    end.
+
 -spec delete_provider_key(integer()) -> ok | {error, term()}.
 delete_provider_key(Id) ->
     exec(<<"DELETE FROM provider_keys WHERE id = ?">>, [Id]).
@@ -354,6 +365,22 @@ set_route_enabled(ModelId, ProviderId, Enabled) when is_boolean(Enabled) ->
         <<"UPDATE model_routes SET enabled = ? WHERE model_id = ? AND provider_id = ?">>,
         [bool_int(Enabled), ModelId, ProviderId]
     ).
+
+-spec set_route_tuning(integer(), integer(), pos_integer(), integer()) ->
+    ok | {error, invalid | term()}.
+set_route_tuning(ModelId, ProviderId, Weight, Priority) ->
+    case is_pos_int(Weight) andalso is_int(Priority) of
+        false ->
+            {error, invalid};
+        true ->
+            exec(
+                <<
+                    "UPDATE model_routes SET weight = ?, priority = ? "
+                    "WHERE model_id = ? AND provider_id = ?"
+                >>,
+                [Weight, Priority, ModelId, ProviderId]
+            )
+    end.
 
 -spec delete_route(integer(), integer()) -> ok | {error, term()}.
 delete_route(ModelId, ProviderId) ->

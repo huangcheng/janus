@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react"
-import { ChevronDown, ChevronRight, Lock, Plus, RefreshCw, Search, X } from "lucide-react"
+import { Check, ChevronDown, ChevronRight, Lock, Pencil, Plus, RefreshCw, Search, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "../api"
 import { ErrorFlash, Layout, Loading } from "../components"
@@ -75,6 +75,7 @@ export function Providers() {
   >(null)
   const [syncing, setSyncing] = useState(false)
   const [listingFilter, setListingFilter] = useState("")
+  const [weightEdit, setWeightEdit] = useState<{ id: number; value: string } | null>(null)
 
   const load = () =>
     api("/providers")
@@ -122,6 +123,15 @@ export function Providers() {
     } finally {
       setSyncing(false)
     }
+  }
+
+  const saveWeight = (k: KeyMeta) => {
+    const weight = Math.max(1, Number(weightEdit?.value) || 1)
+    setWeightEdit(null)
+    act(
+      () => api(`/provider-keys/${k.id}/weight`, { method: "POST", body: { weight } }),
+      "weight updated",
+    )
   }
 
   return (
@@ -250,12 +260,52 @@ export function Providers() {
                                   <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
                                     {k.key_id}
                                   </span>
-                                  <span
-                                    className="text-xs text-muted-foreground tabular-nums"
-                                    title="Traffic share when several keys are enabled on this provider (weighted round-robin)"
-                                  >
-                                    weight {k.weight}
-                                  </span>
+                                  {weightEdit?.id === k.id ? (
+                                    <span className="flex items-center gap-1">
+                                      <Input
+                                        type="number"
+                                        min={1}
+                                        className="h-7 w-20 px-2 text-xs"
+                                        value={weightEdit.value}
+                                        autoFocus
+                                        onChange={(e) =>
+                                          setWeightEdit({ id: k.id, value: e.target.value })
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") saveWeight(k)
+                                          if (e.key === "Escape") setWeightEdit(null)
+                                        }}
+                                      />
+                                      <Button
+                                        variant="ghost"
+                                        size="icon-xs"
+                                        aria-label="Save weight"
+                                        onClick={() => saveWeight(k)}
+                                      >
+                                        <Check />
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon-xs"
+                                        aria-label="Cancel"
+                                        onClick={() => setWeightEdit(null)}
+                                      >
+                                        <X />
+                                      </Button>
+                                    </span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="group flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                                      title="Traffic share when several keys are enabled on this provider (weighted round-robin) — click to edit"
+                                      onClick={() =>
+                                        setWeightEdit({ id: k.id, value: String(k.weight) })
+                                      }
+                                    >
+                                      weight {k.weight}
+                                      <Pencil className="size-3 opacity-0 transition-opacity group-hover:opacity-60" />
+                                    </button>
+                                  )}
                                   <div className="flex-1" />
                                   <StateBadge enabled={k.enabled} />
                                   <Button
