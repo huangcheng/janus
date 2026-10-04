@@ -51,6 +51,9 @@ is_loopback({127, 0, 0, 1}) -> true;
 is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
 is_loopback(_) -> false.
 
+handle(_Method, undefined, Req) ->
+    %% Exact /stats match has undefined path_info; normalize.
+    handle(_Method, [], Req);
 handle(<<"GET">>, [], Req) ->
     Stats = #{
         generation => janus_config:generation(),

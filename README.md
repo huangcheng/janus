@@ -1,6 +1,6 @@
 # Janus
 
-Erlang/OTP LLM gateway — OpenAI + Anthropic faces, native cluster LB, Dashboard UI.
+Erlang/OTP LLM gateway — OpenAI + Anthropic faces, native cluster LB. Managed by the standalone dashboard ([janus-dashboard](../janus-dashboard): Python FastAPI + SPA).
 
 ## Status
 
@@ -57,7 +57,7 @@ docker compose --profile postgres up
 
 Hot path never queries SQL — ETS holds routes. Postgres is for shared catalog across nodes; SQLite is for single-node / laptop.
 
-`JANUS_ROLE=gateway` starts the agent plane only (`:8080`, no dashboard). `JANUS_ROLE=dashboard` starts `:8090` only. Default `all` is both (laptop / noveo). Gateway nodes use shared Postgres, the same secrets as the dashboard node, and should set `JANUS_MODEL_SYNC_INTERVAL_SEC=0` and omit `JANUS_AUTO_SEED`.
+The admin plane (`:8090`) is read-only stats for the standalone dashboard to poll (`/stats`, token-authenticated via `JANUS_STATS_TOKEN`). Gateway nodes use shared Postgres, the same secrets, and should set `JANUS_MODEL_SYNC_INTERVAL_SEC=0` and omit `JANUS_AUTO_SEED`.
 
 ## Agent endpoints
 
@@ -74,9 +74,8 @@ Provider `protocol` is one of `openai_chat` | `openai_responses` | `anthropic_me
 |-----|------|
 | `janus` | Root release application |
 | `janus_core` | DB backend select, ETS config, LB |
-| `janus_http` | Cowboy + agent HTTP API |
+| `janus_http` | Cowboy agent API (`:8080`) + admin stats plane (`:8090`) |
 | `janus_providers` | Upstream adapters |
-| `janus_dashboard` | Dashboard API + UI (`/dashboard`) |
 
 ## License
 

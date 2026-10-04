@@ -36,23 +36,3 @@ jobs:
 
       - name: EUnit
         run: rebar3 eunit
-
-  spa:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/janus_dashboard/spa
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: apps/janus_dashboard/spa/package-lock.json
-
-      - name: Install deps
-        run: npm ci
-
-      - name: Typecheck + build
-        run: npm run build

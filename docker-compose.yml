@@ -10,10 +10,8 @@ services:
     environment:
       # Omit JANUS_DB_* to use SQLite at JANUS_SQLITE_PATH
       JANUS_SQLITE_PATH: /var/lib/janus/janus.db
-      # all (default) | gateway (:8080 only) | dashboard (:8090 only)
-      # JANUS_ROLE: gateway
-      # Dashboard console password (unset => dashboard logins disabled).
-      # JANUS_DASHBOARD_PASSWORD: change-me
+      # Shared token the standalone dashboard presents when polling /stats.
+      # JANUS_STATS_TOKEN: change-me
     volumes:
       - janus_data:/var/lib/janus
 

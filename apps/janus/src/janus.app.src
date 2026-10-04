@@ -14,8 +14,7 @@
         esqlite,
         janus_core,
         janus_providers,
-        janus_http,
-        janus_dashboard
+        janus_http
     ]},
     {env, []},
     {modules, []},

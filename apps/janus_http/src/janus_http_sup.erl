@@ -9,14 +9,7 @@ start_link() ->
 
 init([]) ->
     Port = application:get_env(janus, http_port, 8080),
-    Bind = case os:getenv("JANUS_HTTP_BIND") of
-        Val when is_list(Val), Val =/= [] -> parse_ip(Val);
-        _ -> application:get_env(janus, http_bind, undefined)
-    end,
-    TransportOpts = case Bind of
-        undefined -> [{port, Port}];
-        Ip when is_tuple(Ip) -> [{port, Port}, {ip, Ip}]
-    end,
+    Bind = bind("JANUS_HTTP_BIND", http_bind),
     Dispatch = cowboy_router:compile([
         {'_', [
             {"/healthz", janus_http_health, []},
@@ -27,7 +20,17 @@ init([]) ->
             {"/v1/messages", janus_http_messages, []}
         ]}
     ]),
-    ProtocolOpts = #{env => #{dispatch => Dispatch}},
+    %% Admin plane: read-only stats for the standalone dashboard to poll.
+    %% Token-authenticated (JANUS_STATS_TOKEN); no UI, no write API.
+    AdminPort = application:get_env(janus, admin_port, 8090),
+    AdminBind = bind("JANUS_ADMIN_BIND", admin_bind),
+    AdminDispatch = cowboy_router:compile([
+        {'_', [
+            {"/healthz", janus_http_health, []},
+            {"/stats", janus_gateway_stats, []},
+            {"/stats/[...]", janus_gateway_stats, []}
+        ]}
+    ]),
     AutoRouter = #{
         id => janus_auto,
         start => {janus_auto, start_link, []},
@@ -38,24 +41,62 @@ init([]) ->
     },
     Listener = #{
         id => janus_http_listener,
-        start => {cowboy, start_clear, [janus_http_listener, TransportOpts, ProtocolOpts]},
+        start =>
+            {cowboy, start_clear, [
+                janus_http_listener,
+                transport_opts(Port, Bind),
+                #{env => #{dispatch => Dispatch}}
+            ]},
         restart => permanent,
         shutdown => 5000,
         type => worker,
         modules => [cowboy]
     },
-    Children =
-        case janus_role:serves_http() of
-            true ->
-                logger:info(#{what => janus_http_listen, port => Port}),
-                [AutoRouter, Listener];
-            false ->
-                logger:info(#{
-                    what => janus_http_skipped, role => janus_role:role(), port => Port
-                }),
-                []
-        end,
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, Children}}.
+    LogTail = #{
+        id => janus_log_tail,
+        start => {janus_log_tail, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_log_tail]
+    },
+    AdminListener = #{
+        id => janus_admin_listener,
+        start =>
+            {cowboy, start_clear, [
+                janus_admin_listener,
+                transport_opts(AdminPort, AdminBind),
+                #{env => #{dispatch => AdminDispatch}}
+            ]},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [cowboy]
+    },
+    logger:info(#{
+        what => janus_http_listen, data_port => Port, admin_port => AdminPort
+    }),
+    {ok, {
+        #{strategy => one_for_one, intensity => 5, period => 10},
+        [AutoRouter, Listener, LogTail, AdminListener]
+    }}.
+
+transport_opts(Port, undefined) ->
+    [{port, Port}];
+transport_opts(Port, Ip) when is_tuple(Ip) ->
+    [{port, Port}, {ip, Ip}].
+
+bind(EnvName, AppKey) ->
+    case os:getenv(EnvName) of
+        Val when is_list(Val), Val =/= [] ->
+            parse_ip(Val);
+        _ ->
+            case application:get_env(janus, AppKey, undefined) of
+                undefined -> undefined;
+                Ip when is_tuple(Ip) -> Ip;
+                Str -> parse_ip(Str)
+            end
+    end.
 
 parse_ip(Bin) when is_binary(Bin) -> parse_ip(binary_to_list(Bin));
 parse_ip(Str) when is_list(Str) ->
