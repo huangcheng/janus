@@ -242,8 +242,22 @@ uri_decode(S) ->
 do_query(Conn, Sql, Params) ->
     %% Always use equery so integer/boolean columns keep typed values.
     %% squery returns every cell as a binary (breaks get_generation/1, etc.).
-    SqlBin = iolist_to_binary(Sql),
+    %% App SQL is SQLite-shaped (`?` binds); rewrite to `$1..$N` for epgsql.
+    %% Callers that already pass `$N` are unchanged (no `?` left to rewrite).
+    SqlBin = rewrite_placeholders(iolist_to_binary(Sql)),
     normalize_epgsql(epgsql:equery(Conn, SqlBin, Params)).
+
+%% Convert SQLite `?` placeholders to Postgres `$1`, `$2`, ...
+rewrite_placeholders(Sql) when is_binary(Sql) ->
+    rewrite_placeholders(binary_to_list(Sql), 1, []).
+
+rewrite_placeholders([], _N, Acc) ->
+    list_to_binary(lists:reverse(Acc));
+rewrite_placeholders([$? | Rest], N, Acc) ->
+    Frag = "$" ++ integer_to_list(N),
+    rewrite_placeholders(Rest, N + 1, lists:reverse(Frag) ++ Acc);
+rewrite_placeholders([C | Rest], N, Acc) ->
+    rewrite_placeholders(Rest, N, [C | Acc]).
 
 normalize_epgsql({ok, _Columns, Rows}) ->
     {ok, Rows};

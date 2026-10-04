@@ -132,32 +132,43 @@ do_sync() ->
         elapsed_ms => erlang:system_time(millisecond) - Started,
         providers => maps:from_list(PerProvider)
     },
-    {Total, Errs} = lists:foldl(
-        fun({_N, #{added := A, error := E}}, {T, Er}) ->
-            {T + A, case E of undefined -> Er; _ -> Er + 1 end}
+    {Total, Seen, Errs} = lists:foldl(
+        fun({_N, #{added := A, seen := S, error := E}}, {T, Se, Er}) ->
+            {T + A, Se + S, case E of undefined -> Er; _ -> Er + 1 end}
         end,
-        {0, 0},
+        {0, 0, 0},
         PerProvider
     ),
-    logger:info(#{what => janus_model_sync_done, providers => length(Providers),
-        models_added => Total, errors => Errs}),
-    Result#{models_added => Total, errors => Errs}.
+    logger:info(#{
+        what => janus_model_sync_done,
+        providers => length(Providers),
+        models_added => Total,
+        models_seen => Seen,
+        errors => Errs
+    }),
+    Result#{models_added => Total, models_seen => Seen, errors => Errs}.
 
 %% Fetches GET {base}/models for one provider and upserts unseen names.
 sync_provider(ProviderId) ->
     case fetch_provider_models(ProviderId) of
         {ok, Names} when is_list(Names) ->
-            Added = lists:foldl(
-                fun(Name, Acc) ->
+            {Added, UpsertErrs} = lists:foldl(
+                fun(Name, {A, E}) ->
                     case upsert_model(Name) of
-                        created -> Acc + 1;
-                        exists -> Acc
+                        created -> {A + 1, E};
+                        exists -> {A, E};
+                        {error, _} -> {A, E + 1}
                     end
                 end,
-                0,
+                {0, 0},
                 Names
             ),
-            #{added => Added, seen => length(Names), error => undefined};
+            Err =
+                case UpsertErrs of
+                    0 -> undefined;
+                    N -> {upsert_failed, N}
+                end,
+            #{added => Added, seen => length(Names), error => Err};
         {error, Reason} ->
             logger:warning(#{what => janus_model_sync_provider_failed,
                 provider_id => ProviderId, reason => Reason}),
@@ -227,19 +238,32 @@ decode_model_names(Body) ->
 
 %% Insert-only when unseen (name is unique); existing rows untouched so
 %% manual enable/disable/routing decisions are never clobbered.
+%% New rows are disabled (enabled=0) until an operator routes them.
 upsert_model(Name) ->
     case janus_db_conn:query(<<"SELECT 1 FROM models WHERE name = ?">>, [Name]) of
         {ok, [_ | _]} ->
             exists;
         {ok, []} ->
             case janus_db_conn:query(
-                <<"INSERT INTO models (name, enabled) VALUES (?, 0)">>, [Name])
-            of
-                {ok, _} -> created;
-                {error, _} -> exists
+                <<"INSERT INTO models (name, enabled) VALUES (?, 0)">>, [Name]
+            ) of
+                {ok, _} ->
+                    created;
+                {error, Reason} ->
+                    logger:warning(#{
+                        what => janus_model_sync_upsert_failed,
+                        model => Name,
+                        reason => Reason
+                    }),
+                    {error, Reason}
             end;
-        {error, _} ->
-            exists
+        {error, Reason} ->
+            logger:warning(#{
+                what => janus_model_sync_lookup_failed,
+                model => Name,
+                reason => Reason
+            }),
+            {error, Reason}
     end.
 
 %%%===================================================================
