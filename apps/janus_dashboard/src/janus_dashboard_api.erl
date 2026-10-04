@@ -461,10 +461,17 @@ handle_key_create(Body, Req) ->
     %% Omit / empty model_ids ⇒ unrestricted (all current and future models).
     RawIds =
         case maps:get(<<"model_ids">>, Body, undefined) of
-            undefined -> [];
-            null -> [];
-            L when is_list(L) -> [I || I <- L, is_integer(I)];
-            _ -> bad
+            undefined ->
+                [];
+            null ->
+                [];
+            L when is_list(L) ->
+                case lists:all(fun is_integer/1, L) of
+                    true -> L;
+                    false -> bad
+                end;
+            _ ->
+                bad
         end,
     case RawIds of
         bad ->

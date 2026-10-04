@@ -80,7 +80,7 @@ export function Keys() {
       <Card>
         <CardHeader>
           <CardTitle>Keys</CardTitle>
-          <CardDescription>Each key can call every model on the gateway.</CardDescription>
+          <CardDescription>New keys can call every model on the gateway.</CardDescription>
           <CardAction>
             <Button size="sm" onClick={() => setModal("create")}>
               <Plus />
@@ -107,8 +107,7 @@ export function Keys() {
                   <TableRow key={k.id}>
                     <TableCell className="font-mono text-xs">{k.prefix}…</TableCell>
                     <TableCell>
-                      {k.model_ids === "all" ||
-                      (Array.isArray(k.model_ids) && k.model_ids.length === 0) ? (
+                      {k.model_ids === "all" ? (
                         <Badge variant="secondary">all models</Badge>
                       ) : (
                         <div className="flex flex-wrap gap-1">
@@ -117,6 +116,9 @@ export function Keys() {
                               {n}
                             </Badge>
                           ))}
+                          {k.model_names.filter(Boolean).length === 0 && (
+                            <span className="text-muted-foreground">—</span>
+                          )}
                         </div>
                       )}
                     </TableCell>
