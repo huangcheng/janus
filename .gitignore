@@ -27,3 +27,7 @@ apps/janus_dashboard/spa/dist/
 apps/janus_dashboard/spa/**/.vite/
 apps/janus_dashboard/spa/tsconfig.tsbuildinfo
 apps/janus_dashboard/priv/www/
+
+!docs/WSL2-DEV.md
+!docs/SCHEMA_ETS_CONTRACT.md
+!docs/audit/SYNTHESIS.md
