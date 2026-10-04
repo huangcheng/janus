@@ -537,7 +537,12 @@ function BindModal({
 }) {
   const [publicName, setPublicName] = useState("")
   const [picked, setPicked] = useState("")
-  const choice = listings.find((x) => `${x.provider.id}:${x.listing.id}` === picked)
+  // Providers already bound to the target public name are hidden — a
+  // duplicate (model, provider) route would be rejected by the DB anyway.
+  const target = models.find((m) => m.name === publicName.trim())
+  const boundProviders = new Set((target?.routes ?? []).map((r) => r.provider_id))
+  const available = listings.filter((x) => !boundProviders.has(x.provider.id))
+  const choice = available.find((x) => `${x.provider.id}:${x.listing.id}` === picked)
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
@@ -571,11 +576,11 @@ function BindModal({
             <FieldLabel>Provider listing</FieldLabel>
             <Select value={picked} onValueChange={setPicked}>
               <SelectTrigger className="w-full">
-                <SelectValue placeholder={listings.length ? "Select listing" : "No listings yet"} />
+                <SelectValue placeholder={available.length ? "Select listing" : "No listings available"} />
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  {listings.map((x) => (
+                  {available.map((x) => (
                     <SelectItem
                       key={`${x.provider.id}:${x.listing.id}`}
                       value={`${x.provider.id}:${x.listing.id}`}
