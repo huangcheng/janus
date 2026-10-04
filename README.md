@@ -57,6 +57,8 @@ docker compose --profile postgres up
 
 Hot path never queries SQL — ETS holds routes. Postgres is for shared catalog across nodes; SQLite is for single-node / laptop.
 
+`JANUS_ROLE=gateway` starts the agent plane only (`:8080`, no dashboard). `JANUS_ROLE=dashboard` starts `:8090` only. Default `all` is both (laptop / noveo). Gateway nodes use shared Postgres, the same secrets as the dashboard node, and should set `JANUS_MODEL_SYNC_INTERVAL_SEC=0` and omit `JANUS_AUTO_SEED`.
+
 ## Agent endpoints
 
 - `POST /v1/chat/completions` (OpenAI Chat)

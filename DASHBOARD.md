@@ -29,6 +29,9 @@ First published package inherits the repo's visibility (private by default).
 
 Unset `JANUS_DASHBOARD_PASSWORD` ⇒ logins are refused (fail closed).
 
+`JANUS_ROLE=gateway` does not start this listener (agent plane only).
+`JANUS_ROLE=dashboard` starts `:8090` and skips `:8080`. Default is both.
+
 ## Architecture
 
 ```

@@ -5,6 +5,7 @@
 
 start(_StartType, _StartArgs) ->
     _ = janus_log:setup(),
+    logger:info(#{what => janus_role, role => janus_role:role()}),
     case janus_core_sup:start_link() of
         {ok, _Pid} = Ok ->
             maybe_auto_seed(),
@@ -17,7 +18,7 @@ stop(_State) ->
     ok.
 
 maybe_auto_seed() ->
-    case env_truthy(os:getenv("JANUS_AUTO_SEED")) of
+    case janus_role:serves_dashboard() andalso env_truthy(os:getenv("JANUS_AUTO_SEED")) of
         true ->
             spawn(fun() ->
                 try

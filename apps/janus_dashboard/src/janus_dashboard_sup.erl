@@ -77,12 +77,25 @@ init([]) ->
         type => worker,
         modules => [cowboy]
     },
-    logger:info(#{
-        what => janus_dashboard_listen,
-        bind => inet:ntoa(Bind),
-        port => Port
-    }),
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [LogTail, Session, Audit, Listener]}}.
+    Children =
+        case janus_role:serves_dashboard() of
+            true ->
+                logger:info(#{
+                    what => janus_dashboard_listen,
+                    bind => inet:ntoa(Bind),
+                    port => Port
+                }),
+                [LogTail, Session, Audit, Listener];
+            false ->
+                logger:info(#{
+                    what => janus_dashboard_skipped,
+                    role => janus_role:role(),
+                    bind => inet:ntoa(Bind),
+                    port => Port
+                }),
+                []
+        end,
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, Children}}.
 
 parse_ip(Bin) when is_binary(Bin) ->
     parse_ip(binary_to_list(Bin));

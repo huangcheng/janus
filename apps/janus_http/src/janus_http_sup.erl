@@ -44,8 +44,18 @@ init([]) ->
         type => worker,
         modules => [cowboy]
     },
-    logger:info(#{what => janus_http_listen, port => Port}),
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [AutoRouter, Listener]}}.
+    Children =
+        case janus_role:serves_http() of
+            true ->
+                logger:info(#{what => janus_http_listen, port => Port}),
+                [AutoRouter, Listener];
+            false ->
+                logger:info(#{
+                    what => janus_http_skipped, role => janus_role:role(), port => Port
+                }),
+                []
+        end,
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, Children}}.
 
 parse_ip(Bin) when is_binary(Bin) -> parse_ip(binary_to_list(Bin));
 parse_ip(Str) when is_list(Str) ->
