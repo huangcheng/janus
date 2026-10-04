@@ -14,6 +14,7 @@
 - rev 1: initial plan.
 - rev 2: 7-model audit (7/7 GO WITH FIXES, `docs/audit/archive/2026-10-04-r3-usage-stats/`). Fixes written as an A1–A10 addendum.
 - rev 3 (this document): second audit round (6/7 GO WITH FIXES, 1 NO-GO on structure — addendum-vs-task divergence) folded **inline**. Tasks below are the single source of truth; no addendum applies.
+- rev 4: third audit round (7/7 GO WITH FIXES) folded inline: working event filters with 400-on-invalid, total read path (no badmatch→500), real `?`-literal guard test + insert/chunk eunit, genuine-zero vs absent usage distinction, avg latency split by stream + success-only `unreported`, mailbox back-pressure guard with atomics counter, throttled drop logs, `erlang:ceil` p95 offset, regex usage fallback for oversized terminal SSE events, bounded chunk-list tail capture, 15s terminate-flush budget, `writer.alive` + `ts_from`/`ts_to` in the API, zero-filled chart buckets.
 
 **Key file facts an implementer must know:**
 - DB facade: `janus_db_conn:query(Sql, Params)` returns `{ok, Rows} | {error, Reason}` (rows are tuples; it does **not** return affected-row counts — see Task 4 sweep). `janus_db_conn:backend()` returns `postgres | sqlite`. `?` placeholders must be rewritten to `$N` for postgres.
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
     provider_key_id INTEGER REFERENCES provider_keys (id) ON DELETE SET NULL,
     protocol TEXT NOT NULL,            -- openai_chat | openai_responses | anthropic_messages
     stream INTEGER NOT NULL DEFAULT 0 CHECK (stream IN (0, 1)),
-    status INTEGER NOT NULL,           -- upstream HTTP status; 502 on mid-stream failure
+    status INTEGER NOT NULL,           -- upstream HTTP status; 502 mid-stream/upstream failure,
+                                       -- 503 provider_disabled, 500 gateway crash
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     latency_ms INTEGER                 -- end-to-end proxy span (full drain for streams)
@@ -181,6 +183,22 @@ responses_sse_tail_test() ->
 
 empty_sse_test() ->
     ?assertEqual(undefined, janus_usage_parse:from_sse(openai_chat, <<>>, <<"data: [DONE]\n\n">>)).
+
+genuine_zero_usage_test() ->
+    B = <<"{\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}">>,
+    ?assertEqual(#{prompt => 0, completion => 0},
+                 janus_usage_parse:from_response_body(openai_chat, B)).
+
+%% response.completed embeds the full response (>16KB); the tail keeps
+%% only its end, so the data: line never decodes whole — the regex
+%% fallback must still recover the trailing usage object.
+responses_oversized_completed_test() ->
+    Filler = binary:copy(<<"x">>, 20000),
+    Tail = <<"...truncated...", Filler/binary,
+             "\"usage\": {\"input_tokens\": 8, \"output_tokens\": 6, ",
+             "\"output_tokens_details\": {\"reasoning_tokens\": 2}}}">>,
+    ?assertEqual(#{prompt => 8, completion => 6},
+                 janus_usage_parse:from_sse(openai_responses, <<>>, Tail)).
 ```
 
 - [ ] **Step 2: Run tests, verify they fail**
@@ -221,10 +239,9 @@ from_response_body(_, _) ->
 from_sse(_Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
     Blob = <<Head/binary, "\n", Tail/binary>>,
     Lines = binary:split(Blob, <<"\n">>, [global]),
-    Usages = lists:filtermap(fun data_line_usage/1, Lines),
-    case Usages of
-        [] -> undefined;
-        _ ->
+    case lists:filtermap(fun data_line_usage/1, Lines) of
+        [] -> usage_regex_fallback(Blob);
+        Usages ->
             P = lists:max([maps:get(prompt, U, 0) || U <- Usages]),
             C = lists:max([maps:get(completion, U, 0) || U <- Usages]),
             case {P, C} of
@@ -234,6 +251,22 @@ from_sse(_Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
     end;
 from_sse(_, _, _) ->
     undefined.
+
+%% Some terminal events (Responses response.completed embeds the whole
+%% response and can exceed the tail window) never decode as one line —
+%% but their trailing usage object survives. Extract the last
+%% "usage":{...} fragment (one nesting level for *_details objects).
+usage_regex_fallback(Blob) ->
+    Pattern = <<"\"usage\"\\s*:\\s*(\\{(?:[^{}]|\\{[^{}]*\\})*\\})">>,
+    case re:run(Blob, Pattern, [{capture, all_but_first, binary}, global]) of
+        {match, Ms} ->
+            case thoas:decode(lists:last(lists:flatten(Ms))) of
+                {ok, U} when is_map(U) -> norm(U);
+                _ -> undefined
+            end;
+        nomatch ->
+            undefined
+    end.
 
 %%% internal
 
@@ -276,12 +309,27 @@ norm(U) when is_map(U), map_size(U) > 0 ->
             first_int(U, [<<"cache_read_input_tokens">>]),
     P = Base + Cache,
     C = first_int(U, [<<"completion_tokens">>, <<"output_tokens">>]),
-    case {P, C} of
-        {0, 0} -> undefined;
-        _ -> #{prompt => P, completion => C}
+    %% A usage object carrying any recognized key is a REAL report — even
+    %% a genuine {0, 0} — and must not collapse to "unreported".
+    case has_known_key(U) of
+        true -> #{prompt => P, completion => C};
+        false -> undefined
     end;
 norm(_) ->
     undefined.
+
+has_known_key(U) ->
+    lists:any(
+        fun(K) -> maps:is_key(K, U) end,
+        [
+            <<"prompt_tokens">>,
+            <<"input_tokens">>,
+            <<"completion_tokens">>,
+            <<"output_tokens">>,
+            <<"cache_creation_input_tokens">>,
+            <<"cache_read_input_tokens">>
+        ]
+    ).
 
 first_int(Map, [K | Ks]) ->
     case Map of
@@ -297,7 +345,7 @@ first_int(_, []) ->
 ```bash
 docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE_DIR=/app/_build ./rebar3 as dev eunit --module=janus_usage_parse_tests'
 ```
-Expected: `All 10 tests passed.` (also run the full suite: `./rebar3 as dev eunit` — existing `janus_protocol_translate_tests` must stay green)
+Expected: `All 12 tests passed.` (also run the full suite: `./rebar3 as dev eunit` — existing `janus_protocol_translate_tests` must stay green)
 
 - [ ] **Step 5: Commit**
 
@@ -338,16 +386,19 @@ Failure-safety contract: every field has a default; a malformed event is dropped
 -export([start_link/0]).
 -export([record/1, stats/0]).
 -export([totals/2, series/3, breakdown/3, recent/2]).
+-export([build_insert/2, chunk/2]). %% exported for eunit
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
 -define(FLUSH_MS, 1000).
 -define(FLUSH_COUNT, 100).
 -define(MAX_BUF, 10000).
+-define(MAX_QUEUE, 5000).
 -define(INSERT_CHUNK, 50).
 -define(RETENTION_SEC, 31 * 86400).
 -define(SWEEP_MS, 24 * 3600 * 1000).
 -define(SWEEP_BATCH, 5000).
+-define(PROTOS, [openai_chat, openai_responses, anthropic_messages]).
 
 -record(state, {
     buf = [] :: [map()],
@@ -367,19 +418,56 @@ start_link() ->
 %% ts, agent_key_id, model_id, provider_id, provider_key_id,
 %% protocol, stream, status, prompt, completion, latency_ms.
 %% Events lacking an integer status are dropped. Never raises.
+%% When the writer's mailbox is saturated the event is dropped HERE
+%% (counted via an atomics counter shared with stats/0) — the mailbox
+%% is the last unbounded resource, and this keeps it bounded.
 -spec record(map()) -> ok.
 record(#{status := Status} = Ev) when is_integer(Status) ->
-    catch gen_server:cast(?SERVER, {record, Ev}),
-    ok;
+    try
+        case whereis(?SERVER) of
+            undefined ->
+                ok;
+            Pid ->
+                {message_queue_len, Q} = erlang:process_info(Pid, message_queue_len),
+                case Q >= ?MAX_QUEUE of
+                    true ->
+                        atomics:add(drop_counter(), 1, 1),
+                        logger:warning(#{what => janus_usage_drop, reason => mailbox_full});
+                    false ->
+                        gen_server:cast(?SERVER, {record, Ev})
+                end
+        end,
+        ok
+    catch
+        _:_ -> ok
+    end;
 record(Bad) ->
     catch gen_server:cast(?SERVER, {drop, Bad}),
     ok.
 
-%% {buffered, dropped} — dropped is cumulative since boot.
+drop_counter() ->
+    case persistent_term:get(janus_usage_drop_atomics, undefined) of
+        undefined ->
+            Ref = atomics:new(1, [{signed, false}]),
+            persistent_term:put(janus_usage_drop_atomics, Ref),
+            Ref;
+        Ref ->
+            Ref
+    end.
+
+dropped_external() ->
+    try atomics:get(drop_counter(), 1)
+    catch _:_ -> 0
+    end.
+
+%% {alive, buffered, dropped} — dropped is cumulative since boot
+%% (gen_server drops + mailbox-saturated drops). Never hangs the caller.
 -spec stats() -> map().
 stats() ->
-    try gen_server:call(?SERVER, stats)
-    catch exit:{noproc, _} -> #{buffered => 0, dropped => 0}
+    try gen_server:call(?SERVER, stats, 1000) of
+        M -> M#{alive => true}
+    catch
+        _:_ -> #{alive => false, buffered => 0, dropped => dropped_external()}
     end.
 
 %%%===================================================================
@@ -393,20 +481,35 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call(stats, _From, State) ->
-    {reply, #{buffered => State#state.buf_size, dropped => State#state.dropped}, State};
+    {reply,
+        #{
+            buffered => State#state.buf_size,
+            dropped => State#state.dropped + dropped_external()
+        },
+        State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 %% Cap overflow drops the INCOMING event (drop-newest, not drop-oldest):
 %% the buffer drains in order and old rows are already on their way out.
+%% The warning is throttled (first drop, then every 1000th) so a stalled
+%% DB cannot flood the logs.
 handle_cast({record, Ev}, #state{buf_size = N} = State) when N >= ?MAX_BUF ->
-    logger:warning(#{what => janus_usage_drop, reason => buffer_full}),
-    {noreply, State#state{dropped = State#state.dropped + 1}};
+    D = State#state.dropped + 1,
+    case D rem 1000 of
+        1 -> logger:warning(#{what => janus_usage_drop, reason => buffer_full, total => D});
+        _ -> ok
+    end,
+    {noreply, State#state{dropped = D}};
 handle_cast({record, Ev}, #state{buf = Buf, buf_size = N} = State) ->
     maybe_flush(State#state{buf = [Ev | Buf], buf_size = N + 1});
 handle_cast({drop, Bad}, State) ->
-    logger:warning(#{what => janus_usage_drop, reason => malformed_event, event => Bad}),
-    {noreply, State#state{dropped = State#state.dropped + 1}};
+    D = State#state.dropped + 1,
+    case D rem 1000 of
+        1 -> logger:warning(#{what => janus_usage_drop, reason => malformed_event, total => D});
+        _ -> ok
+    end,
+    {noreply, State#state{dropped = D}};
 handle_cast(_Other, State) ->
     {noreply, State}.
 
@@ -498,9 +601,18 @@ build_insert(Cols, Rows) ->
 int_or_null(N) when is_integer(N) -> N;
 int_or_null(_) -> null.
 
-proto_bin(P) when is_atom(P) -> atom_to_binary(P, utf8);
-proto_bin(P) when is_binary(P) -> P;
-proto_bin(_) -> <<"openai_chat">>.
+proto_bin(P) when is_atom(P) ->
+    case lists:member(P, ?PROTOS) of
+        true -> atom_to_binary(P, utf8);
+        false -> <<"openai_chat">>
+    end;
+proto_bin(P) when is_binary(P) ->
+    case lists:member(P, [<<"openai_chat">>, <<"openai_responses">>, <<"anthropic_messages">>]) of
+        true -> P;
+        false -> <<"openai_chat">>
+    end;
+proto_bin(_) ->
+    <<"openai_chat">>.
 
 bool_int(true) -> 1;
 bool_int(1) -> 1;
@@ -511,9 +623,11 @@ sweep() ->
     sweep_batch(Cutoff, 0).
 
 %% janus_db_conn:query returns {ok, Rows}, not affected counts, so loop
-%% on COUNT(*) — stop when nothing old remains (or after 100 batches).
+%% on COUNT(*) — stop when nothing old remains. Log if the 100-batch
+%% ceiling is hit (rows older than retention remain; visible, not silent).
 sweep_batch(_Cutoff, 100) ->
-    0;
+    logger:warning(#{what => janus_usage_sweep_capped, batches => 100}),
+    ok;
 sweep_batch(Cutoff, Iter) ->
     case q(<<"SELECT COUNT(*) FROM usage_events WHERE ts < ?">>, [Cutoff]) of
         {ok, [{0}]} ->
@@ -521,7 +635,7 @@ sweep_batch(Cutoff, Iter) ->
         {ok, [{_}]} ->
             _ = q(
                 <<"DELETE FROM usage_events WHERE id IN "
-                  "(SELECT id FROM usage_events WHERE ts < ? LIMIT ?BATCH)">>,
+                  "(SELECT id FROM usage_events WHERE ts < ? LIMIT 5000)">>,
                 [Cutoff]
             ),
             sweep_batch(Cutoff, Iter + 1);
@@ -557,18 +671,16 @@ rewrite_pg(<<>>, _N) ->
 
 Note on `rewrite_pg`: it rewrites every `?` including inside string literals — **no usage SQL may contain a `?` literal** (enforced by the Task 4 eunit).
 
-Note on the sweep DELETE: SQLite does not allow a bind parameter inside `LIMIT`, so the batch size is inlined as a literal — write the SQL as `... LIMIT 5000)` (the `?BATCH` above is illustrative; final code inlines `5000`).
-
 - [ ] **Step 2: Supervise in `janus_core_sup`**
 
-Add a child spec right after the `janus_lb` child (mirroring its map shape):
+Add a child spec right after the `janus_lb` child (mirroring its map shape). The 15000ms shutdown budget gives `terminate/2` room to flush a full buffer:
 
 ```erlang
                 #{
                     id => janus_usage,
                     start => {janus_usage, start_link, []},
                     restart => permanent,
-                    shutdown => 5000,
+                    shutdown => 15000,
                     type => worker,
                     modules => [janus_usage]
                 },
@@ -621,9 +733,48 @@ breakdown_orders_by_requests_test() ->
     {Col, _, _} = janus_usage:breakdown_dim(key),
     ?assertEqual(<<"ue.agent_key_id">>, Col).
 
+%% Placeholders are bare `?`; a literal would appear as `'?` or `?'`.
+%% Scan every SQL fragment the module emits (both breakdown joins and
+%% name expressions) — rewrite_pg rewrites `?` inside literals blindly.
+no_qmark_literals_test() ->
+    Frags = lists:flatmap(
+        fun(Dim) ->
+            {_, Join, NameExpr} = janus_usage:breakdown_dim(Dim),
+            [Join, NameExpr]
+        end,
+        [key, model, provider, provider_key]
+    ),
+    lists:foreach(
+        fun(B) ->
+            ?assertEqual(nomatch, binary:match(B, <<"'?">>)),
+            ?assertEqual(nomatch, binary:match(B, <<"?'",>>))
+        end,
+        Frags
+    ).
+
 provider_key_name_has_no_qmark_test() ->
     {_, _, NameExpr} = janus_usage:breakdown_dim(provider_key),
     ?assertEqual(nomatch, binary:match(NameExpr, <<"?">>)).
+
+build_insert_shape_test() ->
+    {Sql, Params} = janus_usage:build_insert(
+        <<"(a, b)">>,
+        [#{status => 200, prompt => 1, stream => true}, #{status => 502}]
+    ),
+    %% 11 placeholders per row, one VALUES group per row.
+    ?assertEqual(22, length(Params)),
+    ?assertMatch(
+        <<"INSERT INTO usage_events (a, b) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
+        Sql
+    ),
+    %% row 2: status 502 present, prompt defaults to null (not 0).
+    ?assertEqual(502, lists:nth(19, Params)),
+    ?assertEqual(null, lists:nth(20, Params)).
+
+chunk_test() ->
+    ?assertEqual([[1, 2], [3]], janus_usage:chunk([1, 2, 3], 2)),
+    ?assertEqual([], janus_usage:chunk([], 3)),
+    ?assertEqual([[1]], janus_usage:chunk([1], 3)).
 ```
 
 - [ ] **Step 2: Run tests, verify they fail** (module exports missing)
@@ -637,32 +788,51 @@ docker exec janus-local sh -c 'cd /app/.worktrees/dashboard-polish && REBAR_BASE
 ```erlang
 %%%===================================================================
 %%% API — read path (called from the dashboard plane; runs in the
-%%% caller's process, never in the writer's mailbox)
+%%% caller's process, never in the writer's mailbox). Every function
+%%% is total: a DB error logs and returns an empty aggregate instead
+%%% of crashing the dashboard handler.
 %%%===================================================================
 
 -spec totals(integer(), integer()) -> map().
 totals(From, To) ->
-    {ok, Rows} = q(
+    Sql =
         <<"SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), "
           "COALESCE(SUM(completion_tokens), 0), "
           "COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0), "
-          "COALESCE(AVG(latency_ms), 0), "
+          "COALESCE(AVG(CASE WHEN stream = 0 THEN latency_ms END), 0), "
+          "COALESCE(AVG(CASE WHEN stream = 1 THEN latency_ms END), 0), "
           "COALESCE(SUM(CASE WHEN prompt_tokens IS NULL AND completion_tokens IS NULL "
-          "THEN 1 ELSE 0 END), 0) "
+          "AND status < 400 THEN 1 ELSE 0 END), 0) "
           "FROM usage_events WHERE ts >= ? AND ts < ?">>,
-        [From, To]
-    ),
-    {Req, Pin, Pout, Err, AvgLat, Unrep} = one_row(Rows, {0, 0, 0, 0, 0, 0}),
-    #{
-        requests => num(Req),
-        prompt_tokens => num(Pin),
-        completion_tokens => num(Pout),
-        errors => num(Err),
-        unreported => num(Unrep),
-        avg_latency_ms => round(num(AvgLat)),
-        p95_latency_ms => p95(From, To, 0),
-        p95_stream_ms => p95(From, To, 1)
-    }.
+    case q(Sql, [From, To]) of
+        {ok, Rows} ->
+            {Req, Pin, Pout, Err, AvgNs, AvgS, Unrep} =
+                one_row(Rows, {0, 0, 0, 0, 0, 0, 0}),
+            #{
+                requests => num(Req),
+                prompt_tokens => num(Pin),
+                completion_tokens => num(Pout),
+                errors => num(Err),
+                unreported => num(Unrep),
+                avg_latency_ms => round(num(AvgNs)),
+                avg_stream_ms => round(num(AvgS)),
+                p95_latency_ms => p95(From, To, 0),
+                p95_stream_ms => p95(From, To, 1)
+            };
+        {error, Reason} ->
+            logger:warning(#{what => janus_usage_query_error, query => totals, reason => Reason}),
+            #{
+                requests => 0,
+                prompt_tokens => 0,
+                completion_tokens => 0,
+                errors => 0,
+                unreported => 0,
+                avg_latency_ms => 0,
+                avg_stream_ms => 0,
+                p95_latency_ms => null,
+                p95_stream_ms => null
+            }
+    end.
 
 -spec series(integer(), integer(), hour | day) -> [map()].
 series(From, To, Bucket) ->
@@ -672,16 +842,21 @@ series(From, To, Bucket) ->
         "COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0) ",
         "FROM usage_events WHERE ts >= ? AND ts < ? GROUP BY b ORDER BY b"
     >>,
-    {ok, Rows} = q(Sql, [From, To]),
-    [
-        #{
-            bucket => to_bin(B),
-            requests => num(R),
-            prompt_tokens => num(P),
-            completion_tokens => num(C)
-        }
-     || {B, R, P, C} <- Rows
-    ].
+    case q(Sql, [From, To]) of
+        {ok, Rows} ->
+            [
+                #{
+                    bucket => to_bin(B),
+                    requests => num(R),
+                    prompt_tokens => num(P),
+                    completion_tokens => num(C)
+                }
+             || {B, R, P, C} <- Rows
+            ];
+        {error, Reason} ->
+            logger:warning(#{what => janus_usage_query_error, query => series, reason => Reason}),
+            []
+    end.
 
 -spec breakdown(key | model | provider | provider_key, integer(), integer()) -> [map()].
 breakdown(Dim, From, To) ->
@@ -695,18 +870,23 @@ breakdown(Dim, From, To) ->
         "GROUP BY ", Col/binary, ", ", NameExpr/binary, " ",
         "ORDER BY 3 DESC"
     >>,
-    {ok, Rows} = q(Sql, [From, To]),
-    [
-        #{
-            id => Id,
-            name => to_bin(Name),
-            requests => num(R),
-            prompt_tokens => num(P),
-            completion_tokens => num(C),
-            last_ts => num(Last)
-        }
-     || {Id, Name, R, P, C, Last} <- Rows
-    ].
+    case q(Sql, [From, To]) of
+        {ok, Rows} ->
+            [
+                #{
+                    id => Id,
+                    name => to_bin(Name),
+                    requests => num(R),
+                    prompt_tokens => num(P),
+                    completion_tokens => num(C),
+                    last_ts => num(Last)
+                }
+             || {Id, Name, R, P, C, Last} <- Rows
+            ];
+        {error, Reason} ->
+            logger:warning(#{what => janus_usage_query_error, query => {breakdown, Dim}, reason => Reason}),
+            []
+    end.
 
 %% Filters: #{key_id => integer(), model_id => integer()} (both optional).
 -spec recent(pos_integer(), map()) -> [map()].
@@ -724,22 +904,27 @@ recent(Limit, Filters) when is_integer(Limit), Limit > 0, Limit =< 200 ->
         <<" ORDER BY ue.ts DESC, ue.id DESC LIMIT ">>,
         integer_to_binary(Limit)
     ]),
-    {ok, Rows} = q(Sql, Params0),
-    [
-        #{
-            ts => num(Ts),
-            key_prefix => to_bin(K),
-            model => to_bin(M),
-            provider => to_bin(P),
-            protocol => to_bin(Proto),
-            stream => num(S),
-            status => num(St),
-            prompt_tokens => num_or_null(Pin),
-            completion_tokens => num_or_null(Pout),
-            latency_ms => num_or_null(Lat)
-        }
-     || {Ts, K, M, P, Proto, S, St, Pin, Pout, Lat} <- Rows
-    ].
+    case q(Sql, Params0) of
+        {ok, Rows} ->
+            [
+                #{
+                    ts => num(Ts),
+                    key_prefix => to_bin(K),
+                    model => to_bin(M),
+                    provider => to_bin(P),
+                    protocol => to_bin(Proto),
+                    stream => num(S),
+                    status => num(St),
+                    prompt_tokens => num_or_null(Pin),
+                    completion_tokens => num_or_null(Pout),
+                    latency_ms => num_or_null(Lat)
+                }
+             || {Ts, K, M, P, Proto, S, St, Pin, Pout, Lat} <- Rows
+            ];
+        {error, Reason} ->
+            logger:warning(#{what => janus_usage_query_error, query => recent, reason => Reason}),
+            []
+    end.
 
 recent_filters(Filters) ->
     lists:foldl(
@@ -769,39 +954,37 @@ breakdown_dim(provider_key) ->
      <<"COALESCE(pp.name, 'unknown') || ' #' || CAST(ue.provider_key_id AS TEXT)">>}.
 
 %% Nearest-rank p95 over rows with latency, split by stream flag.
-%% Returns null on an empty window.
+%% Returns null on an empty window; total — never crashes on DB error.
 p95(From, To, StreamFlag) ->
     case janus_db_conn:backend() of
         postgres ->
-            {ok, Rows} = q(
+            case q(
                 <<"SELECT percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) "
                   "FROM usage_events WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL "
                   "AND stream = ?">>,
                 [From, To, StreamFlag]
-            ),
-            case Rows of
-                [{V}] -> num_or_null(V);
+            ) of
+                {ok, [{V}]} -> num_or_null(V);
                 _ -> null
             end;
         _ ->
-            {ok, CountRows} = q(
+            case q(
                 <<"SELECT COUNT(*) FROM usage_events "
                   "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL AND stream = ?">>,
                 [From, To, StreamFlag]
-            ),
-            case CountRows of
-                [{0}] ->
+            ) of
+                {ok, [{0}]} ->
                     null;
-                [{Count}] ->
-                    Offset = max(0, ceil(0.95 * Count) - 1),
-                    {ok, Rows} = q(
+                {ok, [{Count}]} when is_integer(Count), Count > 0 ->
+                    %% erlang:ceil/1 returns an integer (safe as a bind param).
+                    Offset = max(0, erlang:ceil(0.95 * Count) - 1),
+                    case q(
                         <<"SELECT latency_ms FROM usage_events "
                           "WHERE ts >= ? AND ts < ? AND latency_ms IS NOT NULL AND stream = ? "
                           "ORDER BY latency_ms LIMIT 1 OFFSET ?">>,
                         [From, To, StreamFlag, Offset]
-                    ),
-                    case Rows of
-                        [{V}] -> num_or_null(V);
+                    ) of
+                        {ok, [{V}]} -> num_or_null(V);
                         _ -> null
                     end;
                 _ ->
@@ -866,7 +1049,7 @@ Expected: parser (10) + SQL-shape (3) + existing suites green.
 ```bash
 docker exec janus-local sh -c "/app/_build/dev/rel/janus/bin/janus eval 'code:load_file(janus_usage), Now = erlang:system_time(second), janus_usage:record(#{ts => Now, agent_key_id => null, model_id => null, provider_id => null, provider_key_id => null, protocol => openai_chat, stream => false, status => 200, prompt => 3, completion => 4, latency_ms => 50}), timer:sleep(1500), {janus_usage:totals(Now - 60, Now + 60), janus_usage:series(Now - 60, Now + 60, hour), janus_usage:breakdown(provider_key, Now - 60, Now + 60), janus_usage:recent(5, #{})}.'"
 ```
-Expected: totals with `requests => 1, prompt_tokens => 3, completion_tokens => 4, unreported => 0, p95_latency_ms => 50, p95_stream_ms => null`; one series bucket; one provider_key row named `unknown #null`→ actually `name => null` handling: `id => null, name => <<"unknown #null">>` is wrong — verify the COALESCE renders `unknown #null` only when the id is non-null; for null ids the SPA shows `(deleted)`. Adjust expectation: `name => <<"unknown #", ...>>` only for non-null ids; a null `ue.provider_key_id` yields `'unknown #null'` in SQLite — if observed, that is acceptable for v1 (row shows as `unknown #null`) OR filter `WHERE Col IS NOT NULL` is NOT applied deliberately (such rows mean "no key captured"). Note the observed behavior in the commit message.
+Expected: totals with `requests => 1, prompt_tokens => 3, completion_tokens => 4, unreported => 0, p95_latency_ms => 50, p95_stream_ms => null`; one series bucket. For the smoke row (all FK ids null) every breakdown returns one row with `id => null, name => null` — NULL concat is NULL in both dialects by design, and the SPA renders these as `(deleted)` ("no key captured" and "key deleted" share the label, same as the other three breakdowns).
 Clean up: `janus_db_conn:query("DELETE FROM usage_events WHERE latency_ms = 50", []).`
 
 - [ ] **Step 6: Commit**
@@ -1033,7 +1216,7 @@ maybe_inject_stream_usage(openai_chat, true, Body, Map) ->
     case {Inject, maps:get(<<"stream_options">>, Map, undefined)} of
         {true, undefined} ->
             Map2 = Map#{<<"stream_options">> => #{<<"include_usage">> => true}},
-            {thoas:encode(Map2), Map2};
+            {iolist_to_binary(thoas:encode(Map2)), Map2};
         _ ->
             {Body, Map}
     end;
@@ -1095,17 +1278,27 @@ capture_usage_chunk(Chunk) ->
         false ->
             ok
     end,
-    Tail0 = case get(janus_usage_tail) of
-        undefined -> <<>>;
-        T0 -> T0
+    %% Tail is a newest-first chunk list capped at 16KB total — no
+    %% per-chunk 16KB rebuild on the hot path.
+    Chunks0 = case get(janus_usage_tail) of
+        undefined -> [];
+        C0 -> C0
     end,
-    Tail1 = <<Tail0/binary, Chunk/binary>>,
-    Size = byte_size(Tail1),
-    Tail2 = case Size > ?USAGE_TAIL_BYTES of
-        true -> binary:part(Tail1, Size - ?USAGE_TAIL_BYTES, ?USAGE_TAIL_BYTES);
-        false -> Tail1
-    end,
-    put(janus_usage_tail, Tail2).
+    put(janus_usage_tail, trim_tail([Chunk | Chunks0])).
+
+trim_tail(Chunks) ->
+    {Kept, _} =
+        lists:foldl(
+            fun(C, {Acc, Size}) ->
+                case Size < ?USAGE_TAIL_BYTES of
+                    true -> {[C | Acc], Size + byte_size(C)};
+                    false -> {Acc, Size}
+                end
+            end,
+            {[], 0},
+            Chunks
+        ),
+    Kept.
 
 stream_usage(ClientProto) ->
     Head = case get(janus_usage_head) of
@@ -1114,7 +1307,7 @@ stream_usage(ClientProto) ->
     end,
     Tail = case get(janus_usage_tail) of
         undefined -> <<>>;
-        T -> T
+        T -> iolist_to_binary(T)
     end,
     erase(janus_usage_head),
     erase(janus_usage_tail),
@@ -1163,6 +1356,8 @@ handle_usage_summary(Req) ->
         200,
         #{
             range => Range,
+            ts_from => From,
+            ts_to => To,
             totals => janus_usage:totals(From, To),
             series => janus_usage:series(From, To, Bucket),
             by_key => janus_usage:breakdown(key, From, To),
@@ -1177,15 +1372,34 @@ handle_usage_summary(Req) ->
 handle_usage_events(Req) ->
     Qs = maps:from_list(cowboy_req:parse_qs(Req)),
     Limit = qs_int(maps:get(<<"limit">>, Qs, undefined), 50, 1, 200),
-    Filters = maps:filter(
+    case usage_filters(Qs) of
+        {error, Field} ->
+            err(400, <<"bad_filter">>, <<Field/binary, " must be an integer">>, Req);
+        Filters when is_map(Filters) ->
+            reply_json(200, #{events => janus_usage:recent(Limit, Filters)}, Req)
+    end.
+
+%% Builds #{key_id => integer(), model_id => integer()} — the exact
+%% shape recent/2's recent_filters/1 matches on (atom keys, int values).
+usage_filters(Qs) ->
+    lists:foldl(
         fun
-            (<<"key_id">>, V) -> {true, {key_id, qs_int(V, undefined, 1, infinity)}};
-            (<<"model_id">>, V) -> {true, {model_id, qs_int(V, undefined, 1, infinity)}};
-            (_, _) -> false
+            (_Pair, {error, _} = Err) ->
+                Err;
+            ({Param, Field}, Acc) ->
+                case maps:get(Param, Qs, undefined) of
+                    undefined ->
+                        Acc;
+                    Bin ->
+                        case qs_int(Bin, undefined, 1, infinity) of
+                            undefined -> {error, Param};
+                            N -> Acc#{Field => N}
+                        end
+                end
         end,
-        Qs
-    ),
-    reply_json(200, #{events => janus_usage:recent(Limit, Filters)}, Req).
+        #{},
+        [{<<"key_id">>, key_id}, {<<"model_id">>, model_id}]
+    ).
 
 qs_int(undefined, Default, _Min, _Max) -> Default;
 qs_int(Bin, Default, Min, Max) when is_binary(Bin) ->
@@ -1249,6 +1463,7 @@ export type UsageTotals = {
   errors: number
   unreported: number
   avg_latency_ms: number
+  avg_stream_ms: number
   p95_latency_ms: number | null
   p95_stream_ms: number | null
 }
@@ -1274,7 +1489,7 @@ export type UsageSummary = {
   by_model: UsageRow[]
   by_provider: UsageRow[]
   by_provider_key: UsageRow[]
-  writer: { buffered: number; dropped: number }
+  writer: { alive: boolean; buffered: number; dropped: number }
 }
 
 export function fmtNum(n: number) {
@@ -1298,9 +1513,9 @@ export function fmtTs(ts: number) {
 
 - `Layout title="Usage" description="Token consumption and traffic across agent keys, models, and providers — times are UTC."`
 - Range `Select` in `CardAction` (24h / 7d / 30d) driving `api("/usage/summary?range=" + range)`; separate `api("/usage/events?limit=50")` for the drill-down. Poll summary every 30s while the page is open.
-- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms ?? "—"` + `ms`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms ?? "—"`, subtitle "end-to-end"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped (writer)".
-- When `totals.unreported > 0`, a one-line muted note under the cards: "N requests had no provider usage report (streams without usage chunk or errors)."
-- Two charts in a 2-col grid: **Tokens (UTC)** — stacked `BarChart` of `prompt_tokens` + `completion_tokens` (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`); **Requests (UTC)** — `BarChart` of `requests` (color `var(--color-chart-1)`). `XAxis dataKey` = precomputed `label` from `fmtBucket`.
+- Stat cards row (6-col grid like the dashboard): **Requests** (`fmtNum(totals.requests)`), **Tokens in** (`fmtNum(totals.prompt_tokens)`), **Tokens out** (`fmtNum(totals.completion_tokens)`), **Errors** (`totals.errors` + share %), **p95 latency** (`totals.p95_latency_ms ?? "—"` + `ms`, subtitle "non-stream"), **p95 stream** (`totals.p95_stream_ms ?? "—"`, subtitle "end-to-end"). Icons: `Activity`, `ArrowDownToLine`, `ArrowUpFromLine`, `CircleAlert`, `Timer`, `TimerReset`. When `writer.dropped > 0`, show a warning badge on the Requests card: "N dropped since boot (writer)" — and if `writer.alive === false`, a destructive badge "writer down".
+- When `totals.unreported > 0`, a one-line muted note under the cards: "N successful requests had no provider usage report (streams without a usage chunk)."
+- Two charts in a 2-col grid: **Tokens (UTC)** — stacked `BarChart` of `prompt_tokens` + `completion_tokens` (`stackId="t"`, colors `var(--color-chart-1)` / `var(--color-chart-2)`); **Requests (UTC)** — `BarChart` of `requests` (color `var(--color-chart-1)`). `XAxis dataKey` = precomputed `label` from `fmtBucket`. Before charting, **zero-fill the buckets**: build the complete bucket sequence for the range (24 hour-buckets ending at the current UTC hour, or N day-buckets ending today UTC) and merge the API rows into it so gaps render as 0, not as missing bars.
 - Four breakdown cards in `xl:grid-cols-2`: **Per agent key** (prefix or `(deleted)` when name is null), **Per model**, **Per provider**, **Per provider key** — columns: name, requests, tokens (`fmtNum(pin + pout)`), and a share bar (`div` with width % of the max requests in that card, `bg-primary/15`).
 - Recent requests card: table Time (`fmtTs` + "UTC"), Key, Model, Provider, Status (2xx `text-success`, 4xx `text-warning`, 5xx `text-destructive`; 502 from mid-stream failure is expected), Stream (a `~` glyph or `Zap` icon when `stream === 1`), In, Out (`"—"` for null), Latency.
 - Loading skeletons, `ErrorFlash`, empty state: "No usage recorded yet — stats appear after the first proxied request."
@@ -1368,7 +1583,7 @@ Expected: `#{dropped := N>0}` after the malformed cast; `{ok,[{0}]}` after the s
 
 - Spec coverage: capture (T5/T6), storage + retention (T1/T3), rollups (T4), API (T7), page (T8), per-key/model/provider/provider-key (T4/T8), streaming (T6), latency avg/p95 split by stream (T4/T8), drill-down with filters (T4/T7), both DBs (T1/T4 dialect branches), audit fixes (all inline, no addendum).
 - `agent_key_id = null` happens only for contexts where the agent id is missing — in practice auth always provides it. FK `ON DELETE SET NULL` renders as `(deleted)` in the UI. If Task 1 Step 3 finds `PRAGMA foreign_keys` off on SQLite, SET NULL is inert there — rows keep their (now-dangling) ids and render as `(deleted)` via the LEFT JOIN anyway, so behavior is consistent.
-- One global gen_server is the write funnel: per-cast cost is a map prepend; flush is a 50-row multi-row statement ~1/sec; the 10k cap + drop-newest bounds memory; the mailbox itself is unbounded only under a permanently stalled DB (accepted for v1, `writer.dropped` is surfaced in the UI).
+- One global gen_server is the write funnel: per-cast cost is a map prepend; flush is a 50-row multi-row statement ~1/sec; buffer capped at 10k (drop-newest); the mailbox itself is bounded by the `record/1` queue-length guard (drops counted via atomics and surfaced in `writer.dropped`).
 - p95 caveat for operators: a provider emitting per-chunk (non-cumulative) `message_delta` token deltas would be under-reported (Anthropic proper is cumulative).
 - `usage_events.protocol` stores the client protocol; SSE parsing is dialect-agnostic, so provider dialect needs no column.
 - Types end-to-end: proxy event keys ↔ `record/1` validation ↔ `build_insert` defaults ↔ migration columns (nullable tokens, `stream` flag) ↔ `recent/2` output ↔ SPA `UsageEvent` (all token/latency fields `number | null`).
