@@ -32,6 +32,33 @@ Unset `JANUS_DASHBOARD_PASSWORD` ⇒ logins are refused (fail closed).
 `JANUS_ROLE=gateway` does not start this listener (agent plane only).
 `JANUS_ROLE=dashboard` starts `:8090` and skips `:8080`. Default is both.
 
+## Behind a reverse proxy (production)
+
+With Caddy/Nginx terminating TLS, set `JANUS_PUBLIC_URL` to the public base
+URL agents use for the data plane — the console sidebar renders its copyable
+endpoints from it:
+
+```bash
+-e JANUS_PUBLIC_URL="https://api.example.com"
+```
+
+Caddy can also route both planes under one domain (the console then shows
+same-origin endpoints and `JANUS_PUBLIC_URL` may be omitted):
+
+```caddy
+llm.example.com {
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:8080   # data plane
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8090   # dashboard console
+    }
+}
+```
+
+Resolution order in the console: `JANUS_PUBLIC_URL` → same origin (page
+served on 80/443) → console host on `:8080` (local dev).
+
 ## Architecture
 
 ```

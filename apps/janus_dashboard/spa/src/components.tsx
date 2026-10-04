@@ -129,7 +129,18 @@ function AppSidebar() {
   const [dataBase, setDataBase] = useState("")
 
   useEffect(() => {
-    setDataBase(`${window.location.protocol}//${window.location.hostname}:8080`)
+    // Resolution order: JANUS_PUBLIC_URL (from /overview) → same origin
+    // (reverse proxy path-routes both planes) → console host on :8080
+    // (bare-metal / local dev).
+    const fallback = () => {
+      const { protocol, hostname, port, origin } = window.location
+      return port === "" || port === "80" || port === "443"
+        ? origin
+        : `${protocol}//${hostname}:8080`
+    }
+    api("/overview")
+      .then((o) => setDataBase(o.public_url ?? fallback()))
+      .catch(() => setDataBase(fallback()))
   }, [])
 
   const signOut = async () => {

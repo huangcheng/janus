@@ -266,10 +266,29 @@ handle_overview(Req) ->
                 agent_keys => length(Keys)
             },
             providers => ProvRows,
-            recent_audit => janus_dashboard_audit:recent(5)
+            recent_audit => janus_dashboard_audit:recent(5),
+            public_url => public_url()
         },
         Req
     ).
+
+%% Public base URL agents use to reach the data plane. Operators set
+%% JANUS_PUBLIC_URL (e.g. https://api.example.com) when the gateway sits
+%% behind a reverse proxy; unset means "same host as the console, :8080".
+public_url() ->
+    case os:getenv("JANUS_PUBLIC_URL") of
+        false ->
+            null;
+        "" ->
+            null;
+        Url when is_list(Url) ->
+            Bin = string:trim(list_to_binary(Url), trailing, "/"),
+            case Bin of
+                <<"http://", _/binary>> -> Bin;
+                <<"https://", _/binary>> -> Bin;
+                _ -> null
+            end
+    end.
 
 handle_auto_get(Req) ->
     Snapshot =
