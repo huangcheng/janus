@@ -279,13 +279,19 @@ unique_violation(Reason) ->
         lists:any(
             fun
                 (B) when is_binary(B) -> binary:match(B, <<"UNIQUE">>) =/= nomatch;
-                (L) when is_list(L) ->
-                    L =/= [] andalso is_integer(hd(L)) andalso string:find(L, "UNIQUE") =/= nomatch;
-                (_) ->
-                    false
+                (L) when is_list(L) -> contains_unique_substring(L);
+                (_) -> false
             end,
             Flatten
         ).
+
+contains_unique_substring(L) ->
+    try string:find(L, "UNIQUE") =/= nomatch of
+        true -> true;
+        false -> false
+    catch
+        _:_ -> false
+    end.
 
 flatten_term(T) when is_tuple(T) ->
     lists:append([flatten_term(X) || X <- tuple_to_list(T)]);
@@ -354,6 +360,7 @@ unique_violation_test() ->
     ?assert(unique_violation({error, {error, <<"23505">>, <<"unique_violation">>}})),
     ?assert(unique_violation("UNIQUE constraint failed: models.name")),
     ?assertNot(unique_violation({error, timeout})),
-    ?assertNot(unique_violation([])).
+    ?assertNot(unique_violation([])),
+    ?assertNot(unique_violation([1, foo])).
 
 -endif.
