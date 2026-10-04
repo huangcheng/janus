@@ -353,6 +353,7 @@ unique_violation_test() ->
     ?assert(unique_violation({error, unique_violation})),
     ?assert(unique_violation({error, {error, <<"23505">>, <<"unique_violation">>}})),
     ?assert(unique_violation("UNIQUE constraint failed: models.name")),
-    ?assertNot(unique_violation({error, timeout})).
+    ?assertNot(unique_violation({error, timeout})),
+    ?assertNot(unique_violation([])).
 
 -endif.
