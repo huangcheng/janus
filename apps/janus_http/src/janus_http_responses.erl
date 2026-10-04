@@ -1,8 +1,8 @@
 %%%-------------------------------------------------------------------
-%%% @doc OpenAI chat/completions agent endpoint.
+%%% @doc OpenAI Responses API agent endpoint.
 %%% @end
 %%%-------------------------------------------------------------------
--module(janus_http_chat).
+-module(janus_http_responses).
 -behaviour(cowboy_handler).
 
 -export([init/2]).
@@ -14,7 +14,7 @@ init(Req0, State) ->
         {ok, Agent, Req1} ->
             case cowboy_req:read_body(Req1, #{length => ?MAX_BODY}) of
                 {ok, Body, Req2} ->
-                    janus_http_proxy:handle(openai_chat, Agent, Body, Req2, State);
+                    janus_http_proxy:handle(openai_responses, Agent, Body, Req2, State);
                 {more, _, Req2} ->
                     Body = thoas:encode(#{
                         error => #{

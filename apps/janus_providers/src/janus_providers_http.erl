@@ -1,0 +1,227 @@
+%%%-------------------------------------------------------------------
+%%% @doc Shared gun HTTP client for upstream LLM providers.
+%%% @end
+%%%-------------------------------------------------------------------
+-module(janus_providers_http).
+
+-export([
+    user_agent/0,
+    parse_base/1,
+    join_path/2,
+    decrypt_key/1,
+    post/3,
+    post/6,
+    post_stream/3
+]).
+
+-define(UA, <<"opencode/2.0.15">>).
+-define(CONNECT_MS, 5000).
+-define(TTFB_MS, 60000).
+-define(BODY_MS, 120000).
+
+-spec user_agent() -> binary().
+user_agent() ->
+    case os:getenv("JANUS_UPSTREAM_UA") of
+        false -> ?UA;
+        "" -> ?UA;
+        Val -> list_to_binary(Val)
+    end.
+
+-spec parse_base(binary() | string()) ->
+    {ok, string(), inet:port_number(), binary(), boolean()} | {error, term()}.
+parse_base(Url) ->
+    case uri_string:parse(Url) of
+        #{scheme := Scheme, host := Host} = U when
+            Scheme =:= <<"https">>;
+            Scheme =:= <<"http">>;
+            Scheme =:= "https";
+            Scheme =:= "http"
+        ->
+            Tls = scheme_tls(Scheme),
+            Port =
+                case maps:get(port, U, undefined) of
+                    undefined when Tls -> 443;
+                    undefined -> 80;
+                    P -> P
+                end,
+            Path0 = maps:get(path, U, <<"/">>),
+            Path =
+                case Path0 of
+                    <<>> -> <<"">>;
+                    <<"/">> -> <<"">>;
+                    Pth -> iolist_to_binary(Pth)
+                end,
+            HostBin = iolist_to_binary(Host),
+            {ok, binary_to_list(HostBin), Port, Path, Tls};
+        Other ->
+            {error, {bad_base_url, Other}}
+    end.
+
+scheme_tls(<<"https">>) -> true;
+scheme_tls("https") -> true;
+scheme_tls(_) -> false.
+
+-spec join_path(binary(), binary()) -> binary().
+join_path(Base, Suffix) ->
+    B =
+        case Base of
+            <<>> ->
+                <<>>;
+            _ ->
+                case binary:last(iolist_to_binary(Base)) of
+                    $/ ->
+                        binary:part(
+                            iolist_to_binary(Base), 0, byte_size(iolist_to_binary(Base)) - 1
+                        );
+                    _ ->
+                        iolist_to_binary(Base)
+                end
+        end,
+    <<B/binary, Suffix/binary>>.
+
+-spec decrypt_key(map()) -> {ok, binary()} | {error, term()}.
+decrypt_key(#{secret_ref := {_KeyId, Cipher}}) when is_binary(Cipher) ->
+    janus_secrets:decrypt(Cipher);
+decrypt_key(#{secret_ref := Cipher}) when is_binary(Cipher) ->
+    janus_secrets:decrypt(Cipher);
+decrypt_key(_) ->
+    {error, bad_secret_ref}.
+
+%% Non-stream POST. Headers is [{binary(), binary()}].
+-spec post(string(), inet:port_number(), binary(), boolean(), [{binary(), binary()}], binary()) ->
+    {ok, pos_integer(), map(), binary()} | {error, term()}.
+post(Host, Port, Path, Tls, Headers, Body) when is_list(Host), is_integer(Port) ->
+    Transport =
+        case Tls of
+            true -> tls;
+            false -> tcp
+        end,
+    Opts = #{
+        transport => Transport,
+        tls_opts => [{verify, verify_none}],
+        connect_timeout => ?CONNECT_MS
+    },
+    case gun:open(Host, Port, Opts) of
+        {ok, Conn} ->
+            try
+                case gun:await_up(Conn, ?CONNECT_MS) of
+                    {ok, _} ->
+                        Stream = gun:post(Conn, Path, Headers, Body),
+                        case gun:await(Conn, Stream, ?TTFB_MS) of
+                            {response, fin, Status, RespHeaders} ->
+                                {ok, Status, headers_map(RespHeaders), <<>>};
+                            {response, nofin, Status, RespHeaders} ->
+                                case collect_body(Conn, Stream, <<>>) of
+                                    {ok, RespBody} ->
+                                        {ok, Status, headers_map(RespHeaders), RespBody};
+                                    {error, _} = Err ->
+                                        Err
+                                end;
+                            {error, Reason} ->
+                                {error, {await, Reason}};
+                            Other ->
+                                {error, {unexpected_await, Other}}
+                        end;
+                    {error, Reason} ->
+                        {error, {await_up, Reason}}
+                end
+            after
+                gun:close(Conn)
+            end;
+        {error, Reason} ->
+            {error, {open, Reason}}
+    end.
+
+%% Compatibility arity used by adapters that pack opts.
+-spec post(map(), [{binary(), binary()}], binary()) ->
+    {ok, pos_integer(), map(), binary()} | {error, term()}.
+post(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Body) ->
+    post(Host, Port, Path, Tls, Headers, Body).
+
+%% Stream POST: returns a drain fun that yields raw body chunks then closes gun.
+%% DrainFun(ChunkFun) -> ok | {error, term()} where ChunkFun(binary()) -> ok.
+-spec post_stream(map(), [{binary(), binary()}], binary()) ->
+    {ok, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
+    | {error, term()}.
+post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Body) ->
+    Transport =
+        case Tls of
+            true -> tls;
+            false -> tcp
+        end,
+    Opts = #{
+        transport => Transport,
+        tls_opts => [{verify, verify_none}],
+        connect_timeout => ?CONNECT_MS
+    },
+    case gun:open(Host, Port, Opts) of
+        {ok, Conn} ->
+            case gun:await_up(Conn, ?CONNECT_MS) of
+                {ok, _} ->
+                    Stream = gun:post(Conn, Path, Headers, Body),
+                    case gun:await(Conn, Stream, ?TTFB_MS) of
+                        {response, fin, Status, RespHeaders} ->
+                            Drain = fun(_ChunkFun) ->
+                                gun:close(Conn),
+                                ok
+                            end,
+                            {ok, Status, headers_map(RespHeaders), Drain};
+                        {response, nofin, Status, RespHeaders} ->
+                            Drain = fun(ChunkFun) ->
+                                try
+                                    drain_stream(Conn, Stream, ChunkFun)
+                                after
+                                    gun:close(Conn)
+                                end
+                            end,
+                            {ok, Status, headers_map(RespHeaders), Drain};
+                        {error, Reason} ->
+                            gun:close(Conn),
+                            {error, {await, Reason}};
+                        Other ->
+                            gun:close(Conn),
+                            {error, {unexpected_await, Other}}
+                    end;
+                {error, Reason} ->
+                    gun:close(Conn),
+                    {error, {await_up, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {open, Reason}}
+    end.
+
+drain_stream(Conn, Stream, ChunkFun) ->
+    case gun:await(Conn, Stream, ?BODY_MS) of
+        {data, nofin, Data} ->
+            _ = ChunkFun(Data),
+            drain_stream(Conn, Stream, ChunkFun);
+        {data, fin, Data} ->
+            _ = ChunkFun(Data),
+            ok;
+        {error, Reason} ->
+            {error, {body, Reason}};
+        Other ->
+            {error, {unexpected_body, Other}}
+    end.
+
+collect_body(Conn, Stream, Acc) ->
+    case gun:await(Conn, Stream, ?BODY_MS) of
+        {data, nofin, Data} ->
+            collect_body(Conn, Stream, <<Acc/binary, Data/binary>>);
+        {data, fin, Data} ->
+            {ok, <<Acc/binary, Data/binary>>};
+        {error, Reason} ->
+            {error, {body, Reason}};
+        Other ->
+            {error, {unexpected_body, Other}}
+    end.
+
+headers_map(Headers) when is_list(Headers) ->
+    maps:from_list([{to_lower(K), V} || {K, V} <- Headers]);
+headers_map(_) ->
+    #{}.
+
+to_lower(B) when is_binary(B) ->
+    string:lowercase(B);
+to_lower(L) when is_list(L) ->
+    string:lowercase(list_to_binary(L)).

@@ -1,55 +1,38 @@
 %%%-------------------------------------------------------------------
-%%% @doc OpenAI-compatible chat/completions and responses upstream via gun.
+%%% @doc Anthropic Messages API upstream via gun.
 %%% @end
 %%%-------------------------------------------------------------------
--module(janus_providers_openai).
+-module(janus_providers_anthropic).
 
--export([chat_completions/3, chat_completions/4, responses/3, responses/4, user_agent/0]).
+-export([messages/3, messages/4, anthropic_version/0]).
 
--spec user_agent() -> binary().
-user_agent() ->
-    janus_providers_http:user_agent().
+-define(DEFAULT_VERSION, <<"2023-06-01">>).
 
-%% Legacy: always non-stream.
--spec chat_completions(map(), binary(), map()) ->
+-spec anthropic_version() -> binary().
+anthropic_version() ->
+    case os:getenv("JANUS_ANTHROPIC_VERSION") of
+        false -> ?DEFAULT_VERSION;
+        "" -> ?DEFAULT_VERSION;
+        Val -> list_to_binary(Val)
+    end.
+
+-spec messages(map(), binary(), map()) ->
     {ok, pos_integer(), map(), binary()}
     | {error, term()}.
-chat_completions(Route, Body, ReqMap) ->
-    chat_completions(Route, Body, ReqMap, #{stream => false}).
+messages(Route, Body, ReqMap) ->
+    messages(Route, Body, ReqMap, #{stream => false}).
 
--spec chat_completions(map(), binary(), map(), map()) ->
-    {ok, pos_integer(), map(), binary()}
-    | {ok, stream, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
-    | {error, term()}.
-chat_completions(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
-    call(Route, ReqMap, <<"/chat/completions">>, Opts).
-
--spec responses(map(), binary(), map()) ->
-    {ok, pos_integer(), map(), binary()}
-    | {error, term()}.
-responses(Route, Body, ReqMap) ->
-    responses(Route, Body, ReqMap, #{stream => false}).
-
--spec responses(map(), binary(), map(), map()) ->
+-spec messages(map(), binary(), map(), map()) ->
     {ok, pos_integer(), map(), binary()}
     | {ok, stream, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
     | {error, term()}.
-responses(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
-    %% Gateway is stateless — never ask upstream to store responses.
-    call(Route, ReqMap#{<<"store">> => false}, <<"/responses">>, Opts).
-
-call(Route, ReqMap, PathSuffix, Opts) ->
+messages(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
     Stream = maps:get(stream, Opts, false) =:= true,
-    case resolve_upstream(Route, ReqMap, PathSuffix, Stream) of
+    case resolve_upstream(Route, ReqMap, Stream) of
         {ok, Target, Headers, OutBody} ->
             case Stream of
                 false ->
-                    case janus_providers_http:post(Target, Headers, OutBody) of
-                        {ok, Status, RespHeaders, RespBody} ->
-                            {ok, Status, RespHeaders, RespBody};
-                        {error, _} = Err ->
-                            Err
-                    end;
+                    janus_providers_http:post(Target, Headers, OutBody);
                 true ->
                     case janus_providers_http:post_stream(Target, Headers, OutBody) of
                         {ok, Status, RespHeaders, Drain} ->
@@ -62,7 +45,7 @@ call(Route, ReqMap, PathSuffix, Opts) ->
             Err
     end.
 
-resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap, PathSuffix, Stream) ->
+resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap, Stream) ->
     case janus_catalog:lookup_provider(Pid) of
         {ok, #{base_url := BaseUrl0, enabled := true}} ->
             case janus_providers_http:decrypt_key(KeyMeta) of
@@ -70,7 +53,7 @@ resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap,
                     BaseUrl = iolist_to_binary(BaseUrl0),
                     case janus_providers_http:parse_base(BaseUrl) of
                         {ok, Host, Port, BasePath, Tls} ->
-                            Path = janus_providers_http:join_path(BasePath, PathSuffix),
+                            Path = janus_providers_http:join_path(BasePath, <<"/messages">>),
                             UpstreamModel = upstream_model(Route, ReqMap),
                             OutMap0 = ReqMap#{<<"model">> => UpstreamModel},
                             OutMap =
@@ -80,14 +63,15 @@ resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap,
                                 end,
                             OutBody = thoas:encode(OutMap),
                             Headers = [
-                                {<<"authorization">>, <<"Bearer ", Token/binary>>},
+                                {<<"x-api-key">>, Token},
+                                {<<"anthropic-version">>, anthropic_version()},
                                 {<<"content-type">>, <<"application/json">>},
                                 {<<"accept">>,
                                     case Stream of
                                         true -> <<"text/event-stream">>;
                                         false -> <<"application/json">>
                                     end},
-                                {<<"user-agent">>, user_agent()}
+                                {<<"user-agent">>, janus_providers_http:user_agent()}
                             ],
                             Target = #{host => Host, port => Port, path => Path, tls => Tls},
                             {ok, Target, Headers, OutBody};
@@ -102,7 +86,7 @@ resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap,
         error ->
             {error, provider_not_found}
     end;
-resolve_upstream(_, _, _, _) ->
+resolve_upstream(_, _, _) ->
     {error, missing_provider_key}.
 
 upstream_model(Route, ReqMap) ->

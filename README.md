@@ -57,12 +57,14 @@ docker compose --profile postgres up
 
 Hot path never queries SQL — ETS holds routes. Postgres is for shared catalog across nodes; SQLite is for single-node / laptop.
 
-## Agent endpoints (planned)
+## Agent endpoints
 
-- `POST /v1/chat/completions` (OpenAI)
-- `POST /v1/responses` (OpenAI)
-- `POST /v1/messages` (Anthropic)
+- `POST /v1/chat/completions` (OpenAI Chat)
+- `POST /v1/responses` (OpenAI Responses)
+- `POST /v1/messages` (Anthropic Messages; Bearer or `x-api-key`, Bearer wins)
 - `GET /v1/models`
+
+Provider `protocol` is one of `openai_chat` | `openai_responses` | `anthropic_messages`. Same-protocol routes passthrough (including SSE streaming). Cross-protocol routes **translate** non-stream only (text + basic tools); `stream: true` on a translate path returns `400 stream_requires_native_protocol`. Vision/multimodal translate is rejected in v1.
 
 ## Apps
 

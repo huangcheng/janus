@@ -15,8 +15,8 @@ init([]) ->
             {"/readyz", janus_http_ready, []},
             {"/v1/models", janus_http_models, []},
             {"/v1/chat/completions", janus_http_chat, []},
-            {"/v1/responses", janus_http_not_implemented, [{api, responses}]},
-            {"/v1/messages", janus_http_not_implemented, [{api, messages}]}
+            {"/v1/responses", janus_http_responses, []},
+            {"/v1/messages", janus_http_messages, []}
         ]}
     ]),
     TransportOpts = [{port, Port}],
