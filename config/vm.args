@@ -1,4 +1,6 @@
 -name janus@127.0.0.1
--setcookie janus
+%% Cookie: absent on purpose — falls back to ~/.erlang.cookie
+%% (random per machine). Override with ERL_FLAGS="--cookie <secret>"
+%% or a -setcookie in a deployment-specific vm.args.
 +K true
 +A 64

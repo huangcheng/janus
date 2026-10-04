@@ -32,7 +32,7 @@ Unset `JANUS_DASHBOARD_PASSWORD` ⇒ logins are refused (fail closed).
 ## Architecture
 
 ```
-/dashboard/api/*      Cowboy → janus_dashboard_api    (JSON, cookie session + CSRF)
+/api/*      Cowboy → janus_dashboard_api    (JSON, cookie session + CSRF)
 /dashboard/*          Cowboy → janus_dashboard_assets (SPA shell + built assets)
 data plane :8080  unchanged (janus_http)
 ```
@@ -40,7 +40,7 @@ data plane :8080  unchanged (janus_http)
 - **Frontend**: `apps/janus_dashboard/spa` — Vite + React + TypeScript +
   TanStack Router (code-based routes, `basepath: '/dashboard'`). Built in the
   first Docker stage; `dist/` lands in `priv/www` of the release.
-  Local dev: `npm run dev` proxies `/dashboard/api` to `127.0.0.1:8090`.
+  Local dev: `npm run dev` proxies `/api` to `127.0.0.1:8090`.
 - **Backend**: `apps/janus_dashboard/src`
   - `janus_dashboard_sup` — listener (default `0.0.0.0:8090` in Docker; env
     overrides `JANUS_DASHBOARD_BIND` / `JANUS_DASHBOARD_PORT`)
@@ -59,7 +59,7 @@ data plane :8080  unchanged (janus_http)
   from the session response.
 - Provider secrets are AES-256-GCM envelopes (`janus_secrets`) — write-only.
 - Agent keys are peppered HMAC hashes; the plaintext appears exactly once,
-  in the `201` response of `POST /dashboard/api/keys`.
+  in the `201` response of `POST /api/keys`.
 - Every mutation and login attempt is audited.
 
 ## Local development
@@ -78,7 +78,7 @@ npm run dev
 - Backend (Erlang) changes are the only thing that needs
   `docker build -t janus:dashboard .` (+ `docker rm -f janus-dev` so the
   predev hook recreates it).
-- `vite.config.ts` proxies `/dashboard/api/*` to the container's dashboard plane
+- `vite.config.ts` proxies `/api/*` to the container's dashboard plane
   (`127.0.0.1:8090`); cookies and CSRF behave exactly like production.
 - The `8090` container port serves the *built* SPA — use it when you want
   to preview what ships, not while iterating.

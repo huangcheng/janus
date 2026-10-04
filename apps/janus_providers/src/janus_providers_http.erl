@@ -98,7 +98,7 @@ post(Host, Port, Path, Tls, Headers, Body) when is_list(Host), is_integer(Port) 
         end,
     Opts = #{
         transport => Transport,
-        tls_opts => [{verify, verify_none}],
+        tls_opts => janus_tls_opts(),
         connect_timeout => ?CONNECT_MS
     },
     case gun:open(Host, Port, Opts) of
@@ -151,7 +151,7 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
         end,
     Opts = #{
         transport => Transport,
-        tls_opts => [{verify, verify_none}],
+        tls_opts => janus_tls_opts(),
         connect_timeout => ?CONNECT_MS
     },
     case gun:open(Host, Port, Opts) of
@@ -225,3 +225,18 @@ to_lower(B) when is_binary(B) ->
     string:lowercase(B);
 to_lower(L) when is_list(L) ->
     string:lowercase(list_to_binary(L)).
+
+%% Upstream TLS verification: configurable via JANUS_UPSTREAM_TLS_VERIFY.
+%% Default verify_peer (secure); set to "none" only for testing with
+%% self-signed certs behind a trusted proxy.
+janus_tls_opts() ->
+    case os:getenv("JANUS_UPSTREAM_TLS_VERIFY") of
+        "none" ->
+            [{verify, verify_none}];
+        _ ->
+            [{verify, verify_peer},
+             {cacerts, public_key:cacerts_get()},
+             {depth, 3},
+             {customize_hostname_check,
+                 [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]}]
+    end.

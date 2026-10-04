@@ -1,7 +1,7 @@
 %%%-------------------------------------------------------------------
 %%% @doc Dashboard console supervisor: session store, audit trail, and a
 %%% Cowboy listener bound to the dashboard plane (default
-%%% `127.0.0.1:8090` — never on the data-plane listener).
+%%% `127.0.0.1:8090` — separate from the data-plane listener).
 %%%
 %%% App env (`janus_dashboard`): `port` (8090), `bind` ("127.0.0.1"),
 %%% `secure_cookies` (false; enable behind Caddy TLS).

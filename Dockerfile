@@ -28,8 +28,10 @@ RUN chmod +x rebar3 && ./rebar3 as prod release
 FROM erlang:27-alpine
 WORKDIR /opt/janus
 COPY --from=build /app/_build/prod/rel/janus ./
-RUN mkdir -p /var/lib/janus
+RUN mkdir -p /var/lib/janus &&     addgroup -S janus && adduser -S janus -G janus &&     chown -R janus:janus /opt/janus /var/lib/janus
+USER janus
 ENV JANUS_SQLITE_PATH=/var/lib/janus/janus.db
 # 8080 = data plane, 8090 = dashboard plane (bind to loopback or put Caddy in front)
 EXPOSE 8080 8090
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 CMD ["bin/janus", "foreground"]

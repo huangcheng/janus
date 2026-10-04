@@ -85,8 +85,14 @@ init([]) ->
     {ok, State}.
 
 handle_call(sync_now, _From, State) ->
-    Result = do_sync(),
-    {reply, {ok, Result}, State#state{last_run = Result}};
+    Result = (catch do_sync()),
+    %% do_sync now handles DB errors internally; catch guards anything else
+    case Result of
+        {ok, R} -> {reply, {ok, R}, State#state{last_run = R}};
+        Other ->
+            ErrMap = #{error => Other},
+            {reply, {ok, ErrMap}, State#state{last_run = ErrMap}}
+    end;
 handle_call(status, _From, State) ->
     {reply, status_map(State), State};
 handle_call(reschedule, _From, State) ->
@@ -98,7 +104,7 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(sync_tick, State) ->
-    _ = spawn(fun() -> {ok, _} = (catch do_sync()) end),
+    _ = spawn(fun() -> _ = (catch do_sync()) end),
     {noreply, maybe_start_timer(State#state{timer_ref = undefined})};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -116,7 +122,12 @@ code_change(_OldVsn, State, _Extra) ->
 
 do_sync() ->
     Started = erlang:system_time(millisecond),
-    {ok, Providers} = janus_db_conn:query(<<"SELECT id, name FROM providers WHERE enabled = 1">>),
+    Providers = case janus_db_conn:query(<<"SELECT id, name FROM providers WHERE enabled = 1">>) of
+        {ok, Rows} -> Rows;
+        {error, Reason} ->
+            logger:warning(#{what => janus_model_sync_db_error, reason => Reason}),
+            []
+    end,
     PerProvider =
         lists:foldl(
             fun({Id, Name}, Acc) ->
@@ -209,7 +220,7 @@ http_get_json(Url, Token) ->
         {"accept", "application/json"}
     ],
     Req = {Url, Headers},
-    HTTPOpts = [{timeout, 15_000}, {autoredirect, true}, {ssl, [{verify, verify_none}]}],
+    HTTPOpts = [{timeout, 15_000}, {autoredirect, true}, {ssl, janus_ssl_opts()}],
     Opts = [{body_format, binary}],
     case httpc:request(get, Req, HTTPOpts, Opts) of
         {ok, {{_V, 200, _}, _H, Body}} ->
@@ -372,3 +383,10 @@ unique_violation_test() ->
     ?assertNot(unique_violation([1, foo])).
 
 -endif.
+
+janus_ssl_opts() ->
+    case os:getenv("JANUS_UPSTREAM_TLS_VERIFY") of
+        "none" -> [{verify, verify_none}];
+        _ ->
+            [{verify, verify_peer}, {cacerts, public_key:cacerts_get()}, {depth, 3}]
+    end.

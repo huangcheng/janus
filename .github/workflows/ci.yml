@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  erlang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          rebar3-version: "3.24"
+
+      - name: Restore rebar cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: rebar-${{ runner.os }}-otp27-${{ hashFiles('rebar.lock') }}
+          restore-keys: rebar-${{ runner.os }}-otp27-
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Format check
+        run: rebar3 fmt --check
+
+      - name: EUnit
+        run: rebar3 eunit
+
+  spa:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/janus_dashboard/spa
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/janus_dashboard/spa/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck + build
+        run: npm run build

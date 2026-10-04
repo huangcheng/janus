@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @doc Dashboard JSON API. Mounted at `/dashboard/api/[...]` on the dashboard
+%%% @doc Dashboard JSON API. Mounted at `/api/[...]` on the dashboard
 %%% listener (see design/dashboard-ui/api.html for the contract).
 %%%
 %%% Auth: `janus_dashboard_session` cookie; mutations additionally require
@@ -22,6 +22,10 @@ init(Req0, State) ->
         try
             route(cowboy_req:method(Req0), cowboy_req:path_info(Req0), Req0)
         catch
+            throw:{db_error, Fn, R} ->
+                logger:error(#{what => janus_dashboard_db_error, function => Fn, reason => R}),
+                reply_json(503, #{error => #{code => <<"db_error">>,
+                    message => <<"database query failed">>}}, Req0);
             throw:{reply, Status, Body} ->
                 reply_json(Status, Body, Req0);
             Class:Reason:Stack ->
@@ -211,12 +215,30 @@ handle_login(Req) ->
     end.
 
 handle_overview(Req) ->
-    {ok, Providers} = janus_dashboard_store:providers(),
-    {ok, Models} = janus_dashboard_store:models(),
-    {ok, Listings} = janus_dashboard_store:provider_models(),
-    {ok, Routes} = janus_dashboard_store:routes(),
-    {ok, Keys} = janus_dashboard_store:agent_keys(),
-    {ok, KeyCounts} = janus_dashboard_store:provider_key_counts(),
+    Providers = (fun() -> case janus_dashboard_store:providers() of
+        {ok, V1} -> V1;
+        {error, R1} -> throw({db_error, providers, R1})
+    end end)(),
+    Models = (fun() -> case janus_dashboard_store:models() of
+        {ok, V2} -> V2;
+        {error, R2} -> throw({db_error, models, R2})
+    end end)(),
+    Listings = (fun() -> case janus_dashboard_store:provider_models() of
+        {ok, V3} -> V3;
+        {error, R3} -> throw({db_error, provider_models, R3})
+    end end)(),
+    Routes = (fun() -> case janus_dashboard_store:routes() of
+        {ok, V4} -> V4;
+        {error, R4} -> throw({db_error, routes, R4})
+    end end)(),
+    Keys = (fun() -> case janus_dashboard_store:agent_keys() of
+        {ok, V5} -> V5;
+        {error, R5} -> throw({db_error, agent_keys, R5})
+    end end)(),
+    KeyCounts = (fun() -> case janus_dashboard_store:provider_key_counts() of
+        {ok, V6} -> V6;
+        {error, R6} -> throw({db_error, provider_key_counts, R6})
+    end end)(),
     ProvRows = [
         #{
             id => maps:get(id, P),
@@ -264,13 +286,22 @@ handle_auto_get(Req) ->
     reply_json(200, Snapshot, Req).
 
 handle_providers_get(Req) ->
-    {ok, Providers} = janus_dashboard_store:providers(),
+    Providers = (fun() -> case janus_dashboard_store:providers() of
+        {ok, V7} -> V7;
+        {error, R7} -> throw({db_error, providers, R7})
+    end end)(),
     ProvidersWithKids =
         lists:map(
             fun(P) ->
                 Pid = maps:get(id, P),
-                {ok, Keys} = janus_dashboard_store:provider_keys(Pid),
-                {ok, Listings} = janus_dashboard_store:provider_models(Pid),
+                Keys = (fun() -> case janus_dashboard_store:provider_keys(Pid) of
+        {ok, V8} -> V8;
+        {error, R8} -> throw({db_error, provider_keys, R8})
+    end end)(),
+                Listings = (fun() -> case janus_dashboard_store:provider_models(Pid) of
+        {ok, V9} -> V9;
+        {error, R9} -> throw({db_error, provider_models, R9})
+    end end)(),
                 P#{keys => Keys, models => Listings}
             end,
             Providers
@@ -351,9 +382,18 @@ handle_provider_model_add(IdBin, Body, Req) ->
     end.
 
 handle_models_get(Req) ->
-    {ok, Models} = janus_dashboard_store:models(),
-    {ok, Routes} = janus_dashboard_store:routes(),
-    {ok, Providers} = janus_dashboard_store:providers(),
+    Models = (fun() -> case janus_dashboard_store:models() of
+        {ok, V10} -> V10;
+        {error, R10} -> throw({db_error, models, R10})
+    end end)(),
+    Routes = (fun() -> case janus_dashboard_store:routes() of
+        {ok, V11} -> V11;
+        {error, R11} -> throw({db_error, routes, R11})
+    end end)(),
+    Providers = (fun() -> case janus_dashboard_store:providers() of
+        {ok, V12} -> V12;
+        {error, R12} -> throw({db_error, providers, R12})
+    end end)(),
     ProvNames = #{maps:get(id, P) => maps:get(name, P) || P <- Providers},
     RoutesByModel =
         lists:foldl(
@@ -477,9 +517,18 @@ sync_status(Req) ->
     reply_json(200, S#{interval_sec => janus_model_sync:interval()}, Req).
 
 handle_keys_get(Req) ->
-    {ok, Keys} = janus_dashboard_store:agent_keys(),
-    {ok, Grants} = janus_dashboard_store:grants(),
-    {ok, Models} = janus_dashboard_store:models(),
+    Keys = (fun() -> case janus_dashboard_store:agent_keys() of
+        {ok, V13} -> V13;
+        {error, R13} -> throw({db_error, agent_keys, R13})
+    end end)(),
+    Grants = (fun() -> case janus_dashboard_store:grants() of
+        {ok, V14} -> V14;
+        {error, R14} -> throw({db_error, grants, R14})
+    end end)(),
+    Models = (fun() -> case janus_dashboard_store:models() of
+        {ok, V15} -> V15;
+        {error, R15} -> throw({db_error, models, R15})
+    end end)(),
     ModelNames = #{maps:get(id, M) => maps:get(name, M) || M <- Models},
     GrantsByKey =
         lists:foldl(
