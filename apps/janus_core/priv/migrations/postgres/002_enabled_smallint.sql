@@ -1,9 +1,6 @@
 -- Align existing BOOLEAN enabled columns with SQLite-shaped app SQL
 -- (`enabled = 1` / `VALUES (..., 1)`). Safe on already-SMALLINT columns:
 -- `enabled::int` works for both boolean and smallint.
---
--- Note: the running Postgres backend loads `priv/migrations/postgres/`;
--- keep this file in sync for the shared `janus_migrate` dialect runner.
 ALTER TABLE api_keys
     ALTER COLUMN enabled DROP DEFAULT,
     ALTER COLUMN enabled TYPE SMALLINT USING (enabled::int),

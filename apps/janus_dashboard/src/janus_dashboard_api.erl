@@ -443,45 +443,63 @@ handle_keys_get(Req) ->
     Rows = [
         begin
             Mids = maps:get(maps:get(id, K), GrantsByKey, []),
-            K#{
-                model_ids => Mids,
-                model_names => [maps:get(Mid, ModelNames, null) || Mid <- Mids]
-            }
+            case Mids of
+                [] ->
+                    K#{model_ids => all, model_names => []};
+                _ ->
+                    K#{
+                        model_ids => Mids,
+                        model_names => [maps:get(Mid, ModelNames, null) || Mid <- Mids]
+                    }
+            end
         end
      || K <- Keys
     ],
     reply_json(200, #{keys => Rows}, Req).
 
 handle_key_create(Body, Req) ->
+    %% Omit / empty model_ids ⇒ unrestricted (all current and future models).
     RawIds =
         case maps:get(<<"model_ids">>, Body, undefined) of
+            undefined -> [];
+            null -> [];
             L when is_list(L) -> [I || I <- L, is_integer(I)];
-            _ -> []
+            _ -> bad
         end,
-    case valid_model_ids(RawIds) of
-        false ->
-            err(
-                400,
-                <<"invalid">>,
-                <<"model_ids must be a non-empty list of existing model ids">>,
-                Req
-            );
-        true ->
-            case janus_dashboard_store:create_agent_key(RawIds) of
-                {ok, Key, Prefix, _Id} ->
-                    mutate(<<"agent_key.create">>, <<Prefix/binary, "...">>, Req),
-                    %% the ONLY response that ever carries the plaintext key
-                    reply_json(201, #{key => Key, prefix => Prefix, model_ids => RawIds}, Req);
-                {error, invalid} ->
+    case RawIds of
+        bad ->
+            err(400, <<"invalid">>, <<"model_ids must be a list of integers when set">>, Req);
+        [] ->
+            create_key_reply([], Req);
+        Ids ->
+            case valid_model_ids(Ids) of
+                false ->
                     err(
                         400,
                         <<"invalid">>,
-                        <<"model_ids must be a non-empty list of integers">>,
+                        <<"model_ids must be existing model ids">>,
                         Req
                     );
-                {error, Reason} ->
-                    err(500, <<"db_error">>, Reason, Req)
+                true ->
+                    create_key_reply(Ids, Req)
             end
+    end.
+
+create_key_reply(RawIds, Req) ->
+    case janus_dashboard_store:create_agent_key(RawIds) of
+        {ok, Key, Prefix, _Id} ->
+            mutate(<<"agent_key.create">>, <<Prefix/binary, "...">>, Req),
+            %% the ONLY response that ever carries the plaintext key
+            Scope =
+                case RawIds of
+                    [] -> all;
+                    _ -> RawIds
+                end,
+            reply_json(201, #{key => Key, prefix => Prefix, model_ids => Scope}, Req);
+        {error, invalid} ->
+            err(400, <<"invalid">>, <<"model_ids must be a list of integers">>, Req);
+        {error, Reason} ->
+            err(500, <<"db_error">>, Reason, Req)
     end.
 
 toggle(Kind, IdBin, Enabled, Req) ->
@@ -591,16 +609,16 @@ route_target(ModelId, ProviderId) ->
         end,
     <<M/binary, " -> ", P/binary>>.
 
-valid_model_ids([]) ->
-    false;
-valid_model_ids(Ids) ->
+valid_model_ids(Ids) when is_list(Ids), Ids =/= [] ->
     case janus_dashboard_store:models() of
         {ok, Models} ->
             Known = sets:from_list([maps:get(id, M) || M <- Models], [{version, 2}]),
             lists:all(fun(I) -> sets:is_element(I, Known) end, Ids);
         {error, _} ->
             false
-    end.
+    end;
+valid_model_ids(_) ->
+    false.
 
 session_token(Req) ->
     Cookies = cowboy_req:parse_cookies(Req),

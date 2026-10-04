@@ -4,7 +4,15 @@ export type Provider = { id: number; name: string; base_url: string; protocol: s
 export type KeyMeta = { id: number; key_id: string; weight: number; enabled: boolean }
 export type Model = { id: number; name: string; enabled: boolean; routes: Route[] }
 export type Route = { model_id: number; provider_id: number; provider_name: string | null; upstream_model_id: string | null; weight: number; priority: number; enabled: boolean }
-export type AgentKey = { id: number; prefix: string; enabled: boolean; created_at: string; model_ids: number[]; model_names: (string | null)[] }
+export type AgentKey = {
+  id: number
+  prefix: string
+  enabled: boolean
+  created_at: string
+  /** `"all"` = unrestricted; otherwise explicit model id grants */
+  model_ids: number[] | "all"
+  model_names: (string | null)[]
+}
 export type AuditEvent = { ts: string; actor: string; action: string; target: string | null; detail: string | null }
 
 export function StateBadge({ enabled }: { enabled: boolean }) {

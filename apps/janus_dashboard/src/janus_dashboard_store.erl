@@ -299,9 +299,10 @@ delete_route(ModelId, ProviderId) ->
 %%% Agent key mutations
 %%%===================================================================
 
+%% Empty ModelIds ⇒ unrestricted key (catalog treats missing grants as `all`).
 -spec create_agent_key([integer()]) ->
     {ok, Key :: binary(), Prefix :: binary(), integer()} | {error, invalid | term()}.
-create_agent_key(ModelIds) when is_list(ModelIds), ModelIds =/= [] ->
+create_agent_key(ModelIds) when is_list(ModelIds) ->
     case lists:all(fun is_pos_int/1, ModelIds) of
         false ->
             {error, invalid};
