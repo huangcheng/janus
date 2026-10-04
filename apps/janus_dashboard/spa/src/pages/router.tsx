@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react"
-import { Plus } from "lucide-react"
+import { Fragment, useEffect, useMemo, useState } from "react"
+import { ChevronDown, ChevronRight, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "../api"
 import { ErrorFlash, Layout, Loading } from "../components"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Model, Provider, ProviderModel, StateBadge } from "./shared"
+import { Model, Provider, ProviderBadges, ProviderModel, StateBadge } from "./shared"
 import {
   Card,
   CardAction,
@@ -31,13 +32,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+
+// Older rows may carry the literal string "undefined" from an earlier seeding
+// bug; treat empty/missing the same and fall back to the public name.
+function upstreamLabel(upstream: string | null, publicName: string) {
+  return upstream && upstream !== "undefined" ? upstream : publicName
+}
 
 export function RouterPage() {
   const [models, setModels] = useState<Model[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [error, setError] = useState("")
   const [loaded, setLoaded] = useState(false)
-  const [selected, setSelected] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState<number | null>(null)
   const [bindOpen, setBindOpen] = useState(false)
 
   const load = () =>
@@ -52,12 +67,6 @@ export function RouterPage() {
   useEffect(() => {
     load()
   }, [])
-
-  const selectable = models.filter((m) => m.routes.length > 0 || m.enabled)
-  const current = selectable.find((m) => m.id === selected) ?? selectable[0]
-  useEffect(() => {
-    if (current && selected === null) setSelected(current.id)
-  }, [current, selected])
 
   const listings = useMemo(() => {
     const out: { provider: Provider; listing: ProviderModel }[] = []
@@ -82,143 +91,152 @@ export function RouterPage() {
   return (
     <Layout
       title="Router"
-      description="Public names agents send, bound to provider listings. Inventory stays under Providers."
+      description="Public model names agents call, each bound to one or more provider listings."
     >
       {error && <ErrorFlash message={error} />}
-      {!loaded && !error ? (
-        <Loading />
-      ) : (
-        <div className="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Bindings</CardTitle>
-              <CardDescription>
-                One public <code>model</code> can point at several listings (failover / weight).
-              </CardDescription>
-              <CardAction>
-                <Button size="sm" onClick={() => setBindOpen(true)}>
-                  <Plus />
-                  Bind listing
-                </Button>
-              </CardAction>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-6 lg:grid-cols-[minmax(12rem,16rem)_1fr_minmax(16rem,22rem)]">
-                <div className="flex flex-col gap-2">
-                  <div className="text-xs font-medium text-muted-foreground">Agent model</div>
-                  <div className="flex max-h-96 flex-col gap-1 overflow-y-auto rounded-xl border p-2">
-                    {selectable.length === 0 && (
-                      <span className="p-2 text-sm text-muted-foreground">
-                        No public names yet — bind a listing.
-                      </span>
-                    )}
-                    {selectable.map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => setSelected(m.id)}
-                        className={`rounded-lg border px-3 py-2 text-left text-sm ${
-                          current?.id === m.id
-                            ? "border-foreground bg-muted"
-                            : "border-transparent hover:bg-muted/60"
-                        }`}
-                      >
-                        <div className="font-mono">{m.name}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {m.routes.length} listing{m.routes.length === 1 ? "" : "s"}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="flex min-h-64 items-center justify-center">
-                  <div className="flex items-center gap-3 text-muted-foreground">
-                    <div className="hidden h-px w-8 border-t border-dashed lg:block" />
-                    <div className="rounded-2xl border bg-card px-5 py-4 text-center shadow-sm">
-                      <div className="text-xs text-muted-foreground">Janus</div>
-                      <div className="font-mono text-sm font-medium">
-                        {current?.name ?? "—"}
-                      </div>
-                      <div className="mt-1 text-xs">priority then weighted RR</div>
-                    </div>
-                    <div className="hidden h-px w-8 border-t border-dashed lg:block" />
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2">
-                  <div className="text-xs font-medium text-muted-foreground">Upstream listings</div>
-                  <div className="flex max-h-96 flex-col gap-2 overflow-y-auto rounded-xl border p-2">
-                    {(current?.routes ?? []).map((r) => (
-                      <div
-                        key={`${r.model_id}-${r.provider_id}`}
-                        className="rounded-lg border bg-card px-3 py-2"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm">
-                            {r.provider_name ?? r.provider_id}
-                          </span>
-                          <StateBadge enabled={r.enabled} />
-                        </div>
-                        <div className="mt-1 font-mono text-xs text-muted-foreground">
-                          {r.upstream_model_id ?? current?.name}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          priority {r.priority} · weight {r.weight}
-                        </div>
-                        <div className="mt-2 flex justify-end gap-1">
-                          <Button
-                            variant="outline"
-                            size="xs"
-                            onClick={() =>
-                              act(
-                                () =>
-                                  api(
-                                    `/models/${r.model_id}/routes/${r.provider_id}/${r.enabled ? "disable" : "enable"}`,
-                                    { method: "POST", body: {} },
-                                  ),
-                                "binding updated",
-                              )
-                            }
-                          >
-                            {r.enabled ? "Off" : "On"}
-                          </Button>
+      <Card>
+        <CardHeader>
+          <CardTitle>Bindings</CardTitle>
+          <CardDescription>
+            When several listings share one public name, calls fail over by priority (lowest
+            first), then weighted round-robin.
+          </CardDescription>
+          <CardAction>
+            <Button size="sm" onClick={() => setBindOpen(true)}>
+              <Plus />
+              Bind listing
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          {!loaded && !error ? (
+            <Loading />
+          ) : loaded && models.length === 0 ? (
+            <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
+              No public models yet — bind a listing to create the first one.
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Public model</TableHead>
+                  <TableHead>Routes to</TableHead>
+                  <TableHead>State</TableHead>
+                  <TableHead className="text-right">Bindings</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {models.map((m) => (
+                  <Fragment key={m.id}>
+                    <TableRow>
+                      <TableCell className="font-mono font-medium">{m.name}</TableCell>
+                      <TableCell>
+                        <ProviderBadges routes={m.routes} />
+                      </TableCell>
+                      <TableCell>
+                        <StateBadge enabled={m.enabled} />
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end">
                           <Button
                             variant="ghost"
                             size="xs"
-                            onClick={() =>
-                              act(
-                                () =>
-                                  api(`/models/${r.model_id}/routes/${r.provider_id}`, {
-                                    method: "DELETE",
-                                  }),
-                                "binding removed",
-                              )
-                            }
+                            onClick={() => setExpanded(expanded === m.id ? null : m.id)}
                           >
-                            Unbind
+                            {m.routes.length} binding{m.routes.length === 1 ? "" : "s"}
+                            {expanded === m.id ? <ChevronDown /> : <ChevronRight />}
                           </Button>
                         </div>
-                      </div>
-                    ))}
-                    {current && current.routes.length === 0 && (
-                      <span className="p-2 text-sm text-muted-foreground">
-                        Unbound — agents get <code>no_route</code>.
-                      </span>
+                      </TableCell>
+                    </TableRow>
+                    {expanded === m.id && (
+                      <TableRow className="bg-muted/30 hover:bg-muted/30">
+                        <TableCell colSpan={4}>
+                          <div className="flex flex-col gap-2 rounded-lg border border-border/70 bg-background p-4 shadow-sm">
+                            {m.routes.length === 0 ? (
+                              <span className="text-sm text-muted-foreground">
+                                Unbound — agents calling <code>{m.name}</code> get{" "}
+                                <code>no_route</code>. Use Bind listing to route it.
+                              </span>
+                            ) : (
+                              m.routes.map((r) => (
+                                <div
+                                  key={`${r.model_id}-${r.provider_id}`}
+                                  className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border/60 px-3 py-2"
+                                >
+                                  <span className="font-mono text-sm font-medium">
+                                    {r.provider_name ?? r.provider_id}
+                                  </span>
+                                  <span className="font-mono text-xs break-all text-muted-foreground">
+                                    {upstreamLabel(r.upstream_model_id, m.name)}
+                                  </span>
+                                  <Badge
+                                    variant="outline"
+                                    className="font-mono text-[11px] tabular-nums"
+                                    title="Priority — lower is tried first"
+                                  >
+                                    p{r.priority}
+                                  </Badge>
+                                  <Badge
+                                    variant="outline"
+                                    className="font-mono text-[11px] tabular-nums"
+                                    title="Weight within the same priority"
+                                  >
+                                    w{r.weight}
+                                  </Badge>
+                                  <StateBadge enabled={r.enabled} />
+                                  <div className="flex-1" />
+                                  <Button
+                                    variant="outline"
+                                    size="xs"
+                                    onClick={() =>
+                                      act(
+                                        () =>
+                                          api(
+                                            `/models/${r.model_id}/routes/${r.provider_id}/${r.enabled ? "disable" : "enable"}`,
+                                            { method: "POST", body: {} },
+                                          ),
+                                        "binding updated",
+                                      )
+                                    }
+                                  >
+                                    {r.enabled ? "Disable" : "Enable"}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="xs"
+                                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                                    onClick={() =>
+                                      act(
+                                        () =>
+                                          api(`/models/${r.model_id}/routes/${r.provider_id}`, {
+                                            method: "DELETE",
+                                          }),
+                                        "binding removed",
+                                      )
+                                    }
+                                  >
+                                    Unbind
+                                  </Button>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
                     )}
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+                  </Fragment>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       {bindOpen && (
         <BindModal
           models={models}
           listings={listings}
-          current={current}
           onClose={() => setBindOpen(false)}
           onDone={async (publicName, listing) => {
             await act(async () => {
@@ -239,7 +257,7 @@ export function RouterPage() {
                   priority: 0,
                 },
               })
-              setSelected(model.id)
+              setExpanded(model.id)
               setBindOpen(false)
             }, "listing bound")
           }}
@@ -252,29 +270,24 @@ export function RouterPage() {
 function BindModal({
   models,
   listings,
-  current,
   onClose,
   onDone,
 }: {
   models: Model[]
   listings: { provider: Provider; listing: ProviderModel }[]
-  current?: Model
   onClose: () => void
   onDone: (publicName: string, listing: { provider: Provider; listing: ProviderModel }) => void
 }) {
-  const [publicName, setPublicName] = useState(current?.name ?? "")
+  const [publicName, setPublicName] = useState("")
   const [picked, setPicked] = useState("")
-  const target = models.find((m) => m.name === publicName.trim())
-  const boundProviders = new Set((target?.routes ?? []).map((r) => r.provider_id))
-  const available = listings.filter((x) => !boundProviders.has(x.provider.id))
-  const choice = available.find((x) => `${x.provider.id}:${x.listing.id}` === picked)
+  const choice = listings.find((x) => `${x.provider.id}:${x.listing.id}` === picked)
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Bind listing</DialogTitle>
           <DialogDescription>
-            Public name is what agents send. Listing is <code>provider / upstream id</code>.
+            Route a public model name to a provider listing.
           </DialogDescription>
         </DialogHeader>
         <FieldGroup>
@@ -293,25 +306,19 @@ function BindModal({
                 <option key={m.id} value={m.name} />
               ))}
             </datalist>
-            <FieldDescription>Creates the public name if it does not exist.</FieldDescription>
+            <FieldDescription>
+              What agents send as <code>model</code>. Created if it does not exist.
+            </FieldDescription>
           </Field>
           <Field>
             <FieldLabel>Provider listing</FieldLabel>
             <Select value={picked} onValueChange={setPicked}>
               <SelectTrigger className="w-full">
-                <SelectValue
-                  placeholder={
-                    available.length
-                      ? "Select listing"
-                      : listings.length
-                        ? "All listings already bound"
-                        : "No listings yet"
-                  }
-                />
+                <SelectValue placeholder={listings.length ? "Select listing" : "No listings yet"} />
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  {available.map((x) => (
+                  {listings.map((x) => (
                     <SelectItem
                       key={`${x.provider.id}:${x.listing.id}`}
                       value={`${x.provider.id}:${x.listing.id}`}
@@ -322,6 +329,7 @@ function BindModal({
                 </SelectGroup>
               </SelectContent>
             </Select>
+            <FieldDescription>New bindings start at priority 0, weight 1.</FieldDescription>
           </Field>
         </FieldGroup>
         <DialogFooter>

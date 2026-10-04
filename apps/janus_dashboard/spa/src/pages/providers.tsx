@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react"
-import { ChevronDown, ChevronRight, Lock, Plus, RefreshCw, X } from "lucide-react"
+import { ChevronDown, ChevronRight, Lock, Plus, RefreshCw, Search, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "../api"
 import { ErrorFlash, Layout, Loading } from "../components"
@@ -13,6 +13,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -169,7 +170,7 @@ export function Providers() {
                     <TableRow>
                       <TableCell className="font-medium">{p.name}</TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
-                        {p.base_url}
+                        <div className="max-w-[260px] truncate">{p.base_url}</div>
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         {p.protocol}
@@ -192,25 +193,36 @@ export function Providers() {
                             {(p.models ?? []).length} {(p.models ?? []).length === 1 ? "model" : "models"}
                             {expanded === p.id ? <ChevronDown /> : <ChevronRight />}
                           </Button>
-                          <Button variant="ghost" size="xs" onClick={() => setModal({ del: p })}>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            onClick={() => setModal({ del: p })}
+                          >
                             Delete
                           </Button>
                         </div>
                       </TableCell>
                     </TableRow>
                     {expanded === p.id && (
-                      <TableRow className="bg-muted/50 hover:bg-muted/50">
+                      <TableRow className="bg-muted/30 hover:bg-muted/30">
                         <TableCell colSpan={5}>
-                          <div className="flex flex-col gap-4">
+                          <div className="flex flex-col gap-4 rounded-lg border border-border/70 bg-background p-4 shadow-sm">
                             <div className="flex flex-col gap-2">
-                              <div className="text-xs font-medium text-muted-foreground">Keys</div>
+                              <div className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+                                Keys · {p.keys.length}
+                              </div>
                               {p.keys.length === 0 && (
                                 <span className="text-sm text-muted-foreground">no keys</span>
                               )}
                               {p.keys.map((k) => (
                                 <div key={k.id} className="flex items-center gap-3">
-                                  <span className="font-mono text-sm">{k.key_id}</span>
-                                  <span className="text-xs text-muted-foreground">w{k.weight}</span>
+                                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                                    {k.key_id}
+                                  </span>
+                                  <Badge variant="outline" className="font-mono text-[11px] tabular-nums">
+                                    w{k.weight}
+                                  </Badge>
                                   <StateBadge enabled={k.enabled} />
                                   <div className="flex-1" />
                                   <Button
@@ -232,6 +244,7 @@ export function Providers() {
                                   <Button
                                     variant="ghost"
                                     size="icon-xs"
+                                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                                     aria-label={`Remove key ${k.key_id}`}
                                     onClick={() => setModal({ delKey: [p, k] })}
                                   >
@@ -533,16 +546,23 @@ function ProviderListings({
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
-        <div className="text-xs font-medium text-muted-foreground">Models</div>
-        <span className="text-xs text-muted-foreground">{listings.length}</span>
+        <div className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+          Models
+        </div>
+        <Badge variant="secondary" className="font-mono text-[11px] tabular-nums">
+          {listings.length}
+        </Badge>
         <div className="flex-1" />
         {listings.length > 8 && (
-          <Input
-            className="h-8 max-w-56"
-            placeholder="Filter…"
-            value={filter}
-            onChange={(e) => onFilter(e.target.value)}
-          />
+          <div className="relative">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
+            <Input
+              className="h-8 w-48 pl-8"
+              placeholder="Filter models…"
+              value={filter}
+              onChange={(e) => onFilter(e.target.value)}
+            />
+          </div>
         )}
         <Button variant="outline" size="xs" onClick={onAdd}>
           <Plus />
@@ -555,9 +575,12 @@ function ProviderListings({
         </span>
       )}
       {listings.length > 0 && (
-        <div className="max-h-64 overflow-y-auto rounded-md border bg-background">
+        <div className="max-h-64 overflow-y-auto rounded-md border border-border/70 bg-background scrollbar-thin">
           {shown.map((m) => (
-            <div key={m.id} className="flex items-center gap-3 border-b px-3 py-1.5 last:border-b-0">
+            <div
+              key={m.id}
+              className="flex items-center gap-3 border-b border-border/60 px-3 py-1.5 transition-colors last:border-b-0 hover:bg-muted/50"
+            >
               <span className="font-mono text-sm">{m.name}</span>
               <div className="flex-1" />
               <StateBadge enabled={m.enabled} />

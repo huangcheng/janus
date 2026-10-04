@@ -60,8 +60,11 @@ export function Audit() {
               <TableBody>
                 {events.map((a, i) => (
                   <TableRow key={i}>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {a.ts}
+                    <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
+                      <div className="flex flex-col">
+                        <span>{a.ts.slice(0, 10)}</span>
+                        <span className="text-muted-foreground/70">{a.ts.slice(11, 19)}</span>
+                      </div>
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {a.actor}
@@ -72,7 +75,9 @@ export function Audit() {
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {a.target ?? "—"}
                     </TableCell>
-                    <TableCell className="text-muted-foreground">{a.detail ?? "—"}</TableCell>
+                    <TableCell className="whitespace-normal text-muted-foreground">
+                      <div className="max-w-[360px]">{a.detail ?? "—"}</div>
+                    </TableCell>
                   </TableRow>
                 ))}
                 {loaded && events.length === 0 && (

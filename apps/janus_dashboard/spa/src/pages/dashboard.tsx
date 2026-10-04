@@ -1,5 +1,13 @@
-import { ReactNode, useEffect, useState } from "react"
-import { RefreshCw } from "lucide-react"
+import { ComponentType, ReactNode, useEffect, useState } from "react"
+import {
+  ArrowLeftRight,
+  Database,
+  Gauge,
+  GitBranch,
+  KeyRound,
+  Layers,
+  RefreshCw,
+} from "lucide-react"
 import { toast } from "sonner"
 import { Bar, BarChart, XAxis } from "recharts"
 import { api } from "../api"
@@ -34,15 +42,22 @@ const activityConfig = {
   events: { label: "Events", color: "var(--primary)" },
 } satisfies ChartConfig
 
-function StatCard({ label, value }: { label: string; value: ReactNode }) {
+function StatCard({
+  label,
+  value,
+  icon: Icon,
+}: {
+  label: string
+  value: ReactNode
+  icon: ComponentType<{ className?: string }>
+}) {
   return (
-    <Card>
-      <CardHeader>
-        <CardDescription>{label}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-semibold tabular-nums">{value}</div>
-      </CardContent>
+    <Card className="gap-2 py-4">
+      <div className="flex items-center justify-between gap-2 px-4">
+        <span className="truncate text-xs font-medium text-muted-foreground">{label}</span>
+        <Icon className="size-4 shrink-0 text-muted-foreground/50" />
+      </div>
+      <div className="px-4 text-2xl font-semibold tracking-tight tabular-nums">{value}</div>
     </Card>
   )
 }
@@ -61,7 +76,7 @@ function ActivityChart({ events }: { events: AuditEvent[] | null }) {
   if (max === 0) {
     return (
       <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
-        No Dashboard activity in the last 24h.
+        No dashboard activity in the last 24h.
       </div>
     )
   }
@@ -74,7 +89,7 @@ function ActivityChart({ events }: { events: AuditEvent[] | null }) {
       <BarChart data={data} accessibilityLayer margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
         <XAxis dataKey="hour" tickLine={false} axisLine={false} interval={3} />
         <ChartTooltip content={<ChartTooltipContent />} />
-        <Bar dataKey="events" fill="var(--color-events)" radius={2} />
+        <Bar dataKey="events" fill="var(--color-events)" radius={[3, 3, 0, 0]} />
       </BarChart>
     </ChartContainer>
   )
@@ -106,12 +121,12 @@ export function Dashboard() {
 
   const stats = data
     ? [
-        { label: "Serving generation", value: data.generation },
-        { label: "DB backend", value: String(data.backend) },
-        { label: "Providers", value: data.counts.providers },
-        { label: "Listings", value: data.counts.listings ?? data.counts.models },
-        { label: "Bindings", value: data.counts.routes },
-        { label: "Agent keys", value: data.counts.agent_keys },
+        { label: "Generation", value: data.generation, icon: Gauge },
+        { label: "DB backend", value: String(data.backend), icon: Database },
+        { label: "Providers", value: data.counts.providers, icon: ArrowLeftRight },
+        { label: "Listings", value: data.counts.listings ?? data.counts.models, icon: Layers },
+        { label: "Bindings", value: data.counts.routes, icon: GitBranch },
+        { label: "Agent keys", value: data.counts.agent_keys, icon: KeyRound },
       ]
     : []
 
@@ -120,53 +135,61 @@ export function Dashboard() {
       title="Dashboard"
       description="Configuration state and upstream health at a glance."
       actions={
-        <Button onClick={reload}>
-          <RefreshCw />
-          Reload catalog
-        </Button>
+        <>
+          {data && (
+            <Badge
+              variant={data.ready ? "success" : "warning"}
+              className="h-7 px-2.5"
+            >
+              <span
+                className={
+                  "size-1.5 rounded-full " + (data.ready ? "bg-success" : "bg-warning")
+                }
+              />
+              {data.ready ? "catalog ready" : "catalog cold"}
+            </Badge>
+          )}
+          <Button onClick={reload}>
+            <RefreshCw />
+            Reload catalog
+          </Button>
+        </>
       }
     >
       {error && <ErrorFlash message={error} />}
       {!data && !error ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 7 }).map((_, i) => (
-            <Skeleton key={i} className="h-28 w-full" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-[92px] w-full rounded-xl" />
           ))}
         </div>
       ) : null}
       {data && (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Card>
-              <CardHeader>
-                <CardDescription>Catalog state</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Badge variant={data.ready ? "default" : "secondary"}>
-                  {data.ready ? "ready" : "cold"}
-                </Badge>
-              </CardContent>
-            </Card>
+          <div className="grid animate-fade-up gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             {stats.map((s) => (
-              <StatCard key={s.label} label={s.label} value={s.value} />
+              <StatCard key={s.label} label={s.label} value={s.value} icon={s.icon} />
             ))}
           </div>
 
-          <Card>
+          <Card className="animate-fade-up" style={{ animationDelay: "80ms" }}>
             <CardHeader>
               <CardTitle>Dashboard activity · last 24h</CardTitle>
-              <CardDescription>audit events per hour</CardDescription>
+              <CardDescription>Audit events per hour</CardDescription>
             </CardHeader>
             <CardContent>
               <ActivityChart events={audit} />
             </CardContent>
           </Card>
 
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div
+            className="grid animate-fade-up gap-4 lg:grid-cols-2"
+            style={{ animationDelay: "160ms" }}
+          >
             <Card>
               <CardHeader>
                 <CardTitle>Providers</CardTitle>
-                <CardDescription>health as of last reload</CardDescription>
+                <CardDescription>Health as of last reload</CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
@@ -206,7 +229,7 @@ export function Dashboard() {
             <Card>
               <CardHeader>
                 <CardTitle>Recent dashboard actions</CardTitle>
-                <CardDescription>last 5</CardDescription>
+                <CardDescription>Last 5</CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
@@ -220,7 +243,7 @@ export function Dashboard() {
                   <TableBody>
                     {data.recent_audit.map((a: AuditEvent, i: number) => (
                       <TableRow key={i}>
-                        <TableCell className="font-mono text-xs text-muted-foreground">
+                        <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
                           {(a.ts ?? "").slice(11, 19)}
                         </TableCell>
                         <TableCell>

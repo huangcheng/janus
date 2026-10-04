@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Check, Copy, Plus } from "lucide-react"
+import { Check, Copy, KeyRound, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "../api"
 import { ErrorFlash, Layout, Loading } from "../components"
@@ -105,14 +105,16 @@ export function Keys() {
               <TableBody>
                 {keys.map((k) => (
                   <TableRow key={k.id}>
-                    <TableCell className="font-mono text-xs">{k.prefix}…</TableCell>
+                    <TableCell className="font-mono text-xs tabular-nums">{k.prefix}…</TableCell>
                     <TableCell>
                       {k.model_ids === "all" ? (
-                        <Badge variant="secondary">all models</Badge>
+                        <Badge variant="secondary" className="font-mono text-[11px]">
+                          all models
+                        </Badge>
                       ) : (
                         <div className="flex flex-wrap gap-1">
                           {k.model_names.filter(Boolean).map((n) => (
-                            <Badge variant="secondary" key={n as string}>
+                            <Badge variant="secondary" className="font-mono text-[11px]" key={n as string}>
                               {n}
                             </Badge>
                           ))}
@@ -122,8 +124,8 @@ export function Keys() {
                         </div>
                       )}
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {k.created_at}
+                    <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
+                      {k.created_at.slice(0, 16).replace("T", " ")}
                     </TableCell>
                     <TableCell>
                       <StateBadge enabled={k.enabled} />
@@ -146,7 +148,12 @@ export function Keys() {
                         >
                           {k.enabled ? "Disable" : "Enable"}
                         </Button>
-                        <Button variant="ghost" size="xs" onClick={() => setModal({ revoke: k })}>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => setModal({ revoke: k })}
+                        >
                           Revoke
                         </Button>
                       </div>
@@ -182,15 +189,21 @@ export function Keys() {
         >
           <DialogContent>
             <DialogHeader>
+              <div className="mb-1 flex size-10 items-center justify-center rounded-full bg-success/10">
+                <KeyRound className="size-5 text-success" />
+              </div>
               <DialogTitle>Key created</DialogTitle>
               <DialogDescription>201 Created — shown only once</DialogDescription>
             </DialogHeader>
             <div className="flex flex-col gap-3">
-              <p className="text-sm font-medium text-destructive">
-                Copy it now — shown only once
+              <p className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm font-medium text-warning">
+                Copy it now — it will not be shown again
               </p>
               <div className="flex items-center gap-2">
-                <code className="flex-1 truncate rounded-md border bg-muted px-3 py-2 font-mono text-xs">
+                <code
+                  className="flex-1 cursor-text truncate rounded-md border bg-muted px-3 py-2 font-mono text-xs select-all"
+                  title={modal.created}
+                >
                   {modal.created}
                 </code>
                 <Button

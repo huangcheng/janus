@@ -56,7 +56,20 @@ export function ThemeToggle() {
   const { theme, toggle } = useTheme()
   return (
     <Button variant="ghost" size="icon" onClick={toggle} aria-label="Toggle theme">
-      {theme === "light" ? <Moon /> : <Sun />}
+      <span className="relative grid size-4 place-items-center">
+        <Moon
+          className={
+            "col-start-1 row-start-1 size-4 transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            (theme === "light" ? "scale-100 opacity-100 blur-0" : "scale-[0.25] opacity-0 blur-[4px]")
+          }
+        />
+        <Sun
+          className={
+            "col-start-1 row-start-1 size-4 transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            (theme === "dark" ? "scale-100 opacity-100 blur-0" : "scale-[0.25] opacity-0 blur-[4px]")
+          }
+        />
+      </span>
     </Button>
   )
 }
@@ -98,14 +111,14 @@ function AppSidebar() {
   return (
     <Sidebar>
       <SidebarHeader>
-        <div className="flex items-center gap-2 px-2 py-1">
+        <div className="flex items-center gap-2.5 px-2 py-1">
           <img
             src={`${import.meta.env.BASE_URL}icon.png`}
             alt="Janus"
-            className="size-8 rounded-md"
+            className="size-8 rounded-lg shadow-sm ring-1 ring-border"
           />
           <div className="flex flex-col">
-            <span className="text-sm font-semibold">Janus</span>
+            <span className="text-sm font-semibold tracking-tight">Janus</span>
             <span className="text-xs text-muted-foreground">gateway console</span>
           </div>
         </div>
@@ -133,19 +146,25 @@ function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
-        <div className="flex flex-col gap-1 px-2 py-1 text-xs text-muted-foreground">
+        <div className="flex flex-col gap-1.5 rounded-lg border bg-background/60 px-3 py-2.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between">
-            <span>data plane</span>
-            <span className="font-mono">:8080</span>
+            <span className="flex items-center gap-1.5">
+              <span className="size-1.5 rounded-full bg-success" />
+              data plane
+            </span>
+            <span className="font-mono tabular-nums">:8080</span>
           </div>
           <div className="flex items-center justify-between">
-            <span>dashboard plane</span>
-            <span className="font-mono">:8090</span>
+            <span className="flex items-center gap-1.5">
+              <span className="size-1.5 rounded-full bg-success" />
+              dashboard plane
+            </span>
+            <span className="font-mono tabular-nums">:8090</span>
           </div>
           {gen !== null && (
             <div className="flex items-center justify-between">
               <span>catalog</span>
-              <span className="font-mono">gen {gen}</span>
+              <span className="font-mono tabular-nums">gen {gen}</span>
             </div>
           )}
         </div>
@@ -173,7 +192,7 @@ export function Layout({
     <SidebarProvider>
       <AppSidebar />
       <SidebarInset>
-        <header className="flex min-h-16 flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-3 md:px-6">
+        <header className="sticky top-0 z-20 flex min-h-16 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-background/85 px-4 py-3 backdrop-blur-md supports-[backdrop-filter]:bg-background/75 md:px-6">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />
           <div className="flex min-w-0 flex-1 flex-col">
@@ -183,7 +202,9 @@ export function Layout({
           {actions}
           <ThemeToggle />
         </header>
-        <div className="flex min-w-0 flex-1 flex-col gap-4 p-4 md:p-6">{children}</div>
+        <div className="mx-auto flex w-full max-w-[88rem] min-w-0 flex-1 flex-col gap-4 p-4 md:gap-6 md:p-6">
+          {children}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   )
@@ -193,10 +214,14 @@ export function Layout({
 
 export function Loading() {
   return (
-    <div className="flex flex-col gap-2">
-      <Skeleton className="h-8 w-full" />
-      <Skeleton className="h-8 w-full" />
-      <Skeleton className="h-8 w-full" />
+    <div className="flex flex-col gap-3 rounded-xl border border-border/70 bg-card p-6 shadow-sm">
+      <Skeleton className="h-5 w-36" />
+      <Skeleton className="h-4 w-64 max-w-full" />
+      <div className="mt-2 flex flex-col gap-2">
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-2/3" />
+      </div>
     </div>
   )
 }

@@ -25,7 +25,16 @@ export type AgentKey = {
 export type AuditEvent = { ts: string; actor: string; action: string; target: string | null; detail: string | null }
 
 export function StateBadge({ enabled }: { enabled: boolean }) {
-  return <Badge variant={enabled ? "default" : "secondary"}>{enabled ? "enabled" : "disabled"}</Badge>
+  return (
+    <Badge variant={enabled ? "success" : "secondary"}>
+      <span
+        className={
+          "size-1.5 rounded-full " + (enabled ? "bg-success" : "bg-muted-foreground/50")
+        }
+      />
+      {enabled ? "enabled" : "disabled"}
+    </Badge>
+  )
 }
 
 /** Unique providers from a model's routes, for the models table. */
@@ -61,5 +70,9 @@ export function ActionBadge({ action }: { action: string }) {
     : /add|create|enable/.test(verb)
       ? "default"
       : "secondary"
-  return <Badge variant={variant}>{action}</Badge>
+  return (
+    <Badge variant={variant} className="font-mono text-[11px]">
+      {action}
+    </Badge>
+  )
 }
