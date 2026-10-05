@@ -16,7 +16,14 @@
 -behaviour(gen_server).
 
 -export([start_link/0, cooling_count/0]).
--export([note_failure/2, note_success/1, note_auth_failure/3, release_inflight/1, pick_route/2]).
+-export([
+    note_failure/2,
+    note_success/1,
+    note_auth_failure/3,
+    release_inflight/1,
+    pick_route/2,
+    pick_listing_route/2
+]).
 -export([
     init/1,
     handle_call/3,
@@ -91,6 +98,14 @@ release_inflight(Target) ->
 pick_route(ModelId, Opts) when is_map(Opts) ->
     gen_server:call(?SERVER, {pick_route, ModelId, Opts}, 5000).
 
+%% @doc Pick a provider for a direct listing call (model not in the
+%% bound models table): candidates are the enabled listings under
+%% `Name`. Shares the cooling/inflight/key-pick pipeline with bound
+%% routes; the returned route carries `model_id => null`.
+-spec pick_listing_route(binary(), map()) -> {ok, map()} | {error, term()}.
+pick_listing_route(Name, Opts) when is_binary(Name), is_map(Opts) ->
+    gen_server:call(?SERVER, {pick_listing_route, Name, Opts}, 5000).
+
 %%--------------------------------------------------------------------
 %% gen_server
 %%--------------------------------------------------------------------
@@ -109,8 +124,9 @@ init([]) ->
     {ok, #state{cooldowns = Cool, inflight = Inflight, cursors = Cursors}}.
 
 handle_call({pick_route, ModelId, Opts}, _From, State) ->
-    Reply = do_pick_route(ModelId, Opts, State),
-    {reply, Reply, State};
+    {reply, do_pick_route(ModelId, Opts, State), State};
+handle_call({pick_listing_route, Name, Opts}, _From, State) ->
+    {reply, do_pick_listing_route(Name, Opts, State), State};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
@@ -142,69 +158,79 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internals
 %%--------------------------------------------------------------------
 
-do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}) ->
+do_pick_route(ModelId, Opts, State) ->
     case catalog_generation_ok(Opts) of
         false ->
             {error, catalog_not_ready};
         true ->
-            Routes0 = janus_catalog:routes_for_model(ModelId),
-            Routes1 = [R || R <- Routes0, maps:get(enabled, R, true)],
-            case Routes1 of
+            pick_from_routes(ModelId, janus_catalog:routes_for_model(ModelId), Opts, State)
+    end.
+
+do_pick_listing_route(Name, Opts, State) ->
+    case catalog_generation_ok(Opts) of
+        false ->
+            {error, catalog_not_ready};
+        true ->
+            pick_from_routes({listing, Name}, janus_catalog:listings_for(Name), Opts, State)
+    end.
+
+pick_from_routes(
+    PickKey, Routes0, _Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}
+) ->
+    Routes1 = [R || R <- Routes0, maps:get(enabled, R, true)],
+    case Routes1 of
+        [] ->
+            {error, no_route};
+        _ ->
+            Now = erlang:monotonic_time(millisecond),
+            Available = [
+                R
+             || R <- Routes1,
+                not is_cooling(provider_target(R), Cool, Now),
+                not is_cooling(route_target(R), Cool, Now),
+                provider_enabled(R)
+            ],
+            case Available of
                 [] ->
-                    {error, no_route};
-                _ ->
-                    Now = erlang:monotonic_time(millisecond),
-                    Available = [
-                        R
-                     || R <- Routes1,
-                        not is_cooling(provider_target(R), Cool, Now),
-                        not is_cooling(route_target(R), Cool, Now),
-                        provider_enabled(R)
-                    ],
-                    case Available of
-                        [] ->
-                            %% All routes filtered out: cooling is only the
-                            %% diagnosis when at least one provider is
-                            %% enabled — a disabled provider must not
-                            %% surface as a cooldown.
-                            case lists:any(fun(R) -> provider_enabled(R) end, Routes1) of
-                                false -> {error, provider_disabled};
-                                true -> {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}}
-                            end;
-                        Candidates ->
-                            case
-                                pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight)
-                            of
-                                {ok, _} = Ok ->
-                                    Ok;
-                                {error, Reason} = Err ->
-                                    logger:warning(#{
-                                        what => janus_lb_no_usable_route,
-                                        model_id => ModelId,
-                                        reason => Reason,
-                                        candidates => length(Candidates)
-                                    }),
-                                    case Reason of
-                                        all_cooling ->
-                                            {error,
-                                                {all_cooling,
-                                                    remaining_cooldown_ms(Candidates, Cool, Now)}};
-                                        _ ->
-                                            Err
-                                    end
+                    %% All routes filtered out: cooling is only the
+                    %% diagnosis when at least one provider is
+                    %% enabled — a disabled provider must not
+                    %% surface as a cooldown.
+                    case lists:any(fun(R) -> provider_enabled(R) end, Routes1) of
+                        false -> {error, provider_disabled};
+                        true -> {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}}
+                    end;
+                Candidates ->
+                    case pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight) of
+                        {ok, _} = Ok ->
+                            Ok;
+                        {error, Reason} = Err ->
+                            logger:warning(#{
+                                what => janus_lb_no_usable_route,
+                                pick_key => PickKey,
+                                reason => Reason,
+                                candidates => length(Candidates)
+                            }),
+                            case Reason of
+                                all_cooling ->
+                                    {error,
+                                        {all_cooling,
+                                            remaining_cooldown_ms(Candidates, Cool, Now)}};
+                                _ ->
+                                    Err
                             end
                     end
             end
     end.
 
 %% Prefer another provider when this one's keys are exhausted.
-pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight) ->
+pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight) ->
     Usable = [R || R <- Candidates, has_usable_key(R, Cool, Now)],
     case Usable of
         [] ->
             {error, classify_key_failures(Candidates, Cool, Now)};
         _ ->
-            Picked = weighted_rr_pick(ModelId, Usable, Cursors),
+            Picked = weighted_rr_pick(PickKey, Usable, Cursors),
             {ok, Key} = select_key(Picked, Cool, Cursors, Now),
             bump_inflight(route_target(Picked), Inflight),
             {ok, Picked#{provider_key => Key}}

@@ -107,27 +107,48 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
 do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
     case resolve_model(ModelName) of
         {ok, ModelId} ->
-            case janus_lb:pick_route(ModelId, #{}) of
-                {ok, Route} ->
-                    case provider_protocol(Route) of
-                        {ok, ProviderProto} ->
-                            dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State);
-                        {error, unknown_protocol} ->
-                            _ = release_route_inflight(Route),
-                            reply_err(
-                                ClientProto,
-                                Req,
-                                State,
-                                502,
-                                <<"unknown_protocol">>,
-                                <<"provider has unknown protocol">>
-                            )
-                    end;
-                {error, Reason} ->
-                    reply_pick_error(ClientProto, Req, State, Reason)
-            end;
+            proxy_picked(
+                ClientProto,
+                janus_lb:pick_route(ModelId, #{}),
+                Body,
+                Map,
+                Req,
+                State
+            );
         error ->
-            reply_err(ClientProto, Req, State, 404, <<"model_not_found">>, <<"unknown model">>)
+            %% Not a bound public model — try a direct provider listing
+            %% (the agent-visible surface is the union of all provider
+            %% catalogs; binding on the Router page is for curation and
+            %% janus-auto tiers, not a precondition for calling).
+            proxy_picked(
+                ClientProto,
+                janus_lb:pick_listing_route(ModelName, #{}),
+                Body,
+                Map,
+                Req,
+                State
+            )
+    end.
+
+proxy_picked(ClientProto, Pick, Body, Map, Req, State) ->
+    case Pick of
+        {ok, Route} ->
+            case provider_protocol(Route) of
+                {ok, ProviderProto} ->
+                    dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State);
+                {error, unknown_protocol} ->
+                    _ = release_route_inflight(Route),
+                    reply_err(
+                        ClientProto,
+                        Req,
+                        State,
+                        502,
+                        <<"unknown_protocol">>,
+                        <<"provider has unknown protocol">>
+                    )
+            end;
+        {error, Reason} ->
+            reply_pick_error(ClientProto, Req, State, Reason)
     end.
 
 provider_protocol(#{provider_id := Pid}) ->

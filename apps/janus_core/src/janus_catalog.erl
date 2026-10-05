@@ -31,6 +31,8 @@
     build/1,
     publish/2,
     routes_for_model/1,
+    listings_for/1,
+    listing_names/0,
     lookup_model/1,
     lookup_provider/1,
     lookup_api_key/1,
@@ -46,7 +48,8 @@
     routes_by_model := ets:tid(),
     providers := ets:tid(),
     provider_keys := ets:tid(),
-    api_keys_by_prefix := ets:tid()
+    api_keys_by_prefix := ets:tid(),
+    listings_by_name := ets:tid()
 }.
 -type published() :: #{
     generation := non_neg_integer(),
@@ -91,17 +94,20 @@ build(Rows) when is_map(Rows) ->
     insert_routes(Routes, maps:get(model_routes, Rows, [])),
     insert_providers(Providers, maps:get(providers, Rows, [])),
     insert_provider_keys(ProvKeys, maps:get(provider_keys, Rows, [])),
+    Listings = new_tab(),
     insert_api_keys(
         ApiKeys,
         maps:get(api_keys, Rows, []),
         maps:get(api_key_models, Rows, [])
     ),
+    insert_listings(Listings, maps:get(provider_models, Rows, [])),
     #{
         models => Models,
         routes_by_model => Routes,
         providers => Providers,
         provider_keys => ProvKeys,
-        api_keys_by_prefix => ApiKeys
+        api_keys_by_prefix => ApiKeys,
+        listings_by_name => Listings
     }.
 
 %% @doc Atomically publish `Tabs` for `Generation`. Deletes previous
@@ -123,6 +129,47 @@ routes_for_model(ModelId) ->
                 [{_, Routes}] -> Routes;
                 [] -> []
             end
+    end.
+
+%% @doc Enabled provider listings registered under `Name` — one
+%% synthetic direct-call route per provider that offers it:
+%% #{provider_id, model_id => null}. Provider-level enablement is
+%% checked by the LB at pick time (same as bound routes).
+-spec listings_for(binary()) -> [map()].
+listings_for(Name) when is_binary(Name) ->
+    case table(listings_by_name) of
+        undefined ->
+            [];
+        Tid ->
+            case ets:lookup(Tid, Name) of
+                [{_, Entries}] ->
+                    [
+                        #{provider_id => P, model_id => null}
+                     || #{provider_id := P, enabled := true} <- Entries
+                    ];
+                [] ->
+                    []
+            end
+    end.
+
+%% @doc Distinct listing names that are enabled on at least one
+%% provider — the union of the providers' catalogs.
+-spec listing_names() -> [binary()].
+listing_names() ->
+    case table(listings_by_name) of
+        undefined ->
+            [];
+        Tid ->
+            ets:foldl(
+                fun({Name, Entries}, Acc) ->
+                    case lists:any(fun(#{enabled := E}) -> E end, Entries) of
+                        true -> [Name | Acc];
+                        false -> Acc
+                    end
+                end,
+                [],
+                Tid
+            )
     end.
 
 -spec lookup_model(binary() | model_id()) -> {ok, map()} | error.
@@ -285,6 +332,25 @@ insert_provider_keys(Tid, Rows) ->
     maps:foreach(
         fun(ProviderId, Keys) ->
             ets:insert(Tid, {ProviderId, lists:reverse(Keys)})
+        end,
+        Grouped
+    ).
+
+insert_listings(Tid, Rows) ->
+    Grouped = lists:foldl(
+        fun(#{provider_id := P, name := N, enabled := E}, Acc) ->
+                %% Postgres SMALLINT arrives as 0/1 — normalize to
+                %% booleans so pattern matches downstream see true/false.
+                Enabled = E =:= 1 orelse E =:= true,
+                Entry = #{provider_id => P, enabled => Enabled},
+                maps:update_with(N, fun(Entries) -> [Entry | Entries] end, [Entry], Acc)
+        end,
+        #{},
+        Rows
+    ),
+    maps:foreach(
+        fun(N, Entries) ->
+            ets:insert(Tid, {N, lists:reverse(Entries)})
         end,
         Grouped
     ).

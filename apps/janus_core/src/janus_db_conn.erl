@@ -226,7 +226,13 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
         {api_key_models,
             <<"SELECT api_key_id, model_id FROM api_key_models ORDER BY api_key_id, model_id">>, [
                 api_key_id, model_id
-            ]}
+            ]},
+        {provider_models,
+            <<
+                "SELECT pm.id, pm.provider_id, pm.name, pm.enabled "
+                "FROM provider_models pm ORDER BY pm.provider_id, pm.name"
+            >>,
+            [id, provider_id, name, enabled]}
     ],
     fetch_all(M, C, Queries, #{}).
 
