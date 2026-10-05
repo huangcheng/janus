@@ -72,6 +72,8 @@ Publish both on loopback and put Caddy (or similar) in front for TLS.
 - `POST /v1/messages` — Anthropic Messages (`Authorization: Bearer` preferred; `x-api-key` accepted, Bearer wins)
 - `GET /v1/models`
 
+Restricted agent keys (`api_key_models` grants) only see those public names on `GET /v1/models`. `janus-auto` is a virtual model: unrestricted keys see it when any tier has members; scoped keys only see it if that name is itself a granted public model.
+
 Provider `protocol`: `openai_chat` | `openai_responses` | `anthropic_messages`. Same-protocol routes passthrough (including SSE). Cross-protocol **translate** is non-stream only (text + basic tools); `stream: true` on a translate path returns `400 stream_requires_native_protocol`. Vision/multimodal translate is rejected in v1.
 
 ## Testing

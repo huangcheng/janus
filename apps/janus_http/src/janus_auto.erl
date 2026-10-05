@@ -237,11 +237,8 @@ error_tag(no_route) -> {error, no_route}.
 %%%===================================================================
 
 features(ReqMap, Cfg) ->
-    Msgs = maps:get(<<"messages">>, ReqMap, undefined),
-    case is_list(Msgs) andalso lists:all(fun is_map/1, Msgs) of
-        false ->
-            {error, malformed};
-        true ->
+    case request_messages(ReqMap) of
+        {ok, Msgs} ->
             {PromptEst, Media} = est_messages(Msgs),
             {ToolsOn, ToolsBytes} = tools_field(ReqMap),
             MediaAllow = min(Media, Cfg#acfg.max_media) * Cfg#acfg.media_allow,
@@ -263,8 +260,54 @@ features(ReqMap, Cfg) ->
                 last_user => bin_part(LastUser, 1200),
                 out_budget => out_budget_line(MaxOut),
                 tools_fp => erlang:phash2(maps:get(<<"tools">>, ReqMap, undefined))
-            }
+            };
+        error ->
+            {error, malformed}
     end.
+
+%% Chat Completions `messages` or Responses `input` (string or item list).
+request_messages(ReqMap) ->
+    case maps:get(<<"messages">>, ReqMap, undefined) of
+        Msgs when is_list(Msgs) ->
+            case lists:all(fun is_map/1, Msgs) of
+                true -> {ok, Msgs};
+                false -> error
+            end;
+        undefined ->
+            case maps:get(<<"input">>, ReqMap, undefined) of
+                Bin when is_binary(Bin) ->
+                    {ok, [#{<<"role">> => <<"user">>, <<"content">> => Bin}]};
+                Items when is_list(Items) ->
+                    Msgs = responses_input_to_messages(Items),
+                    case lists:all(fun is_map/1, Msgs) of
+                        true -> {ok, Msgs};
+                        false -> error
+                    end;
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end.
+
+responses_input_to_messages(Items) ->
+    lists:filtermap(
+        fun
+            (Bin) when is_binary(Bin) ->
+                {true, #{<<"role">> => <<"user">>, <<"content">> => Bin}};
+            (#{<<"role">> := Role} = M) when is_map(M) ->
+                {true, M#{<<"role">> => Role}};
+            (#{<<"type">> := <<"message">>, <<"role">> := Role} = M) ->
+                {true, M#{<<"role">> => Role}};
+            (#{<<"type">> := <<"input_text">>, <<"text">> := T}) when is_binary(T) ->
+                {true, #{<<"role">> => <<"user">>, <<"content">> => T}};
+            (#{<<"type">> := <<"input_text">>, <<"content">> := T}) when is_binary(T) ->
+                {true, #{<<"role">> => <<"user">>, <<"content">> => T}};
+            (_) ->
+                false
+        end,
+        Items
+    ).
 
 %% {EstTokens, NonTextParts} across all messages.
 est_messages(Msgs) ->
@@ -748,13 +791,14 @@ model_available(Name) when is_binary(Name) ->
     %% Read-only catalog probe: pick_route/2 mutates LB state (RR cursors,
     %% inflight counters) and must not be called speculatively. Cooling
     %% routes are handled by do_proxy's real pick + 503 retry-after.
-    case janus_catalog:lookup_model(Name) of
-        {ok, #{id := Id, enabled := true}} ->
-            Routes = janus_catalog:routes_for_model(Id),
-            lists:any(fun(#{enabled := E}) -> E end, Routes);
-        _ ->
-            false
-    end;
+    Bound =
+        case janus_catalog:lookup_model(Name) of
+            {ok, #{id := Id, enabled := true}} ->
+                lists:any(fun(R) -> maps:get(enabled, R, true) end, janus_catalog:routes_for_model(Id));
+            _ ->
+                false
+        end,
+    Bound orelse janus_catalog:listings_for(Name) =/= [];
 model_available(_) ->
     false.
 
@@ -1374,7 +1418,14 @@ features_basic_test() ->
 
 features_malformed_test() ->
     ?assertEqual({error, malformed}, features(#{<<"messages">> => [null]}, cfg())),
-    ?assertEqual({error, malformed}, features(#{<<"messages">> => <<"hi">>}, cfg())).
+    ?assertEqual({error, malformed}, features(#{<<"messages">> => <<"hi">>}, cfg())),
+    ?assertEqual({error, malformed}, features(#{}, cfg())).
+
+features_responses_input_test() ->
+    F = features(#{<<"input">> => <<"count to ten">>}, cfg()),
+    ?assertMatch(#{}, F),
+    ?assertEqual(1, maps:get(msg_count, F)),
+    ?assertEqual(<<"count to ten">>, maps:get(last_user, F)).
 
 features_tools_invalid_test() ->
     F = features(

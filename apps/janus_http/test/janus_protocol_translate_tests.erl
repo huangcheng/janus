@@ -34,6 +34,18 @@ chat_to_messages_text_test() ->
     ?assertEqual(128, maps:get(<<"max_tokens">>, Out)),
     ?assertMatch([#{<<"role">> := <<"user">>, <<"content">> := <<"hi">>}], maps:get(<<"messages">>, Out)).
 
+chat_to_messages_max_completion_tokens_test() ->
+    In = #{
+        <<"model">> => <<"m">>,
+        <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => <<"hi">>}],
+        <<"max_tokens">> => 128,
+        <<"max_completion_tokens">> => 32
+    },
+    {ok, Out} = janus_protocol_translate:translate_request(
+        openai_chat, anthropic_messages, In
+    ),
+    ?assertEqual(32, maps:get(<<"max_tokens">>, Out)).
+
 messages_to_chat_text_test() ->
     In = #{
         <<"model">> => <<"m">>,

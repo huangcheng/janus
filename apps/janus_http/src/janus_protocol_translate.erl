@@ -55,6 +55,12 @@ default_max_tokens() ->
             end
     end.
 
+chat_max_tokens(Map) ->
+    case maps:get(<<"max_completion_tokens">>, Map, undefined) of
+        N when is_integer(N), N > 0 -> N;
+        _ -> maps:get(<<"max_tokens">>, Map, default_max_tokens())
+    end.
+
 %%--------------------------------------------------------------------
 %% Request translation
 %%--------------------------------------------------------------------
@@ -183,7 +189,7 @@ chat_to_messages(Map) ->
                     case convert_chat_messages(Msgs) of
                         {ok, AMsgs} ->
                             Model = maps:get(<<"model">>, Map),
-                            MaxTok = maps:get(<<"max_tokens">>, Map, default_max_tokens()),
+                            MaxTok = chat_max_tokens(Map),
                             Out0 = #{
                                 <<"model">> => Model,
                                 <<"messages">> => AMsgs,

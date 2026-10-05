@@ -50,17 +50,24 @@ x_api_key(Req) ->
 
 verify_token(Token, Req) ->
     Prefix = janus_api_keys:prefix(Token),
-    case janus_catalog:lookup_api_key(Prefix) of
+    case first_matching_key(Token, janus_catalog:lookup_api_keys(Prefix)) of
         {ok, #{enabled := false}} ->
             {error, unauthorized(Req, <<"api key disabled">>)};
-        {ok, #{key_hash := Hash} = Meta} ->
-            case janus_api_keys:verify(Token, Hash) of
-                true -> {ok, Meta, Req};
-                false -> {error, unauthorized(Req, <<"invalid api key">>)}
-            end;
+        {ok, Meta} ->
+            {ok, Meta, Req};
         error ->
             {error, unauthorized(Req, <<"invalid api key">>)}
     end.
+
+first_matching_key(_Token, []) ->
+    error;
+first_matching_key(Token, [#{key_hash := Hash} = Meta | Rest]) ->
+    case janus_api_keys:verify(Token, Hash) of
+        true -> {ok, Meta};
+        false -> first_matching_key(Token, Rest)
+    end;
+first_matching_key(Token, [_ | Rest]) ->
+    first_matching_key(Token, Rest).
 
 unauthorized(Req, Msg) ->
     Body = thoas:encode(#{

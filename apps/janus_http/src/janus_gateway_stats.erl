@@ -35,16 +35,47 @@ authorize(Req0) ->
                 false -> {error, unauthorized(Req0, <<"stats token not configured; loopback only">>)}
             end;
         Token ->
-            case cowboy_req:header(<<"authorization">>, Req0) of
-                <<"Bearer ", Token/binary>> -> ok;
-                _ -> {error, unauthorized(Req0, <<"invalid or missing stats token">>)}
-        end
+            case bearer_token(Req0) of
+                {ok, Got} ->
+                    case token_eq(Got, Token) of
+                        true -> ok;
+                        false -> {error, unauthorized(Req0, <<"invalid or missing stats token">>)}
+                    end;
+                error ->
+                    {error, unauthorized(Req0, <<"invalid or missing stats token">>)}
+            end
     end.
+
+bearer_token(Req) ->
+    case cowboy_req:header(<<"authorization">>, Req) of
+        Bin when is_binary(Bin) ->
+            case binary:split(Bin, <<" ">>) of
+                [Scheme, Rest] when Rest =/= <<>> ->
+                    case string:lowercase(Scheme) of
+                        <<"bearer">> -> {ok, Rest};
+                        _ -> error
+                    end;
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end.
+
+token_eq(Got, Want) when byte_size(Got) =:= byte_size(Want) ->
+    crypto:hash_equals(Got, Want);
+token_eq(_, _) ->
+    false.
 
 stats_token() ->
     case os:getenv("JANUS_STATS_TOKEN") of
         Val when is_list(Val), Val =/= [] -> list_to_binary(Val);
-        _ -> application:get_env(janus, stats_token, undefined)
+        _ ->
+            case application:get_env(janus, stats_token, undefined) of
+                B when is_binary(B), B =/= <<>> -> B;
+                L when is_list(L), L =/= [] -> list_to_binary(L);
+                _ -> undefined
+            end
     end.
 
 is_loopback({127, 0, 0, 1}) -> true;
@@ -55,6 +86,7 @@ handle(_Method, undefined, Req) ->
     %% Exact /stats match has undefined path_info; normalize.
     handle(_Method, [], Req);
 handle(<<"GET">>, [], Req) ->
+    Usage = janus_usage:stats(),
     Stats = #{
         generation => janus_config:generation(),
         ready => janus_config:ready(),
@@ -62,11 +94,13 @@ handle(<<"GET">>, [], Req) ->
         uptime_sec => uptime_sec(),
         routes_cooling => janus_lb:cooling_count(),
         models_serving => models_serving(),
-        usage_writer => janus_usage:stats()
+        usage => Usage,
+        usage_writer => Usage
     },
     reply_json(200, Stats, Req);
 handle(<<"GET">>, [<<"logs">>], Req) ->
-    {ok, Events, Total} = janus_log_tail:recent(100, undefined),
+    Limit = qs_int(Req, <<"limit">>, 100, 1, 2000),
+    {ok, Events, Total} = janus_log_tail:recent(Limit, undefined),
     reply_json(200, #{events => Events, total => Total}, Req);
 handle(_, _, Req) ->
     reply_json(405, #{error => #{code => <<"method_not_allowed">>}}, Req).
@@ -76,6 +110,20 @@ uptime_sec() ->
     %% milliseconds since VM start).
     {WallMs, _} = statistics(wall_clock),
     WallMs div 1000.
+
+qs_int(Req, Name, Default, Min, Max) ->
+    Qs = cowboy_req:parse_qs(Req),
+    case lists:keyfind(Name, 1, Qs) of
+        {_, Bin} ->
+            try
+                N = binary_to_integer(Bin),
+                max(Min, min(Max, N))
+            catch
+                _:_ -> Default
+            end;
+        false ->
+            Default
+    end.
 
 models_serving() ->
     case janus_catalog:get() of

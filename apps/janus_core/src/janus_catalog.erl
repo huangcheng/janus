@@ -37,6 +37,7 @@
     lookup_model/1,
     lookup_provider/1,
     lookup_api_key/1,
+    lookup_api_keys/1,
     provider_keys/1
 ]).
 
@@ -111,25 +112,21 @@ build(Rows) when is_map(Rows) ->
         listings_by_name => Listings
     }.
 
-%% @doc Atomically publish `Tabs` for `Generation`. Deletes previous
-%% catalog ETS tables after the pointer swap. Does not touch LB ETS.
+%% @doc Atomically publish `Tabs` for `Generation`. Previous catalog
+%% ETS tables are deleted after a short delay so in-flight lookups
+%% (LB pick, auth) cannot `badarg` on a dropped tid. Does not touch LB ETS.
 -spec publish(non_neg_integer(), catalog_tabs()) -> ok.
 publish(Generation, Tabs) when is_integer(Generation), Generation >= 0, is_map(Tabs) ->
     Old = get(),
     persistent_term:put(?PT_KEY, #{generation => Generation, catalog => Tabs}),
-    delete_tabs(Old),
+    schedule_delete(Old),
     ok.
 
 -spec routes_for_model(model_id()) -> [map()].
 routes_for_model(ModelId) ->
-    case table(routes_by_model) of
-        undefined ->
-            [];
-        Tid ->
-            case ets:lookup(Tid, ModelId) of
-                [{_, Routes}] -> Routes;
-                [] -> []
-            end
+    case ets_lookup(table(routes_by_model), ModelId) of
+        [{_, Routes}] -> Routes;
+        _ -> []
     end.
 
 %% @doc Enabled provider listings registered under `Name` — one
@@ -138,19 +135,14 @@ routes_for_model(ModelId) ->
 %% checked by the LB at pick time (same as bound routes).
 -spec listings_for(binary()) -> [map()].
 listings_for(Name) when is_binary(Name) ->
-    case table(listings_by_name) of
-        undefined ->
-            [];
-        Tid ->
-            case ets:lookup(Tid, Name) of
-                [{_, Entries}] ->
-                    [
-                        #{provider_id => P, model_id => null}
-                     || #{provider_id := P, enabled := true} <- Entries
-                    ];
-                [] ->
-                    []
-            end
+    case ets_lookup(table(listings_by_name), Name) of
+        [{_, Entries}] ->
+            [
+                #{provider_id => P, model_id => null}
+             || #{provider_id := P, enabled := true} <- Entries
+            ];
+        _ ->
+            []
     end.
 
 %% @doc Distinct listing names that are enabled on at least one
@@ -161,16 +153,20 @@ listing_names() ->
         undefined ->
             [];
         Tid ->
-            ets:foldl(
-                fun({Name, Entries}, Acc) ->
-                    case lists:any(fun(#{enabled := E}) -> E end, Entries) of
-                        true -> [Name | Acc];
-                        false -> Acc
-                    end
-                end,
-                [],
-                Tid
-            )
+            try
+                ets:foldl(
+                    fun({Name, Entries}, Acc) ->
+                        case lists:any(fun(#{enabled := E}) -> E end, Entries) of
+                            true -> [Name | Acc];
+                            false -> Acc
+                        end
+                    end,
+                    [],
+                    Tid
+                )
+            catch
+                error:badarg -> []
+            end
     end.
 
 %% @doc Name -> merged capability metadata across providers offering
@@ -182,6 +178,7 @@ listings_summary() ->
         undefined ->
             #{};
         Tid ->
+            try
             ets:foldl(
                 fun({Name, Entries}, Acc) ->
                     Merged = lists:foldl(
@@ -206,6 +203,9 @@ listings_summary() ->
                 #{},
                 Tid
             )
+            catch
+                error:badarg -> #{}
+            end
     end.
 
 %% Pass-through merge of raw provider catalog entries (binary JSON
@@ -274,50 +274,40 @@ decode_meta(_) ->
 
 -spec lookup_model(binary() | model_id()) -> {ok, map()} | error.
 lookup_model(Key) ->
-    case table(models) of
-        undefined ->
-            error;
-        Tid ->
-            case ets:lookup(Tid, Key) of
-                [{_, Meta}] -> {ok, Meta};
-                [] -> error
-            end
+    case ets_lookup(table(models), Key) of
+        [{_, Meta}] -> {ok, Meta};
+        _ -> error
     end.
 
 -spec lookup_provider(provider_id()) -> {ok, map()} | error.
 lookup_provider(ProviderId) ->
-    case table(providers) of
-        undefined ->
-            error;
-        Tid ->
-            case ets:lookup(Tid, ProviderId) of
-                [{_, Meta}] -> {ok, Meta};
-                [] -> error
-            end
+    case ets_lookup(table(providers), ProviderId) of
+        [{_, Meta}] -> {ok, Meta};
+        _ -> error
     end.
 
 -spec lookup_api_key(binary()) -> {ok, map()} | error.
 lookup_api_key(Prefix) when is_binary(Prefix) ->
-    case table(api_keys_by_prefix) of
-        undefined ->
-            error;
-        Tid ->
-            case ets:lookup(Tid, Prefix) of
-                [{_, Meta}] -> {ok, Meta};
-                [] -> error
-            end
+    case lookup_api_keys(Prefix) of
+        [Meta | _] -> {ok, Meta};
+        [] -> error
+    end.
+
+%% All catalog rows sharing an 8-byte prefix (collisions are rare but
+%% must not silently drop a valid key). Auth verifies the HMAC of each.
+-spec lookup_api_keys(binary()) -> [map()].
+lookup_api_keys(Prefix) when is_binary(Prefix) ->
+    case ets_lookup(table(api_keys_by_prefix), Prefix) of
+        [{_, Metas}] when is_list(Metas) -> Metas;
+        [{_, Meta}] when is_map(Meta) -> [Meta];
+        _ -> []
     end.
 
 -spec provider_keys(provider_id()) -> [map()].
 provider_keys(ProviderId) ->
-    case table(provider_keys) of
-        undefined ->
-            [];
-        Tid ->
-            case ets:lookup(Tid, ProviderId) of
-                [{_, Keys}] -> Keys;
-                [] -> []
-            end
+    case ets_lookup(table(provider_keys), ProviderId) of
+        [{_, Keys}] -> Keys;
+        _ -> []
     end.
 
 %%--------------------------------------------------------------------
@@ -327,11 +317,31 @@ provider_keys(ProviderId) ->
 new_tab() ->
     ets:new(janus_catalog_tab, [set, public, {read_concurrency, true}]).
 
+ets_lookup(undefined, _Key) ->
+    [];
+ets_lookup(Tid, Key) ->
+    try
+        ets:lookup(Tid, Key)
+    catch
+        error:badarg -> []
+    end.
+
 table(Name) ->
     case get() of
         #{catalog := Tabs} -> maps:get(Name, Tabs, undefined);
         undefined -> undefined
     end.
+
+schedule_delete(undefined) ->
+    ok;
+schedule_delete(Old) ->
+    spawn(fun() ->
+        receive
+        after 2000 ->
+            delete_tabs(Old)
+        end
+    end),
+    ok.
 
 delete_tabs(undefined) ->
     ok;
@@ -483,8 +493,16 @@ insert_api_keys(Tid, Keys, AllowRows) ->
                     end
             },
             case Prefix of
-                undefined -> ok;
-                _ -> ets:insert(Tid, {Prefix, Meta})
+                undefined ->
+                    ok;
+                _ ->
+                    Prev =
+                        case ets:lookup(Tid, Prefix) of
+                            [{_, Existing}] when is_list(Existing) -> Existing;
+                            [{_, One}] when is_map(One) -> [One];
+                            _ -> []
+                        end,
+                    ets:insert(Tid, {Prefix, Prev ++ [Meta]})
             end
         end,
         Keys

@@ -79,16 +79,18 @@ init([]) ->
     State0 = #state{},
     State = maybe_start_timer(State0),
     case sync_on_start() of
-        true -> _ = spawn(fun() -> {ok, _} = (catch do_sync()) end);
+        true -> _ = spawn(fun() -> _ = (catch do_sync()) end);
         false -> ok
     end,
     {ok, State}.
 
 handle_call(sync_now, _From, State) ->
-    Result = (catch do_sync()),
-    %% do_sync now handles DB errors internally; catch guards anything else
-    case Result of
-        {ok, R} -> {reply, {ok, R}, State#state{last_run = R}};
+    case (catch do_sync()) of
+        {ok, R} when is_map(R) ->
+            {reply, {ok, R}, State#state{last_run = R}};
+        {'EXIT', Reason} ->
+            ErrMap = #{error => Reason},
+            {reply, {ok, ErrMap}, State#state{last_run = ErrMap}};
         Other ->
             ErrMap = #{error => Other},
             {reply, {ok, ErrMap}, State#state{last_run = ErrMap}}
@@ -156,7 +158,7 @@ do_sync() ->
         models_seen => Seen,
         errors => Errs
     }),
-    Result#{models_added => Total, models_seen => Seen, errors => Errs}.
+    {ok, Result#{models_added => Total, models_seen => Seen, errors => Errs}}.
 
 %% Fetches GET {base}/models for one provider and upserts unseen names.
 sync_provider(ProviderId) ->
@@ -189,7 +191,7 @@ fetch_provider_models(ProviderId) ->
     try
         case janus_catalog:lookup_provider(ProviderId) of
             {ok, #{base_url := Base0, enabled := true}} ->
-                case janus_catalog:provider_keys(ProviderId) of
+                case [K || K <- janus_catalog:provider_keys(ProviderId), maps:get(enabled, K, true)] of
                     [#{secret_ref := Ref} | _] ->
                         {ok, Token} = janus_secrets:decrypt(
                             case Ref of {_, Cipher} -> Cipher; C -> C end),

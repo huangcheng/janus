@@ -303,8 +303,13 @@ ensure_route(ModelId, ProviderId) ->
                     [ModelId, ProviderId]
                 )
             of
-                {ok, _} -> ok;
-                {error, Reason} -> error({insert_route, Reason})
+                {ok, _} ->
+                    ok;
+                {error, Reason} ->
+                    case janus_model_sync:unique_violation(Reason) of
+                        true -> ok;
+                        false -> error({insert_route, Reason})
+                    end
             end;
         {error, Reason} ->
             error({ensure_route, Reason})

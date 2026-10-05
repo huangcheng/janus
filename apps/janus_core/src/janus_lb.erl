@@ -231,9 +231,13 @@ pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight) ->
             {error, classify_key_failures(Candidates, Cool, Now)};
         _ ->
             Picked = weighted_rr_pick(PickKey, Usable, Cursors),
-            {ok, Key} = select_key(Picked, Cool, Cursors, Now),
-            bump_inflight(route_target(Picked), Inflight),
-            {ok, Picked#{provider_key => Key}}
+            case select_key(Picked, Cool, Cursors, Now) of
+                {ok, Key} ->
+                    bump_inflight(route_target(Picked), Inflight),
+                    {ok, Picked#{provider_key => Key}};
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end.
 
 has_usable_key(#{provider_id := ProviderId}, Cool, Now) ->
@@ -520,12 +524,26 @@ sanitize_cooldown_reason(_) -> failure.
 %% Count routes currently in cooldown (for /stats reporting).
 cooling_count() ->
     try
-        Now = erlang:system_time(millisecond),
+        Now = erlang:monotonic_time(millisecond),
         Tid = janus_lb_cooldowns,
         ets:foldl(
-            fun({_Key, Until}, Acc) when is_integer(Until) ->
-                    case Until > Now of true -> Acc + 1; false -> Acc end;
-               (_, Acc) -> Acc
-            end, 0, Tid)
-    catch _:_ -> 0
+            fun
+                ({_Key, Until, _Reason}, Acc) when is_integer(Until) ->
+                    case Until > Now of
+                        true -> Acc + 1;
+                        false -> Acc
+                    end;
+                ({_Key, Until}, Acc) when is_integer(Until) ->
+                    case Until > Now of
+                        true -> Acc + 1;
+                        false -> Acc
+                    end;
+                (_, Acc) ->
+                    Acc
+            end,
+            0,
+            Tid
+        )
+    catch
+        _:_ -> 0
     end.

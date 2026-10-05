@@ -5,10 +5,10 @@
 
 init(Req0, State) ->
     case janus_http_auth:require_agent(Req0) of
-        {ok, _Agent, Req1} ->
+        {ok, Agent, Req1} ->
             Data =
                 try
-                    list_models()
+                    list_models(Agent)
                 catch
                     C:R:S ->
                         logger:error(#{what => models_handler_crash, class => C, reason => R, stack => S}),
@@ -28,10 +28,15 @@ init(Req0, State) ->
             {ok, ReqErr, State}
     end.
 
-list_models() ->
+list_models(Agent) ->
     case janus_catalog:get() of
         #{catalog := #{models := Tid}} ->
-            Rows = ets:tab2list(Tid),
+            Rows =
+                try
+                    ets:tab2list(Tid)
+                catch
+                    error:badarg -> []
+                end,
             %% Table stores both id and name keys — keep name entries only once.
             Seen = ets:new(janus_models_seen, [set]),
             try
@@ -57,7 +62,7 @@ list_models() ->
                  || Name <- janus_catalog:listing_names(),
                     ets:insert_new(Seen, {Name, true})
                 ],
-                Names = lists:sort(Bound ++ Listings) ++ auto_names(),
+                Names = filter_allowed(Agent, lists:sort(Bound ++ Listings) ++ auto_names()),
                 Meta = janus_catalog:listings_summary(),
                 [model_entry(Name, maps:get(Name, Meta, #{})) || Name <- Names]
             after
@@ -66,6 +71,25 @@ list_models() ->
         _ ->
             []
     end.
+
+filter_allowed(#{model_ids := all}, Names) ->
+    Names;
+filter_allowed(#{model_ids := Ids}, Names) when is_list(Ids) ->
+    Allowed = sets:from_list(allowed_names(Ids), [{version, 2}]),
+    [N || N <- Names, sets:is_element(N, Allowed)];
+filter_allowed(_, Names) ->
+    Names.
+
+allowed_names(Ids) ->
+    lists:filtermap(
+        fun(Id) ->
+            case janus_catalog:lookup_model(Id) of
+                {ok, #{name := Name}} when is_binary(Name) -> {true, Name};
+                _ -> false
+            end
+        end,
+        Ids
+    ).
 
 %% Capability fields captured from provider catalogs appear only when
 %% at least one provider reports them: context_length / max_output_tokens
