@@ -31,6 +31,18 @@ init([]) ->
             {"/stats/[...]", janus_gateway_stats, []}
         ]}
     ]),
+    %% idle_timeout must exceed the longest legitimate upstream wait
+    %% (reasoning models can compute for minutes before first byte) —
+    %% cowboy's 60s default kills the handler mid-call with a bare
+    %% connection reset (surfaced as a bodiless 502 behind a proxy).
+    ProtocolOpts = #{
+        env => #{dispatch => Dispatch},
+        idle_timeout => 300_000
+    },
+    AdminProtocolOpts = #{
+        env => #{dispatch => AdminDispatch},
+        idle_timeout => 300_000
+    },
     AutoRouter = #{
         id => janus_auto,
         start => {janus_auto, start_link, []},
@@ -45,7 +57,7 @@ init([]) ->
             {cowboy, start_clear, [
                 janus_http_listener,
                 transport_opts(Port, Bind),
-                #{env => #{dispatch => Dispatch}}
+                ProtocolOpts
             ]},
         restart => permanent,
         shutdown => 5000,
@@ -66,7 +78,7 @@ init([]) ->
             {cowboy, start_clear, [
                 janus_admin_listener,
                 transport_opts(AdminPort, AdminBind),
-                #{env => #{dispatch => AdminDispatch}}
+                AdminProtocolOpts
             ]},
         restart => permanent,
         shutdown => 5000,

@@ -211,20 +211,52 @@ do_flush(#state{buf = Buf} = State) ->
             fun(Rows, Acc) ->
                 {Sql, Params} = build_insert(Cols, Rows),
                 case q(Sql, Params) of
-                    {ok, _} -> Acc;
+                    {ok, _} ->
+                        Acc;
                     {error, Reason} ->
-                        logger:warning(#{
-                            what => janus_usage_flush_error,
-                            rows => length(Rows),
-                            reason => Reason
-                        }),
-                        Acc + length(Rows)
+                        case fk_salvage(Cols, Rows, Reason) of
+                            ok ->
+                                logger:warning(#{
+                                    what => janus_usage_flush_fk_salvaged, rows => length(Rows)
+                                }),
+                                Acc;
+                            keep ->
+                                logger:warning(#{
+                                    what => janus_usage_flush_error,
+                                    rows => length(Rows),
+                                    reason => Reason
+                                }),
+                                Acc + length(Rows)
+                        end
                 end
             end,
             0,
             chunk(lists:reverse(Buf), ?INSERT_CHUNK)
         ),
     State#state{buf = [], buf_size = 0, dropped = State#state.dropped + Failed}.
+
+%% FK-race salvage: a key/model/provider row can be deleted between
+%% record/1 and the flush (the dashboard revokes a key while its events
+%% are still buffered), failing the whole chunk with 23503. Retry once
+%% with the id columns NULLed — attribution is lost for those rows, the
+%% events are not.
+fk_salvage(Cols, Rows, Reason) ->
+    Bin = iolist_to_binary(io_lib:format("~0p", [Reason])),
+    IsFk =
+        binary:match(Bin, <<"23503">>) =/= nomatch orelse
+            binary:match(Bin, <<"foreign_key">>) =/= nomatch,
+    case IsFk of
+        false ->
+            keep;
+        true ->
+            KeepKeys = [ts, protocol, stream, status, prompt, completion, latency_ms],
+            Stripped = [maps:with(KeepKeys, Ev) || Ev <- Rows],
+            {Sql, Params} = build_insert(Cols, Stripped),
+            case q(Sql, Params) of
+                {ok, _} -> ok;
+                _ -> keep
+            end
+    end.
 
 chunk(L, N) ->
     chunk(L, N, []).
