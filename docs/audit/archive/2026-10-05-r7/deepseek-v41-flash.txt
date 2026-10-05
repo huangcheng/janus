@@ -1,0 +1,32 @@
+1. **Verdict: GO** — the spec's decisive contracts (SSE translate, mid-stream errors, per-node counters, test image, deploy wait) are internally consistent, and every apparent §4 tension is resolved by §10; the sole mismatch is a typo, not a fix.
+
+2. **Critical risks**
+- **SSE contract**: `finalize_sse/3`'s `{error, invalid_request|upstream}` arms have no frame spec in §4.1.2; only §4.1.4 sketches them. The zero-content rule (`next_block==0` → empty text block) collides with "mapping row already emitted finish/usage → terminator only" when a stream had finish but no content. Precedence is unstated.
+- **Mid-stream**: once headers are 200, `track` may record 400/502 — `capture_usage_chunk` must still run. Sanitized error JSON needs a deterministic ≤200-byte truncation schema per face; malformed-JSON must not abort the stream.
+- **Idle/disconnect**: 300s Cowboy inactivity vs long SSE; `{error, closed}` must `gun:cancel` exactly once and never double-finalize (`terminal_sent`).
+- **Counters vs SPEC**: §4.2 alternates `janus_stats_tracked` and `janus_stats_failed` as the gate; guard must be one flag. Atomic lifetime (app init vs hot reload) needs a test.
+- **Docker/_build ABI**: named `_build` volume across OTP/lock changes; CI no-mount run depends on image compile being complete; CRLF fmt on host mounts.
+- **Deploy wait**: leader-generation capture timing, `--code-only` uptime/digest detection, and 401-halt need explicit exit codes.
+
+3. **Contradictions / stale**
+- "Three independent PRs" (§3 table C) vs "four shippable slices" (§4 heading, §9): numeric typo; §10 doesn't address it, but it blocks nothing. Otherwise §10 and §4 agree.
+
+4. **Missing requirements**
+- Exact `finalize_sse` error-arm frames, and zero-content-vs-usage-flushed precedence.
+- Sanitized error JSON schema/truncation for both client faces.
+- Provider `ping` handling when the client face is Chat (comment vs bare `data:`).
+- Counter bump when `include_usage` retry fails (stream still 200; `out_tokens` null).
+- eunit cases: first chunk carrying content (message_start before block), zero-content provider-Chat stream, leftover cap straddling two chunks.
+
+5. **Architecture notes**
+- Handler owns `#sse_st{}`; `Rest`→`leftover` single owner; immediate writes, no frame buffer is sound.
+- Inner janus-auto `janus_stats_inner` put/erase must wrap the inner `do_proxy` including its usage-only `track`, so outer flags survive — correct and testable.
+- Atomics in `persistent_term` at `janus_http_app` init fits the invariant; `/stats` missing-ref → 0 is fine.
+- Paired TEST-FLOWS + `deploy_prod.sh` PRs make Slice A/D repo-atomic; keep TF-6.8/6.8b assertions on wire order, not just counts.
+
+6. **Top 5 concrete edits**
+1. Change "Three independent PRs" → "four slices (four PRs)".
+2. Specify `finalize_sse` error arms and the zero-content/usage precedence rule.
+3. Collapse the counter gate to one flag; document inner skip explicitly.
+4. Define the error-frame JSON/truncation contract for both faces.
+5. Add the three eunit cases above (content-first chunk, zero-content Chat→Anthropic, split-cap).

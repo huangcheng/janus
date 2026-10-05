@@ -1,0 +1,30 @@
+**1. Verdict: GO** — I found no sentence-level contradiction that §10 leaves unresolved; the defects below are omissions, not conflicts.
+
+**2. Critical risks**
+- `#sse_st{}` as written lacks `usage_sent`, `finish_sent`, `stop_sent`, and `created`, yet the normative prose depends on all four ("If a mapping-table row already emitted the finish/usage, finalize emits only the terminator (`usage_sent` / `finish_sent` on St)"; "usage chunk: `id`/`object`/`created`/`model` **from St**"; Anthropic finalize "if stop not yet sent, `message_delta`"). §10 requires the flag semantics, so the record listing is simply wrong — an implementer coding the literal record will double-emit usage or skip `[DONE]`-only terminators.
+- §4.4 never states the gateway's generation poll interval; the 300s follower deadline is unsafe if the poll cadence approaches it.
+- The include_usage retry leg (400 → resend without `stream_options`) silently loses `completion_tokens`; TF-6.8b's usage assertions must tolerate that path.
+- Disconnect 502 usage row: tokens come from `#sse_st{}` mid-fold — the capture path in the disconnect branch is implied, not specified.
+
+**3. Contradictions or stale claims**
+- Only the record-vs-prose field mismatch above; nothing else (I checked request-vs-response `n`, before/after-200 400-vs-502, disconnect vs finalize contract, native-byte identity, counter funnel vs §10 — all consistent).
+- §4.3's `.gitattributes` line "`*.erl *.hrl *.config … text eol=lf`" is not valid git syntax.
+
+**4. Missing requirements**
+- No eunit rows for the §4.1.3 stop/finish-reason mapping table (both directions, incl. unknown + log) — §4.1.5 covers everything except the table most likely to regress.
+- No eunit/E2E for request-leg `n≠1` → 400 before upstream.
+- Chat-face usage chunk `object` value unspecified.
+- OpenAI-compatible proxies that emit `event:` lines alongside `data:` — sse_events OpenAI shape doesn't say whether to ignore them.
+
+**5. Architecture/design notes**
+- PD keys on the handler process only is sound *because* janus-auto inner `do_proxy` runs in that same process — worth one sentence so nobody moves it to a task.
+- Atomics init before listeners via persistent_term matches the existing boot invariant; missing-ref→0 read is the right degradation.
+- Per-fold immediate write with `Rest` copied to `#sse_st.leftover` is single-owner and correct; keep gun flow/backpressure active.
+- Dual-repo paired-PR rule (A/B/D paired, C Janus-only) is internally consistent.
+
+**6. Top 5 concrete edits**
+1. §4.1.2 record: add `usage_sent`, `finish_sent`, `stop_sent`, `created = undefined` fields.
+2. §4.1.5: add stop/finish mapping eunit rows both directions, plus unknown-value logging.
+3. §4.4: state gateway poll interval; require 300s ≥ 2× that interval.
+4. §4.3: fix `.gitattributes` to one pattern per attribute line.
+5. TF-6.8b: assert `message_delta.usage` only when the include_usage leg succeeded; document retry-leg nulls.

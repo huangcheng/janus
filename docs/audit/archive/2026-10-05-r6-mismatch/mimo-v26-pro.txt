@@ -1,0 +1,33 @@
+**1. Verdict: GO WITH FIXES** — the spec is unusually closed, but the attached prompt describes a different project (entitlement matrix + key failover), and several operational observables (catalog-apply detection, image digests, hex-cache location) are unspecified.
+
+**2. Critical risks**
+- *Retry/failover boundary:* the single `include_usage` 400-retry is the only retry; "re-encode the already-translated body" is undefined if the body is already iodata, and the 400 body must be drained/reset on gun before re-send, or the retry rides a broken stream. Guard: never after 200, never 401/5xx (stated, good).
+- *Classification false-negatives:* `translate_sse` bad-JSON → `{ok,[],St}` silently can turn a fully-broken upstream into a clean-looking empty stream. Require a `janus_translate_sse_bad_json` counter surfaced on `/stats`, not just a log.
+- *Counter semantics:* "mid-stream 400" (§4.1.2/4.1.3) contradicts "HTTP status stays 200" (§4.1.4). Operators will read Nodes `requests_failed` as wire errors. Fix wording to "recorded status".
+- *Double-count:* `track` + `try/after` + `janus_stats_failed` gating across crash paths is the easiest invariant to break; the flag save/restore around janus-auto **nested same-process** calls (`inner=true`) is unspecified.
+- *Deploy race:* "generation after catalog apply (ETS rebuild done)" has no observable; a follower can report the new generation while ETS is mid-rebuild.
+
+**3. Contradictions / stale claims**
+- Prompt's A–D (probe matrix, catalog-bundled entitlements, key-pool failover) appear nowhere in `target.md` — stale prompt or wrong attachment.
+- Leftover ownership stated twice, differently: `sse_events` returns `Rest` that "handler copies to `#sse_st.leftover`", yet "that field is the only leftover owner". Pick one; state that the next call's Buffer = `St.leftover ++ Chunk`.
+- Slice C: "warm the hex cache in the image" — hex cache is `~/.cache/hex`, not `_build`; the named volume doesn't shadow it. Say so, or the requirement reads unimplementable.
+- Slice B: flags named `janus_stats_tracked` in the table but `janus_stats_failed` in prose; `usage_sent`/`finish_sent` appear in §4.1.2 but are absent from the `#sse_st{}` record.
+
+**4. Missing requirements**
+- Deploy: source of "image digest changed"; observable for "catalog apply done"; leader-probe deadline ("the same 300s" — same as whose?).
+- `janus_usage_parse` Anthropic merge gap is deferred to "if TF-6.8 tokens would otherwise stay null" — that's a spec contingent on test outcome. Decide now.
+- TF-6.8 token assertion is conditional ("when upstream reports them") → gate can pass with always-null tokens. Add a deterministic stub or eunit-level usage assertion.
+- `/stats` `started_at` format (unix seconds vs ISO) and FastAPI passthrough behavior on unknown fields.
+
+**5. Architecture notes**
+- Counters in `persistent_term` from `janus_http_app` before listeners is right; but hot reload keeping counters silently diverges from doc "reset when inits" — document explicitly.
+- Process-dict flags live on the handler process only: safe, but janus-auto inner calls must snapshot/restore `inner` around nested `do_proxy`, not just set it.
+- `{ok,[],St}` frames-may-be-`[]` discipline is sound; add an invariant test that `translate_sse` never loses `block_kind`/`in_tokens`.
+- Slice C mount list omits `apps/*/priv` (covered) but not `docs/`; harmless — yet `rebar3 fmt --check` on CRLF-mounted files will fail as "environment bug"; the `.gitattributes` fix must land in the same PR as Slice C or the documented command fails on first run.
+
+**6. Top 5 edits**
+1. Resolve prompt-vs-spec mismatch; note in the header which spec is authoritative.
+2. Replace every "400/502" in §4.1 with "recorded status"; add "wire status 200" column.
+3. Specify `#sse_st{}` gains `usage_sent`/`finish_sent`, and single leftover ownership.
+4. Specify deploy observables: catalog-apply marker, digest source, per-probe deadlines.
+5. Make TF-6.8 usage assertion deterministic; decide the `janus_usage_parse` merge gap now.

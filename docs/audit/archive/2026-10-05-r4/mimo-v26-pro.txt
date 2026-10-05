@@ -1,0 +1,29 @@
+**1. Verdict: GO WITH FIXES** — the spec is unusually closed, but the `finalize_sse` flush contract and the idle_timeout semantics are still ambiguous in the text itself.
+
+**2. Critical risks**
+- Drain EOF with an **open content block / pending usage / no finish chunk**: `finalize_sse(normal)` is specified only as "one terminal", but not whether it flushes pending non-terminal frames (`content_block_stop`, synthesized `message_delta`/finish chunk, usage chunk) before the terminator. Clients can hang or see a stream with no `stop_reason`.
+- `include_usage` retry: "retry without it only before any 200" — no trigger condition (which provider statuses? 400 only?) or attempt bound; a blanket retry could replay 5xx.
+- Counter gap: a request that enters `do_proxy` and dies pre-upstream on `translate_unsupported` (streaming tools/vision) — tracked 400 (failed+1) or not? Not in the bump table; E2E only covers 404/401.
+- Docker ABI: recreate-volume list omits `rebar.config` and OTP patch bumps; `COPY rebar3` assumes a host-copied escript exists at build context.
+
+**3. Contradictions / stale claims**
+- §4.1.4: idle_timeout is "300s on the **whole request** … (not a per-byte watchdog)" vs §10: "300s of total silence can kill the handler". Those are different semantics; Cowboy's `idle_timeout` is inactivity-based. One sentence is wrong.
+- `sse_events` contract says error when `Buffer+Chunk > 1 MiB` without a complete event; §4.1.2 handler text says "1 MiB **Rest** or a single `data:` line > 1 MiB". Three thresholds.
+- ".dockerignore already should exclude `_build`" is an unverified claim ("should").
+
+**4. Missing requirements**
+- Anthropic-face `message.id` provenance/format for Chat→Messages (synthesize `msg_`-prefixed? copy `chatcmpl-…`?).
+- TF-6.8 token assertion is soft ("when upstream reports them") — not repeatable as a gate; specify a fixture upstream (e2e fake) for token-bearing streams.
+- Slice D code-only false-halt: node with no restart (no change shipped) fails the `uptime_sec` window check; need "skip nodes whose artifact hash is unchanged" or explicit expected-restart list.
+
+**5. Architecture/design notes**
+- Handler-process dict flags are sound (single Cowboy process for `do_proxy`/`track`/`after`), and atomics-in-persistent_term before listeners is correct. Keep `janus_gateway_stats` reads total (missing ref → 0) — but define behavior across a **hot code reload** of `janus_http_app` (no re-init → counters survive; fine, but say it).
+- Drain fold ordering (`sse_events` → `translate_sse` → write) is right; ensure the drain loop writes each fold result immediately (no buffering of frames) or memory grows on long streams.
+- Dual-repo pairing (TEST-FLOWS + deploy script) is correctly stated as non-closable from Janus alone.
+
+**6. Top 5 edits**
+1. Specify `finalize_sse` flush: pending `content_block_stop` + synthesized finish/`message_delta` + one usage chunk **before** the single terminator, per client face.
+2. Reconcile idle_timeout wording to inactivity semantics (match §10).
+3. Unify `sse_events` limit: one named constant, state whether it applies to whole buffer, Rest, or single line.
+4. Add a bump-table row for pre-upstream `translate_unsupported` 400 (tracked, failed+1) and an E2E assertion for it.
+5. Add `rebar.config` + OTP version to the volume-recreate trigger list; replace TF-6.8's soft token assertion with a fixture upstream.

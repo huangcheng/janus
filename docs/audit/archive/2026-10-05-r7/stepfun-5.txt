@@ -1,0 +1,13 @@
+Audit complete. Response saved to `F:\Janus\docs\audit\2026-10-05-pi-audit-round-8.md`:
+
+**Verdict: GO** — no two sentences in the spec contradict each other in a way §10 leaves unresolved; what remains is wording imprecision and gaps, not blocking conflict.
+
+Headline findings:
+
+- **Top risk:** §4.1.4 claims Cowboy `idle_timeout=300s` covers SSE response-side inactivity, but in Cowboy 2.x that timeout bounds request reads; once the handler streams, response inactivity falls to `stream_body`/`cowboy_loop` timeouts. Verify empirically before coding the idle row.
+- **Cap danger:** capping *any* complete `data:` line at 1 MiB invites spurious 502s on large legit text; bound leftover growth only.
+- **Counter wording:** §4.1.2 "only the outer client-visible `track` may bump failed" conflicts textually with §4.2's crash `after` bump (contextually "outer, never inner" — tighten).
+- **Dual-repo scope gap:** §3 names only A and D as paired, but Slice B edits `nodes.tsx` + SPEC §2.4 + FastAPI passthrough — B is de facto dual-repo.
+- **Stale claim:** §4.3's hex-cache rationale (`_build` volume shadowing) is wrong — hex lives in `~/.cache/rebar3`.
+
+Full risk list, contradictions, missing requirements (malformed-event shape, `redacted_thinking`, TF-6.8 `x-accel-buffering` assertion), architecture notes, and top 5 concrete edits are in the file.

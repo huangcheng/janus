@@ -1,0 +1,29 @@
+**1. Verdict: GO WITH FIXES** — target.md is internally coherent, but prompt.md audits a *different* spec (entitlement matrix, key failover, passive learning — none of which exist in target.md); confirm which document is under audit before relying on this round.
+
+**2. Critical risks**
+- Prompt/spec mismatch: the required risk categories (probe blowback, classification false-negatives, failover storms, streaming failover boundary) have no corresponding text in target.md. Either prompt.md is stale (round-6 prompt against a superseded spec) or target.md is the wrong attachment.
+- Catalog reload races: Slice A/B/D don't touch catalog writes, but Slice D's generation check ("follower > gen0 OR == leader, stable ×2") can pass spuriously if a *second* config ship lands mid-deploy; gen0 is recorded but never re-validated.
+- `include_usage` retry-on-400: requires replaying the gun request; the spec never states the translated body must be retained until 200, nor caps retry latency against the Cowboy handler timeline.
+- Truncated-stream false success: provider EOF without `message_stop`/`[DONE]` flows into `finalize_sse(normal)` with default `stop_reason=end_turn` — recorded as success, indistinguishable from a clean stream. No invariant guards this.
+
+**3. Contradictions / stale claims**
+- §4.1.2 `finalize_sse` references `usage_sent` / `finish_sent` "on St", but the `#sse_st{}` record defines neither field — the record and the function spec disagree.
+- Slice D step 6 ("empty JANUS_STATS_TOKEN: halt immediately") is numbered *after* leader migration; an empty token must be a preflight abort before any ship action (step 0), else leader is already migrated.
+- §4.1.1 item 6 (first-byte timeout → 504) has no row in the Slice B bump table — is it counted failed? Undefined.
+
+**4. Missing requirements**
+- Bump-table row for 504 first-byte timeout and for gun-connect failure.
+- Retry-once `include_usage`: body-retention requirement and "re-encode the already-translated body" needs the pre-injection body kept.
+- Slice C: image RUN compiles only the default profile; eunit-profile beams are still compiled at run time (hex/plugins cached, but add `rebar3 eunit` warm-up RUN or document the run-time compile).
+- `#sse_st{}`: no field for "usage chunk already sent" beyond the missing `usage_sent`.
+
+**5. Architecture/design notes**
+- ETS/atomics design is sound; persistent_term atomics survive start order correctly.
+- Process-dict gating (`janus_stats_*`) on the Cowboy handler only is correct given janus-auto inner `do_proxy` runs in-process — but verify inner calls can't inherit a stale outer flag on reused processes; spec should mandate flag reset at handler entry.
+
+**6. Top 5 edits**
+1. Resolve prompt↔target mismatch; re-issue the audit prompt for this spec.
+2. Add `usage_sent`/`finish_sent` to `#sse_st{}`.
+3. Move token-empty halt to deploy preflight (before gen0 capture).
+4. Add 504/connect-failure rows to the Slice B bump table.
+5. Specify truncated-EOF detection (no terminal event seen) → `finalize_sse({error, upstream, …})`, counted failed.

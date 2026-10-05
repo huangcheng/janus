@@ -1,0 +1,32 @@
+# Janus Phase-1 Spec Audit (round 9)
+
+## 1. Verdict
+**GO** — internally consistent; §10 closes every cross-reference I could stress, and remaining items are spec gaps, not contradictions.
+
+## 2. Critical risks
+- **Usage capture protocol ambiguity.** "DB usage row is `capture_usage_chunk` only" never states whether the capturing tap parses **provider** bytes or client bytes on a translating stream. On Chat-client↔Anthropic-provider, the raw upstream is Anthropic SSE; if `janus_usage_parse` keys off the client proto, TF-6.8's "tokens not both null" silently fails. §7 only says "confirm… extend if" — this is a must-fix, not a nice-to-have.
+- **`usage.output_tokens` required by Anthropic wire.** Chat→Anthropic mapping stashes usage and emits `message_delta` at "usage or `[DONE]`"; if the provider never sends usage, `output_tokens` is undefined. §4.1.2 says "omit usage object if both token fields undefined", but the mapping row emits `usage:{…output_tokens}` unconditionally — Anthropic clients validate that field. Define a default (0) or omit-rule.
+- **`finalize_sse` error-reason contract underspecified.** §4.1.2 documents `Reason=normal` frames in detail but says nothing about what `{error, invalid_request|upstream, Msg}` emits; the error-frame JSON and ≤200-byte sanitization live only in §4.1.4's table. The pure-function eunit target needs it in the function contract.
+- **Empty-delta first chunk.** "first provider chunk (role optional; also empty `delta` keepalive **after** start already sent → skip)" leaves the empty-delta-as-very-first-chunk case implied, not stated. Emit `message_start` on it or skip — pick one.
+- **Counter/`started_at` skew.** Atomics reset on `janus_http_app` init; if `started_at` comes from a different clock (e.g. VM start), hot-reload-vs-restart gives counters that postdate `started_at` — Nodes table rate math breaks silently.
+
+## 3. Contradictions / stale claims
+None found that §10 doesn't resolve. Duplicate sentence in §4.1.2 ("Rest is the incomplete tail" twice) — cosmetic.
+
+## 4. Missing requirements
+- Provider-vs-client proto keying for usage capture (above).
+- `sse_events` on `[DONE]` mid-buffer with trailing partial event — state the tail handling.
+- Slice C: hex cache warm path vs named `_build` volume — `~/.cache/hex` is **not** under `/app/_build`, so a fresh volume still forces a first-run fetch unless `HEX_HOME` is redirected. "warm the hex cache… so a named `_build` volume does not force a first-run hex fetch" is currently false as written.
+- Slice D: no statement of what happens when the leader's own `/stats` probe 401s at step 1 (vs step 5's follower case) — presumably same halt; say it.
+
+## 5. Architecture notes
+Single-owner `#sse_st{}` with `Rest` copied to `leftover` each drain step is sound; one-terminal invariant is enforceable via `terminal_sent`. Process-dict flags confined to the Cowboy handler plus explicit `janus_stats_inner` put/erase is the right shape. Atomics-in-persistent_term read with missing-ref→0 is fine. Dual-repo pairing (TEST-FLOWS, deploy_prod.sh) correctly blocks Janus-only merges.
+
+## 6. Top 5 concrete edits
+1. State that on translating streams `capture_usage_chunk` taps **provider-protocol** bytes (provider proto passed to `janus_usage_parse`).
+2. Chat→Anthropic: define `message_delta.usage.output_tokens` default (0) when the provider never reported usage.
+3. Add the `{error, invalid_request|upstream, Msg}` frame shapes + sanitization to the `finalize_sse` contract in §4.1.2.
+4. Decide and write the empty-delta-first-chunk behavior (recommend: emit `message_start`, keep it pure).
+5. Slice C: set `HEX_HOME`/`MIX_HOME` inside the image to a path the `_build` volume shadows, or drop the "no first-run fetch" claim; align `started_at` with atomics init.
+
+(~440 words)

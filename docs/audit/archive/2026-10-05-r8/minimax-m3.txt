@@ -1,0 +1,32 @@
+**Verdict:** GO. §10 resolves the seams I checked; no two spec sentences directly contradict.
+
+**Critical risks**
+
+- **`n>1` scope ambiguity** (§4.1.1 step 3): unqualified "Request `n>1` → 400 before upstream" would break Phase-0 native Chat↔Chat n>1. Should be "translated request n>1".
+- **Inner janus-auto process model** (§4.2 / §10): `janus_stats_inner` is process-dict; if inner `do_proxy` is spawned, flag-set, no-op `inc_total`, after-clause gating all break. Pin inner as synchronous, same handler process.
+- **Post-200 `tool_use` signal** (§4.1.3 / §4.1.4): `translate_sse` returns `{error, translate_unsupported, St}` on Anthropic `content_block_start` type `tool_use`. Spec implies handler branches (post-200 → 502; pre-upstream → 400) but doesn't bind to a code signal.
+- **Image pre-compile wasted by volume** (§4.3): image RUNs `rebar3 compile`, yet `-v janus-ebin-otp27:/app/_build` shadows image's `_build` on first run. Only hex cache warmed; first run after volume wipe is full re-compile.
+
+**Contradictions:** none found.
+
+**Missing requirements**
+
+- **SPEC §2.4 content** (§4.2): "update SPEC §2.4" without specifying fields. Needs: `failed` logical (post-`do_proxy`); may be 400/502 while HTTP stays 200 (SSE); janus-auto = 1 (inner fails not counted).
+- **`#sse_st.created` source**: §4.1.2 says gateway `erlang:system_time(second)`; §4.1.3 should state "from gateway clock, never upstream" (Anthropic has no `created`).
+- **Anthropic→Chat partial usage** (§4.1.3): "omit usage chunk if both token fields undefined" — if `in_tokens` known and `out_tokens` undefined, Chat `usage` shape unspecified.
+- **Mid-stream n>1 detection** (§4.1.4): no mechanism. "`translate_sse` returns `{error, invalid_request, St}` on `choices.length > 1` after SSE 200".
+- **`track(502)` × after-clause** (§4.1.4 / §4.2): disconnect calls `track(502)`; `after` is fallback that bumps failed. Need `janus_stats_failed` gating to prevent double-bump.
+
+**Architecture notes**
+
+- `#sse_st{}` + idempotent `finalize_sse` + single `leftover` owner is well-specified; `terminal_sent`/`finish_sent`/`usage_sent` prevent double-frame.
+- Counter funnel: `inc_total` at `do_proxy` enter → `track(Status)` bumps failed once → `after` fallback only. Atomics in persistent_term; reset on app init, survive hot reload.
+- Deploy: `gen0` + leader post-apply gen + 2s parallel polls / 300s deadline; `--code-only` uses `uptime_sec < ship_window` only on changed image digests.
+
+**Top 5 concrete edits**
+
+1. **§4.1.1 step 3**: "Translated request `n>1` → 400 before upstream (native Chat↔Chat unchanged)."
+2. **§4.2**: "Inner `do_proxy` runs synchronously in the outer handler's Erlang process; process-dict flags read/set in that process."
+3. **§4.1.4**: "`translate_sse` returns `{error, invalid_request, St}` on `choices.length > 1` after SSE 200; handler 400 finalizes and cancels gun."
+4. **§4.1.3 Chat→Anthropic `message_start`**: "`usage.input_tokens` = stashed `in_tokens` from any prior Chat usage chunk, or 0; `output_tokens` always 0."
+5. **§4.1.3 Anthropic→Chat usage chunk** (one token undefined): "emit `{prompt_tokens:N, completion_tokens:null}`; omit chunk if both undefined."

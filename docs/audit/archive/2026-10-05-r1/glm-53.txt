@@ -1,0 +1,40 @@
+**1. Verdict**
+
+GO WITH FIXES — the slices are well-scoped and correctly sequenced, but Slice A lacks a normative event-mapping/terminal contract and Slice B has a crash-accounting hole.
+
+**2. Critical risks**
+
+- Anthropic SSE uses `event:` lines and per-block start/delta/stop sequences; OpenAI is bare `data:` chunks ending `[DONE]`. Bidirectional translate needs block-index→`tool_calls.index` remapping (Anthropic indices count text/thinking blocks; parallel tool calls). No table given; a per-event `translate_sse/3` can't express state like role injection or synthesized `message_start` ids.
+- Usage placement differs: Anthropic emits input tokens in `message_start`, output in `message_delta`; OpenAI clients expect usage only in a final chunk (and only with `include_usage`). Spec covers recording, not what the client stream must contain.
+- "One client error frame" is protocol-specific (OpenAI `data:{"error":…}`+`[DONE]` vs Anthropic `event: error`); unspecified.
+- `requests_failed` includes "crash", but a crashed handler never reaches `track` — who bumps? Needs a monitor or `try…after`.
+- README command omits the named volume it mandates; `rebar3 get-deps` is not a rebar3 verb.
+- Generation wait can race concurrent dashboard writes; require "equal and stable for 2 polls" with a deadline.
+
+**3. Contradictions / stale claims**
+
+- TF-6.8 "[DONE] (or Anthropic message_stop)" — wrong: the *client* protocol dictates the terminal; a Chat client always gets `[DONE]`.
+- `translate_sse_chunk/3` (§architecture) vs `translate_sse/3` (§contract).
+- Slice B says "no SPA change / numbers already shown", yet §7 lists editing `nodes.tsx`.
+
+**4. Missing requirements**
+
+- Normative mapping table both directions: role injection, text/thinking deltas, `input_json_delta`↔`tool_calls.function.arguments` fragments, `ping`/comment skip, stop↔finish_reason (incl. `content_filter`/`refusal`/`stop_sequence`), usage, terminals.
+- Exactly-one-terminal invariant via a single finalize path (success, error, client disconnect).
+- `stream_options.include_usage`; interleaved thinking+text merging into one delta.
+- E2E must assert ≥2 incremental data events, not just "SSE chunks".
+- Counter edges: parse-400s outside both counters; failed ≤ total invariant.
+
+**5. Architecture notes**
+
+- Keep `sse_events`/`translate_sse` pure; hold per-stream state (role_sent, open block, tool index map, terminal_sent) in a handler-owned record with one `finalize/2` used on every exit path.
+- Init the atomics ref at app start, before listeners — `/stats` then never sees a missing ref; simpler than the 0-default branch.
+- TF-6.8 must state which upstream local E2E uses (simulator vs real Anthropic key).
+
+**6. Top 5 concrete edits**
+
+1. Add the normative bidirectional event-mapping table (tool index remap, stop reasons, usage, terminals, ping).
+2. Fix TF-6.8: Chat client ⇒ `[DONE]` always; assert ≥2 data events + usage row `stream=1`.
+3. Specify the crash path for `requests_failed` (monitor or `after`), plus parse-failure exclusion.
+4. Slice C command: add `-v janus_build:/app/_build`, drop `get-deps`, warn about host `_build` ABI.
+5. Define per-protocol mid-stream error frames and exactly-one-terminal via a single finalize; unify translate function naming.

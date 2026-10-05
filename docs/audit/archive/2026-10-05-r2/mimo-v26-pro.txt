@@ -1,0 +1,32 @@
+**1. Verdict: GO WITH FIXES** — the slice decomposition and 400-before-upstream rule are sound, but two event-ordering gaps in the SSE contract and a counter/image mismatch would fail the spec's own success criteria.
+
+**2. Critical risks**
+- *Usage ordering (Chat→Anthropic):* OpenAI's usage chunk arrives **after** the `finish_reason` chunk, yet the table emits `message_delta` (with output usage) at `finish_reason` and "stash, do not emit yet" on the usage chunk. Input usage never reaches the Anthropic face: `message_start.message.usage.input_tokens` is absent from the client-frame table. Result: `message_delta` carries stale/zero tokens.
+- *SSE parser:* no CRLF rule, no multi-line `data:` concatenation, no `data.type` vs `event:` precedence (Anthropic duplicates `type` in both; some proxies drop `event:`).
+- *Idle:* skipping `ping` removes the only client-side keepalive over 300s `idle_timeout` — client legs will drop long thinking streams. Forward as SSE comment `: ping`.
+- *Counters vs SPEC §2.4:* "unit = one client LLM call" must match dashboard definitions verbatim (401/400-before-parse = 0/0 is unusual). `janus_stats_counted` process-dict flag breaks if `do_proxy` ever runs off-handler; `after`-crash + `track(502)` can double-count failed. No `started_at`/uptime field ⇒ dashboard rate math on reset is wrong despite "documented on Nodes UI".
+- *Image/ABI:* the documented run mounts `janus-ebin-otp27` **over** `/app/_build`, discarding the image's compiled beams — "prebuilt" is false for laptops and compile happens on mounted (possibly CRLF) source. Volume name pins OTP major only.
+- *Deploy:* generation equality ≠ hot-reload applied; leader generation source (DB vs `/stats`) unspecified; halt leaves a mixed fleet with no remediation.
+
+**3. Contradictions / stale claims**
+- §4.1.3 Anthropic→Chat emits usage in `message_delta`, but Chat→Anthropic "does not emit yet" — asymmetric with no stated reason.
+- §2 claims `build` stage "today is a prod release" while Slice C keeps tag `janus-build:test` — ambiguous which stage CI's existing path builds.
+- `finalize_sse` `Reason = {error, binary()}` cannot express the table's 400 (`translate_unsupported`) vs 502 distinction.
+- "True incremental drain (no whole-body buffer)" vs `sse_events` buffering unbounded malformed tails — needs a cap.
+
+**4. Missing requirements**
+- Reverse stop-reason table (`stop`/`length`/`content_filter` → `end_turn`/`max_tokens`/…); `tool_calls`-from-provider before any 200 mapping.
+- `message_start` client-frame field list (id, model, role, **usage.input_tokens**).
+- `gun:cancel` vs `gun:close` semantics; behavior when handler dies mid-drain.
+- Counter test asserting `failed <= total` across crash + disconnect; SPEC §2.4 field sync checklist.
+- Fixture: Anthropic SSE split across chunk boundaries at every field line.
+
+**5. Architecture notes**
+Handler-owns-`#sse_st{}` is right (matches `janus_usage_head`); keep counters in `persistent_term` atomics created pre-listener — but gate `inc_total` in one place and make `inc_failed` idempotent per request. Freeze the byte-identical same-protocol path. Dual-repo paired-PR rule needs a checklist item in both PR templates, not just prose.
+
+**6. Top 5 edits**
+1. Fix usage lifecycle: stash input at `message_start`, delay `message_delta`/`message_stop` until usage chunk or `[DONE]`, emit `usage.input_tokens` in Anthropic `message_start`.
+2. Add reverse stop-reason table; widen `finalize_sse` Reason to `normal | {error, invalid_request | upstream, binary()} | disconnect` with explicit track status per arm.
+3. Specify SSE lexical rules (CRLF, multi-line `data:`, `data.type` precedence), `: ping` forwarding, max buffer size.
+4. Reconcile counters with SPEC §2.4 verbatim; add `started_at` to `/stats`; make failed-increment once-per-request; E2E asserts invariant.
+5. Drop the named-volume-over-`_build` run (or make it `deps`-cache-only); pin volume to full OTP version; state CRLF failures are environment bugs, and define deploy "applied" as generation + reload timestamp with post-halt remediation.

@@ -1,0 +1,41 @@
+# Janus Phase-1 Spec Audit
+
+## 1. Verdict
+
+**GO WITH FIXES** — the slice decomposition and dual-repo pairing are sound, but the `translate_sse` contract is self-contradictory and several wire-level details (Anthropic envelopes, stop-reason coverage, usage write site) are underspecified enough to bite during implementation.
+
+## 2. Critical risks
+
+- **`skip` vs state (§4.1.2/4.1.3):** `translate_sse` may return bare `skip`, yet the mapping requires skipped events to mutate state (`content_block_start` records `block_kind`; `message_start` stashes `in_tokens`; usage chunk "stash tokens"). If `skip` returns no state, those updates are lost. This is the spec's biggest internal bug.
+- **Anthropic client envelope:** real SDKs parse `message_start` as `{message:#{id,role,usage=>#{input_tokens}}}` and `message_delta.usage.output_tokens`; the spec only says "id/model". Chat→Anthropic streams will crash strict clients.
+- **Stop-reason table incomplete:** no mapping for Anthropic `refusal` or OpenAI `content_filter`; unknown-reason fallback undefined.
+- **Usage row provenance:** TF-6.8 asserts non-null tokens, but the touch map lists no `janus_usage` change. If `capture_usage_chunk` can't already parse Anthropic SSE usage (message_start + message_delta merge), the test fails and the fix isn't scoped.
+- **Mid-stream `translate_unsupported`:** table says track 400 but not whether the gun drain is cancelled immediately (it should be, like disconnect) or continues translating garbage.
+- **Thinking-first streams (Chat→Anthropic):** "close text block" fires when no block is open; needs a guard.
+- **Slice C mount shadowing:** `-v F:/Janus:/app` shadows the image's `/app`, including any vendored `rebar3`; hex package cache isn't persisted (network refetch each run).
+
+## 3. Contradictions / stale claims
+
+- `translate_sse` return type vs stateful skips (above).
+- §2 calls the current `build` stage "prod release, not eunit" while AGENTS.md's command implies otherwise — the spec acknowledges this; confirm the fix lands in AGENTS.md, not just README.
+- `finalize_sse(..., Reason, …)` accepts `Reason` but §4.1.4 error frames have no stated producer (handler inline vs finalize).
+
+## 4. Missing requirements
+
+- Chat chunk needs `created`; Anthropic face needs the full `message` object and usage fields.
+- Default stop-reason mapping for unknown values (+ log).
+- Behavior after emitting mid-stream error frames (cancel drain, ignore further events).
+- `skip`-preserves-state semantics.
+- Whether TF-6.8b asserts a usage row too.
+
+## 5. Architecture notes
+
+Handler-owned `#sse_st{}` in the same process as usage capture is correct; persistent_term atomics match existing boot-order invariants; single-funnel total with `track`-only-failed is clean and preserves `failed <= total`; the process-dict crash guard is acceptable per-request. Paired-PR rule for TEST-FLOWS/deploy is the right governance.
+
+## 6. Top 5 edits
+
+1. **§4.1.2:** make `translate_sse` always return `{ok, Frames, St}` (Frames may be `[]`); delete bare `skip`.
+2. **§4.1.3:** complete both stop-reason tables (`refusal`, `content_filter`, unknown→`stop`/`end_turn` + log).
+3. **§4.1.3:** specify full Anthropic envelope (`message` object, `usage.input_tokens` default 0, `message_delta.usage`) and add `created` to Chat chunks.
+4. **§4.1.4/§7:** define post-error behavior (cancel gun) and add the usage-capture/write site (verify `capture_usage_chunk` Anthropic-SSE support) to the touch map.
+5. **§4.3:** install `rebar3` to `/usr/local/bin` in the `test` stage (survives `/app` mount); note hex-cache refetch; guard "close text block" when none is open.

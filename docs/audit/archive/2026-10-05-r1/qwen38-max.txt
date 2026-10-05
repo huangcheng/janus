@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the slice decomposition and sequencing are sound, but the SSE usage/error contracts and counter count-points are underspecified enough to ship visible client bugs.
+
+**2. Critical risks**
+- **Usage in mixed streaming is not free.** OpenAI Chat streams omit usage unless `stream_options.include_usage=true`; Anthropic clients expect usage in `message_start`. Spec promises "usage on the terminal event" without specifying that the gateway must *inject* `include_usage` into upstream requests (provider=openai_chat) or emit zero/omitted usage otherwise.
+- **Mid-stream failures:** "send one error frame if none sent; else close" silently truncates Anthropic clients (no `message_stop`) and OpenAI clients (no `[DONE]`). Define protocol-correct terminal frames and whether status is 400 vs 502; `track(400)` for a translate limitation after upstream 200 is semantically wrong.
+- **Tool deltas are not passthrough.** OpenAI splits `tool_calls` arguments across many chunks; Anthropic `input_json_delta` likewise. "Only if non-stream supports it" hides that streaming requires argument accumulation — a real state machine, not a mapping.
+- **Counters:** count-point must be once per client request, not per LB retry; boot-relative counters reset on rolling deploys, making dashboard error-rate jumps misleading (emit `boot_time` or accept it).
+- **Docker ABI:** named `_build` volume survives image upgrades; an OTP bump then mixes beams. Tie volume name to OTP version.
+- **Deploy wait:** good barrier, but must fail *before* traffic shift and tolerate transient `/stats` failures.
+
+**3. Contradictions / stale claims**
+- Spec uses `--target test`; AGENTS.md and success criteria disagree (`build` vs `test`). Pick one.
+- "SPA `Node.health` already has `requests_total/failed`" and "`/stats.generation` exists" are asserted, not verified.
+- Aliyun apk mirror only fixes CN networks; a CI `eunit-docker` job on GitHub runners may be slower with the mirror — parameterize.
+
+**4. Missing requirements**
+- Event mapping table: `ping`, `signature_delta`, `content_block_stop`, `finish_reason↔stop_reason` (`tool_calls↔tool_use`, `length↔max_tokens`), `[DONE]` emission.
+- E2E fixtures: streaming Anthropic mock upstream for TF-6.8 (does TF-6.4's mock stream?).
+- Backpressure/buffer cap between gun drain and slow client socket.
+- Whether malformed-JSON 400s count toward counters (spec implies no; state it).
+
+**5. Architecture notes**
+- Handler-process translator state is right; read atomics ref once per request from persistent_term, never per event. Catalog/LB untouched — fine. TEST-FLOWS lives in the dashboard repo: Slice A needs a dashboard-side PR, sequence it.
+
+**6. Top 5 edits**
+1. Add full SSE event-mapping table + `include_usage` injection rule and usage-fallback semantics.
+2. Define mid-stream error contract: protocol-native terminal frame, correct track status, single count-point excluding retries.
+3. Specify tool-call argument accumulation or explicitly drop streaming tools to 400.
+4. Unify Docker stage name; OTP-versioned `_build` volume; mirror parameterization.
+5. Make generation/token checks a pre-traffic-shift barrier with timeout and retry semantics.

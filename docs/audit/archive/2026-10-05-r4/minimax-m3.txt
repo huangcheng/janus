@@ -1,0 +1,36 @@
+**Verdict**: GO WITH FIXES — the spec is structurally coherent and §10 closes most gaps, but three concrete defects remain that would surface as test failures or operator surprises.
+
+**Critical risks:**
+
+1. **Counter bump table self-contradicts** (§4.2). "Enter `do_proxy` after successful JSON map" implies model check is inside; but row "missing model **before** `do_proxy` | 0 | 0" says neither increments. TF-6.1 wants unknown-model to increment both. Pick one and bind it.
+
+2. **Chat→Anthropic `input_tokens` is stuck at 0** (§4.1.3). `message_start` writes `usage: {input_tokens: In or 0, output_tokens: 0}`, but `prompt_tokens` arrives on the empty-choices usage chunk **after** the first content delta. §10's "do not rewrite message_start" is the **opposite** direction (provider Anthropic → client Chat). Either emit a corrective `message_delta.usage` patch when that chunk lands, or document the always-0 behavior in the README — Anthropic clients keying cost off `message_start.usage.input_tokens` will see 0 every time.
+
+3. **Deploy wait deadlocks on no-op config ship** (§4.4). If the config diff is empty, generation never bumps; `gen0 == captured leader gen`, so `> gen0 OR == captured` fails forever on every follower. Add a "config diff empty ⇒ skip generation wait" branch before the poll loop.
+
+**Contradictions / stale claims:**
+
+- §4.1.2 record `block_kind = undefined | undefined | text | thinking` — duplicated `undefined`; should be `undefined | text | thinking`.
+- §4.2 says atomics "reset on VM restart" but creates them in `janus_http_app` init — they actually reset on **app** restart, not VM. Pick one.
+- §4.1.3 Chat→Anthropic `message_start` lists `id/type/role/model/content/stop_reason/usage` but omits Anthropic-required `created`. State it.
+
+**Missing requirements:**
+
+- janus-auto inner call (§4.2): "presets `janus_stats_counted` before inner `do_proxy`" — does inner route through the same `janus_http_proxy:do_proxy/7` or a sibling? If sibling, total may double-count.
+- §4.3 Windows: bind Docker Desktop file-sharing for the drive and `F:/…` acceptance as-is.
+- §4.2 disconnect `track(502)` says "usage row is written"; bind it explicitly to `capture_usage_chunk` with tokens possibly null.
+- §4.4 step 1 "probe": state retry policy on transient HTTP errors at **probe** time (only follower poll has a retry rule today).
+
+**Architecture / design notes:**
+
+- `#sse_st{}` carries `block`, `next_block`, `block_kind` — three fields for one concern. Add invariant: `block_kind` set ⇔ `block` set; `next_block` is Chat→Anthropic only.
+- Process-dict keys (`janus_stats_counted/_tracked/_failed`) live on the Cowboy handler process. Confirm `track/3` is only called there (not from a spawned gun worker), or the flag breaks.
+- Dual-repo rule intact; Slice A's `TEST-FLOWS.md` and Slice D's `deploy_prod.sh` are paired.
+
+**Top 5 concrete edits:**
+
+1. §4.2: pin model-missing 400 to one path (before ⇒ 0/0; inside ⇒ +1/+1); drop the conflicting row.
+2. §4.1.3: emit corrective `message_delta.usage` on Chat→Anthropic empty-choices chunk, or document always-0 `input_tokens` in README.
+3. §4.4: add "config diff empty ⇒ skip generation wait" branch before the poll loop.
+4. §4.1.2: fix record type to `undefined | text | thinking`.
+5. §4.3: one-line Windows note — Docker Desktop file-sharing enabled, `F:/…` accepted.
