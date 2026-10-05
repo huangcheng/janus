@@ -185,9 +185,10 @@ listings_summary() ->
             ets:foldl(
                 fun({Name, Entries}, Acc) ->
                     Merged = lists:foldl(
-                        fun(#{meta := Meta}, AccM) when is_map(Meta) ->
+                        fun
+                            (#{enabled := true, meta := Meta}, AccM) when is_map(Meta) ->
                                 merge_meta(Meta, AccM);
-                           (_, AccM) ->
+                            (_, AccM) ->
                                 AccM
                         end,
                         #{},
@@ -195,7 +196,8 @@ listings_summary() ->
                     ),
                     %% `#{}` as a case pattern matches EVERY map (open
                     %% subset matching) — size check is required for
-                    %% "nothing known".
+                    %% "nothing known". Names disabled on every provider
+                    %% stay out of the surface metadata.
                     case map_size(Merged) of
                         0 -> Acc;
                         _ -> Acc#{Name => Merged}

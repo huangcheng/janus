@@ -74,6 +74,23 @@ Publish both on loopback and put Caddy (or similar) in front for TLS.
 
 Provider `protocol`: `openai_chat` | `openai_responses` | `anthropic_messages`. Same-protocol routes passthrough (including SSE). Cross-protocol **translate** is non-stream only (text + basic tools); `stream: true` on a translate path returns `400 stream_requires_native_protocol`. Vision/multimodal translate is rejected in v1.
 
+## Testing
+
+Three layers, in the order they should fail:
+
+1. **eunit** — `./rebar3 eunit`. Pure logic with PRODUCTION-shaped
+   fixtures: JSON-decoded binary keys, Postgres SMALLINT 0/1 as the
+   drivers return them, epgsql row tuples. A test written from the
+   implementation's own idioms (atoms, booleans) tests the wrong code.
+2. **Local E2E** — `bash ../janus-dashboard/scripts/e2e_local.sh` (from
+   the dashboard repo) boots this release in Docker against a real
+   Postgres and runs the full TEST-FLOWS suite with real upstream
+   calls; it is the acceptance gate for every change.
+3. **Live checks** — the gateway image is rebuilt and deployed to the
+   three production nodes by the dashboard repo's scripts; the same
+   flows run against production (`scripts/run_test_flows.py`, prod
+   mode).
+
 ## Usage statistics
 
 Every proxied request (streaming included) is recorded into `usage_events`: token counts, upstream status, latency, and the key/model/provider/provider-key ids. Rows are kept 31 days and swept daily; the dashboard's Usage page reads the rollups. Streams get the terminal usage chunk via polite `stream_options.include_usage` injection — disable with app env `janus_core.usage_inject_include_usage = false` if an upstream rejects the field.

@@ -87,7 +87,13 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call(stats, _From, State) ->
-    {reply, #{buffered => State#state.buf_size}, State};
+    %% dropped must include INTERNAL losses (malformed events, buffer
+    %% cap, failed inserts) — stats/0 merges this over its external
+    %% (mailbox/writer-down) counter.
+    {reply, #{
+        buffered => State#state.buf_size,
+        dropped => State#state.dropped + dropped_external()
+    }, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
