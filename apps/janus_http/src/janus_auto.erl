@@ -592,7 +592,14 @@ judge_model_route(JM) ->
                 _ -> error
             end;
         _ ->
-            error
+            %% The judge is deployer-designated and may be any model in
+            %% the agent-visible surface (a provider listing that was
+            %% never bound on the Router page) — fall back to the
+            %% direct-listing pick, sharing the LB pipeline.
+            case janus_lb:pick_listing_route(JM, #{}) of
+                {ok, Route} -> {ok, Route};
+                _ -> error
+            end
     end.
 
 judge_prompt() ->
