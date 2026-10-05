@@ -1,16 +1,27 @@
 %%%-------------------------------------------------------------------
 %%% @doc Pure request/response translation between OpenAI chat,
 %%% OpenAI responses, and Anthropic messages. Fail-closed.
+%%% Streaming (SSE) translate: sse_events/2 parser, translate_sse/4
+%%% event mapper, finalize_sse/3 terminator — also pure; the handler
+%%% (janus_http_proxy) owns gun/cowboy side effects.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_protocol_translate).
+
+-include("janus_protocol_translate.hrl").
 
 -export([
     normalize_protocol/1,
     wants_stream/1,
     translate_request/3,
     translate_response/3,
-    default_max_tokens/0
+    default_max_tokens/0,
+    %% Streaming translate (Slice A)
+    new_sse_st/0,
+    sse_events/2,
+    translate_sse/4,
+    finalize_sse/3,
+    stream_translate_blocked/2
 ]).
 
 -define(DEFAULT_MAX_TOKENS, 4096).
@@ -1213,3 +1224,586 @@ copy_if(Src, Dst, Key) ->
         null -> Dst;
         V -> Dst#{Key => V}
     end.
+
+%%====================================================================
+%% Streaming translate (Slice A): parser + event mapper + terminator.
+%% All pure. Frames are iodata the handler writes immediately.
+%%====================================================================
+
+-spec new_sse_st() -> #sse_st{}.
+new_sse_st() ->
+    #sse_st{}.
+
+%% True when a streaming request CANNOT ride the translate path and
+%% must stay on a same-protocol route (client openai_responses, or the
+%% request carries tools / non-text content / n>1). Single source for
+%% the dispatch 400 and the janus-auto tier constraint.
+-spec stream_translate_blocked(atom(), map()) -> boolean().
+stream_translate_blocked(ClientProto, Map) when is_map(Map) ->
+    PairOk =
+        case ClientProto of
+            openai_chat -> true;
+            anthropic_messages -> true;
+            _ -> false
+        end,
+    not PairOk orelse has_non_text_content(Map) orelse has_tools(Map) orelse n_blocked(Map).
+
+n_blocked(Map) ->
+    case maps:get(<<"n">>, Map, 1) of
+        N when is_integer(N), N > 1 -> true;
+        _ -> false
+    end.
+
+has_tools(Map) ->
+    case maps:get(<<"tools">>, Map, undefined) of
+        L when is_list(L), L =/= [] -> true;
+        _ -> false
+    end.
+
+%%%-------------------------------------------------------------------
+%%% sse_events/2 — SSE wire parser
+%%%-------------------------------------------------------------------
+
+%% Bin holds the bytes not yet consumed since the last event dispatch:
+%% an event's lines only leave Bin at its blank-line terminator, so a
+%% chunk split mid-event keeps the whole pending region in Rest.
+-spec sse_events(binary(), binary()) ->
+    {ok, [map()], binary()} | {error, leftover_cap}.
+sse_events(Buffer, Chunk) when
+    byte_size(Buffer) + byte_size(Chunk) > ?SSE_LEFTOVER_CAP
+->
+    {error, leftover_cap};
+sse_events(Buffer, Chunk) ->
+    sse_loop(<<Buffer/binary, Chunk/binary>>, none, [], []).
+
+sse_loop(Bin, Ev, Datas, Acc) ->
+    case binary:split(Bin, <<"\n">>) of
+        [_Incomplete] ->
+            {ok, lists:reverse(Acc), Bin};
+        [Line0, Rest] ->
+            Line = strip_cr(Line0),
+            case Line of
+                <<>> ->
+                    case Datas of
+                        [] ->
+                            sse_loop(Rest, none, [], Acc);
+                        _ ->
+                            sse_loop(Rest, none, [], [sse_event(Ev, Datas) | Acc])
+                    end;
+                <<":", _/binary>> ->
+                    %% SSE comment (keepalive) — never an event.
+                    sse_loop(Rest, Ev, Datas, Acc);
+                _ ->
+                    {Field, Value} =
+                        case binary:split(Line, <<":">>) of
+                            [F, V] -> {F, strip_one_space(V)};
+                            [F] -> {F, <<>>}
+                        end,
+                    case Field of
+                        <<"event">> ->
+                            sse_loop(Rest, Value, Datas, Acc);
+                        <<"data">> ->
+                            case byte_size(Value) > ?SSE_LEFTOVER_CAP of
+                                true -> {error, leftover_cap};
+                                false -> sse_loop(Rest, Ev, [Value | Datas], Acc)
+                            end;
+                        _ ->
+                            %% id:/retry:/unknown fields are ignored.
+                            sse_loop(Rest, Ev, Datas, Acc)
+                    end
+            end
+    end.
+
+strip_cr(Line) ->
+    case byte_size(Line) > 0 andalso binary:last(Line) =:= 13 of
+        true -> binary:part(Line, 0, byte_size(Line) - 1);
+        false -> Line
+    end.
+
+strip_one_space(<<$\s, V/binary>>) -> V;
+strip_one_space(V) -> V.
+
+%% Anthropic events carry the type on the `event:` line; OpenAI chunks
+%% have no event line. [DONE] becomes a bare done marker.
+sse_event(Ev, Datas) ->
+    Data = iolist_to_binary(lists:join(<<"\n">>, lists:reverse(Datas))),
+    Decoded =
+        case thoas:decode(Data) of
+            {ok, Map} when is_map(Map) -> Map;
+            _ -> Data
+        end,
+    case Data of
+        <<"[DONE]">> -> #{type => <<"done">>, data => <<>>};
+        _ when Ev =:= none -> #{type => <<"chunk">>, data => Decoded};
+        _ -> #{type => Ev, data => Decoded}
+    end.
+
+%%%-------------------------------------------------------------------
+%%% Frame helpers
+%%%-------------------------------------------------------------------
+
+%% One frame = one complete SSE event as a flat binary (the handler
+%% writes frames verbatim; tests assert on them directly).
+chat_frame(Map) ->
+    iolist_to_binary([<<"data: ">>, thoas:encode(Map), <<"\n\n">>]).
+
+anthropic_frame(Event, Map) ->
+    iolist_to_binary([<<"event: ">>, Event, <<"\ndata: ">>, thoas:encode(Map), <<"\n\n">>]).
+
+chat_synthetic_id() ->
+    <<"chatcmpl-", (integer_to_binary(erlang:unique_integer([positive]), 16))/binary>>.
+
+anthropic_synthetic_id() ->
+    Hex = string:lowercase(integer_to_binary(erlang:unique_integer([positive]), 16)),
+    <<"msg_", (binary:part(Hex, 0, min(8, byte_size(Hex))))/binary>>.
+
+int_or_undef(V) when is_integer(V), V >= 0 -> V;
+int_or_undef(_) -> undefined.
+
+input_or_zero(undefined) -> 0;
+input_or_zero(V) when is_integer(V), V >= 0 -> V.
+
+bin_or(B, _Default) when is_binary(B), B =/= <<>> -> B;
+bin_or(_, Default) -> Default.
+
+trunc_200(B) when byte_size(B) > 200 ->
+    binary:part(B, 0, 200);
+trunc_200(B) ->
+    B.
+
+created_now(#sse_st{created = C}) when is_integer(C) ->
+    C;
+created_now(_) ->
+    erlang:system_time(second).
+
+%%%-------------------------------------------------------------------
+%%% translate_sse/4 — provider Anthropic -> client Chat
+%%%-------------------------------------------------------------------
+
+-spec translate_sse(atom(), atom(), map(), #sse_st{}) ->
+    {ok, [iodata()], #sse_st{}} | {error, translate_unsupported, #sse_st{}}.
+translate_sse(openai_chat, anthropic_messages, Event, St) ->
+    anthro_to_chat(Event, St);
+translate_sse(anthropic_messages, openai_chat, Event, St) ->
+    chat_to_anthropic(Event, St);
+translate_sse(_ClientProto, _ProviderProto, _Event, St) ->
+    {error, translate_unsupported, St}.
+anthro_to_chat(#{type := <<"ping">>}, St) ->
+    {ok, [<<": ping\n\n">>], St};
+anthro_to_chat(#{type := <<"message_start">>, data := D}, St) when
+    is_map(D)
+->
+    Msg = maps:get(<<"message">>, D, #{}),
+    Id = bin_or(maps:get(<<"id">>, Msg, undefined), chat_synthetic_id()),
+    Model = bin_or(maps:get(<<"model">>, Msg, undefined), <<"unknown">>),
+    Created = created_now(St),
+    U = maps:get(<<"usage">>, Msg, #{}),
+    InTok = int_or_undef(maps:get(<<"input_tokens">>, U, undefined)),
+    Chunk = #{
+        <<"id">> => Id,
+        <<"object">> => <<"chat.completion.chunk">>,
+        <<"created">> => Created,
+        <<"model">> => Model,
+        <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{<<"role">> => <<"assistant">>}}]
+    },
+    {ok, [chat_frame(Chunk)], St#sse_st{
+        role_sent = true, msg_id = Id, model = Model, created = Created, in_tokens = InTok
+    }};
+anthro_to_chat(#{type := <<"message_start">>}, St) ->
+    %% Undecodable data: skip, never crash the fold.
+    {ok, [], St};
+anthro_to_chat(#{type := <<"content_block_start">>, data := D}, St) when
+    is_map(D)
+->
+    B = maps:get(<<"content_block">>, D, #{}),
+    case maps:get(<<"type">>, B, undefined) of
+        <<"text">> ->
+            emit_chat_first_delta(<<"content">>, maps:get(<<"text">>, B, undefined), St#sse_st{block_kind = text});
+        <<"thinking">> ->
+            emit_chat_first_delta(
+                <<"reasoning_content">>, maps:get(<<"thinking">>, B, undefined), St#sse_st{block_kind = thinking}
+            );
+        _ ->
+            {error, translate_unsupported, St}
+    end;
+anthro_to_chat(#{type := <<"content_block_start">>}, St) ->
+    {ok, [], St};
+anthro_to_chat(#{type := <<"content_block_delta">>, data := D}, St) when
+    is_map(D)
+->
+    Delta = maps:get(<<"delta">>, D, #{}),
+    case maps:get(<<"type">>, Delta, undefined) of
+        <<"text_delta">> ->
+            chat_delta_frame(<<"content">>, maps:get(<<"text">>, Delta, undefined), St);
+        <<"thinking_delta">> ->
+            chat_delta_frame(<<"reasoning_content">>, maps:get(<<"thinking">>, Delta, undefined), St);
+        <<"signature_delta">> ->
+            {ok, [], St};
+        <<"input_json_delta">> ->
+            {error, translate_unsupported, St};
+        _ ->
+            {ok, [], St}
+    end;
+anthro_to_chat(#{type := <<"content_block_delta">>}, St) ->
+    {ok, [], St};
+anthro_to_chat(#{type := <<"message_delta">>, data := D}, St) when
+    is_map(D)
+->
+    StopIn = maps:get(<<"stop_reason">>, maps:get(<<"delta">>, D, #{}), undefined),
+    FR = chat_finish_reason(StopIn),
+    U = maps:get(<<"usage">>, D, #{}),
+    OutTok = int_or_undef(maps:get(<<"output_tokens">>, U, undefined)),
+    Chunk = #{
+        <<"id">> => bin_or(St#sse_st.msg_id, chat_synthetic_id()),
+        <<"object">> => <<"chat.completion.chunk">>,
+        <<"created">> => created_now(St),
+        <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+        <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{}, <<"finish_reason">> => FR}]
+    },
+    %% Usage is NEVER on the finish chunk — message_stop emits it.
+    {ok, [chat_frame(Chunk)], St#sse_st{finish_sent = true, finish_reason = FR, out_tokens = OutTok}};
+anthro_to_chat(#{type := <<"message_stop">>}, St) ->
+    {UsageFrames, St1} = chat_pending_usage(St),
+    {ok, UsageFrames ++ [<<"data: [DONE]\n\n">>], St1#sse_st{terminal_sent = true}};
+anthro_to_chat(#{type := <<"error">>}, St) ->
+    {error, translate_unsupported, St};
+anthro_to_chat(#{type := _}, St) ->
+    %% content_block_stop / unknown events: no-op.
+    {ok, [], St}.
+
+chat_to_anthropic(#{type := <<"done">>}, St) ->
+    {CloseFrames, St1} = close_open_block(St),
+    {DeltaFrames, St2} = anthropic_pending_stop(St1),
+    {ok,
+        CloseFrames ++ DeltaFrames ++ [anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>})],
+        St2#sse_st{terminal_sent = true}};
+chat_to_anthropic(#{type := <<"chunk">>, data := D}, St) when
+    is_map(D)
+->
+    case maps:get(<<"error">>, D, undefined) of
+        Err when is_map(Err) ->
+            {error, translate_unsupported, St};
+        _ ->
+            {StartFrames, St1} = anthropic_ensure_start(D, St),
+            chat_chunk_body(D, St1, StartFrames)
+    end;
+chat_to_anthropic(#{type := _}, St) ->
+    %% Undecodable data (binary): skip.
+    {ok, [], St}.
+%% Emit a start object's non-empty text/thinking as the first delta.
+emit_chat_first_delta(Field, Text, St) when is_binary(Text), Text =/= <<>> ->
+    chat_delta_frame(Field, Text, St);
+emit_chat_first_delta(_Field, _Text, St) ->
+    {ok, [], St}.
+
+chat_delta_frame(_Field, undefined, St) ->
+    {ok, [], St};
+chat_delta_frame(_Field, <<>>, St) ->
+    {ok, [], St};
+chat_delta_frame(Field, Text, St) when is_binary(Text) ->
+    Chunk = #{
+        <<"id">> => bin_or(St#sse_st.msg_id, chat_synthetic_id()),
+        <<"object">> => <<"chat.completion.chunk">>,
+        <<"created">> => created_now(St),
+        <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+        <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{Field => Text}}]
+    },
+    {ok, [chat_frame(Chunk)], St}.
+
+chat_finish_reason(<<"end_turn">>) -> <<"stop">>;
+chat_finish_reason(<<"stop_sequence">>) -> <<"stop">>;
+chat_finish_reason(<<"max_tokens">>) -> <<"length">>;
+chat_finish_reason(<<"refusal">>) -> <<"content_filter">>;
+chat_finish_reason(<<"pause_turn">>) -> <<"stop">>;
+chat_finish_reason(undefined) -> <<"stop">>;
+chat_finish_reason(Other) when is_binary(Other) ->
+    _ = logger:warning(#{what => janus_translate_sse_unknown_stop, stop_reason => Other}),
+    <<"stop">>.
+
+%% At most one empty-choices usage chunk; omitted when both unknown.
+chat_pending_usage(#sse_st{usage_sent = true} = St) ->
+    {[], St};
+chat_pending_usage(St) ->
+    case {St#sse_st.in_tokens, St#sse_st.out_tokens} of
+        {undefined, undefined} ->
+            {[], St};
+        {In, Out} ->
+            Usage0 =
+                case In of
+                    undefined -> #{};
+                    _ -> #{<<"prompt_tokens">> => In}
+                end,
+            Usage1 =
+                case Out of
+                    undefined -> Usage0;
+                    _ -> Usage0#{<<"completion_tokens">> => Out}
+                end,
+            Chunk = #{
+                <<"id">> => bin_or(St#sse_st.msg_id, chat_synthetic_id()),
+                <<"object">> => <<"chat.completion.chunk">>,
+                <<"created">> => created_now(St),
+                <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+                <<"choices">> => [],
+                <<"usage">> => Usage1
+            },
+            {[chat_frame(Chunk)], St#sse_st{usage_sent = true}}
+    end.
+
+%%%-------------------------------------------------------------------
+%%% translate_sse/4 — provider Chat -> client Anthropic
+%%%-------------------------------------------------------------------
+
+%% Emit message_start on the first provider chunk (role optional).
+anthropic_ensure_start(_D, #sse_st{role_sent = true} = St) ->
+    {[], St};
+anthropic_ensure_start(D, St) ->
+    Msg = #{
+        <<"type">> => <<"message">>,
+        <<"id">> => bin_or(maps:get(<<"id">>, D, undefined), anthropic_synthetic_id()),
+        <<"role">> => <<"assistant">>,
+        <<"model">> => bin_or(maps:get(<<"model">>, D, undefined), <<"unknown">>),
+        <<"content">> => [],
+        <<"stop_reason">> => null,
+        <<"usage">> => #{
+            <<"input_tokens">> => input_or_zero(St#sse_st.in_tokens),
+            <<"output_tokens">> => 0
+        }
+    },
+    Frame = anthropic_frame(
+        <<"message_start">>, #{<<"type">> => <<"message_start">>, <<"message">> => Msg}
+    ),
+    {[Frame], St#sse_st{role_sent = true}}.
+
+chat_chunk_body(D, St, Acc) ->
+    Choice = first_choice(D),
+    Delta = maps:get(<<"delta">>, Choice, #{}),
+    case maps:get(<<"tool_calls">>, Delta, undefined) of
+        TC when TC =/= undefined ->
+            {error, translate_unsupported, St};
+        _ ->
+            chat_chunk_usage(D, Choice, Delta, St, Acc)
+    end.
+
+chat_chunk_usage(D, Choice, Delta, St, Acc) ->
+    St1 =
+        case maps:get(<<"usage">>, D, undefined) of
+            UMap when is_map(UMap) ->
+                In = int_or_undef(maps:get(<<"prompt_tokens">>, UMap, undefined)),
+                Out = int_or_undef(maps:get(<<"completion_tokens">>, UMap, undefined)),
+                merge_tokens(St, In, Out);
+            _ ->
+                St
+        end,
+    case {maps:get(<<"finish_reason">>, Choice, undefined), St1#sse_st.finish_sent} of
+        {FR, false} when is_binary(FR), FR =/= <<>> ->
+            {StopFrames, St2} = close_open_block(St1),
+            St3 = St2#sse_st{
+                finish_sent = true,
+                stop_reason = anthropic_stop_reason(FR),
+                finish_reason = FR
+            },
+            %% message_delta is delayed until the usage chunk or [DONE].
+            chat_flush_or_delta(Delta, St3, Acc ++ StopFrames);
+        _ ->
+            chat_flush_or_delta(Delta, St1, Acc)
+    end.
+
+%% A usage chunk arriving after finish flushes message_delta now.
+chat_flush_or_delta(Delta, St, Acc) ->
+    case {St#sse_st.finish_sent, St#sse_st.usage_sent, has_usage_evidence(St)} of
+        {true, false, true} ->
+            {DeltaFrames, St1} = anthropic_pending_stop(St),
+            chat_text_reasoning(Delta, St1, Acc ++ DeltaFrames);
+        _ ->
+            chat_text_reasoning(Delta, St, Acc)
+    end.
+
+has_usage_evidence(#sse_st{in_tokens = In, out_tokens = Out}) ->
+    In =/= undefined orelse Out =/= undefined.
+
+chat_text_reasoning(Delta, St, Acc) ->
+    %% Content first, then reasoning — one transition per chunk.
+    {Frames1, St1} =
+        case maps:get(<<"content">>, Delta, undefined) of
+            C when is_binary(C), C =/= <<>> ->
+                open_block_and_delta(text, <<"text">>, C, St, Acc);
+            _ ->
+                {Acc, St}
+        end,
+    {Frames2, St2} =
+        case maps:get(<<"reasoning_content">>, Delta, undefined) of
+            R when is_binary(R), R =/= <<>> ->
+                open_block_and_delta(thinking, <<"thinking">>, R, St1, Frames1);
+            _ ->
+                {Frames1, St1}
+        end,
+    {ok, Frames2, St2}.
+
+%% Transition into the requested block kind if needed, then the delta.
+open_block_and_delta(Kind, TextField, Text, St, Acc) ->
+    {TransFrames, St1} =
+        case St#sse_st.block_kind of
+            Kind when St#sse_st.block =/= undefined ->
+                {[], St};
+            _ ->
+                {Stop, St0} = close_open_block(St),
+                Idx = St0#sse_st.next_block,
+                BlockField =
+                    case Kind of
+                        text -> #{<<"type">> => <<"text">>, <<"text">> => <<>>};
+                        thinking -> #{<<"type">> => <<"thinking">>, <<"thinking">> => <<>>}
+                    end,
+                Start = anthropic_frame(
+                    <<"content_block_start">>,
+                    #{<<"index">> => Idx, <<"content_block">> => BlockField}
+                ),
+                {Stop ++ [Start], St0#sse_st{block = Idx, block_kind = Kind, next_block = Idx + 1}}
+        end,
+    Delta = anthropic_frame(
+        <<"content_block_delta">>,
+        #{
+            <<"index">> => St1#sse_st.block,
+            <<"delta">> => #{<<"type">> => block_delta_type(Kind), TextField => Text}
+        }
+    ),
+    {Acc ++ TransFrames ++ [Delta], St1}.
+
+block_delta_type(text) -> <<"text_delta">>;
+block_delta_type(thinking) -> <<"thinking_delta">>.
+
+close_open_block(#sse_st{block = undefined} = St) ->
+    {[], St};
+close_open_block(St) ->
+    Frame = anthropic_frame(<<"content_block_stop">>, #{<<"index">> => St#sse_st.block}),
+    {[Frame], St#sse_st{block = undefined, block_kind = undefined}}.
+
+anthropic_stop_reason(<<"stop">>) -> <<"end_turn">>;
+anthropic_stop_reason(<<"length">>) -> <<"max_tokens">>;
+anthropic_stop_reason(<<"content_filter">>) -> <<"refusal">>;
+anthropic_stop_reason(Other) when is_binary(Other), Other =/= <<>> ->
+    _ = logger:warning(#{what => janus_translate_sse_unknown_stop, stop_reason => Other}),
+    <<"end_turn">>;
+anthropic_stop_reason(_) ->
+    <<"end_turn">>.
+
+%% The delayed message_delta (stop + usage) — emitted once, either at
+%% the usage chunk or at [DONE]/finalize.
+anthropic_pending_stop(#sse_st{finish_sent = false} = St) ->
+    %% No finish seen at all (EOF): synthesize the default stop.
+    anthropic_pending_stop(St#sse_st{finish_sent = true, stop_reason = <<"end_turn">>});
+anthropic_pending_stop(#sse_st{usage_sent = true} = St) ->
+    {[], St};
+anthropic_pending_stop(St) ->
+    Usage0 =
+        case St#sse_st.in_tokens of
+            undefined -> #{};
+            In -> #{<<"input_tokens">> => In}
+        end,
+    Usage =
+        case St#sse_st.out_tokens of
+            undefined -> Usage0;
+            Out -> Usage0#{<<"output_tokens">> => Out}
+        end,
+    StopReason = stop_reason_of(St),
+    DeltaPart = #{
+        <<"type">> => <<"message_delta">>,
+        <<"delta">> => #{<<"stop_reason">> => StopReason, <<"stop_sequence">> => null}
+    },
+    Map =
+        case map_size(Usage) of
+            0 -> DeltaPart;
+            _ -> DeltaPart#{<<"usage">> => Usage}
+        end,
+    {[anthropic_frame(<<"message_delta">>, Map)], St#sse_st{usage_sent = true}}.
+
+merge_tokens(St, In, Out) ->
+    St#sse_st{
+        in_tokens = first_defined(In, St#sse_st.in_tokens),
+        out_tokens = first_defined(Out, St#sse_st.out_tokens)
+    }.
+
+first_defined(undefined, Existing) -> Existing;
+first_defined(New, _Existing) -> New.
+
+first_choice(D) ->
+    case maps:get(<<"choices">>, D, []) of
+        [C | _] when is_map(C) -> C;
+        _ -> #{}
+    end.
+
+%%%-------------------------------------------------------------------
+%%% finalize_sse/3 — exactly one terminator
+%%%-------------------------------------------------------------------
+
+-spec finalize_sse(
+    atom(), normal | disconnect | {error, invalid_request | upstream, binary()}, #sse_st{}
+) ->
+    {ok, [iodata()], #sse_st{}}.
+finalize_sse(_ClientProto, _Reason, #sse_st{terminal_sent = true} = St) ->
+    {ok, [], St};
+finalize_sse(_ClientProto, disconnect, St) ->
+    %% Frames are discarded — the socket cannot receive them.
+    {ok, [], St#sse_st{terminal_sent = true}};
+finalize_sse(openai_chat, normal, St) ->
+    {FinishFrames, St1} =
+        case St#sse_st.finish_sent of
+            true ->
+                {[], St};
+            false ->
+                Chunk = #{
+                    <<"id">> => bin_or(St#sse_st.msg_id, chat_synthetic_id()),
+                    <<"object">> => <<"chat.completion.chunk">>,
+                    <<"created">> => created_now(St),
+                    <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+                    <<"choices">> => [
+                        #{<<"index">> => 0, <<"delta">> => #{}, <<"finish_reason">> => <<"stop">>}
+                    ]
+                },
+                {[chat_frame(Chunk)], St#sse_st{finish_sent = true}}
+        end,
+    {UsageFrames, St2} = chat_pending_usage(St1),
+    {ok, FinishFrames ++ UsageFrames ++ [<<"data: [DONE]\n\n">>], St2#sse_st{terminal_sent = true}};
+finalize_sse(anthropic_messages, normal, St) ->
+    {ZeroFrames, St1} =
+        case St#sse_st.next_block of
+            0 ->
+                Start = anthropic_frame(
+                    <<"content_block_start">>,
+                    #{<<"index">> => 0, <<"content_block">> => #{<<"type">> => <<"text">>, <<"text">> => <<>>}}
+                ),
+                Stop = anthropic_frame(<<"content_block_stop">>, #{<<"index">> => 0}),
+                {[Start, Stop], St#sse_st{next_block = 1}};
+            _ ->
+                {[], St}
+        end,
+    {CloseFrames, St2} = close_open_block(St1),
+    {DeltaFrames, St3} = anthropic_pending_stop(St2),
+    StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
+    {ok, ZeroFrames ++ CloseFrames ++ DeltaFrames ++ [StopFrame], St3#sse_st{terminal_sent = true}};
+finalize_sse(openai_chat, {error, Kind, Msg}, St) ->
+    Err = chat_frame(#{
+        <<"error">> => #{<<"message">> => trunc_200(Msg), <<"type">> => error_type(Kind)}
+    }),
+    {ok, [Err, <<"data: [DONE]\n\n">>], St#sse_st{terminal_sent = true}};
+finalize_sse(anthropic_messages, {error, Kind, Msg}, St) ->
+    Err = anthropic_frame(
+        <<"error">>,
+        #{
+            <<"type">> => <<"error">>,
+            <<"error">> => #{<<"type">> => error_type(Kind), <<"message">> => trunc_200(Msg)}
+        }
+    ),
+    StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
+    {ok, [Err, StopFrame], St#sse_st{terminal_sent = true}}.
+
+error_type(invalid_request) -> <<"invalid_request_error">>;
+error_type(_) -> <<"api_error">>.
+
+%% Stop reason for the delayed message_delta: the mapped value when
+%% present, else derived from the raw finish_reason, else end_turn.
+stop_reason_of(#sse_st{stop_reason = SR}) when is_binary(SR), SR =/= <<>> ->
+    SR;
+stop_reason_of(#sse_st{finish_reason = FR}) when is_binary(FR), FR =/= <<>> ->
+    anthropic_stop_reason(FR);
+stop_reason_of(_) ->
+    <<"end_turn">>.

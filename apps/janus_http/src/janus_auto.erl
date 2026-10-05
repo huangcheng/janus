@@ -65,10 +65,10 @@ maybe_route(Name, ReqMap) when is_binary(Name), is_map(ReqMap) ->
     maybe_route(Name, ReqMap, #{}).
 
 %% Constraint may carry #{client_proto => atom(), stream => boolean()}:
-%% a STREAMING client cannot stream through a cross-protocol provider
-%% (translate is non-stream only), so tier resolution skips
-%% protocol-incompatible members instead of returning a target the
-%% proxy would reject with 400 stream_requires_native.
+%% the proxy sets stream=true only when the streaming TRANSLATE path
+%% cannot serve the request (tools/vision/n>1, or a responses client),
+%% so tier resolution skips protocol-incompatible members exactly for
+%% those requests instead of returning a target the proxy would reject.
 maybe_route(Name, ReqMap, Constraint) when
     is_binary(Name), is_map(ReqMap), is_map(Constraint)
 ->

@@ -5,6 +5,8 @@
 %%%-------------------------------------------------------------------
 -module(janus_http_proxy).
 
+-include("janus_protocol_translate.hrl").
+
 -export([handle/5, model_field/1]).
 %% Exported for eunit (usage capture helpers).
 -export([maybe_trim/2, maybe_inject_stream_usage/4]).
@@ -26,6 +28,8 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_usage_head),
     erase(janus_usage_tail),
     erase(janus_req_model),
+    erase(janus_sse_state),
+    erase(janus_sse_tracked),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
         agent => Agent,
@@ -80,9 +84,13 @@ extract_model(_Proto, Map) ->
     end.
 
 proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
+    WantStream = janus_protocol_translate:wants_stream(Map),
+    %% janus-auto skips cross-protocol tier members ONLY when the
+    %% translate path cannot serve the stream (tools/vision/n>1 or a
+    %% responses client); plain text/thinking streams translate now.
     AutoConstraint = #{
         client_proto => ClientProto,
-        stream => janus_protocol_translate:wants_stream(Map)
+        stream => WantStream andalso janus_protocol_translate:stream_translate_blocked(ClientProto, Map)
     },
     case janus_auto:maybe_route(ModelName, Map, AutoConstraint) of
         {ok, Target} ->
@@ -176,21 +184,44 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
     Native = ClientProto =:= ProviderProto,
     case {Native, WantStream} of
         {false, true} ->
-            _ = release_route_inflight(Route),
-            reply_err(
-                ClientProto,
-                Req,
-                State,
-                400,
-                <<"stream_requires_native_protocol">>,
-                <<"streaming requires a same-protocol provider route">>
-            );
+            case janus_protocol_translate:stream_translate_blocked(ClientProto, Map) of
+                false ->
+                    call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
+                true ->
+                    _ = release_route_inflight(Route),
+                    case translatable_stream_pair(ClientProto, ProviderProto) of
+                        true ->
+                            %% Tools/vision/n>1 on a translate pair: the
+                            %% stream translate is text+thinking only.
+                            reply_err(
+                                ClientProto,
+                                Req,
+                                State,
+                                400,
+                                <<"translate_unsupported">>,
+                                <<"streaming translate supports text and thinking only">>
+                            );
+                        false ->
+                            reply_err(
+                                ClientProto,
+                                Req,
+                                State,
+                                400,
+                                <<"stream_requires_native_protocol">>,
+                                <<"streaming requires a same-protocol provider route">>
+                            )
+                    end
+            end;
         {true, _} ->
             {Body2, Map2} = maybe_inject_stream_usage(ClientProto, WantStream, Body, Map),
             call_native(ClientProto, ProviderProto, Route, Body2, Map2, WantStream, Req, State);
         {false, false} ->
-            call_translate(ClientProto, ProviderProto, Route, Map, Req, State)
+            call_translate(ClientProto, ProviderProto, Route, Map, false, Req, State)
     end.
+
+translatable_stream_pair(openai_chat, anthropic_messages) -> true;
+translatable_stream_pair(anthropic_messages, openai_chat) -> true;
+translatable_stream_pair(_, _) -> false.
 
 call_native(ClientProto, ProviderProto, Route, Body, Map, WantStream, Req, State) ->
     Opts = #{stream => WantStream},
@@ -209,27 +240,205 @@ call_native(ClientProto, ProviderProto, Route, Body, Map, WantStream, Req, State
         end,
     handle_upstream(ClientProto, ProviderProto, Result, Route, false, Req, State).
 
-call_translate(ClientProto, ProviderProto, Route, Map, Req, State) ->
+call_translate(ClientProto, ProviderProto, Route, Map, WantStream, Req, State) ->
     case janus_protocol_translate:translate_request(ClientProto, ProviderProto, Map) of
         {error, {translate_unsupported, Msg}} ->
             _ = release_route_inflight(Route),
             reply_err(ClientProto, Req, State, 400, <<"translate_unsupported">>, Msg);
-        {ok, ProviderMap} ->
-            OutBody = thoas:encode(ProviderMap),
-            Result =
-                try
-                    call_adapter(ProviderProto, Route, OutBody, ProviderMap, #{stream => false})
-                catch
-                    Class:CatchReason:Stack ->
-                        logger:error(#{
-                            what => janus_proxy_crashed,
-                            class => Class,
-                            reason => sanitize_upstream_error(CatchReason),
-                            stack => janus_seed:redact_stack(Stack)
-                        }),
-                        {error, crashed}
+        {ok, ProviderMap0} ->
+            %% chat_to_messages hardcodes stream=false; the streaming
+            %% leg overrides it and drops any client stream_options
+            %% (the gateway injects its own when needed).
+            ProviderMap1 =
+                case WantStream of
+                    true -> maps:remove(<<"stream_options">>, ProviderMap0#{<<"stream">> => true});
+                    false -> ProviderMap0
                 end,
-            handle_upstream(ClientProto, ProviderProto, Result, Route, true, Req, State)
+            {InjectUsed, ProviderMap} =
+                maybe_inject_include_usage(ClientProto, ProviderProto, WantStream, ProviderMap1),
+            OutBody = thoas:encode(ProviderMap),
+            Result = upstream_call(ProviderProto, Route, OutBody, ProviderMap, WantStream),
+            Result2 = maybe_retry_include_usage(
+                ClientProto, ProviderProto, Route, ProviderMap, InjectUsed, WantStream, Result
+            ),
+            case {WantStream, Result2} of
+                {true, {ok, stream, Status, Headers, Drain}} when Status < 400 ->
+                    handle_translate_stream(
+                        ClientProto, ProviderProto, Status, Headers, Drain, Route, Req, State
+                    );
+                {true, {ok, stream, Status, Headers, Drain}} when Status >= 400 ->
+                    %% Error-status stream: collect, then the normal
+                    %% non-stream error reply path (retryable upstream state).
+                    case collect_drain(Drain) of
+                        {ok, RespBody} ->
+                            handle_upstream(
+                                ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, true, Req, State
+                            );
+                        {error, Reason} ->
+                            handle_upstream(ClientProto, ProviderProto, {error, Reason}, Route, true, Req, State)
+                    end;
+                _ ->
+                    handle_upstream(ClientProto, ProviderProto, Result2, Route, true, Req, State)
+            end
+    end.
+
+upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
+    try
+        call_adapter(ProviderProto, Route, Body, Map, #{stream => WantStream})
+    catch
+        Class:CatchReason:Stack ->
+            logger:error(#{
+                what => janus_proxy_crashed,
+                class => Class,
+                reason => sanitize_upstream_error(CatchReason),
+                stack => janus_seed:redact_stack(Stack)
+            }),
+            {error, crashed}
+    end.
+
+%% Slice A include_usage: only provider openai_chat + client Messages.
+%% The injected field rides the TRANSLATED provider body (the client's
+%% own stream_options never survives translation).
+maybe_inject_include_usage(anthropic_messages, openai_chat, true, ProviderMap) ->
+    Inject = application:get_env(janus_core, usage_inject_include_usage, true),
+    case Inject of
+        true -> {true, ProviderMap#{<<"stream_options">> => #{<<"include_usage">> => true}}};
+        false -> {false, ProviderMap}
+    end;
+maybe_inject_include_usage(_, _, _, ProviderMap) ->
+    {false, ProviderMap}.
+
+%% Some strict OpenAI-compatible upstreams 400 on stream_options.
+%% Retry EXACTLY once, only on a pre-200 400, re-encoding the already
+%% translated body without stream_options; the discarded attempt is
+%% never tracked (no usage row, no counters).
+maybe_retry_include_usage(_ClientProto, ProviderProto, Route, ProviderMap, true, true, {ok, stream, 400, _H, Drain}) ->
+    _ = collect_drain(Drain),
+    ProviderMap2 = maps:remove(<<"stream_options">>, ProviderMap),
+    upstream_call(ProviderProto, Route, thoas:encode(ProviderMap2), ProviderMap2, true);
+maybe_retry_include_usage(_, _, _, _, _, _, Result) ->
+    Result.
+
+%%%--------------------------------------------------------------------
+%%% Streaming translate (Slice A): fold provider SSE -> client frames
+%%%--------------------------------------------------------------------
+
+handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Route, Req, State) ->
+    put(janus_sse_state, janus_protocol_translate:new_sse_st()),
+    put(janus_sse_tracked, false),
+    Req2 = cowboy_req:stream_reply(Status, filter_stream_headers(Headers), Req),
+    try
+        Drain(fun(Chunk) -> translate_chunk(ClientProto, ProviderProto, Chunk, Req2) end)
+    of
+        ok ->
+            finish_translate_stream(ClientProto, Route, Req2, State, normal)
+    catch
+        throw:{janus_translate, Kind, Msg} ->
+            finish_translate_stream(ClientProto, Route, Req2, State, {error, Kind, Msg});
+        throw:janus_client_disconnect ->
+            %% Drain aborted from a dead client socket; the drain's
+            %% after-clause already closed gun. No frames can be sent.
+            finalize_quiet(ClientProto),
+            translate_track(502, Route, ClientProto),
+            _ = release_route_inflight(Route),
+            {ok, Req2, State};
+        Class:Reason ->
+            %% EXIT path: request process would otherwise die without a
+            %% usage row (socket close, cowboy transport error).
+            _ = logger:warning(#{
+                what => janus_translate_stream_exit,
+                class => Class,
+                reason => sanitize_upstream_error(Reason)
+            }),
+            finalize_quiet(ClientProto),
+            translate_track(502, Route, ClientProto),
+            _ = release_route_inflight(Route),
+            {ok, Req2, State}
+    end.
+
+%% Drain callback: parse + translate + write each frame immediately.
+translate_chunk(ClientProto, ProviderProto, Chunk, Req2) ->
+    capture_usage_chunk(Chunk),
+    St0 = get(janus_sse_state),
+    case janus_protocol_translate:sse_events(St0#sse_st.leftover, Chunk) of
+        {error, leftover_cap} ->
+            put(janus_sse_state, St0),
+            throw({janus_translate, upstream, <<"upstream SSE frame exceeds 1MiB">>});
+        {ok, Events, Rest} ->
+            St1 = St0#sse_st{leftover = Rest},
+            St2 =
+                lists:foldl(
+                    fun(Ev, StAcc) ->
+                        guard_chat_multi_choice(ProviderProto, Ev),
+                        case janus_protocol_translate:translate_sse(ClientProto, ProviderProto, Ev, StAcc) of
+                            {ok, Frames, StNext} ->
+                                write_frames(Frames, Req2),
+                                StNext;
+                            {error, translate_unsupported, StNext} ->
+                                put(janus_sse_state, StNext),
+                                throw(
+                                    {janus_translate, upstream,
+                                        <<"upstream sent an unsupported stream construct">>}
+                                )
+                        end
+                    end,
+                    St1,
+                    Events
+                ),
+            put(janus_sse_state, St2)
+    end.
+
+%% Defensive: a misbehaving OpenAI-compatible proxy emitting extra
+%% choices would corrupt the translated single-choice Anthropic face.
+guard_chat_multi_choice(openai_chat, #{type := <<"chunk">>, data := D}) when is_map(D) ->
+    case maps:get(<<"choices">>, D, []) of
+        Choices when is_list(Choices), length(Choices) > 1 ->
+            throw({janus_translate, invalid_request, <<"provider emitted multiple choices">>});
+        _ ->
+            ok
+    end;
+guard_chat_multi_choice(_, _) ->
+    ok.
+
+write_frames(Frames, Req2) ->
+    lists:foreach(fun(F) -> _ = (catch cowboy_req:stream_body(iolist_to_binary(F), nofin, Req2)) end, Frames).
+
+finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
+    St0 = get(janus_sse_state),
+    {ok, Frames, St1} = janus_protocol_translate:finalize_sse(ClientProto, Reason, St0),
+    put(janus_sse_state, St1),
+    case Reason of
+        normal ->
+            TrackStatus = 200,
+            _ = note_key_success(Route),
+            _ = note_route_success(Route);
+        {error, invalid_request, _} ->
+            TrackStatus = 400;
+        {error, upstream, Msg} ->
+            TrackStatus = 502,
+            _ = note_provider_failure(Route, sanitize_upstream_error(Msg))
+    end,
+    %% Record BEFORE the final frame so a dying client can never cost
+    %% us the usage row.
+    translate_track(TrackStatus, Route, ClientProto),
+    write_frames(Frames, Req2),
+    catch cowboy_req:stream_body(<<>>, fin, Req2),
+    _ = release_route_inflight(Route),
+    {ok, Req2, State}.
+
+finalize_quiet(ClientProto) ->
+    St0 = get(janus_sse_state),
+    {ok, [], St1} = janus_protocol_translate:finalize_sse(ClientProto, disconnect, St0),
+    put(janus_sse_state, St1).
+
+translate_track(Status, Route, ClientProto) ->
+    case get(janus_sse_tracked) of
+        true ->
+            ok;
+        _ ->
+            put(janus_sse_tracked, true),
+            _ = track(Status, Route, stream_usage(ClientProto)),
+            ok
     end.
 
 call_adapter(openai_chat, Route, Body, Map, Opts) ->
@@ -534,7 +743,10 @@ filter_stream_headers(Headers) when is_map(Headers) ->
     Base = #{
         <<"content-type">> => <<"text/event-stream">>,
         <<"cache-control">> => <<"no-cache">>,
-        <<"connection">> => <<"keep-alive">>
+        <<"connection">> => <<"keep-alive">>,
+        %% Disable proxy buffering (nginx/Caddy) so translated frames
+        %% reach the client as they are produced.
+        <<"x-accel-buffering">> => <<"no">>
     },
     case maps:get(<<"content-type">>, Headers, undefined) of
         CT when is_binary(CT) -> Base#{<<"content-type">> => CT};
