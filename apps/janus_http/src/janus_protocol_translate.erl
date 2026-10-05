@@ -1516,8 +1516,13 @@ chat_finish_reason(<<"max_tokens">>) -> <<"length">>;
 chat_finish_reason(<<"refusal">>) -> <<"content_filter">>;
 chat_finish_reason(<<"pause_turn">>) -> <<"stop">>;
 chat_finish_reason(undefined) -> <<"stop">>;
+chat_finish_reason(null) -> <<"stop">>;
 chat_finish_reason(Other) when is_binary(Other) ->
     _ = logger:warning(#{what => janus_translate_sse_unknown_stop, stop_reason => Other}),
+    <<"stop">>;
+chat_finish_reason(_) ->
+    %% JSON null decodes to the atom null; any other shape must not
+    %% crash the fold (function_clause escapes translate_sse/4).
     <<"stop">>.
 
 %% At most one empty-choices usage chunk; omitted when both unknown.
@@ -1764,22 +1769,24 @@ finalize_sse(openai_chat, normal, St) ->
     {UsageFrames, St2} = chat_pending_usage(St1),
     {ok, FinishFrames ++ UsageFrames ++ [<<"data: [DONE]\n\n">>], St2#sse_st{terminal_sent = true}};
 finalize_sse(anthropic_messages, normal, St) ->
+    {StartIfMissing, St0} = anthropic_ensure_start(#{}, St),
     {ZeroFrames, St1} =
-        case St#sse_st.next_block of
+        case St0#sse_st.next_block of
             0 ->
                 Start = anthropic_frame(
                     <<"content_block_start">>,
                     #{<<"index">> => 0, <<"content_block">> => #{<<"type">> => <<"text">>, <<"text">> => <<>>}}
                 ),
                 Stop = anthropic_frame(<<"content_block_stop">>, #{<<"index">> => 0}),
-                {[Start, Stop], St#sse_st{next_block = 1}};
+                {[Start, Stop], St0#sse_st{next_block = 1}};
             _ ->
-                {[], St}
+                {[], St0}
         end,
     {CloseFrames, St2} = close_open_block(St1),
     {DeltaFrames, St3} = anthropic_pending_stop(St2),
     StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
-    {ok, ZeroFrames ++ CloseFrames ++ DeltaFrames ++ [StopFrame], St3#sse_st{terminal_sent = true}};
+    {ok, StartIfMissing ++ ZeroFrames ++ CloseFrames ++ DeltaFrames ++ [StopFrame],
+        St3#sse_st{terminal_sent = true}};
 finalize_sse(openai_chat, {error, Kind, Msg}, St) ->
     Err = chat_frame(#{
         <<"error">> => #{<<"message">> => trunc_200(Msg), <<"type">> => error_type(Kind)}

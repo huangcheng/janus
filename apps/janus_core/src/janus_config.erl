@@ -305,6 +305,17 @@ distribute_settings(Rows) ->
     Settings = maps:get(settings, Rows, []),
     lists:foreach(
         fun
+            (#{key := <<"failover">>, value := V}) ->
+                case decode_json(V) of
+                    {ok, Map} when is_map(Map) ->
+                        %% Same direct-PT convention as auto_router:
+                        %% consumers read persistent_term, never casts.
+                        persistent_term:put({janus, failover_cfg}, Map);
+                    _ ->
+                        logger:warning(#{
+                            what => janus_settings_bad_value, key => failover
+                        })
+                end;
             (#{key := <<"auto_router">>, value := V}) ->
                 case decode_json(V) of
                     {ok, Map} when is_map(Map) ->

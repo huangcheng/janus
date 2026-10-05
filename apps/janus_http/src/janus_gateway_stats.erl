@@ -87,7 +87,8 @@ handle(_Method, undefined, Req) ->
     handle(_Method, [], Req);
 handle(<<"GET">>, [], Req) ->
     Usage = janus_usage:stats(),
-    Stats = #{
+    Stats = janus_http_stats:snapshot(),
+    Stats#{
         generation => janus_config:generation(),
         ready => janus_config:ready(),
         backend => janus_db:select_backend(),

@@ -22,7 +22,10 @@
     note_auth_failure/3,
     release_inflight/1,
     pick_route/2,
-    pick_listing_route/2
+    pick_listing_route/2,
+    %% Entitlement carrier observability (spec Part B/C)
+    bump_stat/1,
+    stats/0
 ]).
 -export([
     init/1,
@@ -37,6 +40,7 @@
 -define(COOLDOWNS, janus_lb_cooldowns).
 -define(INFLIGHT, janus_lb_inflight).
 -define(CURSORS, janus_lb_rr_cursors).
+-define(ENT_STATS, janus_lb_ent_stats).
 -define(DEFAULT_COOLDOWN_MS, 5000).
 -define(AUTH_COOLDOWN_MS, 60000).
 -define(MAX_RETRY_AFTER_MS, 300000).
@@ -118,6 +122,9 @@ init([]) ->
         named_table, set, public, {write_concurrency, true}
     ]),
     Cursors = ets:new(?CURSORS, [
+        named_table, set, public, {write_concurrency, true}
+    ]),
+    _ = ets:new(?ENT_STATS, [
         named_table, set, public, {write_concurrency, true}
     ]),
     logger:info(#{what => janus_lb_started}),
@@ -231,7 +238,7 @@ pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight) ->
             {error, classify_key_failures(Candidates, Cool, Now)};
         _ ->
             Picked = weighted_rr_pick(PickKey, Usable, Cursors),
-            case select_key(Picked, Cool, Cursors, Now) of
+            case select_key(PickKey, Picked, Cool, Cursors, Now) of
                 {ok, Key} ->
                     bump_inflight(route_target(Picked), Inflight),
                     {ok, Picked#{provider_key => Key}};
@@ -270,22 +277,82 @@ key_status(#{provider_id := ProviderId}, Cool, Now) ->
 key_status(_, _, _) ->
     missing_provider_key.
 
-select_key(#{provider_id := ProviderId} = Route, Cool, Cursors, Now) ->
-    Keys = [
+select_key(PickKey, #{provider_id := ProviderId} = Route, Cool, Cursors, Now) ->
+    Keys0 = [
         K
      || K <- janus_catalog:provider_keys(ProviderId),
         maps:get(enabled, K, true),
         not is_cooling(key_target(K), Cool, Now)
     ],
-    case Keys of
+    Upstream = upstream_model_name(PickKey, Route),
+    %% Entitlement carrier pre-filter: skip deny/balance/broken keys
+    %% for THIS upstream listing (spec Part B). broken = key-level row.
+    Allowed = [
+        K
+     || K <- Keys0,
+        janus_catalog:entitlement_denied(
+            ProviderId, Upstream, maps:get(id, K, undefined)
+        ) =:= false
+    ],
+    case Allowed of
+        [] when Keys0 =/= [] ->
+            %% Zero-eligible fail-open: the matrix is advisory; stale
+            %% deny/balance data must not cause a total outage.
+            _ = bump_stat(entitlement_failopen),
+            logger:warning(#{
+                what => janus_entitlement_failopen,
+                provider => ProviderId,
+                model => Upstream,
+                excluded => length(Keys0)
+            }),
+            pick_rr_key(ProviderId, Route, Keys0, Cursors);
         [] ->
             {error, key_status(Route, Cool, Now)};
         _ ->
-            CursorKey = {provider_keys, ProviderId, maps:get(model_id, Route, undefined)},
-            {ok, weighted_rr_pick(CursorKey, Keys, Cursors)}
+            pick_rr_key(ProviderId, Route, Allowed, Cursors)
     end;
-select_key(_, _, _, _) ->
+select_key(_, _, _, _, _) ->
     {error, missing_provider_key}.
+
+pick_rr_key(ProviderId, Route, Keys, Cursors) ->
+    CursorKey = {provider_keys, ProviderId, maps:get(model_id, Route, undefined)},
+    {ok, weighted_rr_pick(CursorKey, Keys, Cursors)}.
+
+%% The listing name actually sent upstream: the route's explicit
+%% upstream_model_id, else the bound public name, else the listing
+%% pick's own name. Deny-map lookups are binary-exact (the
+%% binary-vs-atom bug class).
+upstream_model_name({listing, Name}, _Route) when is_binary(Name) ->
+    Name;
+upstream_model_name(_PickKey, Route) ->
+    case maps:get(upstream_model_id, Route, undefined) of
+        Bin when is_binary(Bin), Bin =/= <<>> ->
+            Bin;
+        _ ->
+            ModelId = maps:get(model_id, Route, undefined),
+            case janus_catalog:lookup_model(ModelId) of
+                {ok, #{name := N}} when is_binary(N) -> N;
+                _ -> undefined
+            end
+    end.
+
+%% Entitlement/failover observability counters (read by /stats).
+-spec bump_stat(atom()) -> ok.
+bump_stat(Key) when is_atom(Key) ->
+    try
+        _ = ets:update_counter(?ENT_STATS, Key, 1, {Key, 0}),
+        ok
+    catch
+        _:_ -> ok
+    end.
+
+-spec stats() -> map().
+stats() ->
+    try
+        maps:from_list(ets:tab2list(?ENT_STATS))
+    catch
+        _:_ -> #{}
+    end.
 
 catalog_generation_ok(Opts) ->
     case janus_catalog:get() of

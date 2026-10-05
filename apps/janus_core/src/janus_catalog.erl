@@ -38,7 +38,10 @@
     lookup_provider/1,
     lookup_api_key/1,
     lookup_api_keys/1,
-    provider_keys/1
+    provider_keys/1,
+    %% Entitlement carrier (spec Part B)
+    entitlement_denied/3,
+    entitlement_codes/0
 ]).
 
 -define(PT_KEY, {janus, catalog}).
@@ -51,7 +54,11 @@
     providers := ets:tid(),
     provider_keys := ets:tid(),
     api_keys_by_prefix := ets:tid(),
-    listings_by_name := ets:tid()
+    listings_by_name := ets:tid(),
+    %% {{ProviderId, ListingNameBinary}, #{KeyId => deny|balance|broken}}
+    deny_keys := ets:tid(),
+    %% {ProviderBinary, [#{match_status, code_keyword, outcome}]}
+    entitlement_codes := ets:tid()
 }.
 -type published() :: #{
     generation := non_neg_integer(),
@@ -103,13 +110,19 @@ build(Rows) when is_map(Rows) ->
         maps:get(api_key_models, Rows, [])
     ),
     insert_listings(Listings, maps:get(provider_models, Rows, [])),
+    Deny = new_tab(),
+    insert_deny_keys(Deny, maps:get(key_entitlements, Rows, [])),
+    Codes = new_tab(),
+    insert_entitlement_codes(Codes, maps:get(entitlement_codes, Rows, [])),
     #{
         models => Models,
         routes_by_model => Routes,
         providers => Providers,
         provider_keys => ProvKeys,
         api_keys_by_prefix => ApiKeys,
-        listings_by_name => Listings
+        listings_by_name => Listings,
+        deny_keys => Deny,
+        entitlement_codes => Codes
     }.
 
 %% @doc Atomically publish `Tabs` for `Generation`. Previous catalog
@@ -311,6 +324,44 @@ provider_keys(ProviderId) ->
     end.
 
 %%--------------------------------------------------------------------
+%% Entitlement carrier (spec Part B)
+%%--------------------------------------------------------------------
+
+%% deny | balance | broken when the carrier marks this
+%% (provider, listing, key); false otherwise. ModelName is the
+%% UPSTREAM-sent listing name (binary match — the binary-vs-atom bug
+%% class); ok rows never ship, so absence = eligible.
+-spec entitlement_denied(provider_id(), binary(), term()) ->
+    deny | balance | broken | false.
+entitlement_denied(ProviderId, ModelName, KeyId) when is_binary(ModelName) ->
+    case ets_lookup(table(deny_keys), {ProviderId, ModelName}) of
+        [{_, Map}] when is_map(Map) ->
+            case maps:get(KeyId, Map, false) of
+                Status when Status =:= deny; Status =:= balance; Status =:= broken -> Status;
+                _ -> false
+            end;
+        _ ->
+            false
+    end;
+entitlement_denied(_, _, _) ->
+    false.
+
+%% Classification rows for the retry-time classifier, grouped per
+%% provider name (binary). Missing table = [] = fully fail-open.
+-spec entitlement_codes() -> #{binary() => [map()]}.
+entitlement_codes() ->
+    case table(entitlement_codes) of
+        undefined ->
+            #{};
+        Tid ->
+            try
+                maps:from_list(ets:tab2list(Tid))
+            catch
+                error:badarg -> #{}
+            end
+    end.
+
+%%--------------------------------------------------------------------
 %% Internals
 %%--------------------------------------------------------------------
 
@@ -465,6 +516,51 @@ insert_listings(Tid, Rows) ->
             ets:insert(Tid, {N, lists:reverse(Entries)})
         end,
         Grouped
+    ).
+
+%% Carrier rows: #{provider_key_id, model_name, status, provider_id}.
+%% Stored as {{ProviderId, ListingName}, #{KeyId => Status}} — keyed
+%% by provider AND model (listing names collide across providers; the
+%% exclusion must not leak across a name collision). 'ok' rows never
+%% ship (absence = eligible, matching the LB convention).
+insert_deny_keys(Tid, Rows) ->
+    Grouped = lists:foldl(
+        fun(#{provider_key_id := Kid, model_name := Name, status := Status, provider_id := P}, Acc)
+                when is_binary(Name), Status =:= <<"deny">> orelse Status =:= <<"balance">> orelse
+                Status =:= <<"broken">> ->
+                StatusA = binary_to_existing_atom(Status, utf8),
+                maps:update_with(
+                    {P, Name},
+                    fun(Map) -> Map#{Kid => StatusA} end,
+                    #{Kid => StatusA},
+                    Acc
+                );
+            (_, Acc) ->
+                Acc
+        end,
+        #{},
+        Rows
+    ),
+    maps:foreach(
+        fun(Key, KeyMap) ->
+            ets:insert(Tid, {Key, KeyMap})
+        end,
+        Grouped
+    ).
+
+insert_entitlement_codes(Tid, Rows) ->
+    lists:foreach(
+        fun(#{provider := P, match_status := MS, code_keyword := KW, outcome := Outcome})
+                when is_binary(P) ->
+                Entry = #{match_status => MS, code_keyword => KW, outcome => Outcome},
+                case ets:lookup(Tid, P) of
+                    [{_, Existing}] -> ets:insert(Tid, {P, Existing ++ [Entry]});
+                    [] -> ets:insert(Tid, {P, [Entry]})
+                end;
+            (_) ->
+                ok
+        end,
+        Rows
     ).
 
 insert_api_keys(Tid, Keys, AllowRows) ->

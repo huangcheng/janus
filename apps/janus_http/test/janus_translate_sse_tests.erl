@@ -487,3 +487,32 @@ finalize_error_message_truncated_test() ->
         janus_protocol_translate:finalize_sse(openai_chat, {error, upstream, Long}, #sse_st{role_sent = true}),
     [Err, _] = Frames,
     ?assert(byte_size(Err) =< 300).
+
+stream_translate_blocked_table_test() ->
+    T = fun(Client, Map) ->
+        janus_protocol_translate:stream_translate_blocked(Client, Map)
+    end,
+    Base = #{<<"messages">> => []},
+    ?assertEqual(false, T(openai_chat, Base)),
+    ?assertEqual(false, T(anthropic_messages, Base)),
+    ?assertEqual(true, T(openai_responses, #{<<"input">> => []})),
+    ?assertEqual(true, T(openai_chat, Base#{<<"tools">> => [#{<<"x">> => 1}]})),
+    ?assertEqual(false, T(openai_chat, Base#{<<"tools">> => []})),
+    ?assertEqual(true, T(openai_chat, Base#{<<"n">> => 2})),
+    ?assertEqual(false, T(openai_chat, Base#{<<"n">> => 1})),
+    ?assertEqual(
+        true,
+        T(openai_chat, #{
+            <<"messages">> => [
+                #{<<"role">> => <<"user">>, <<"content">> => [#{<<"type">> => <<"image_url">>}]}
+            ]
+        })
+    ).
+
+finalize_anthropic_missing_start_test() ->
+    %% Empty 200 body (no decodable chunk): finalize must still open
+    %% with message_start so the client stream is never malformed.
+    {ok, Frames, St} = janus_protocol_translate:finalize_sse(anthropic_messages, normal, #sse_st{}),
+    [First | _] = Frames,
+    ?assertMatch(<<"event: message_start", _/binary>>, First),
+    ?assertEqual(true, St#sse_st.role_sent).

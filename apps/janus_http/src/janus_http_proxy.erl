@@ -30,12 +30,34 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_req_model),
     erase(janus_sse_state),
     erase(janus_sse_tracked),
+    erase(janus_failover_started),
+    erase(janus_failover_ref),
+    erase(janus_failover_attempt),
+    erase(janus_failover_keys),
+    erase(janus_failover_err_code),
+    erase(janus_failover_unclassified_retried),
+    erase(janus_stats_counted),
+    erase(janus_stats_tracked),
+    erase(janus_stats_failed),
+    erase(janus_stats_inner),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
         agent => Agent,
         client_proto => ClientProto,
         stream => false
     }),
+    try
+        handle_body(ClientProto, Agent, Body, Req, State)
+    catch
+        Class:Reason:Stack ->
+            %% Crash fallback: bump failed ONLY when this request was
+            %% counted (entered do_proxy), is not an inner call, and
+            %% nothing already tracked/failed it.
+            maybe_crash_bump_failed(),
+            erlang:raise(Class, Reason, Stack)
+    end.
+
+handle_body(ClientProto, Agent, Body, Req, State) ->
     case thoas:decode(Body) of
         {ok, Map} when is_map(Map) ->
             case extract_model(ClientProto, Map) of
@@ -118,6 +140,7 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
     end.
 
 do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
+    inc_total_once(),
     put(janus_req_model, ModelName),
     case resolve_model(ModelName) of
         {ok, ModelId} ->
@@ -189,6 +212,7 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
                     call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
                 true ->
                     _ = release_route_inflight(Route),
+                    _ = bump_failed_maybe(400),
                     case translatable_stream_pair(ClientProto, ProviderProto) of
                         true ->
                             %% Tools/vision/n>1 on a translate pair: the
@@ -224,26 +248,19 @@ translatable_stream_pair(anthropic_messages, openai_chat) -> true;
 translatable_stream_pair(_, _) -> false.
 
 call_native(ClientProto, ProviderProto, Route, Body, Map, WantStream, Req, State) ->
-    Opts = #{stream => WantStream},
-    Result =
-        try
-            call_adapter(ProviderProto, Route, Body, Map, Opts)
-        catch
-            Class:CatchReason:Stack ->
-                logger:error(#{
-                    what => janus_proxy_crashed,
-                    class => Class,
-                    reason => sanitize_upstream_error(CatchReason),
-                    stack => janus_seed:redact_stack(Stack)
-                }),
-                {error, crashed}
-        end,
-    handle_upstream(ClientProto, ProviderProto, Result, Route, false, Req, State).
+    Result = upstream_call(ProviderProto, Route, Body, Map, WantStream),
+    case failover_decide(ClientProto, Route, Map, Body, Result, Req, State) of
+        {continue, Result2} ->
+            handle_upstream(ClientProto, ProviderProto, Result2, Route, false, Req, State);
+        {handled, Ok} ->
+            Ok
+    end.
 
 call_translate(ClientProto, ProviderProto, Route, Map, WantStream, Req, State) ->
     case janus_protocol_translate:translate_request(ClientProto, ProviderProto, Map) of
         {error, {translate_unsupported, Msg}} ->
             _ = release_route_inflight(Route),
+            _ = bump_failed_maybe(400),
             reply_err(ClientProto, Req, State, 400, <<"translate_unsupported">>, Msg);
         {ok, ProviderMap0} ->
             %% chat_to_messages hardcodes stream=false; the streaming
@@ -261,8 +278,20 @@ call_translate(ClientProto, ProviderProto, Route, Map, WantStream, Req, State) -
             Result2 = maybe_retry_include_usage(
                 ClientProto, ProviderProto, Route, ProviderMap, InjectUsed, WantStream, Result
             ),
-            case {WantStream, Result2} of
-                {true, {ok, stream, Status, Headers, Drain}} when Status < 400 ->
+            case failover_decide(ClientProto, Route, Map, OutBody, Result2, Req, State) of
+                {continue, Result3} ->
+                    translate_result(
+                        ClientProto, ProviderProto, Route, Result3, Req, State
+                    );
+                {handled, Ok} ->
+                    Ok
+            end
+    end.
+
+translate_result(ClientProto, ProviderProto, Route, Result, Req, State) ->
+    WantStream = true,
+    case {WantStream, Result} of
+        {true, {ok, stream, Status, Headers, Drain}} when Status < 400 ->
                     handle_translate_stream(
                         ClientProto, ProviderProto, Status, Headers, Drain, Route, Req, State
                     );
@@ -277,9 +306,8 @@ call_translate(ClientProto, ProviderProto, Route, Map, WantStream, Req, State) -
                         {error, Reason} ->
                             handle_upstream(ClientProto, ProviderProto, {error, Reason}, Route, true, Req, State)
                     end;
-                _ ->
-                    handle_upstream(ClientProto, ProviderProto, Result2, Route, true, Req, State)
-            end
+        _ ->
+            handle_upstream(ClientProto, ProviderProto, Result, Route, true, Req, State)
     end.
 
 upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
@@ -647,13 +675,341 @@ collect_drain(Drain) ->
         ets:delete(Acc)
     end.
 
+
+%%%--------------------------------------------------------------------
+%%% In-request key failover (spec Part C)
+%%%
+%%% Wraps every upstream attempt: retryable key-scoped failures
+%%% (401/403/429/deny-shaped 400/404, 5xx, transport) retry on another
+%%% key/route inside the budget; input-shape 400s and committed 2xx
+%%% streams are terminal. The FIRST call is unconditional; the knobs
+%%% bound RETRIES. Knobs live in the settings table (failover key,
+%%% distributed via persistent_term) with sys.config defaults.
+%%%--------------------------------------------------------------------
+
+pd(Key, Default) ->
+    case get(Key) of
+        undefined -> Default;
+        V -> V
+    end.
+
+failover_knobs() ->
+    case persistent_term:get({janus, failover_cfg}, undefined) of
+        #{<<"max_attempts">> := A} = Cfg when is_integer(A), A >= 0, A =< 20 ->
+            B =
+                case maps:get(<<"max_budget_ms">>, Cfg, 45000) of
+                    BB when is_integer(BB), BB > 0 -> min(BB, 180000);
+                    _ -> 45000
+                end,
+            {A, B};
+        _ ->
+            {application:get_env(janus, failover_max_attempts, 3),
+                application:get_env(janus, failover_max_budget_ms, 45000)}
+    end.
+
+failover_start() ->
+    case get(janus_failover_started) of
+        undefined ->
+            put(janus_failover_started, erlang:monotonic_time(millisecond)),
+            put(janus_failover_ref, binary:encode_hex(crypto:strong_rand_bytes(16))),
+            put(janus_failover_attempt, 1),
+            ok;
+        _ ->
+            ok
+    end.
+
+%% Error-status streams are collected HERE (pre-reply upstream state is
+%% retryable; the body feeds classification).
+normalize_result({ok, stream, Status, Headers, Drain}) when Status >= 400 ->
+    case collect_drain(Drain) of
+        {ok, Body} -> {ok, Status, Headers, Body};
+        {error, Reason} -> {error, Reason}
+    end;
+normalize_result(R) ->
+    R.
+
+%% {continue, Result} -> caller replies via handle_upstream.
+%% {handled, {ok, Req, State}} -> a retry completed the request.
+failover_decide(ClientProto, Route, Map, Body, Result0, Req, State) ->
+    failover_start(),
+    Result = normalize_result(Result0),
+    case failover_classify(Route, Result) of
+        terminal ->
+            {continue, Result};
+        {retryable, ErrCode} ->
+            put(janus_failover_err_code, ErrCode),
+            {Attempts, Budget} = failover_knobs(),
+            Attempt = get(janus_failover_attempt),
+            Elapsed = erlang:monotonic_time(millisecond) - pd(janus_failover_started, 0),
+            case Attempt =< Attempts andalso Elapsed < Budget of
+                true ->
+                    failover_note(Route, Result),
+                    failover_record_attempt(Route, Result, ErrCode),
+                    retry_jitter(),
+                    janus_lb:bump_stat(requests_retried),
+                    put(janus_failover_attempt, Attempt + 1),
+                    mark_key_attempted(Route),
+                    case repick_route(ClientProto, Map, 3) of
+                        {ok, Route2} ->
+                            {handled, retry_dispatch(ClientProto, Route2, Body, Map, Req, State)};
+                        error ->
+                            {continue, Result}
+                    end;
+                false ->
+                    janus_lb:bump_stat(failovers_exhausted),
+                    {continue, Result}
+            end
+    end.
+
+retry_dispatch(ClientProto, Route2, Body, Map, Req, State) ->
+    case provider_protocol(Route2) of
+        {ok, ProviderProto2} ->
+            dispatch(ClientProto, ProviderProto2, Route2, Body, Map, Req, State);
+        {error, unknown_protocol} ->
+            _ = release_route_inflight(Route2),
+            reply_err(ClientProto, Req, State, 502, <<"unknown_protocol">>, <<"provider has unknown protocol">>)
+    end.
+
+retry_jitter() ->
+    rand:uniform(200) + 99.
+
+mark_key_attempted(Route) ->
+    case key_id_of(Route) of
+        Kid when is_integer(Kid) ->
+            Attempted = [Kid | lists:delete(Kid, key_attempt_list())],
+            put(janus_failover_keys, Attempted);
+        _ ->
+            ok
+    end.
+
+key_attempt_list() ->
+    case get(janus_failover_keys) of
+        L when is_list(L) -> L;
+        _ -> []
+    end.
+
+key_attempted(Route) ->
+    case key_id_of(Route) of
+        Kid when is_integer(Kid) -> lists:member(Kid, key_attempt_list());
+        _ -> false
+    end.
+
+%% Re-pick a route for the SAME model, skipping already-attempted keys
+%% and (for translate-blocked streams) protocol-incompatible routes.
+repick_route(_ClientProto, _Map, 0) ->
+    error;
+repick_route(ClientProto, Map, Tries) ->
+    ModelName = get(janus_req_model),
+    Blocked =
+        janus_protocol_translate:wants_stream(Map) andalso
+            janus_protocol_translate:stream_translate_blocked(ClientProto, Map),
+    Pick =
+        case resolve_model(ModelName) of
+            {ok, ModelId} -> janus_lb:pick_route(ModelId, #{});
+            error -> janus_lb:pick_listing_route(ModelName, #{})
+        end,
+    case Pick of
+        {ok, Route} ->
+            ProtoOK =
+                (not Blocked) orelse
+                    (provider_protocol(Route) =:= {ok, ClientProto}),
+            case key_attempted(Route) orelse not ProtoOK of
+                true ->
+                    _ = release_route_inflight(Route),
+                    repick_route(ClientProto, Map, Tries - 1);
+                false ->
+                    {ok, Route}
+            end;
+        {error, _} ->
+            error
+    end.
+
+failover_note(Route, {ok, 401, _H, _B}) ->
+    _ = note_auth_failure(Route, 401),
+    _ = release_route_inflight(Route),
+    ok;
+failover_note(Route, {ok, 403, _H, _B}) ->
+    _ = note_route_failure(Route, {http, 403}),
+    _ = release_route_inflight(Route),
+    ok;
+failover_note(Route, {ok, 429, H, _B}) ->
+    _ = note_key_failure(Route, H, 429),
+    _ = release_route_inflight(Route),
+    ok;
+failover_note(Route, {ok, Status, _H, _B}) when Status >= 500 ->
+    _ = note_provider_failure(Route, {http, Status}),
+    _ = release_route_inflight(Route),
+    ok;
+failover_note(Route, {error, _Reason}) ->
+    _ = release_route_inflight(Route),
+    ok;
+failover_note(Route, _Other) ->
+    %% Deny-shaped 4xx: key-scoped — bench the key briefly.
+    _ = note_key_failure(Route, #{}, 400),
+    _ = release_route_inflight(Route),
+    ok.
+
+%% Non-terminal usage row for a retried attempt (terminal row comes
+%% from track/3 on the final outcome; it attaches the same
+%% request_ref/attempt from the process dictionary).
+failover_record_attempt(Route, {ok, Status, _H, _B}, ErrCode) ->
+    record_failover_row(Route, Status, ErrCode);
+failover_record_attempt(Route, {error, crashed}, _ErrCode) ->
+    record_failover_row(Route, 500, crashed);
+failover_record_attempt(Route, {error, Reason}, _ErrCode) ->
+    record_failover_row(Route, 502, sanitize_upstream_error(Reason)).
+
+record_failover_row(Route, Status, ErrCode) ->
+    case get(janus_usage_ctx) of
+        #{started := _Started, agent := Agent, client_proto := Proto, stream := Stream} ->
+            janus_usage:record(#{
+                ts => erlang:system_time(second),
+                agent_key_id => maps:get(id, Agent, null),
+                model_id => maps:get(model_id, Route, null),
+                provider_id => maps:get(provider_id, Route, null),
+                provider_key_id => key_id_of(Route),
+                protocol => Proto,
+                stream => usage_bool_int(Stream),
+                status => Status,
+                prompt => null,
+                completion => null,
+                latency_ms => 0,
+                error_code => ErrCode,
+                attempt => pd(janus_failover_attempt, 1),
+                request_ref => pd(janus_failover_ref, null),
+                is_terminal => false
+            });
+        _ ->
+            ok
+    end.
+
+%%% Retry-time classification (codes table single-source, spec C.1)
+
+failover_classify(_Route, {ok, Status, _H, _B}) when
+    Status =:= 401; Status =:= 403; Status =:= 429; Status >= 500
+->
+    {retryable, null};
+failover_classify(Route, {ok, Status, _H, Body}) when Status >= 400, Status < 500 ->
+    case classify_client_error(Route, Status, Body) of
+        deny ->
+            {retryable, deny};
+        balance ->
+            {retryable, balance};
+        rate ->
+            {retryable, rate};
+        input_shape ->
+            terminal;
+        unclassified ->
+            %% Bounded cost: one failover attempt on an unclassified
+            %% 4xx, then terminal (codes-table feedback for the next
+            %% seed update). Fully fail-open when the table is empty.
+            case get(janus_failover_unclassified_retried) of
+                true ->
+                    terminal;
+                _ ->
+                    put(janus_failover_unclassified_retried, true),
+                    {retryable, unclassified}
+            end
+    end;
+failover_classify(_Route, {error, _Reason}) ->
+    %% Transport errors behave like 5xx: retryable within the budget.
+    {retryable, null};
+failover_classify(_Route, _Result) ->
+    terminal.
+
+classify_client_error(Route, _Status, Body) ->
+    Codes = janus_catalog:entitlement_codes(),
+    Provider = route_provider_name(Route),
+    Rows = maps:get(Provider, Codes, []),
+    {Code, Message} = extract_error_code_message(Body),
+    classify_with_rows(Rows, Code, Message).
+
+classify_with_rows([], _Code, _Message) ->
+    unclassified;
+classify_with_rows([Row | Rest], Code, Message) ->
+    MS = maps:get(match_status, Row, undefined),
+    KW = maps:get(code_keyword, Row, undefined),
+    Outcome = maps:get(outcome, Row, undefined),
+    Matched =
+        case MS of
+            <<"regex">> -> regex_matches(KW, Message) orelse regex_matches(KW, Code);
+            _ -> is_binary(KW) andalso KW =/= <<>> andalso KW =:= Code
+        end,
+    case Matched of
+        true -> outcome_atom(Outcome);
+        false -> classify_with_rows(Rest, Code, Message)
+    end.
+
+regex_matches(Pattern, Subject) when is_binary(Pattern), is_binary(Subject), Subject =/= <<>> ->
+    try
+        re:run(Subject, Pattern, [{capture, none}]) =:= match
+    catch
+        _:_ -> false
+    end;
+regex_matches(_, _) ->
+    false.
+
+outcome_atom(<<"deny">>) -> deny;
+outcome_atom(<<"balance">>) -> balance;
+outcome_atom(<<"rate">>) -> rate;
+outcome_atom(<<"input_shape">>) -> input_shape;
+outcome_atom(_) -> unclassified.
+
+%% Provider-native error code + message from the error body. Tolerant:
+%% OpenAI {error:{code,message}}, DashScope top-level {code,message},
+%% Anthropic {type:error,error:{type,message}}.
+extract_error_code_message(Body) when is_binary(Body) ->
+    case thoas:decode(Body) of
+        {ok, Map} when is_map(Map) ->
+            Err = maps:get(<<"error">>, Map, #{}),
+            Inner =
+                case Err of
+                    E when is_map(E) -> E;
+                    _ -> #{}
+                end,
+            Code =
+                first_bin([
+                    maps:get(<<"code">>, Map, undefined),
+                    maps:get(<<"code">>, Inner, undefined),
+                    maps:get(<<"type">>, Inner, undefined)
+                ]),
+            Message =
+                first_bin([
+                    maps:get(<<"message">>, Map, undefined),
+                    maps:get(<<"message">>, Inner, undefined)
+                ]),
+            {Code, Message};
+        _ ->
+            {undefined, undefined}
+    end;
+extract_error_code_message(_) ->
+    {undefined, undefined}.
+
+first_bin([B | Rest]) when is_binary(B), B =/= <<>> -> B;
+first_bin([_ | Rest]) -> first_bin(Rest);
+first_bin([]) -> undefined.
+
 %%--------------------------------------------------------------------
 %% Errors / replies
 %%--------------------------------------------------------------------
 
-reply_pick_error(ClientProto, Req, State, all_cooling) ->
-    reply_pick_error(ClientProto, Req, State, {all_cooling, 5000});
-reply_pick_error(ClientProto, Req, State, {all_cooling, Ms}) when is_integer(Ms), Ms > 0 ->
+reply_pick_error(ClientProto, Req, State, Reason) ->
+    %% Pick failures happen INSIDE do_proxy (already counted) and are
+    %% client-visible failures — bump the failed counter for the
+    %% status this reason will produce.
+    _ = bump_failed_maybe(pick_error_status(Reason)),
+    do_reply_pick_error(ClientProto, Req, State, Reason).
+
+pick_error_status({all_cooling, _}) -> 503;
+pick_error_status(provider_disabled) -> 503;
+pick_error_status(keys_disabled) -> 503;
+pick_error_status(missing_provider_key) -> 503;
+pick_error_status(catalog_not_ready) -> 503;
+pick_error_status(_) -> 404.
+
+do_reply_pick_error(ClientProto, Req, State, all_cooling) ->
+    do_reply_pick_error(ClientProto, Req, State, {all_cooling, 5000});
+do_reply_pick_error(ClientProto, Req, State, {all_cooling, Ms}) when is_integer(Ms), Ms > 0 ->
     Sec = max(1, (Ms + 999) div 1000),
     reply_err(
         ClientProto,
@@ -664,18 +1020,18 @@ reply_pick_error(ClientProto, Req, State, {all_cooling, Ms}) when is_integer(Ms)
         <<"all upstream routes are cooling down">>,
         #{<<"retry-after">> => integer_to_binary(Sec)}
     );
-reply_pick_error(ClientProto, Req, State, provider_disabled) ->
+do_reply_pick_error(ClientProto, Req, State, provider_disabled) ->
     reply_err(
         ClientProto, Req, State, 503, <<"provider_disabled">>,
         <<"the provider for this model is disabled">>
     );
-reply_pick_error(ClientProto, Req, State, keys_disabled) ->
+do_reply_pick_error(ClientProto, Req, State, keys_disabled) ->
     reply_err(ClientProto, Req, State, 503, <<"no_usable_key">>, <<"no enabled upstream keys">>);
-reply_pick_error(ClientProto, Req, State, missing_provider_key) ->
+do_reply_pick_error(ClientProto, Req, State, missing_provider_key) ->
     reply_err(
         ClientProto, Req, State, 503, <<"no_usable_key">>, <<"provider has no keys configured">>
     );
-reply_pick_error(ClientProto, Req, State, catalog_not_ready) ->
+do_reply_pick_error(ClientProto, Req, State, catalog_not_ready) ->
     reply_err(
         ClientProto,
         Req,
@@ -685,7 +1041,7 @@ reply_pick_error(ClientProto, Req, State, catalog_not_ready) ->
         <<"catalog not ready">>,
         #{<<"retry-after">> => <<"1">>}
     );
-reply_pick_error(ClientProto, Req, State, _Reason) ->
+do_reply_pick_error(ClientProto, Req, State, _Reason) ->
     reply_err(ClientProto, Req, State, 404, <<"no_route">>, <<"no route for model">>).
 
 reply_err(ClientProto, Req, State, Status, Code, Msg) ->
@@ -756,6 +1112,46 @@ filter_stream_headers(_) ->
     #{<<"content-type">> => <<"text/event-stream">>}.
 
 %%--------------------------------------------------------------------
+%% Node counters (Slice B): one client LLM call = +1 total at
+%% do_proxy entry; +1 failed exactly once on a client-visible >=400
+%% outcome (outer track) or the crash fallback. Inner calls (a future
+%% janus-auto/failover inner do_proxy) never bump either counter.
+%%--------------------------------------------------------------------
+
+inc_total_once() ->
+    case get(janus_stats_inner) of
+        true ->
+            ok;
+        _ ->
+            janus_http_stats:inc_total(),
+            put(janus_stats_counted, true)
+    end.
+
+bump_failed_maybe(Status) when Status >= 400 ->
+    case {get(janus_stats_inner), get(janus_stats_failed)} of
+        {true, _} ->
+            ok;
+        {_, true} ->
+            ok;
+        _ ->
+            janus_http_stats:inc_failed(),
+            put(janus_stats_failed, true)
+    end;
+bump_failed_maybe(_Status) ->
+    ok.
+
+maybe_crash_bump_failed() ->
+    case
+        {get(janus_stats_counted), get(janus_stats_inner), get(janus_stats_tracked), get(janus_stats_failed)}
+    of
+        {true, false, undefined, undefined} ->
+            janus_http_stats:inc_failed(),
+            put(janus_stats_failed, true);
+        _ ->
+            ok
+    end.
+
+%%--------------------------------------------------------------------
 %% LB helpers (same contracts as former janus_http_chat)
 %%--------------------------------------------------------------------
 
@@ -807,6 +1203,8 @@ usage_or_undef(U) -> U.
 track(_Status, Route, _Usage) when not is_map(Route) ->
     ok;
 track(Status, Route, Usage) ->
+    put(janus_stats_tracked, true),
+    bump_failed_maybe(Status),
     case get(janus_usage_ctx) of
         undefined ->
             ok;
@@ -839,7 +1237,11 @@ track(Status, Route, Usage) ->
                 status => Status,
                 prompt => maps:get(prompt, Usage, null),
                 completion => maps:get(completion, Usage, null),
-                latency_ms => LatencyMs
+                latency_ms => LatencyMs,
+                error_code => pd(janus_failover_err_code, null),
+                attempt => pd(janus_failover_attempt, 1),
+                request_ref => pd(janus_failover_ref, null),
+                is_terminal => true
             });
         _ ->
             ok

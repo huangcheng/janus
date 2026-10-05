@@ -233,12 +233,46 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
                 "FROM provider_models pm ORDER BY pm.provider_id, pm.name"
             >>,
             [id, provider_id, name, enabled, meta]},
-        {settings, <<"SELECT key, value FROM settings">>, [key, value]}
+        {settings, <<"SELECT key, value FROM settings">>, [key, value]},
+        %% Entitlement carrier (dashboard-owned tables). POSTGRES-ONLY
+        %% by design: on SQLite (or a dashboard that never ran) these
+        %% queries fail and the carrier stays empty = fully fail-open.
+        %% Per-spec TTL windows are enforced HERE — reads are fresh by
+        %% construction; nothing re-checks checked_at gateway-side.
+        {optional, key_entitlements,
+            <<
+                "SELECT ke.provider_key_id, ke.model_name, ke.status, pk.provider_id "
+                "FROM key_entitlements ke "
+                "JOIN provider_keys pk ON pk.id = ke.provider_key_id "
+                "WHERE (ke.status IN ('deny','broken') AND ke.checked_at > now() - interval '24 hours') "
+                "OR (ke.status = 'balance' AND ke.checked_at > now() - interval '1 hour')"
+            >>,
+            [provider_key_id, model_name, status, provider_id]},
+        {optional, entitlement_codes,
+            <<
+                "SELECT provider, match_status, code_keyword, outcome "
+                "FROM entitlement_codes"
+            >>,
+            [provider, match_status, code_keyword, outcome]}
     ],
     fetch_all(M, C, Queries, #{}).
 
 fetch_all(_M, _C, [], Acc) ->
     {ok, Acc};
+fetch_all(M, C, [{optional, Key, Sql, Fields} | Rest], Acc) ->
+    case M:query(C, Sql, []) of
+        {ok, Rows} ->
+            fetch_all(M, C, Rest, Acc#{Key => [row_map(Fields, R) || R <- Rows]});
+        {error, Reason} ->
+            %% Undefined table is a defined state (dashboard has not
+            %% created the matrix yet): log ONCE per fetch, ship empty.
+            logger:warning(#{
+                what => janus_entitlement_carrier_missing,
+                key => Key,
+                reason => Reason
+            }),
+            fetch_all(M, C, Rest, Acc#{Key => []})
+    end;
 fetch_all(M, C, [{Key, Sql, Fields} | Rest], Acc) ->
     case M:query(C, Sql, []) of
         {ok, Rows} ->
