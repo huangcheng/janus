@@ -1,0 +1,34 @@
+**1. Verdict:** GO WITH FIXES — the design (advisory matrix, fail-open, bounded failover, `is_terminal` billing) is sound, but the missing `broken` carrier row and the probe-budget contradiction block implementation.
+
+**2. Critical risks**
+- **Probe cost:** day-one DashScope = 3 keys × 262 = 786 billable calls; only a 30s pause on 429 guards the shared rate pool; no probe-cost metering is ever required.
+- **Deny-regex:** fail-open default is correct, but the code/message-only scoping must *prove* echoed prompt text can't leak into those fields.
+- **Failover latency:** 300−60−30−30=180 holds only if the *last* attempt overruns; each earlier attempt eats TTFB(60)+body(30)=90s, so a 180s budget can still land ~270s — inside `idle_timeout`, but the reasoning is unstated.
+- **Retry storms:** 100–300ms jitter + per-key cooling; no pool breaker (acknowledged).
+- **Reload race:** single generation snapshot at `dispatch` entry — correctly specified.
+- **Rotation:** secret update clears all rows — good; but healing-loop replica fan-out is unspecified (see edits).
+- **Streaming:** pre-first-byte error streams retryable ✓; a 200-status error *inside* the SSE body is unhandled and reaches the client.
+
+**3. Contradictions / stale claims**
+- `JANUS_PROBE_MAX_CALLS`: A.2 = per-batch stop (1000); A.4 = per-provider *daily* budget — and collides with `JANUS_PROBE_DAILY_CALLS` (5000, also "per-provider daily").
+- A.1 says the `__key__`/`broken` row ships in the carrier, but Part B SQL selects only deny+balance → C.1's broken-key skip is unimplementable.
+- A sqlite SELECT is given for a table that is "POSTGRES-ONLY BY DESIGN"/never exists on sqlite — dead code; "Both variants ship…? No" is self-answering.
+- "committed from its first frame" vs "committed once any byte is passed to `stream_reply`" conflate status-line and body commit points.
+- A.5 hard-rejects binding `deny 0/K` (400) while Part B calls the matrix advisory/fail-open — operators can't bind even to test recovery.
+- "JSEC-decrypted key" (A.2) undefined.
+
+**4. Missing requirements**
+- 200-status in-stream SSE errors (above).
+- Explicit statement that v1 matrix-deny is **probe-only** (traffic gap acknowledged via E.1).
+- Whether a crashed request's already-flushed token rows *bill* (the `is_terminal` backfill implies yes — confirm).
+- Model-delete doesn't cascade `key_entitlements` rows (harmless, unspecified).
+- No probe-cost/budget metering surface.
+
+**5. Architecture notes** — snapshot threading, `is_terminal`-only billing, dashboard-writes/gateway-reads, codes-table-driven 429 dual class, reserved provider slot (≤ attempts+2), PT knobs with write-time ceiling validation: all correct and match repo invariants. ETS `{{ProviderId,ModelName}=>#{KeyId=>…}}` keying avoids cross-provider name collision. Solid.
+
+**6. Top 5 edits**
+1. Add `OR status='broken'` (deny's 24h window) to **both** carrier SQL variants, or C.1's broken-skip is dead.
+2. Resolve `MAX_CALLS`: keep per-batch (1000); route A.4's daily budget through `JANUS_PROBE_DAILY_CALLS` (5000).
+3. Zero-eligible fail-open must still skip `__key__` broken keys — else the single attempt 401s again; update Part B + Flow 10.
+4. Specify cross-replica locking (advisory lock or leader) for the A.4 healing loop; N replicas otherwise multiply spend.
+5. Delete the dead sqlite SELECT or mark it future-parity, and add an accepted-limit for 200-status in-stream SSE errors.

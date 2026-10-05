@@ -1,0 +1,38 @@
+**Verdict**: GO WITH FIXES — five first-day breakers must land before merge.
+
+**Critical risks**
+1. **Broken-key fan-out** — `__key__` rows carry no model; `deny_keys` ETS is keyed by `{ProviderId, ModelName}`, so a key-level broken mark can't apply across the catalog. Add a sibling `broken_keys: #{ProviderId => #{KeyId => true}}` ETS, or expand `__key__` to all listings at fetch.
+2. **Codes-table-empty 429 cooldown** — A.2 mandates a 10s cooldown even in fail-open; C.1 rate-class says "no cooldown". Pick one — current text either benches healthy keys or storms the pool.
+3. **Streaming commit point** — "a 2xx stream is committed from its first frame" contradicts "200-then-stall: committed at stream_reply". First commit is the status line at `stream_reply`; drop "first frame" and align test 17.
+4. **Premarked modality invisibility** — `ok+input_shape` rows never ship, but C.1's TERMINAL input_shape branch needs the premark at the gateway. Ship `premarked_models` alongside the codes table, or premarked listings always retry-once.
+5. **Deploy order** — E.3 reads `is_terminal`, needs E.2 columns first. Correct: E.4 → E.1 → E.2 → E.3 → Part A probe → Part C → B carrier.
+6. **Deny regex JSON paths** — per-provider field map (error.code/message) never specced; echoed "not activated" misclassifies.
+7. **/stats gap** — E.6 alarm needs `matrix_loaded_at`; not in C.1 /stats gains.
+
+**Contradictions / stale claims**
+- Streaming commit, 429 cooldown, E.3 deploy order (above).
+- A.4 `balance > deny > ok` vs A.2 `broken > balance` — needs explicit 4-level `broken > balance > deny > ok`.
+- A.1 escalation rule moot for A.2 premarked rows (bypass probing entirely).
+- A.4 trigger 1 says "delete entitlement rows whose model_name no longer exists" — broken rows use `__key__` so deletion logic must skip them; not stated.
+
+**Missing requirements**
+- Per-provider JSON path map (error.code, error.message).
+- /stats `matrix_loaded_at` for E.6 alarm.
+- Probe abort on dashboard shutdown (in-flight rows).
+- Operator break-glass override (force `ok`).
+- Carrier bundle size statement (DashScope matrix ≈ 786 rows).
+- Codes-table-empty 429 metric `entitlement_codes_unconfigured_provider_total`.
+- Healing-loop reliability invariant (broken key TTL 24h relies on re-probe every ≤22h; a missed healing tick re-eligibilizes dead keys).
+
+**Architecture / design notes**
+- Per-request snapshot at `dispatch/7` entry correct; verify no gen_server holds a deny-map across reloads.
+- Per-attempt usage rows + crash-mark grace + 1s/100-row buffer loss = bounded billing undercount on bursty crashes; surface in pricing docs.
+- Persistent_term knob delivery correct; log when the 180s clamp fires (sys.config misconfig visibility).
+- `failover_max_attempts=0` already disables `pool_reuse` (C.1); test 11 ambiguous about it.
+
+**Top 5 concrete edits**
+1. **Part B** — add `broken_keys: #{ProviderId => #{KeyId => true}}` ETS via `WHERE model_name='__key__' AND status='broken' AND checked_at > now()-interval '24 hours'`; union with `deny_keys`; fail-open skips `deny_keys` only.
+2. **A.2 / C.1** — codes-table-empty 429 = rate + 10s cooldown everywhere; remove C.1 "no cooldown" claim; apply cooldown regardless of codes-table presence.
+3. **C.1** — delete "a 2xx stream is committed from its first frame"; replace with "committed from `stream_reply` (status line) onward"; align test 17.
+4. **Part E** — rewrite deploy order E.4 → E.1 → E.2 → E.3 → Part A probe → Part C loop → B carrier; mark A.3 traffic learning GA-only after E.1 ships.
+5. **A.4 / B** — ship `premarked_models: #{ProviderId => #{ModelName => true}}`; extend `entitlement_codes` with per-provider JSON paths (error.code/message); add /stats `matrix_loaded_at`.

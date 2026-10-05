@@ -1,0 +1,36 @@
+**1. Verdict: GO WITH FIXES** — sound design (fail-open bias, single classifier, is_terminal billing split), but the budget/timeout arithmetic and a couple of internal contradictions must be resolved before implementation.
+
+**2. Critical risks**
+- **Idle-timeout arithmetic broken at ceiling**: worst case = budget + one TTFB. Ceiling 280s + 60s = 340s > Cowboy idle_timeout 300s → the bodiless-502 failure the doc warns about. Ceiling must be ≤ ~230s (or idle_timeout raised).
+- **Retry storms**: 429 is retryable and probes share rate pools with live traffic; a rate-limited provider gets probe calls + failover retries + the 30s provider pause only on probe-side 429. Needs a failover-side 429 backoff cap too.
+- **Probe blowback**: 262 models × N keys at 150ms is real money and rate-pool consumption; `JANUS_PROBE_MAX_CALLS` caps calls but not spend or concurrent batches across providers.
+- **Balance misclassification starves keys for 1h**: a rate-limit 429 misread as `balance` excludes a healthy key; inverse also (balance read as rate → endless failover retries against an empty wallet).
+- **Generation snapshot threading**: "attempts never mix generations" is asserted but the loop re-picks per attempt; the snapshot must be captured at `dispatch/7` entry and passed into each pick — unstated.
+- **Key rotation mid-request**: secret-update re-probe leaves stale rows; failover can retry a key whose secret just changed.
+
+**3. Contradictions**
+- Single-flight: "in-process lock" (A.2 top) vs "advisory lock … not an in-process lock" (A.2 bottom).
+- A.1 gives TTLs "consumers enforce by checked_at" including `ok` 7d / `input_shape` 1h — but Part B ships only deny/balance, so `ok` TTLs are enforced by nobody; A.4's healing loop never re-probes expired `ok` rows (7-day staleness unaddressed).
+- `entitlement_codes` is "seeded from the classifier" while the classifier "consumes it" — circular.
+- Flow 11 and flow 16 are the same test.
+- A.5 hard-rejects binding on `deny 0/K` evidence while Part B calls the matrix "advisory" fail-open — inconsistent philosophy (mitigated by 24h TTL, but state which wins).
+
+**4. Missing requirements**
+- 401/403 in failover is retryable, but probe aborts the key — retrying a known-broken key wastes budget; skip attempted-broken keys.
+- Batch semantics when one key hits 401 mid-batch (continue other keys?).
+- Gateway cold start before carrier delivers `entitlement_codes`: retry-time classifier fallback?
+- Where legacy backfill (`attempt=1, is_terminal=true`) runs (gateway migration vs dashboard), given write-ownership rules.
+- Body buffering/re-marshalling cost for large non-stream requests per attempt.
+
+**5. Design notes**
+- ETS rebuild-atomic + snapshot-per-request is right; per-attempt usage rows with `is_terminal` billing filtering cleanly separates evidence from billing — but only if dashboard aggregation gates on it everywhere (success-rate denominators included).
+- 429 dual-meaning is correctly split (rate=skip vs balance=row), but the classifier must return `rate`/`balance` distinctly to the failover loop, not just "retryable".
+- Attempt accounting (1 + max_attempts + 1 reserved) is coherent and test 17 covers reservation.
+- Knob delivery via persistent_term settings distribution matches repo invariants.
+
+**6. Top 5 edits**
+1. Fix ceiling: `failover_max_budget_ms` ≤ 230000, or document idle_timeout raise; restate worst-case wall time.
+2. Delete the in-process-lock sentence; keep advisory lock only.
+3. Give `ok`/`input_shape` TTLs an owner (probe re-check queue) or drop them from A.1.
+4. Make `entitlement_codes` the seeded source of truth; migrate inline A.2 lists into it.
+5. Add generation-snapshot capture at `dispatch/7` entry + failover-side 429 backoff to C.1.

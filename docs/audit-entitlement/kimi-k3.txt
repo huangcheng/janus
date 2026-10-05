@@ -1,0 +1,36 @@
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and unusually well-guarded, but a handful of internal contradictions (429 fail-open, broken-key fail-open, escalation state) must be resolved before implementation.
+
+## 2. Critical risks
+- **Probe cost/rate blowback**: well mitigated (advisory lock, pacing, dual budget knobs, reserved healing share, persisted counters). Residual: probes share live-traffic rate pools; a bootstrap on a low-RPM provider can still throttle production — the "never more than known RPM" rule has no enforcement mechanism specified.
+- **Deny-regex false positives**: fail-open default + anchored regex + code/message-only scoping is correct; residual risk is Erlang `re` vs Python `re` dialect drift on the same seeded patterns — one row could classify differently probe-side vs retry-side.
+- **Latency vs idle_timeout**: ceiling math checks out (180+60+30 < 300), but the 45s default silently abandons 30s-budget clients — acceptable, documented.
+- **Retry storms**: damped by per-key cooling + attempt caps; no pool breaker is a conscious v1 tradeoff. Fine.
+- **Reload races**: per-request snapshot threading is the right answer.
+- **Balance starvation**: healed via key-scoped canary + 25% reserved share — closed.
+- **Rotation staleness**: delete+bump is correct.
+
+## 3. Contradictions / stale claims
+1. **429 with empty codes table**: C.1 says "every 429 classifies rate (retryable, **no cooldown**)"; the exhaustion contract says codes-table-empty 429s "carry a **minimum 10s cooldown**". Pick one.
+2. **Broken vs fail-open**: B/C.1 grant one fail-open pick from "any non-cooling, non-attempted key" when the pool empties, but broken keys are "never fail-open candidates" and an all-broken pool must terminate with broken evidence. Fail-open must explicitly exclude `broken`-marked keys.
+3. **Healing priority**: A.2 says broken ≥22h re-probes FIRST (above balance); A.4's single queue lists only balance > deny > ok — broken is missing from the ordering.
+4. **"Halve in-flight" on 429** (A.2) is meaningless at probe concurrency 1; the 30s pause sentence contradicts/duplicates it.
+5. **Escalation**: "3 consecutive input_shape re-probes" but the schema has no counter column — consecutive-count state has nowhere to live.
+6. **UNCLASSIFIED 400** gets "ONE failover attempt" unconditionally, but `failover_max_attempts=0` means "NO retries of any kind" — precedence unstated.
+7. Counter named `janus_entitlement_failopen` (B) vs `entitlement_failopen` (C.1); probe response counts omit `broken` despite the abort path.
+
+## 4. Missing requirements
+- `Retry-After` parsing responsibility (gateway translate layer?) for rate-class cooldown.
+- 200-status-with-error-body upstreams (non-stream path classifies 2xx as success) — no detection rule.
+- Healing-loop vs manual-probe contention: state the advisory lock covers both.
+- Auth/audit specifics for `GET /api/entitlements` and the refresh endpoint.
+
+## 5. Architecture notes
+ETS snapshot threading, dashboard-write/gateway-read ownership, postgres-only matrix, `is_terminal` billing, and persistent_term knob delivery are all consistent with repo invariants. Usage-row multiplication (≤22/request) fits the writer. Crash-marking grace (300s) correctly derives from the ceiling.
+
+## 6. Top 5 concrete edits
+1. Resolve the 429-empty-codes contradiction (recommend: rate-class **with** 10s min cooldown).
+2. Exclude `broken` keys from the fail-open pick; restate all-broken termination in B.
+3. Add `consecutive_input_shape SMALLINT NOT NULL DEFAULT 0` to the schema; define reset rules.
+4. Merge broken into A.4's queue ordering (broken ≥22h > balance > deny > ok); delete "halve in-flight".
+5. State `max_attempts=0` suppresses the unclassified-400 retry too; unify counter naming; add `broken` to probe response counts.

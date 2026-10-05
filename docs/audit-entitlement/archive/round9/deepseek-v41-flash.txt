@@ -1,0 +1,34 @@
+**1. Verdict:** GO WITH FIXES — the fail-open, evidence-driven design is sound, but a direct 429-cooldown contradiction, ambiguous attempt accounting, and missing gateway→dashboard balance feedback must be fixed before coding.
+
+**2. Critical risks**
+- **Probe cost/RPM:** real money sharing live RPM; 150ms spacing + 2 keys/parallel is not proven ≤ provider RPM. The 30s 429 pause is reactive; only batch/daily caps are proactive.
+- **Deny-regex false positives:** anchored regex is better, but classifying on provider `message` fields still risks prompt/request text leaking a deny word. The `ok+input_shape` fail-open default is the correct bias.
+- **Failover latency:** worst wall ≈ 180s budget + 60s TTFB + 30s body-cap ≈ 270s vs 300s idle_timeout — margin is thin; any extra hop or misconfig busts Cowboy.
+- **Retry storms:** no pool-level breaker; codes-table-empty 429s are the danger (contradiction below).
+- **Reload races:** the per-request snapshot is right, but mid-loop key deletion is claimed handled by "skip absent candidate" while candidates come from that same snapshot — the deleted key is still in it.
+- **Balance starvation:** retry-time balance only cools locally; v1 traffic learning is promote-only, so a balance-dead key is re-picked every 60s until a canary fires. Deny healing can also starve behind balance priority inside the 25% share.
+- **Rotation staleness:** rows deleted + generation bumped is good, but "row-less = eligible" means a swapped secret takes real traffic before first probe; 401 fails over only if another key exists.
+- **Streaming boundary:** collect_drain error-status streams retryable, 2xx committed at `stream_reply` — correct, but "committed once any byte passed" needs one helper or it will drift.
+
+**3. Contradictions**
+- C.1: codes-table-empty 429s are "rate (retryable, no cooldown)" yet "carry a minimum 10s cooldown." Pick one.
+- Attempt math: "total ≤ max_attempts + 2", but pool_reuse is "OUTSIDE the key budget" and the provider retry is a reserved extra slot → max_attempts + 3.
+- "Single-flight per provider (in-process lock)" vs "Advisory lock is the single mechanism."
+- A.2 "One `bump_generation` per batch" vs 401/403 bumping mid-batch.
+- A.1 "consumers enforce by checked_at" vs Part B "nothing re-checks checked_at gateway-side."
+
+**4. Missing**
+- No gateway→dashboard path for retry-time balance/deny evidence (reader-only + promote-only = no demotion learning).
+- No guard between key-secret update and an in-flight probe.
+- Bind validation blocks on stale deny (24h TTL) with no override.
+- No kill switch for the healing loop/probe endpoint.
+
+**5. Architecture notes**
+- Per-request snapshot preserves ETS atomicity. Per-attempt rows: billing filters `is_terminal`, but the refresher writes back `is_terminal` on crash — cross-ownership to document. 429 dual-meaning correctly centralized in `entitlement_codes`; empty-table default must not zero-cooldown. persistent_term knob delivery matches the repo invariant.
+
+**6. Top 5 edits**
+1. Reconcile the 429-empty cooldown (keep ≥10s).
+2. Fix attempt accounting (max_attempts + 3, or fold pool_reuse into key budget).
+3. Add gateway→dashboard balance/deny evidence, or pull E.1 into v1.
+4. Add a proactive RPM governor + provider-level probe breaker.
+5. One "committed" helper + explicit snapshot-based mid-loop deletion behavior.

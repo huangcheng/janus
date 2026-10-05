@@ -1,0 +1,27 @@
+**Verdict:** GO WITH FIXES — the loop shape and ownership boundary are sound, but worst-case math, provider-retry selection, and several cross-table handoffs are under-specified.
+
+**Critical risks**
+- **Failover latency vs idle_timeout.** Ceiling math is wrong: with budget 180s ceiling, four attempts each potentially at TTFB 60s + body-cap 30s = 90s plus jitter gives ~361s, breaching idle_timeout 300s. Per-attempt caps or attempt-count must shrink near the ceiling, not just budget-start gating.
+- **Provider-retry key selection.** "Pick reuses the coolest (least recently failed) attempted key" when `attempted == pool` is a key that just failed; reusing it makes the reserved slot nearly guaranteed to lose. Reuse should be the *least recently used among keys whose cooldown has expired*, not "least recently failed."
+- **Probe budget enforcement.** A.4 reserves "≥ 25%" for healing but never enforces the 75% bootstrap cap; a DashScope day-one bootstrap (786 calls) can drain the 75% share before the first healing tick. Hard cap per trigger, not aspirational.
+- **Codes-table distribution.** The carrier query is shown only for `key_entitlements`; how `entitlement_codes` ships is asserted ("The carrier also ships …") with no SQL and no generation-bump trigger when the codes table mutates independently of probes.
+- **Streaming retry non-idempotency.** The spec acknowledges 5xx duplication but not error-status stream drains on non-idempotent endpoints; status-known-before-first-byte is fine for chat, risky for batch/embeddings reuses.
+- **Balance starvation.** Probe-driven only, 1h TTL. Multi-region providers with sticky routing can starve a balance-excluded key past TTL even after top-up; spec says traffic cannot heal it — true, but does not say probe always wins the race.
+- **Deny-regex scope.** Regex is `message`-scoped per A.2 — but echoed prompt text inside a `message` field will hit the regex. Provider-side validation messages quote user input; "未开通" inside echoed content will false-positive deny.
+
+**Contradictions / stale claims**
+- "ok rows never ship" contradicts A.1 need for `input_shape` / `escalated` flag to be observable to gateway retry classifier (it doesn't, because gateway uses codes table — fine, but the claim reads as if no ok metadata ever matters).
+- Postgres/SQLite asymmetry: "undefined-table error" exists only in Postgres; SQLite has no concept. Confirming "no sqlite DDL exists on purpose" is correct, but the wrapper must dialect-branch, not generically trap.
+
+**Missing requirements**
+- Billing policy on `is_terminal=false` attempts: confirmed not billed, but the FIRST attempt (real upstream cost) is now invisible to the customer. Document or revise.
+- Feedback loop from fail-open usage rows → codes-table update (claimed in C.1, no mechanism).
+- Tenant scoping on `key_entitlements` rows.
+- Catalog-bundle fetcher change list (`janus_catalog` SQL) — outside spec, blocks gateway impl.
+
+**Top 5 concrete edits**
+1. Replace single-call ceiling math with `attempts × (TTFB + body-cap) + jitter ≤ idle_timeout − margin`; shrink `failover_max_attempts` as budget approaches ceiling.
+2. Provider-retry selection: only keys with `cooldown_until ≤ now`, else skip the reserved slot and go terminal.
+3. Add explicit carrier SQL for `entitlement_codes` + generation-bump trigger on codes-table writes.
+4. Hard 75% bootstrap / sync budget cap per day per provider; healing gets an unconditional floor, not a "may overspend" note.
+5. Constrain deny regex to provider-error `code` fields only (already claimed) AND reject matches where the phrase appears in any user-content echo; document the heuristic.

@@ -1,0 +1,33 @@
+1. **Verdict: NO-GO** — the attached document is an entitlement-matrix + key-failover spec; the audit prompt scopes Phase 1 (streaming Chat↔Messages translate, /stats counters, Alpine test image, deploy waits) and §10 explicitly excludes "entitlement-matrix/key-failover ideas" and forbids entitlement-matrix scoping, so no Phase 1 item can be audited here.
+
+2. **Critical risks (within target.md as written):**
+   - C.1 5xx retry "at most ONE additional key" vs C.2's 3-attempt cap: does provider-scoped retry consume the key budget or get a separate envelope? Unspecified.
+   - C.1 streaming-first-byte rule needs the gun callback to flip a flag before any `cowboy_req:chunk/2`; mechanism not described, only the policy.
+   - A.2 401/403 abort "surfaces error to operator" — no machine-readable signal, no re-probe trigger after key rotation.
+   - A.4 only re-probes on `/api/models/sync`; between syncs, 7d+ rows silently degrade to `unknown` (A.1) with no fallback refresher.
+   - A.5 binding validation labels itself "Router" (gateway-side) but lives in dashboard per the architecture boundary — ownership split ambiguous.
+
+3. **Contradictions / stale:**
+   - Spec scope vs audit scope are disjoint (see §1).
+   - A.3 "last write wins on timestamp" + "never downgrade on traffic alone" is asymmetric: a transient 404 microseconds after a successful call flips `ok→deny` because the guard checks source, not monotonicity.
+   - Part B bundle travels in `janus_db_conn` catalog fetch racing dashboard probe-triggered generation bumps; no version vector defined.
+
+4. **Missing requirements:**
+   - A.3 refresh window (how far back to scan usage rows); trigger cadence (every poll? every N rows?).
+   - C.1 terminal error shape when budget exhausted — original 4xx echoed, normalized, or wrapped?
+   - A.2 rate-limit "throttle concurrency" — to what RPS, per-key or per-provider?
+   - Probe audit-log retention and PII handling for upstream response bodies.
+   - Catalog hot-reload semantics on matrix-only generation bumps vs full bundle.
+
+5. **Architecture/design notes:**
+   - Boundary respected: probe/matrix dashboard, consumption/failover gateway.
+   - Per-attempt usage row (C.1) keeps billing honest; per-request attempt counter in proxy dict avoids new gen_server.
+   - `deny_keys_by_model` mixes `deny` and `balance` — balance-refresh needs a distinct re-probe path; make it explicit.
+   - Dual-repo E2E (Part D) is realistic; mock-upstream 401-key-A / 200-key-B needs deterministic per-run fixture reset to remain a real fixture.
+
+6. **Top 5 concrete edits:**
+   1. **Attach the correct spec** — this document is wrong for the audit scope; no Phase 1 item is reviewable here.
+   2. Make C.1 5xx retry a separate 1-attempt envelope, NOT consuming the 3-attempt key budget.
+   3. Define first-byte detection on gun streaming (flag flipped in the gun callback before any `cowboy_req:chunk/2` to the client).
+   4. Specify A.3 traffic-refresh window (e.g., last 1h) and trigger (post-poll vs on-N-rows).
+   5. Add explicit gateway catalog hot-reload behavior on matrix-only generation bumps (in-flight requests on stale ETS? rebuild-then-swap?).

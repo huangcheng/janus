@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and unusually self-aware, but two direct internal contradictions (429 cooldown, broken-key TTL) and an ambiguous retry-loop branch must be resolved before implementation.
+
+## 2. Critical risks
+- **Probe blowback**: 262 listings × 15s timeout worst-case ≈ 65min/key ≫ 10min wall cap; the cap silently truncates, and "Router-bound first" priority means unbound listings stay `unknown` forever — acceptable, but the UI badge story ("no badge = unknown") will show permanent noise on large catalogs.
+- **Regex false positives**: mitigated well (fail-open default, field-scoped regex), but the gateway-side classifier's *field paths* (OpenAI `error.code` vs Anthropic `error.type` vs zhipu shapes) are never specced — `code_keyword` matching is undefined at retry time.
+- **Failover latency**: ceiling math (300−60−30−30=180s) checks out; 45s default knowingly breaks 30s-budget clients — fine, documented.
+- **Retry storms**: per-key cooling only; fail-open pick + pool_reuse each bounded to one — OK.
+- **Balance starvation**: v1 traffic refresher can't demote; request-time balance 429 only cools 60s, so every subsequent request re-burns one attempt until the 429-heuristic canary probe fires. Acknowledged indirectly but the gap deserves an explicit sentence.
+
+## 3. Contradictions / stale claims
+- **429 fail-open**: A.2 says codes-table-missing → "every 429 classifies rate (retryable, **no cooldown**)"; C.1 exhaustion contract says codes-table-empty 429s carry "**minimum 10s cooldown**". Pick one.
+- **Broken keys**: carrier ships `broken` only within 24h; healing re-probes at ≥22h — leaving a 2h window (and any healing-lag window) where a broken key is eligible again, contradicting "broken keys are never fail-open candidates" and the all-broken-pool contract.
+- **Naming**: `janus_entitlement_failopen` (B) vs `entitlement_failopen` (C.1) — one counter, two names.
+
+## 4. Missing requirements
+- **pool_reuse semantics**: the loop shows it as a separate branch, terminal classes tie it to 5xx, and test 16 ties it to pool exhaustion — precedence when both apply (5xx on attempt 1 with candidates left) is undefined.
+- Erlang classifier field paths per protocol (above).
+- Probe endpoint RBAC/audit detail beyond "standard JWT".
+- Generation-bump-on-deletion: how the carrier distinguishes "table missing" (log-once warning) from "legitimately empty" is fine fail-open-wise, but the matrix-less alarm (E.6) will false-positive during legitimate clears.
+
+## 5. Architecture notes
+- Single-snapshot dispatch entry correctly kills the ETS-rebuild race; per-attempt usage rows with `is_terminal` + crash-grace 300s linked to ceiling is clean; deploy order E.3/E.4→E.2 is correct; 429 dual-class single-sourced in `entitlement_codes` is the right call; PT-based knob delivery matches repo invariant.
+
+## 6. Top 5 edits
+1. Resolve the 429 contradiction: specify one cooldown (10s min) for table-empty rate-class.
+2. Ship `broken` with no TTL (or heal at 12h) so "never fail-open" holds.
+3. Define pool_reuse precedence: state it fires only when candidates are exhausted OR on 5xx, explicitly.
+4. Add per-protocol JSON field paths to `entitlement_codes` (or a provider→path map) for retry-time matching.
+5. Unify counter names and add one sentence on v1 balance-key churn (60s cooldown loop until canary probe).

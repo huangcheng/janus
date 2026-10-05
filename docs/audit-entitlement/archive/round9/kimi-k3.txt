@@ -1,0 +1,37 @@
+# Audit: Key Entitlement Matrix + In-Request Failover
+
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and unusually well-guarded (fail-open defaults, TTL'd deny, budget reservations, per-request snapshots), but it ships several internal contradictions that will bite implementers.
+
+## 2. Critical risks
+- **Probe blowback**: well mitigated (daily budget, ≥25% healing reserve, 429 backoff). Residual: bootstrap ≤75% of 5000 = 3750 calls; DashScope day-one (786×3 keys=2358) fits, but larger catalogs silently truncate — bound set prioritized, good.
+- **Deny-regex false positives**: anchored regex + fail-open-to-`input_shape` is correct asymmetry. But hard-blocking binds on `deny 0/K` (A.5) trusts possibly-stale matrix data with a 400 — needs an override.
+- **Latency vs idle_timeout**: ceiling math (300−60−30−30=180s) is coherent; 45s default honestly documented vs 30s client budgets.
+- **Retry storms**: per-key cooling only; no pool breaker is an accepted v1 gap — fine, but `balance`-dead pools will burn the full retry budget per request until the 60s cooldown lands.
+- **Reload races**: single entry snapshot threaded through picks — correctly closed.
+- **Rotation staleness**: secret update deletes rows + bumps generation — correct.
+- **Streaming boundary**: committed-at-`stream_reply` rule is precise; error-status collect_drain retryability is consistent.
+
+## 3. Contradictions / stale claims
+1. **429 empty-codes-table cooldown**: C.1 says "no cooldown" in fail-open; the exhaustion contract says "minimum 10s cooldown even in the fail-open default". Direct conflict.
+2. **Probe single-flight**: "in-process lock" vs "advisory lock is the single mechanism" — pick one (advisory).
+3. **Classifier single-sourcing**: A.2 hardcodes the `no permission`/`unsupported operation` phrases and the entitlement regex in prose, then says the table is the only rule store and "no second copy exists". Unseeded-provider behavior is undefined.
+4. **Generation bumps**: key-broken abort "bumps the generation" per key vs "one `bump_generation` per batch (never per row)".
+5. **Counter naming**: `janus_entitlement_failopen` (B) vs `entitlement_failopen` (C.1).
+6. A.2 429 handling: "halve in-flight" is meaningless at probe concurrency 1; later text says pause 30s.
+
+## 4. Missing requirements
+- Carrier SQL lacks provider_id; gateway must join key→provider itself to build `{ProviderId, ModelName}` keys — specify.
+- Who writes the `is_terminal` crash backfill? A dashboard process mutating gateway-owned `usage_events` crosses the stated write-ownership boundary; bless it explicitly.
+- Probe behavior on key deletion mid-batch; JSEC decrypt availability in the probe runner context.
+- `classify(Result)` returning `pool_reuse` conflates result-classification with pool-state — pseudocode needs restructuring.
+
+## 5. Architecture notes
+ETS snapshot-per-request is the right call; per-attempt usage rows with `is_terminal` billing filter is clean; 429 dual-class via one table across probe/refresher/retry is the strongest design element; knob delivery via settings→persistent_term follows repo invariant.
+
+## 6. Top 5 edits
+1. Resolve the 429 cooldown contradiction (recommend: min 10s everywhere).
+2. Delete the in-process lock; advisory lock only.
+3. Move the hardcoded phrases/regex into the seed table; define unseeded-provider fallback explicitly.
+4. One generation bump per batch, including key-broken aborts (batch-end).
+5. Make `deny 0/K` bind rejection overridable (`?force=1` with audit), and name the `is_terminal` backfill owner.

@@ -1,0 +1,38 @@
+# 审计意见：target.md（Key Entitlement Matrix + In-Request Failover SPEC）
+
+**1. Verdict：GO WITH FIXES** — 架构边界、TTL 分层与 fail-first 语义基本自洽，但 broken-key 载体形状、429 兜底规则两处自相矛盾且阻断 C.1 落地，需先修。
+
+**2. Critical risks**
+- 探测成本可控（262×3=786，配额/25% 保留/封顶都有），但探测与真实流量共享 RPM 池，仅“429 时降并发”，无基于实测流量的自适应节流，理论上可把线上 429 打高。
+- deny 正则可控（锚定消息字段、默认 input_shape fail-open），但“no permission”等被判 ok+input_shape，与 A.3 任一 200 即晋升交互后，证据梯度被抹平。
+- 延迟账面 45s 预算+TTFB+body=135s<300s idle_timeout 成立；但见 §3 deadline 问题。
+- 重试风暴：codes 表缺失时 429 无 cooldown 的说法是风暴入口。
+- 快照设计消除 reload race，好。
+- balance 饥饿、轮换、流式首字节边界均有措施。
+
+**3. Contradictions / stale**
+- 429 空表：retryable 段“no cooldown” vs exhaustion 段“minimum 10s cooldown”——直接冲突。
+- 单飞：“in-process lock” vs “advisory lock is the single mechanism”。
+- broken-key 跳过不可实现：deny_keys 键为 `{ProviderId, ModelName}`，`__key__` 行的 ModelName 永不匹配 listing 查询；C.1“跳过 broken”无载体。
+- fail-open pick“任意 non-cooling non-attempted”与“broken 永不做 fail-open”矛盾。
+- deadline 自 t0 起算：首调用健康慢上游（60s TTFB+30s cap=90s>45s）后 `now<deadline` 已假，重试全灭——正文却宣称 105s 慢上游“by design”。天花板算式 300−60−30−30=180 假设 budget 含首调用，最坏 wall 应为 budget+90=270s，test 18 断言欠慢首调用用例。
+- A.3 晋升 v1 无来源区分：fail-open 尝试（D-10）打 deny-key 成功 → 200 → 晋升回 ok，deny 矩阵被单次 stale 盲打自愈，削弱 pre-filter。
+
+**4. Missing requirements**
+- 轮换后 traffic refresher 可被旧 secret 的窗口内 200 事件重新写入 ok（无 rotation 时间下限）。
+- zhipu coding-endpoint 专属 key（SPEC 目标处的动机）未解决：probe 用单一 base，被判 input_shape/ok，failover 仍选中它。
+- A.2“halve in-flight”未定义对象；per-key probe 与 all-keys 的并发/拒绝语义（409?）未定。
+- `requests_retried`/`failovers_won` 计数语义未定义；carrier 体量上限未声明。
+- 账号级 balance 重试同账号其他 key 必再败，无“整池 balance 短路”。
+
+**5. Architecture notes**
+- ETS 单快照 entry-snapshot 正确；usage 多行 `WHERE is_terminal` 计费语义清晰，注意 is_terminal 迁移默认值与 legacy 回填须同一迁移。
+- 429 双义由单表+key_scoped_balance 驱动是对的，但阈值/上限（Retry-After cap）缺。
+- 尝试预算“≤max+2”在混合 5xx→key 序列下边界模糊，建议给状态机。
+
+**6. Top 5 edits**
+1. B 的 deny_keys 增加 key 级 broken（`{ProviderId,key}` 或加载时并入该 provider 全部 listing），C.1 fail-open pick 显式排除 broken/deny。
+2. 统一 429 空表规则：保留 10s 最小 cooldown，删“no cooldown”；补 Retry-After 上限。
+3. A.3 晋升加护栏：低于 key 轮换时间的事件丢弃；fail-open 尝试产生的 200 不晋升（或记弱证据）。
+4. deadline 语义改成“per-attempt 重锚或首调用独占预算”二选一并写明；修天花板公式至 budget+90s，test 18 增加慢首调用。
+5. 新增 per-provider probe endpoint 覆盖（或 v1 明确排除 endpoint-scoped key，A.5 提示 operator）。

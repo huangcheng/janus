@@ -1,0 +1,41 @@
+**1. Verdict**
+GO WITH FIXES — sound architecture (fail-open bias, dashboard-only writer, atomic generation swap), but the max knob yields bodiless 502s, the healing loop has a starvation hole, and several "hard rules" have no enforcement point.
+
+**2. Critical risks**
+- Probe blowback: fixed 150ms spacing ignores per-provider RPM; probes share rate pools with live traffic; the 30s pause fires only after live 429s. Cap 1000 < 262 models × 4 keys; truncation order unspecified.
+- Deny-regex: fail-open default is right; but the regex isn't in `entitlement_codes` → hand-copied gateway copy.
+- Latency: ceiling 280s + TTFB 60s = 340s > Cowboy idle 300s → bodiless 502 at max knob. A slow first TTFB also consumes the entire 45s default budget → failover never fires.
+- Retry storms: ≤5 upstream calls per request; shared-quota 429s retried across the pool deepen throttling; no provider-level breaker.
+- Reload race: fine iff the retry loop binds one deny-map snapshot for all attempts; row-write vs `bump_generation` ordering unspecified.
+- Balance starvation: the [45m,60m] window can be missed (loop phase, dashboard downtime) → row never re-probed again.
+- Rotation: re-probe queue persistence unspecified; a restart loses it.
+- Streaming: committed-response rule is sound; verify status-line forwarding matches the commit definition.
+
+**3. Contradictions / stale claims**
+1. A.2: "single-flight per provider (in-process lock)" vs later "advisory lock…, not an in-process lock."
+2. Ceiling 280s claimed "< idle_timeout 300s" contradicts the spec's own worst case = budget + TTFB (340s).
+3. "No hand-copied second table" — yet the retry-time regex fallback isn't in the carrier.
+4. `ok` TTLs (7d / 1h input_shape) are "hard rules" with no consumer: carrier ships only deny/balance; healing loop ignores ok.
+5. Postgres-only DDL (`TIMESTAMPTZ`, `NOW()`) vs the sqlite carrier query expecting epoch seconds.
+6. 429 rate-class: "halve in-flight for 30s" vs "pause that provider's probe for 30s."
+
+**4. Missing requirements**
+- sqlite DDL/timestamp format for both new tables.
+- Enforcement consumer for ok-TTLs — or delete the rule.
+- Durable re-probe queue for secret rotation.
+- Explicit loop termination on empty candidate pool, incl. `retry_provider` branch.
+- Usage row written after classify ⇒ exactly one `is_terminal` per `request_ref`; rule for crash orphans.
+- Reporting when the call cap truncates a batch.
+
+**5. Architecture/design notes**
+- Generation-swap + per-request snapshot is right; assert the snapshot is held across the whole loop.
+- `is_terminal`-only billing is correct; failed-attempt tokens uncounted is a stated choice; mid-loop crash ⇒ zero-terminal requests.
+- Write ownership and persistent_term knob delivery match repo invariants.
+- 1+N+1 accounting is consistent; the "remaining candidates exist" guard is missing from the provider-retry branch.
+
+**6. Top 5 concrete edits**
+1. Cap `failover_max_budget_ms` at idle_timeout − TTFB ⇒ 240000, not 280000.
+2. Healing loop: re-probe `balance` rows aged ≥45min and `deny` ≥22h, open-ended (no upper bound).
+3. Pick one single-flight mechanism (advisory lock); ship deny regexes in `entitlement_codes` or pin identical patterns in Erlang.
+4. Ship sqlite DDL (epoch-second `checked_at`) for both tables.
+5. Terminate explicitly on empty pool; write usage rows after classification to guarantee exactly one terminal row.

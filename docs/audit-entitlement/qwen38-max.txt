@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — the design is unusually disciplined (fail-open defaults, single classifier table, snapshot-per-request), but it ships one deploy-order bug, one internal contradiction, and one ambiguous retry mechanism.
+
+**2. Critical risks**
+- **Probe blowback:** 150ms spacing ≈ 6.7 req/s/key against rate pools shared with live traffic; "provider's known RPM" has no defined source (schema field? codes table?). Truncated bootstrap tails are never re-enqueued — only `/models/sync` re-discovers row-less keys, so capped providers keep permanent unknown tails.
+- **Deny-regex false positives:** well guarded (field-scoped regex, fail-open default). Residual: `max_tokens=1` probe shape may itself 400 → false `input_shape` → escalation; healed only by traffic 200s, and meanwhile retry-time classifier treats those models as TERMINAL-zero-retry.
+- **Latency vs idle_timeout:** ceiling math (180+60+30<300) holds, but worst-case jitter at `max_attempts=20` (~6s) is omitted from the formula.
+- **Retry storms:** see contradiction below.
+- **Reload races:** dispatch-entry snapshot is correct; but A.1's "gateways drop the stale broken mark **immediately**" is false — propagation is bounded by the poll interval (never stated).
+- **Balance starvation:** 1h TTL + 15-min healing + key-scoped canary adequately close it; expiry-to-unknown costs one 429 failover, acceptable.
+- **Streaming boundary:** sound — error-status streams are pre-`stream_reply` and retryable; 2xx streams commit at first frame. Non-stream path buffers full body with no stated cap beyond TTFB.
+
+**3. Contradictions / stale claims**
+- C.1 self-contradicts on codes-empty 429: "retryable, **no cooldown**" vs exhaustion contract's "**minimum 10s cooldown**".
+- Terminal classes say the provider retry is 5xx/transport-only, but the loop pseudocode and test 16 use the reserved slot for *any* retryable class once the pool is exhausted. One mechanism, two specs.
+- **Deploy order is backwards:** E.3 (`WHERE is_terminal` aggregation) before E.2 (gateway migration adding the column) breaks dashboard billing queries.
+- Cosmetic: schema comment calls `escalated` the "stable_input_shape marker".
+
+**4. Missing requirements**
+- RPM-limit source; bootstrap-tail re-enqueue; `/stats` matrix-loaded flag (E.6's alarm depends on it, C.1's counter list omits it); TTL-aware bind validation (A.5 reads raw rows — a 25h deny should not block binding); gateway/DB clock-skew handling for traffic timestamps vs probe `NOW()`; and key-level 401/403 traffic evidence is unambiguous (can't be input-shape) — banning *all* traffic demotion pre-E.1 is over-conservative.
+
+**5. Architecture notes** — ETS atomic rebuild + single-generation snapshot: correct and lock-free. Per-attempt usage with `is_terminal`-only billing + 300s crash grace: sound; 1s-buffer loss acknowledged. Dashboard-sole-writer boundary clean. Knobs via settings→persistent_term match repo invariants; apply-time clamp is right.
+
+**6. Top 5 edits**
+1. Fix deploy order: E.3 ships with/after E.2, or the dashboard migration owns column+backfill.
+2. State once: codes-empty 429 → rate-class with ≥10s cooldown; delete "no cooldown".
+3. Merge pool_reuse/provider-retry into one definition; align terminal-classes text.
+4. Replace "immediately" with "next generation poll" and state the interval.
+5. Add bootstrap-tail re-enqueue, RPM source, /stats matrix flag, TTL-respecting bind validation.

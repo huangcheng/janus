@@ -1,0 +1,31 @@
+# Audit: target.md
+
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound and internally consistent on the hard parts (generation snapshots, single classifier table, is_terminal billing), but four specific contradictions must be resolved before implementation.
+
+## 2. Critical risks
+- **Probe 401/403 → whole-key `broken` for 24h**: one model-scoped 403 on the first listing probed removes the entire key — the exact "false deny is worse than false ok" failure the spec's own doctrine forbids, and broken keys are excluded from fail-open too.
+- **Traffic 401s never heal**: A.3 is ok-only promotion; the 429-repeats canary exists, but nothing enqueues a probe on repeated traffic 401/403 — a revoked key burns one failover attempt per request for up to 3 days (ok-row re-probe).
+- **Clock skew**: traffic rows stamp gateway event timestamps, but upsert arbitration claims "one DB clock"; the 1h watermark only tolerates skew within the scan window — a fast gateway clock still outranks fresh probe evidence.
+- Retry storms, reload races, balance starvation, streaming boundary, and idle_timeout math are all properly handled.
+
+## 3. Contradictions
+- **Codes-table-empty 429**: Retryable-classes says "every 429 classifies rate (retryable, **no cooldown**)"; exhaustion contract says codes-table-empty 429s carry "minimum 10s cooldown". Direct conflict.
+- **Deploy order**: E.3 (dashboard aggregation `WHERE is_terminal`) ordered BEFORE E.2 (gateway migration creating those columns) — dashboard SQL hits a missing column.
+- **Premarked rows**: A.2 says `premark_input_shape` rows "never enter the hourly loop / zero budget"; A.4 re-probes input_shape-flagged ok rows after 1h "unless escalated" — but premarked rows can never escalate (escalation requires re-probes). Either they burn healing budget hourly or the clauses conflict.
+- Part B's "pick ignores the matrix for a single attempt" vs C.1's `failover_failopen_used` flag — duplicated, non-normative definitions.
+
+## 4. Missing requirements
+- pool_reuse when all attempted keys are still within cooldown: no candidate defined (wait-until-expiry bounded by deadline, or terminal?).
+- RPM source for probe pacing ("the provider's known RPM") undefined.
+- Mock upstream / flows cover only OpenAI protocol; the anthropic probe path (x-api-key + version header) is untested.
+
+## 5. Architecture notes
+Generation snapshot threaded through all attempts is correct. Per-attempt rows with `is_terminal`-only billing is coherent, but failed-attempt tokens are invisible to billing by design — document it. Single-source `entitlement_codes` + carrier distribution is the spec's strongest element. Knobs via persistent_term match repo invariants.
+
+## 6. Top 5 edits
+1. Pick one codes-table-empty 429 rule: rate-class with `max(Retry-After, 10s)` cooldown.
+2. Fix deploy order: E.2 columns before E.3 aggregation; E.4/`key_entitlements` before Part B.
+3. Require corroboration (401/403 on ≥2 listings) before writing `broken`; add a traffic-401 probe trigger mirroring the 429 canary.
+4. Explicitly exclude `premark_input_shape` rows from the 1h healing queue (or stamp `escalated=true` at write).
+5. Specify pool_reuse candidate selection when no cooldown-expired key exists.

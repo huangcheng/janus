@@ -1,0 +1,36 @@
+**1. Verdict**
+GO WITH FIXES — fail-open posture, generation snapshots, single classifier, and carrier-SQL TTL enforcement are sound, but broken-key lifecycle, model aliasing, and the streaming commit boundary are under-specified.
+
+**2. Critical risks**
+- Probe/rate-pool blowback: probes share provider RPM with live traffic; the 30s 429 pause is coarse; "never more than known RPM if lower" is unenforced/vague.
+- deny-regex: mitigations are decent (anchored, code/message fields only), but `product.*未开通` is broad and some providers echo request text inside `message` — residual false-deny risk, partially saved by the timestamp-guarded 24h TTL.
+- Failover latency: worst case 180s budget + 60s TTFB + 30s body cap + jitter ≈ 270s vs 300s idle_timeout — a 30s margin is thin; default 45s still abandons 30s-budget clients (acknowledged).
+- Retry storms: missing/empty codes table → every 429 is rate-class with **no cooldown**, so retries hammer a balance-dead key; concurrent bursts also each burn one attempt on a newly-dead key before cooling lands (no pool breaker, acknowledged).
+- Matrix/catalog races: solved by the single generation snapshot threaded through `dispatch/7` — good. But deny-map keys assume listing name == name sent upstream; Router alias rewriting is unspecified, risking silent non-exclusion.
+- Balance starvation: bounded by 1h TTL + key-scoped canary healing — acceptable.
+- Key rotation: new-secret keys are rowless = eligible until bootstrap; covered by failover, acknowledged.
+- Streaming boundary: if upstream 200 status arrives before `stream_reply`, the stated commit rule ("byte passed to stream_reply") says uncommitted → TTFB-timeout retry may duplicate in-flight upstream generation (double billing).
+
+**3. Contradictions / stale claims**
+- `broken` ships with deny's 24h TTL, but A.4 healing priorities (balance > deny > ok) never re-probe broken rows → after expiry the key silently re-enters the pool.
+- A.2 says key-level 401/403 "leave prior rows untouched" while A.1 says the abort writes the `__key__` broken row — compatible, but worded in conflict.
+- E.2 adds `request_ref` but no index is specified for the crash-backfill scan.
+
+**4. Missing requirements**
+- Healing/TTL policy and operator override (manual deny/ok/unbreak) for `broken`.
+- Alias → deny-map key translation rule.
+- Deploy ordering: E.3 (aggregation `WHERE is_terminal`) must ship before/at Part C's usage rows or billing breaks.
+- Advisory-lock unlock discipline (session lock on a pooled connection can leak).
+- Auth/audit for `entitlement_codes` CRUD; non-stream body buffer cap; request-time 401 evidence path (until E.1, production broken keys are only found by probes).
+
+**5. Architecture notes**
+- ETS atomicity + per-request snapshot correctly resolves reload races; lock-free reads fine.
+- Billing correctness hinges on `is_terminal` discipline across *all* aggregation queries, not just the ones listed.
+- Dashboard-only writes + TTL enforced solely in carrier SQL is a clean single enforcement point. 429 dual-class via one shared table is right; knob delivery via persistent_term follows repo invariants. Attempt accounting (1 + N + 1 reserved) is internally consistent.
+
+**6. Top 5 concrete edits**
+1. Give `broken` a lifecycle: exclude from the 24h TTL or add it to healing above `deny`; spec post-E.1 request-time 401 evidence.
+2. Specify aliasing: state whether deny-map keys are router aliases or upstream listing names, and where translation happens.
+3. Empty-codes-table fail-open: keep 429 = rate class but with a minimum cooldown (≥10s) to prevent storming balance-dead keys.
+4. Resolve 200-then-stall: commit at upstream 2xx status for streams (not first frame), or explicitly accept duplicate upstream work.
+5. Enforce deploy order (dashboard E.3 before gateway E.2), add a `request_ref` index, and spell out advisory-lock unlock on the same session.

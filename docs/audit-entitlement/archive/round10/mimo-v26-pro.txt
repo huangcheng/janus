@@ -1,0 +1,37 @@
+**1. Verdict: GO WITH FIXES** — sound fail-open design and honest limits, but it ships three internal contradictions and one undistributed gateway dependency.
+
+**2. Critical risks**
+- **Probe blowback**: 262-model DashScope × 3 keys × 150ms ≈ minutes of real-money calls sharing live rate pools; "halve in-flight 30s" is underspecified (halve what, per key or provider?) and `JANUS_PROBE_DAILY_CALLS=5000` vs one-key Ark/zhipu costs is unstated per-account.
+- **Regex false positives**: anchored deny patterns are good, but `product.*未开通` is still substring-loose; one false deny benches a key 24h with no traffic to heal it (probe-only recovery is 15-min loop + budget contention).
+- **Latency**: 45s + 60s TTFB + 30s body-cap ≈ 135s wall — exceeds common 30/60s client budgets; spec admits waste but gives no per-attempt sub-budget.
+- **Retry storms**: rate-class 429 with no cooldown (empty-codes path) can stampede a throttled key concurrently; per-key cooling only damps after first failure.
+- **Reload races**: entry-snapshot pinning is right, but cooldown/note_failure state lives in `janus_lb` outside the snapshot — a fail-open pick can reuse a key another request just cooled.
+- **Balance starvation**: reserved 25% healing share is a counter, not a scheduler; key-scoped canaries only where `key_scoped_balance` is set — per-row balance on other providers burns budget 1:1.
+- **Rotation staleness**: secret update clears rows + bumps generation, but async re-probe leaves the key eligible-unknown meanwhile — a still-bad secret re-learns 401 only at request time.
+- **Streaming boundary**: "committed at stream_reply" is clear; but non-stream full-body collection before reply adds TTFB-to-client latency for every error path.
+
+**3. Contradictions / stale claims**
+- Empty codes table: "every 429 classifies rate (retryable, **no cooldown**)" vs "codes-table-empty 429s carry a **minimum 10s cooldown**". Pick one.
+- 401 abort "bump the generation" (per key) vs "one `bump_generation` per batch (never per row)".
+- Counter `janus_entitlement_failopen` (B) vs `entitlement_failopen` (C stats list).
+- C.1 gateway "known input-shape … **a premarked modality listing**" — premark listings are probe-side only; **the carrier ships no premark data**, so gateways cannot know them. Either ship premarked listing names or drop that clause.
+- Escalation "3 consecutive re-probes" vs premarked rows "never enter the hourly loop" — clarify escalation is probe-derived input_shape only.
+
+**4. Missing requirements**
+- DDL for `entitlement_codes` (incl. `match_status` enum, regex validation rules) and `probe_budget_counters`.
+- Retry-After parse source; where "known RPM" comes from; read-endpoint pagination for 262×N matrices; generation bump for the codes seed migration; zero-key/zero-listing provider behavior.
+
+**5. Architecture notes**
+- ETS atomic rebuild + per-request generation pinning: correct; do not relax to per-attempt reads.
+- `is_terminal` billing is sound; unflushed-row loss accepted — say the same for crash-marking false negatives on unflushed successors.
+- Write ownership (dashboard-only matrix, gateway evidence via usage rows) is clean and enforced by SQL-only carrier.
+- 429 dual-meaning single-sourced in one table: right; keep probe/refresher/retry on it verbatim.
+- Budget accounting 1 + max_attempts + reserved provider slot is coherent under `=0`.
+- Knob delivery via settings → persistent_term matches repo invariant; clamp is right.
+
+**6. Top 5 edits**
+1. Resolve the empty-codes 429 cooldown contradiction.
+2. Ship premark listing names in the carrier (or delete the gateway clause).
+3. Reconcile per-key 401 bump with one-bump-per-batch; unify counter names.
+4. Add `entitlement_codes`/`probe_budget_counters` DDL + seed-migration bump rule.
+5. Add per-attempt TTFB sub-budget (e.g. 20s) so worst-case fits 60s clients.

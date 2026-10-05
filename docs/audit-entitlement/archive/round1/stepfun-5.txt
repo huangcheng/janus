@@ -1,0 +1,39 @@
+**1. Verdict:** GO WITH FIXES — the design is sound but the write-ownership boundary, the missing error-text pipeline for traffic learning, and deny-vs-input-shape classification will ship incorrect behavior.
+
+**2. Critical risks**
+- Probe blowback: 786 reqs/provider (2–4 min) invites rate limits; "a few cents" is optimistic; English-only deny regex misses Chinese text ("未开通") → false `ok`.
+- Input-shape is a *default*, not a detection: any unclassifiable 400 (incl. Ark's 400 `InvalidEndpointOrModel`, absent from the regex) becomes `ok+input_shape`.
+- Latency: attempts×TTFB(60s) is not a bound; 3 attempts of a 120s-TTFB model = 360s > Cowboy's 300s idle_timeout → mid-failover bodiless 502.
+- Retry amplification: N in-flight requests on a hot model all fail over onto the survivor key; no jitter; 429-balance burns one attempt per request until refresh.
+- Reload races: one traffic 200 overwrites a newer probe `deny`; a rotated key (same id) keeps stale rows.
+- Streaming: HTTP 200 then a mid-stream SSE error frame is unretryable after first client byte; usage-row token semantics undefined.
+- Write ownership: A.1 has the gateway writing `key_entitlements` — violates "pure gateway" and contradicts A.3.
+
+**3. Contradictions / stale**
+- "keys sequentially" vs "5 in-flight per provider".
+- A.1 "gateway writes traffic rows" vs A.3 "dashboard refresher folds usage rows".
+- A.3 keys off "recorded error shape", but usage_events carries no error text.
+- C.2 "judge does not fail over" vs C.3 "no changes" — nothing marks judge calls inside `do_proxy`.
+- A.1 treats `InvalidEndpointOrModel` as 404; Ark returns 400.
+- B's SQL fetches `ok` only to drop it — carrier noise on every reload.
+
+**4. Missing**
+- usage_events additions: error_code, error_text, attempt/request correlation id (required by A.3 and per-attempt billing).
+- Matrix invalidation on key rotation/secret update.
+- Per-protocol probe shapes (Anthropic `/v1/messages` + `x-api-key`), not one OpenAI body.
+- Knob delivery path (settings → persistent_term, not sys.config).
+- 429 balance-vs-rate cooldown differentiation; behavior when pick yields no eligible key.
+
+**5. Architecture notes**
+- ETS atomic swap with absence=eligible is correct; the 7d SQL filter makes stale→unknown implicit. Keep it.
+- Per-attempt usage rows inflate request counts and quota; define failed-attempt billing (401/403 rows = zero cost, no quota).
+- Writers must be dashboard-only; the gateway reports failures via usage events.
+- The attempt budget needs a shared wall-clock deadline, not just a counter.
+- Traffic `ok` must not resurrect a probe `deny` without a newer probe re-confirming.
+
+**6. Top 5 edits**
+1. Strike the gateway from `key_entitlements` writers; make A.3 depend on an explicit usage_events schema add (error_code, error_text, attempt_seq) and flag the cross-repo dependency.
+2. Rewrite 400 classification: deny by error_code/text (Chinese + `InvalidEndpointOrModel` included); `input_shape` only for positively identified capability errors; default unclassified 400 → skip/unknown.
+3. Add a failover deadline (`min(attempts×TTFB, 240s)`) asserted against idle_timeout, shared with the 5xx extra attempt.
+4. Add an explicit no-failover context flag for judge calls so C.2 and C.3 agree.
+5. Specify per-protocol probe requests, resolve the concurrency contradiction, and define matrix invalidation on key rotation.

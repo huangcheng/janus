@@ -1,0 +1,40 @@
+**1. Verdict: GO WITH FIXES** — structurally tight, but ships open knobs (time budget, jitter, billing, probe generation bump, key-rotation probe) that bite in production.
+
+**2. Critical risks**
+- **Probe rate-limit blowback (A.2):** 786 probes × 15s timeout against one provider will itself trigger 429s, biasing the matrix it builds. 5-in-flight vs ~60-rpm DashScope quota exhausts during `/sync`.
+- **Deny-regex false positives:** `no permission` substring matches generic 403s on non-model APIs of the same provider; `unsupported operation for this model` can fire on content-policy or region restrictions, not entitlement.
+- **Failover latency:** 3 × 60s TTFB = 180s upstream alone; client budgets are typically 30–60s. Only attempt count is bounded — no per-request wall-clock cap.
+- **Retry storms:** No jitter/backoff; a stale keyset fans 3× concurrent at upstream.
+- **Reload race (B/A.4):** Generation bump only on `/sync`; standalone `/probe` writes rows the gateways never see.
+- **Balance starvation:** A `balance` row excludes a key up to 7 days until the next stale-triggered probe; mid-window it gets no traffic and cannot heal via passive learning.
+- **Key rotation staleness:** New keys inserted via dashboard are not auto-probed; until probed they're `unknown` → all calls fail until operator notices.
+- **Stream first-byte boundary:** retryability assumes upstream status is known before client sees response — detection point undefined (C.1).
+- **Idempotency:** upstream may commit on the 1st attempt (network blip after commit); retry duplicates non-idempotent work.
+
+**3. Contradictions / stale**
+- A.2 says `/probe` "fans out sequentially" yet "5 in-flight per provider" — contradictory model.
+- A.2 aborts probe on 401; C.1 retries on 401 — a transient token-expiry 401 then triggers 3 doomed retries.
+- A.1 defines `unknown` but B's bundle SQL drops it; "no row" and "stale row" are indistinguishable unless A.2 eagerly writes `unknown` on first-seen — not stated.
+
+**4. Missing requirements**
+- Per-request wall-clock budget (only attempt count is capped).
+- Backoff/jitter between attempts.
+- Billing semantics for N rows per request (only terminal bills).
+- Generation bump on every `/probe` endpoint; auto-probe on key insert.
+- Knob delivery via `persistent_term` (project rule).
+- First-byte detection mechanism for stream retry.
+- Mock upstream fixture spec for E2E (D references but doesn't pin).
+- janus-auto exclusion asserted in C.3 but not anchored in `janus_auto` API.
+
+**5. Architecture / design notes**
+- ETS atomic rebuild → lock-free per-request reads — fine.
+- Per-attempt usage rows change billing: only the terminal row should count toward customer billing; failed rows are operator-visibility.
+- 429 dual classification requires reliable error-body text matching across providers with wildly different schemas.
+- Knob delivery must use `persistent_term` via the `settings` table (project rule); `sys.config` is the wrong path.
+
+**6. Top 5 concrete edits**
+1. Add `janus.failover_max_budget_ms` (default ~90s) — more useful than attempt count for client UX.
+2. Add bounded jitter (100–300ms) between retry attempts.
+3. Billing: only the terminal usage row bills the customer; failed attempts tagged `attempt=N`, `terminal=false`.
+4. Bump generation on every probe-write endpoint; auto-probe a new key in `provider_keys` POST.
+5. Pin the mock-upstream fixture (401 for key A, 200 for key B, error bodies matching the deny regex) — otherwise E2E proves nothing.

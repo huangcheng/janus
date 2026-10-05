@@ -1,0 +1,22 @@
+**Mismatch between prompt and attachment — I can't run this audit as instructed.**
+
+The prompt describes the spec under review as *"Phase 1: streaming Chat↔Messages translate, /stats request counters, a prebuilt Alpine test image (Aliyun apk mirror), and deploy generation/token waits"* and explicitly states:
+
+> "This document is **not** an entitlement-matrix/key-failover spec."
+
+But the attached `target.md` **is exactly that**: a Key Entitlement Matrix + In-Request Key Failover spec (Parts A–E: probe runner, matrix distribution, failover loop, E2E plan). It contains none of the content the required output format demands:
+
+- No SSE/streaming translate contracts (§2 item 1) — the only streaming mention is C.1's first-byte rule
+- No `/stats` counter definitions vs dashboard SPEC (§2 item 5)
+- No Docker/`_build` ABI or Alpine image content (§4)
+- No deploy generation/token waits (§2 item 6)
+- No **§10** at all — the verdict rule ("unless … §10 does not already pick a winner. Do not restate §10") references a section that doesn't exist in this document
+
+So the verdict logic and fix criteria are keyed to a different document. Producing "GO WITH FIXES" with quoted contradictions from a spec the prompt disclaims would be auditing the wrong artifact.
+
+Two ways forward — pick one:
+
+1. **Attach the intended spec** (the streaming-translate//stats/Alpine-image/deploy-waits document) and I'll audit it against this rubric.
+2. **Audit `target.md` on its own terms** — I'd use an entitlement-appropriate rubric: probe classification safety (401-abort, input-shape-400 vs deny-regex overlap), matrix→catalog propagation timing, `deny_keys_by_model` ETS invariants, failover loop budget vs Cowboy `idle_timeout` (3 × 60s TTFB = 180s > 300s? borderline), streaming first-byte boundary, and dual-repo E2E coverage per `TEST-FLOWS.md` rules.
+
+Which document do you actually want reviewed?

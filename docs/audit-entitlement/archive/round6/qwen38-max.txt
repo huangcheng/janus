@@ -1,0 +1,34 @@
+**1. Verdict:** GO WITH FIXES — the design is sound and failure-mode-aware, but one carrier bug and one knob contradiction break stated behavior.
+
+**2. Critical risks**
+- **Probe cost/rate-limit:** pacing is decent, but the per-provider *daily* budget's storage/persistence across dashboard restarts/replicas is unspecified — an advisory lock alone can't hold a daily counter.
+- **Deny-regex false positives:** fail-open default + code/message-field-only matching is the right call; residual risk on unseeded providers is bounded by retry-once.
+- **Latency vs idle_timeout:** arithmetic holds (180+60+30+jitter ≈ 270s < 300s) only because budget gates attempt *starts*. Real risk is client-side 30–60s timeouts: default 45s budget + slow failures routinely exceeds them, despite the "fits common client budgets" claim.
+- **Retry storms:** v1 traffic evidence can only PROMOTE. A pool-wide new deny (e.g., model renamed) stays matrix-`ok`, and every request amplifies ≤5x until a probe notices — healing never re-probes fresh `ok` rows (3-day TTL). This is the spec's biggest operational hole.
+- **Reload races:** one generation snapshot threaded through `dispatch/7` solves candidate/deny-map mixing; carrier rows can outlive SQL TTL by one poll interval — acceptable.
+- **Balance starvation:** 1h TTL + key-scoped canary is right, but the canary *model* is unspecified — if it picks a deny-model, balance never heals.
+- **Key rotation:** delete-all-rows + row-less=eligible window is acceptable; 401 fails over.
+- **Streaming boundary:** committed-at-`stream_reply` with error-status collect_drain is consistent and keeps errors retryable.
+
+**3. Contradictions / stale claims**
+- **Carrier SQL omits broken keys:** A.1 ships `__key__` rows with `status='broken'`, and `deny_keys` values include `broken`, but Part B's SELECT only matches `'deny'/'balance'` — broken rows never reach gateways, so C.1's "skip known-broken keys" is unimplementable as written.
+- `JANUS_PROBE_MAX_CALLS`: A.2 says per-batch hard stop; A.4 calls it the per-provider DAILY budget (that's `JANUS_PROBE_DAILY_CALLS`).
+- A.2: "in-process lock" vs "advisory lock is the single mechanism."
+- A sqlite SELECT variant exists though sqlite is declared permanently matrix-less with no DDL — dead code.
+
+**4. Missing requirements**
+- Recovery for truncated bootstraps: the 10-min wall abort leaves models row-less; healing only touches existing rows, so they stay unprobed until the next `/models/sync`.
+- Daily-budget counter persistence.
+- Balance canary model selection rule.
+- Status-only 401/403 traffic evidence is unambiguous and needs no `error_code`, yet is ignored until Part E — no interim key-broken path.
+- Bind-time validation should honor deny/balance TTLs, not raw rows.
+
+**5. Architecture notes**
+Generation-snapshot reads keep per-request picks lock-free and atomic; `is_terminal`-only billing is correct (accept undercount of mid-attempt upstream tokens as cost visibility); write ownership is clean (dashboard-only writer); 429 dual-class via one seeded codes table read by both classifiers is the right single-source design; knob delivery via persistent_term matches repo invariants. Non-stream success bodies needlessly buffer before reply.
+
+**6. Top 5 edits**
+1. Add `OR (status='broken' AND model_name='__key__' AND checked_at > now()-24h)` to the carrier SQL.
+2. Fix A.4 to reference `JANUS_PROBE_DAILY_CALLS`; keep MAX_CALLS per-batch.
+3. Add interim status-only demotion: N traffic 401/403s on a key → write `__key__` broken.
+4. Make the healing loop also queue never-probed (absent-row) models, closing the bootstrap-abort gap.
+5. Forward non-stream 2xx immediately; collect only ≥400 bodies, mirroring the stream path.

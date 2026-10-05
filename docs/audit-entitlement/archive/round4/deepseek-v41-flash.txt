@@ -1,0 +1,37 @@
+## 1. Verdict
+**GO WITH FIXES** — the fail-open/failover skeleton is sound, but probe coverage vs budget, the 429 dual-class path, and cross-ownership writes are under-specified.
+
+## 2. Critical risks
+- **Probe cost/coverage:** 262 listings × real TTFB (up to 60s) blows the 10-min wall long before coverage; the 1000-call cap is the only real bound. "Cheap probes" is asserted, not modeled; 429 backoff (halve in-flight, 30s pause) still shares the live rate pool.
+- **Deny false positives:** regex is scoped to code/message fields, but per-provider message field names aren't enumerated; a provider emitting entitlement text in a generic field risks a false `deny` → good key removed (the stated worse failure).
+- **Failover latency:** budget gates attempt STARTS only; worst case 105s vs Cowboy 300s is fine, but TTFB isn't a named knob — the ceiling math depends on an unconfigured value.
+- **Retry storms:** cooling is post-hoc; concurrent bursts on a fresh deny set all pick the same next key.
+- **Reload race:** per-request snapshot is good, but the rotation→next-generation-poll staleness window is undefined.
+- **Balance starvation:** 1h TTL + ≥45min healing probe is a 15-min window; a missed tick benches a topped-up key up to 1h.
+
+## 3. Contradictions / stale
+- A.2 says "Single-flight per provider (in-process lock)" then "there is no in-process lock." Pick one.
+- `failover_max_attempts=0` → "single-attempt," but the reserved provider slot (≤ max_attempts+2) implies 2 calls. Test 11 vs 16 conflict.
+- A.1's traffic timestamp-guard is moot under A.3's promote-only rule.
+- Part B retains editorial text: "Both dialect variants ship as gateway migrations? No".
+- A.1 gives only Postgres DDL; sqlite's epoch `checked_at` schema is unspecified.
+
+## 4. Missing requirements
+- Generation-poll interval / matrix propagation SLO.
+- Gateway behavior when `entitlement_codes` carrier is absent (boot-before-dashboard): classifier fallback undefined.
+- Metric emission for `janus_entitlement_failopen` and counters.
+- 429 classification when the body is unparseable.
+- usage_events migration DDL for `attempt`/`request_ref`/`is_terminal` + legacy backfill statement.
+
+## 5. Architecture notes
+- **ETS atomicity vs per-request reads:** snapshot-at-entry is correct; but "cooling" is separate live state, so matrix generation and cooldown generation mix — acceptable, should be stated.
+- **Billing:** `WHERE is_terminal` only, but the crash-marking refresher makes the DASHBOARD a writer of gateway-owned `usage_events` — an ownership crossing not acknowledged, unlike A's "dashboard is the ONLY writer."
+- **429 dual meaning:** needs the code table at retry time; without it, balance-vs-rate defaults are unset.
+- **Knob delivery:** ceiling validated at write time only; already-distributed PT values aren't revalidated.
+
+## 6. Top 5 edits
+1. Model probe wall-time vs coverage; make bound-model priority explicit and derive/raise the cap.
+2. Resolve the in-process-lock contradiction and the `max_attempts=0` vs provider-slot conflict.
+3. Specify gateway behavior when `entitlement_codes` is missing.
+4. Define the rotation→reload staleness window and generation-poll interval.
+5. Acknowledge dashboard writes to `usage_events` (is_terminal backfill) or move crash-marking gateway-side.

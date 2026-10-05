@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — the design (fail-open classifier, timestamp-guarded upserts, bounded failover) is sound, but the carrier SQL contradicts the TTL rules and the healing path for expired `deny` rows is never scheduled.
+
+**2. Critical risks**
+- *Probe cost/blowback:* 262 models × 3 keys at 150ms = ~40s/key floor, but 15s timeouts on dead listings blow the 10-min target; probes on live traffic share provider rate limits (the 429 backoff only halves probe concurrency, not blast radius). 24h deny TTL × ~250 deny rows = a full daily re-sweep — cost never stated.
+- *Deny false positives:* Ark `InvalidEndpointOrModel` fires on model-name/shape errors too — classifying it `deny` contradicts the spec's own fail-open doctrine and can starve a good key for 24h.
+- *Failover latency:* 3 × TTFB + jitter inside 90s budget vs typical 30–60s client budgets means retries often run after the client is gone; retained-request-map replay must also cover large/streaming request bodies (unspecified).
+- *Retry storms:* 100–300ms jitter is negligible; retrying 429 into sibling keys of the same account amplifies the rate-limit penalty the provider just issued.
+- *Reload races:* per-request snapshot is fine; but the probe batch's single `bump_generation` races the gateway's 24h-window fetch on `now()` clock skew between DB and gateway.
+
+**3. Contradictions / stale claims**
+- A.1: `balance` valid 1h; Part B carrier: `checked_at > now() - 24 hours` for `IN ('deny','balance')` — balance rows ship 24× their TTL. "Consumers enforce by checked_at" is asserted but never implemented anywhere.
+- A.1 garbled sentence ("indistinguishable-by-design is WRONG") vs "creating a key inserts `unknown` rows lazily" — eager-vs-lazy first-seen write is unresolved.
+- Part C: 429 "rate or balance" both retryable, yet A.2 probe treats rate-limit 429 as skip/backoff — inconsistent taxonomy.
+
+**4. Missing requirements**
+- No periodic re-probe job for expired `deny`/`balance` rows — healing exists only post-`/models/sync`/key-insert, so the starvation loop the spec cites is only half-closed.
+- Gateway-side code table is a "copy" of `entitlement_class.py` — no drift/sync mechanism.
+- Usage semantics: `attempt=1 OR terminal` double-counts single-attempt requests; no request-level correlation id across attempts; cost attribution of failed attempts per key undefined.
+- Multi-worker/multi-replica dashboard: "in-process lock" single-flight is insufficient.
+- Probe endpoint rate limiting / spend cap.
+
+**5. Architecture notes**
+- Atomic ETS swap + snapshot-at-entry is correct and lock-free; keep it.
+- Dashboard-writes/gateway-reads boundary is clean; fail-open counter needs a defined metric export.
+- Attempt budget accounting (shared wall clock, provider retry consuming it, pre-call guard) has no off-by-one.
+- Knob delivery via settings→persistent_term matches the repo invariant.
+
+**6. Top 5 edits**
+1. Fix carrier SQL: per-status windows (`deny` 24h, `balance` 1h), or enforce TTL at gateway read from `checked_at`.
+2. Reclassify Ark `InvalidEndpointOrModel` as `input_shape`/`unsupported_model`, not `deny`.
+3. Add a scheduled re-probe of expired rows (healing loop) to A.4.
+4. Specify usage dedupe (request id + attempt), terminal-row billing rule, failed-attempt cost attribution.
+5. Specify retry body buffering/replay limits and generate both classifiers from one shared table.

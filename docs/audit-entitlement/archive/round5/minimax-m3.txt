@@ -1,0 +1,35 @@
+**1. Verdict: GO WITH FIXES** — architecture is sound, but a missing carrier payload (broken keys) and an under-sized probe budget will silently break the very mechanisms this spec exists to deliver.
+
+**2. Critical risks**
+- **Broken-key gap**: probe aborts on 401 and writes nothing; the deny-map carrier carries only `deny|balance`. Spec promises "skipped from candidates entirely" but defines no shipping mechanism — the gateway never learns, every request still 401s and fails over, no self-heal.
+- **Probe budget starvation**: `JANUS_PROBE_MAX_CALLS=1000/day` shared across sync/bootstrap/healing × N providers. DashScope alone = 262 × 3 keys = 786 calls per bootstrap. With 3+ providers, one bootstrap exhausts the day; healing loop idles; `deny`/`balance` rows never re-probe; topped-up keys stay excluded past TTL.
+- **Failover wall-time**: default 45s + 60s TTFB = ~106s; ceiling 210s + one full final TTFB = 270s, inside 300s idle. Per-attempt TTFB × 4 + jitter ≈ 241s, within ceiling. OK.
+- **Retry storms**: explicit no-breaker in v1; thundering herd over 2-key model retries the alternate key serially. Acceptable, flag as v1.1.
+- **Streaming boundary**: `stream_reply` → upstream-error-before-first-chunk is undefined; spec only handles Status≥400 pre-byte and 2xx-from-first-frame.
+
+**3. Contradictions / stale**
+- "max_attempts + 2 calls" with default 3 = 1 unconditional + 3 key retries + 1 provider retry = 5. Internally consistent.
+- "Fresh by construction" carrier claim holds only because dashboard is the sole updater — invariant is implicit, not asserted.
+
+**4. Missing requirements**
+- Carrier payload for 401/403-broken keys (sentinel or sibling map).
+- Secret-update de-dupe / coalesce window in A.1 (rapid edits queue multiple bootstraps?).
+- Streaming `stream_reply`-to-first-chunk rule.
+- Legacy `usage_events` backfill timing (`attempt=1, is_terminal=true`) — which side runs the UPDATE, at migration apply.
+- `no_failover` knob on janus-auto and its dispatch/7 entry assertion.
+- Provider-retry pool exhaustion case (attempted == pool AND no other key available — "reuses coolest attempted" but if all are failed, terminal); the test plan doesn't cover the all-cool case.
+
+**5. Architecture / design notes**
+- Per-attempt usage rows + `WHERE is_terminal` billing + 5-min crash backfill: counts are correct iff the backfill flips exactly one row per `request_ref`. Assert `UNIQUE(request_ref) WHERE is_terminal` or equivalent.
+- `entitlement_codes` as single source for probe + retry-time + 429 dual-class is the right call; unclassified 429 → rate (not balance) prevents healthy-throttled cooldown.
+- Entry-snapshot deny map at `dispatch/7` is correct; lock-free per-request reads preserved.
+- Probe lazy-INSERT of `unknown` avoids upfront cost on key create. Good.
+
+**6. Top 5 concrete edits**
+1. Add `broken_provider_keys` carrier (`#{KeyId => {http_status, checked_at}}`); gateway skips in pre-filter; 24h TTL; secret-update clears it.
+2. Raise `JANUS_PROBE_MAX_CALLS` default to 5,000/day **and** make it per-provider so a DashScope-heavy bootstrap doesn't starve zhipu healing.
+3. Spell out streaming rule: retryable until first byte to client (not until `stream_reply`); stream_reply+no-chunk = still retryable on upstream error.
+4. Coalesce A.1 secret-update re-probes within a 60s window per `(provider, key_id)`.
+5. Add `no_failover` to janus-auto settings; assert the flag at `dispatch/7` entry (audit on mis-wiring).
+
+(≈445 words)

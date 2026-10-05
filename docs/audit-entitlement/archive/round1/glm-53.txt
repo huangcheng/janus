@@ -1,0 +1,39 @@
+# Audit: target.md (Entitlement Matrix + In-Request Failover)
+
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and repo-boundary-respecting, but passive learning is unimplementable as written, the deny regex risks permanent pool erosion, and the latency math omits the 5xx retry.
+
+## 2. Critical risks
+- **Traffic-based deny is impossible as specced**: A.3 folds "status 400/404 with the recorded error shape", but usage_events record no error text/code today. The required schema + gateway write-path change is nowhere in the spec.
+- **Deny-regex false positives**: `no permission` and `unsupported operation for this model` are frequently param/shape-scoped, not entitlement-scoped. A false deny pre-filters a good key out of routing *entirely* (worse than the uni-api denylist bug it cites).
+- **Latency math wrong**: worst case is 3 key attempts **+ 1** 5xx retry = 4×60s TTFB = 240s, not "attempts × TTFB". Inside Cowboy's 300s idle_timeout but past every real client timeout.
+- **Retry storms**: sudden key revocation × N concurrent requests × 3 attempts, each writing cooldowns — can cascade-drain the pool; no circuit breaker.
+- **Balance starvation**: balance keys excluded up to 7 days; only re-probe triggers are staleness and model sync — a topped-up key stays dark.
+- **Zero-eligible-keys path undefined**: when all keys are deny-marked, the pre-filter leaves an empty pool; client-facing behavior unspecced.
+- **Key rotation staleness**: rotating a secret (same key id) keeps stale deny rows; only deletion cascades.
+
+## 3. Contradictions
+- A.1: "a balance key failing over once is acceptable" vs Part B excluding balance keys from picking entirely (zero failovers).
+- Part B SQL ships `ok` rows; ETS keeps only deny/balance — filter in SQL.
+- C.2 latency bound ignores the +1 5xx attempt.
+- C.1: "no new state beyond an attempt counter", yet eligibility ("more eligible keys remain") and same-request repick exclusion must be guaranteed — unstated.
+
+## 4. Missing requirements
+- usage_events error-code capture (or drop traffic-deny).
+- SQLite migration dialect — `interval '7 days'`/TIMESTAMPTZ are Postgres-only; repo ships both.
+- `janus.failover_max_attempts` delivery via settings → persistent_term (start-order rule).
+- Per-attempt usage rows: billing/aggregation semantics (retried requests double-count cost).
+- Probe endpoint authz + cost cap; 429-rate backoff parameters (quantitative).
+
+## 5. Architecture notes
+- ETS atomic rebuild vs per-request reads is fine; shrink the bundle by filtering `ok` in SQL.
+- 429 dual meaning is handled in failover but unresolvable in passive learning without error codes.
+- Attempt-budget ambiguity: does the 5xx retry consume the 3-key budget?
+- 200-status-then-transport-failure mid-body: retrying duplicates upstream billing; boundary unaddressed.
+
+## 6. Top 5 edits
+1. Spec usage_events.error_code (gateway write path) or delete traffic-based deny from A.3.
+2. Narrow the deny regex to provider-documented activation errors; classify `no permission`/`unsupported operation` as `ok/input_shape` unless error_code confirms entitlement.
+3. Fix C.2: worst case = (failover_max_attempts + 1) × TTFB; state idle_timeout interaction; recommend default < 3 for streaming-heavy fleets.
+4. Add balance re-probe trigger (429-balance traffic or ~1h TTL) replacing the 7-day lockout.
+5. Add sqlite migration, knob-via-settings delivery, and the all-keys-deny error response.

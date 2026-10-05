@@ -1,0 +1,37 @@
+**Verdict:** GO WITH FIXES — sound budget/TTL math, correct per-request generation-snapshot, clean ownership split; ambiguities in balance-canary branching, provider-retry edge case, and judge-failure semantics need resolution before impl.
+
+**Critical risks:**
+- Probe cost: 5000/day × providers × 2-key-parallel probes share rate pools with live traffic. Daily budget is counter-enforced (not aspiration); sync + bootstrap (786 calls) + ≥25% healing share must hard-stop per-trigger when exhausted.
+- Deny regex false positives: `product.*not.*activate` matches "activation not required". Fail-open default (unclassifiable 400→input_shape) covers most; missing codes table must explicitly default ALL 429→rate and ALL 400→input_shape.
+- Failover vs idle_timeout: 45s + 60s TTFB + 30s body-cap ≈ 135s, fits 300s. Stream committed at first frame; error-status streams take collect_drain pre-`stream_reply` — verify against cowboy (5xx frames via collect_drain stay retryable; non-2xx stream_reply path must not fire).
+- Retry storms: jitter+per-key cooling, no pool breaker (v1). Exhaustion returns LAST error — should optionally surface FIRST classified error for operator diagnostics.
+- Matrix/catalog races: per-request snapshot at dispatch/7 is correct; probe-batch transaction + gen-bump must be atomic.
+- Balance starvation: key-scoped canary. Edge: canary returns DENY → spec updates ALL balance rows to deny — wrong (key is broken, not balance).
+- Key rotation: SECRET update deletes rows; row-less=unknown=eligible. Cached deny entries lag by gen-poll window — bound and document.
+
+**Contradictions / stale:**
+- A.4 balance canary on deny-shaped response → should mark key broken (`__key__` row), not blanket-update balance rows.
+- A.2 "pre-marked ok+input_shape on FIRST probe without retry" — ambiguous (skip probe? probe once?). Clarify: probe once, mark ok+input_shape regardless of body.
+- C.1 provider-retry when attempted==pool and cooldown-EXPIRED set empty (recent 401s don't expire hours) → slot unusable. Define fallback: terminal with provider-scoped error.
+- B contains self-answered rhetorical ("gateway migrations? No — table stays dashboard-owned"); trim.
+
+**Missing requirements:**
+- janus-auto judge bypasses failover; persistent judge failures (429/5xx) cause auto-requests to fail entirely. Document breaker/timeout + surface diagnostic.
+- Dashboard advisory lock on crash: `pg_advisory_lock` is session-scoped; process crash holds lock. Require explicit `pg_advisory_unlock` in `finally` + session timeout config.
+- Per-request snapshot threading through `janus_lb:pick_route` — current code reads ETS; document new arg.
+- Streaming-200-then-deny-chunk: spec implies unretryable (committed at first byte). State explicitly.
+- Cooldown TTL mismatch: traffic balance-429 cooldown 60s vs matrix balance TTL 1h — different scopes; document.
+
+**Architecture / design notes:**
+- ETS rebuild atomicity: gen-bump rebuilds whole ETS; per-request snapshot is correct and lock-free. Confirm snapshot type (immutable map) is cheap to thread.
+- Per-attempt usage billing: aggregator counts `WHERE is_terminal`; partial-stream 200 commits single row, token counts approximate.
+- 429 dual meaning: codes table is single source; empty→rate-only fail-open. State explicitly.
+- Attempt budget: `max_attempts=0` = zero retries including provider slot. State explicitly.
+- Knob delivery: settings → persistent_term (direct PT write, not gen_server cast). State explicitly.
+
+**Top 5 concrete edits:**
+1. Fix A.4 balance canary: branch on outcome (200→ok-all; deny→`__key__` broken; 429-balance→re-stamp).
+2. Clarify A.2 image/audio "pre-marked ok+input_shape": probe once, mark regardless of body.
+3. Add C.1 provider-retry fallback: no cooldown-expired attempted key → terminal with provider-scoped error.
+4. Add janus-auto judge failure semantics (breaker/timeout, no failover, surfaced diagnostic).
+5. Add dashboard advisory-lock lifecycle (`pg_advisory_unlock` in `finally` + session timeout).

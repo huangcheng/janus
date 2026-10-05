@@ -1,0 +1,31 @@
+## 1. Verdict
+GO WITH FIXES — the spec is unusually thorough on race/budget accounting, but has real contradictions in the codes-table ownership model and an under-specified streaming/body-classification interaction.
+
+## 2. Critical risks
+- **Probe cost blowback**: 786-call bootstrap against DashScope while sharing live rate pools; the 30s pause on 429 class helps, but a 262-model catalog × N keys on first sync is a visible money/rate event. The 25% healing reservation is good; day-one bootstrap still queues ~hours.
+- **Deny-regex false positives**: multi-language regex against `code`/`message` only is right, but "provider missing seed rows → retry-once" means an *unlisted provider's genuine deny* burns one retry per request forever until the table is updated — feedback loop exists but is manual.
+- **Failover latency vs idle_timeout**: worst-case math (45s budget + 60s TTFB + 30s body cap) fits, but collecting a 64KB error body up to 30s on *every failed attempt* stacks across attempts — 3 key retries could add 90s of body collection not accounted for in the ceiling formula.
+- **Retry storms**: "no pool-level breaker in v1" + per-key cooling means a provider-wide outage (all keys 503) still spends the full budget per request under load. Accepted, but worth a counter-driven admission note.
+- **Matrix/catalog reload races**: single generation snapshot threaded through picks is correct; mid-loop key deletion handled. OK.
+- **Balance-key starvation**: healing share + key-scoped canary is well designed; canary updating ALL balance rows from one model's outcome assumes balance is truly key-level — plausible but a provider with per-model quotas breaks it.
+
+## 3. Contradictions / stale claims
+- A.2 says `entitlement_codes` "no second copy exists," yet C.1 says "the gateway-side **copy** of the code table" — it's distributed via carrier, so say "distributed read replica," not copy.
+- A.2 lists `no permission` / `unsupported operation` as input_shape → `ok`, but test key F says "input-shape 400 → NO retry," while C.1 terminal classes say unclassifiable 400 gets ONE failover attempt. Flow 8 contradicts C.1: F's phrasing is exactly the "input_shape-classified" case, which per A.2 produces `ok`+`input_shape`, and per C.1 still retries once. Pick one.
+- Flow 17 "200-then-stall → no retry" is consistent with C.1, but flow 8's "NO retry" conflicts with "ONE failover attempt on another key, then terminal."
+
+## 4. Missing requirements
+- No idempotency guard for non-idempotent retries beyond a note (POST chat with usage billing — duplicate charges on 5xx retry are real).
+- No spec for how `deny_keys` interacts with janus-auto's bound-model validation when all keys for a binding are deny-marked.
+- `probe_budget_counters` reset/rotation semantics (day boundary, TZ) unspecified.
+- No metric/alert on healing-queue backlog; budget exhaustion is silent.
+
+## 5. Design notes
+ETS snapshot threading, is_terminal billing, dashboard-write/gateway-read ownership, and PT knob delivery all match repo invariants — clean. 429 dual-class via one seeded table is the right call. Attempt accounting (retries-after-first, reserved provider slot) is off-by-one-proof.
+
+## 6. Top 5 concrete edits
+1. Resolve flow 8 vs C.1: state explicitly whether input_shape-classified 400 gets the one fail-open retry.
+2. Fix "no second copy" → "single source of truth, read-only replica shipped in carrier."
+3. Account for per-attempt body-collection (30s × retries) in the ceiling formula or cap total classification time.
+4. Specify provider-wide-outage damping (e.g., consecutive-exhaustion counter suppressing retries for N seconds).
+5. Document canary assumption: balance treated as key-level; add escape hatch if per-model quota evidence appears.

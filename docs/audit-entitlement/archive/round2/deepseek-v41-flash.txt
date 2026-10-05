@@ -1,0 +1,35 @@
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and matches the repo's write/read split, but the carrier/usage schema has concrete gaps that will ship wrong data.
+
+## 2. Critical risks
+- **Carrier omits `checked_at`.** The SQL selects only `(key, model, status)` with a hard `24 hours` window, yet A.1 says "consumers enforce by `checked_at`." The gateway *cannot* enforce TTL; and balance rows (1h TTL) will ride for 24h. Direct contradiction.
+- **Balance starvation unresolved.** Spec fixes deny starvation via short TTL + probes, but balance keys are equally excluded and equally traffic-starved; healing is probe-only and unstated for balance.
+- **Key rotation staleness.** "updating a key's secret does NOT clear rows" assumes entitlement follows the *account*. Rotation to a genuinely different account leaves stale rows indefinitely.
+- **Budget > client budget.** 90s default exceeds typical 30–60s client timeouts, so retries can outlive the caller — wasted upstream spend.
+- **429 dual meaning.** Probe treats 429 as skip/backoff; failover treats it as key-scoped retry. Two behaviors on one status, reconciled only by provider-native codes.
+
+## 3. Contradictions / stale claims
+- A.1: "so 'no row' and 'stale row' are indistinguishable-by-design is WRONG" — garbled, self-negating; unclear when `unknown` rows are actually written.
+- E.3 counts `attempt=1 OR terminal`, but **no `terminal` column is defined** anywhere.
+- Carrier 24h window vs A.1 deny 24h / balance 1h TTLs.
+- A.3 promotes only on status 200 → ok, but `ok` rows are never shipped (absence = eligible), so the promotion is invisible to the gateway until a later deny. Fine, but state it.
+
+## 4. Missing requirements
+- `terminal` marker (column or defined derivation) for billing.
+- Zero-eligible fail-open: **which** key is picked is unspecified (random? first?) and how often it can fire.
+- No probe-side rate-limit budget across keys (2 parallel × 262 models still bursts).
+- No definition of gateway behavior when carrier table is *stale* vs *missing* (both → empty list, conflated).
+
+## 5. Architecture notes
+- ETS snapshot-at-entry is correct; deny-map keys must be listing binaries (spec flags the atom/binary bug class — good).
+- Read-only gateway, dashboard-only writer: clean, no ownership violation.
+- Per-attempt usage rows are right, but billing correctness hinges on the undefined `terminal` flag.
+- `failover_max_attempts` counting provider retries is unambiguous — no off-by-one. Good.
+- Knobs via persistent_term matches invariant.
+
+## 6. Top 5 edits
+1. Ship `checked_at` in the carrier and enforce per-status TTL (deny 24h, balance 1h) at gateway read; drop the single 24h SQL window.
+2. Define `terminal` (boolean column or `attempt = last` rule) and fix E.3's query.
+3. Decide key-secret rotation semantics: clear or re-probe rows, or document the account-identity assumption explicitly.
+4. Specify fail-open key selection + counter, and cap total probe calls/rate budget.
+5. Rewrite the garbled A.1 `unknown` sentence and state exactly when `unknown` rows are inserted.

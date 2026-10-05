@@ -1,0 +1,35 @@
+**Audit of `F:\Janus\docs\audit-entitlement\target.md`**
+
+**1. Verdict:** GO WITH FIXES — structurally sound and unusually rigorous on budget/latency math; defects are edge interactions, not architecture.
+
+**2. Critical risks**
+- *Probe vs live traffic*: probes share per-key upstream rate pools; 150ms pacing + 30s provider pause mitigates, but a 786-call bootstrap can still degrade a live key for minutes. No probe-spend/429-pause metric for operators.
+- *Fail-open false negatives*: a real deny from an unseeded provider classifies `ok`; every request burns one failover attempt **forever** — v1 traffic learning is promote-only, so only a manual probe/codes edit fixes it. Bounded but permanent churn.
+- *Retry storms*: bounded per-request; no pool breaker (accepted). Concurrent bursts on a broken pool each pay full attempts until a probe writes `__key__`.
+- *Latency vs idle_timeout*: ceiling math (180s = 300−60−30−30) is correct and knob-validated. OK.
+- Reload races, balance starvation, rotation, streaming boundary: adequately addressed (entry snapshot; key-scoped canary; row-clear-on-secret; committed-response rule).
+
+**3. Contradictions / stale claims**
+- **Reserved provider slot is dead code at defaults**: C.1's exhausted-pool reuse requires a "cooldown-EXPIRED" key, but balance cooldown (60s) > budget (45s) — nothing ever expires in-window; D.16 would fail. Also, 401 cooldown is "as today" — an unspecified value that retry correctness now depends on.
+- **Broken vs fail-open**: C.1 says broken keys are "skipped from candidates entirely"; Part B says fail-open "IGNORES the matrix". May the single fail-open attempt pick a broken-marked key? Unspecified.
+- **A.2 vs A.1**: A.2's 401/403 abort says "leave prior rows untouched" while A.1 says it writes the `__key__` broken row — A.2 must restate the write.
+- **Healing loop omits `broken`**: A.4 enumerates balance/deny/ok only. A broken row expires to eligible at 24h with no re-probe, so a still-broken key re-enters rotation and eats a 401 failover per request until the next sync/manual probe.
+
+**4. Missing requirements**
+- Healing entry for `__key__` rows (canary re-probe before 24h TTL lapses).
+- Probes must skip disabled keys (spend).
+- The one-time `entitlement_codes` seed migration must bump generation (spec covers later writes only).
+- Request-time deny-shaped 400s never update the matrix until E.1 — fine, but say explicitly that detection of new deny wordings is probe-manual in v1.
+
+**5. Architecture/design notes**
+- Snapshot-at-dispatch + ok-never-ships keeps the carrier small and closes reload races — sound.
+- Per-attempt rows with `request_ref`/`is_terminal` + crash backfill (grace tied to ceiling) is correct billing semantics; 1s-buffer loss is fairly bounded.
+- 429 dual-class single-sourced in `entitlement_codes` across probe/refresher/gateway is the right design; empty-table fail-open well-defined.
+- Knobs via persistent_term conform to the repo invariant.
+
+**6. Top 5 concrete edits**
+1. A.4: add `__key__` canary re-probe (~23h, priority beside balance).
+2. C.1: exhausted-pool provider-retry pick must **ignore cooldown** (LRU attempted key ≠ just-failed); delete "cooldown-EXPIRED"; state the 401 cooldown value.
+3. Part B/C.1: fail-open explicitly overrides (or honors) broken-key skip — recommend overrides, as last resort.
+4. A.2: 401/403 abort writes the `__key__` broken row; align wording with A.1.
+5. A.2: probes skip disabled keys; seed migration bumps generation; add probe-spend counters.

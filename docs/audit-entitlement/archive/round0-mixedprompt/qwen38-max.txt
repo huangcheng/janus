@@ -1,0 +1,35 @@
+**Mismatch first:** `prompt.md` instructs auditing a different document — a “next-phase” spec (streaming translate, `/stats` counters, Alpine image) — and asserts *“This document is **not** an entitlement-matrix spec.”* But `target.md` **is** the entitlement-matrix/key-failover spec, and it has no §10. I audited the actual document, adapting the rubric; the SSE/Docker/deploy-wait categories don’t exist here.
+
+**1. Verdict:** GO WITH FIXES — C.1’s loop admits four total upstream calls at default (`attempts = 0` … `{retry_key, Status} when attempts < 3 … -> … attempts+1, loop`), which contradicts C.2’s “Max 3 key attempts per request (config knob `janus.failover_max_attempts`, default 3…)”.
+
+**2. Critical risks**
+- Off-by-one above: worst case is 4×TTFB latency, not the 3× promised.
+- Test 4 vs test 9: with the matrix loaded, the pre-filter excludes deny keys “entirely”, so `[deny-key, ok-key]` succeeds on the FIRST attempt (one usage row). Test 4’s “two usage rows (one 4xx, one 200)” only holds with no matrix — it must say so.
+- Empty candidate set: after exclusions no eligible key may remain; the client-visible error is undefined.
+- Probe storm: a sweep writes up to ~786 rows; per-write `bump_generation` triggers full catalog reloads on every gateway — no debounce specified.
+- A.3 folding has no concurrency rule (pollers racing on the same usage events).
+
+**3. Contradictions / stale claims**
+- Attempts budget (quoted in §1).
+- Carrier SQL ships `status IN ('ok','deny','balance')` while Part B keeps “only routing-relevant states (`deny`/`balance`)”; also the ETS table `deny_keys_by_model` silently carries `balance` entries.
+
+**4. Missing requirements**
+- Error contract for “no eligible keys” (503? evidence body?).
+- Definition of “more eligible keys remain” (exclude cooling + denied + already-attempted?).
+- A.3 upsert mechanics: `ON CONFLICT … DO UPDATE` with a `checked_at` guard, else “last write wins” races.
+- Probe endpoint authz — probes spend real money.
+- Hot path for `failover_max_attempts` (persistent_term, per repo convention).
+- `balance` refresh: A.4 re-probes missing/stale coverage, but balance rows count as covered → a balance block can persist 7 days; specify a shorter TTL.
+
+**5. Architecture notes**
+- ETS lookup keys must match exactly the model binaries `pick` sees (this repo’s binary-vs-atom bug class).
+- `unknown`-as-absence is consistent with LB convention — keep `ok` out of the bundle for the same reason.
+- Stream-first-byte rule correctly preserves existing collect_drain behavior.
+- Per-attempt usage rows preserve the A.3 learning signal; state explicitly that pre-filtered keys write none (test 9 depends on it).
+
+**6. Top 5 edits**
+1. Fix C.1 guard (or recount) so total calls == `failover_max_attempts`.
+2. Restate test 4 as the no-matrix fixture; cross-reference test 9.
+3. Add the “no eligible keys” client error contract in C.1/A.5.
+4. Drop `'ok'` from the carrier SQL (or justify); document balance-in-deny-map.
+5. Specify A.3 upsert timestamp guard, A.2 bump debouncing, and probe authz.

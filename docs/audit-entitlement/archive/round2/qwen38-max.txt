@@ -1,0 +1,37 @@
+**1. Verdict:** GO WITH FIXES — design is sound and audit-hardened, but the balance-TTL shipping bug, missing probe scheduler, and usage-row aggregation semantics must be fixed first.
+
+**2. Critical risks**
+- *Probe blowback:* 786 probes/batch at 150ms spacing ≈ 6.7 req/s/key trips low-RPM provider limits; "halve in-flight" backoff is meaningless when probing is sequential per key (in-flight is always 1).
+- *Deny regex:* whitelist is only 2 phrases; the gateway-side in-request copy turns any false positive into wasted failover attempts; two code-table copies across repos will drift (no sync mechanism).
+- *Latency:* 90s budget < 300s Cowboy idle_timeout is fine, but **no per-attempt timeout is defined** — one slow key can consume the whole budget on attempt 1.
+- *Retry storms:* jitter helps, but concurrent bursts all hit the same dead key before cooldown lands; only a fresh deny-map mitigates.
+- *Reload races:* snapshot-per-request + one bump/batch is sound.
+- *Balance starvation (real bug):* A.1 promises 1h healing, but the carrier ships balance in the 24h window **without `checked_at`**, and no periodic probe exists — excluded keys get no traffic and traffic only promotes, so actual self-heal is the 24h age-out.
+- *Key rotation:* keeping rows across secret rotation is defensible, but a probe-aborting 401 leaves prior `ok` rows routing to a dead key until request-time failover catches it.
+- *Streaming boundary:* first-byte rule is clear; headers-sent → mid-stream error correctly terminal.
+
+**3. Contradictions / stale claims**
+- Carrier 24h window vs balance 1h TTL; `checked_at` isn't shipped, so A.1's "consumers enforce by checked_at" is unimplementable gateway-side.
+- "only the terminal row is counted" vs `WHERE attempt = 1 OR terminal` — a request succeeding on attempt 2 double-counts (rows 1 and 2 both match).
+- "topped-up key returns to the pool within an hour without operator action" — false as written.
+- "halve in-flight" clause is stale given sequential probing.
+
+**4. Missing requirements**
+- Periodic probe scheduler (the only deny/balance healing path).
+- Cross-process single-flight: an in-process lock fails with >1 dashboard worker.
+- usage_events: request correlation id + `terminal` flag (Part E.2 ships only `attempt`).
+- Per-attempt upstream timeout for failover.
+- SQLite `key_entitlements` DDL (epoch-seconds variant only hinted at).
+
+**5. Architecture/design notes**
+- ETS atomic generation swap with lock-free per-request snapshots: correct.
+- Dashboard-only write ownership and settings→persistent_term knobs match repo invariants.
+- Treating both 429 classes as retryable in-request is right; probe balance/deny split relies on fragile body-keyword classification.
+- Fail-open on zero eligible keys is the correct failure direction.
+
+**6. Top 5 edits**
+1. Ship `checked_at` or use per-status SQL windows (balance 1h / deny 24h); delete the false 1h-heal claim.
+2. Add a probe scheduler cadence (e.g., hourly balance-near-TTL, daily deny).
+3. Add `request_id` + `terminal` to usage_events and fix the aggregation predicate.
+4. Replace the in-process probe lock with a DB advisory lock; state the worker-count assumption.
+5. Define a per-attempt timeout; rework or remove the "halve in-flight" clause.

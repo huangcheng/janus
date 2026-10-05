@@ -1,0 +1,39 @@
+**1. Verdict:** GO WITH FIXES — the failure-mode-first design is sound, but gateway TTL freshness, 429 backoff contradictions, and pool-exhaustion edges must be resolved first.
+
+**2. Critical risks**
+- Probe cost/rate blowback: DashScope 262×3; probes share live RPM pools; batch cap 1000 / daily 5000 / 786 bootstrap unreconciled.
+- Deny-regex false positives mitigated (anchored; input-shape default), but one wrong seeded code row removes a good key for 24h.
+- Failover latency: 45s default exceeds 30s client budgets; worst case ~135s inside 300s idle_timeout — documented footgun.
+- Retry storms: no pool breaker; deny-shaped 400s multiply upstream calls until the matrix loads.
+- Balance starvation: request-time 60s cooldown vs 1h matrix TTL re-tries a dry key ~60×.
+- Streaming: 2xx committed at `stream_reply`; 200-with-error-body unaddressed.
+
+**3. Contradictions/stale**
+- A.2 429: "halve in-flight 30s" vs "pause that provider's probe 30s".
+- A.1: 401/403 "leave prior rows untouched" vs the `__key__` broken row that same flow must write.
+- Part B ships an sqlite variant then declares it nonexistent ("illustrative only"; "no sqlite DDL exists").
+- Part B "gateway reads are fresh by construction; nothing re-checks checked_at" contradicts ETS persistence between polls — balance can outlive 1h.
+- Balance: A.1 1h TTL vs C.1 60s cooldown.
+- "One bump_generation per batch" vs codes-table writes bumping generation.
+
+**4. Missing**
+- Gateway validation/max for `failover_max_attempts` (only budget has a ceiling).
+- `attempted == pool` with no cooldown-expired key → provider retry impossible; undefined.
+- Gun connection reuse / subscription cancel across attempts (latency).
+- 200 status carrying an error payload on streaming.
+- Matrix-less (SQLite) gateway monitoring, not log-once; `key_entitlements` GC; probe-spend metric.
+
+**5. Architecture notes**
+- ETS atomic rebuild + one-snapshot-per-request threading is correct.
+- `is_terminal` billing correct; non-terminal rows still consume the writer buffer (bounded, noted).
+- Write ownership clean (dashboard writes; gateway reads + usage evidence).
+- 429 dual meaning single-sourced via codes table; empty-table fail-open defined.
+- Accounting: 1 + max_attempts key calls + 1 provider slot = max_attempts+2; off-by-one stated correctly.
+- persistent_term knob delivery matches the repo invariant.
+
+**6. Top 5 edits**
+1. Enforce TTL gateway-side or bound poll interval <1h; fix the freshness claim.
+2. Reconcile the two A.2 429 backoffs and align C.1 balance cooldown with A.1's 1h.
+3. State the `__key__` broken-row write in A.2's 401/403 flow.
+4. Delete the sqlite variant; declare Postgres-only and alarm on matrix-less gateways.
+5. Define pool-exhaustion/no-expired-candidate behavior and bound `failover_max_attempts`.

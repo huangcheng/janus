@@ -1,0 +1,36 @@
+## Audit — Entitlement Matrix + In-Request Key Failover
+
+**1. Verdict:** GO WITH FIXES — spec is structurally sound but has one logic bug (off-by-one on disabled retry), one missing safety bound (budget vs Cowboy `idle_timeout`), and the test plan doesn't actually exercise the budget-cutoff path it claims.
+
+**2. Critical risks**
+- **Probe cost / rate-limit**: 786 calls per DashScope sync (262 × 3). "Skip, retry once" on 429 doesn't bound total probe rate per provider — a sync can trigger upstream 429 storms; no periodic re-probe (only on `/api/models/sync`).
+- **`ok` 7-day TTL too long for input_shape**: unclassifiable 4xx defaults to `ok` + `error_code='input_shape'`. A real deny misclassified this way stays valid a week; input_shape-tagged `ok` rows should expire in 1h.
+- **Budget vs Cowboy `idle_timeout`**: AGENTS.md pins listener `idle_timeout=300_000`. Spec default budget 90_000 ms fits, but no MAX on the knob — operator setting 600_000 silently kills handlers (bodiless 502). Hard cap <300_000 ms needed.
+- **Retry storms**: only per-request jitter 100–300 ms. 1k concurrent requests failing on key A all retry to key B in the same window — no global coordination; risk of marking the surviving key cooling through collateral.
+- **Streaming first-byte**: relies on `Status >= 400 collect_drain`. SSE 200 + mid-stream error frames never retry; spec doesn't address.
+- **Probe → matrix → catalog race**: ONE bump per batch; gateway sees stale matrix until next poll. No bound on poll propagation or on probe respawn during the gap.
+
+**3. Contradictions / stale claims**
+- **Off-by-one on disabled retry**: pseudo-code says guard `attempts_total < max_attempts` evaluated **before** every call → `max_attempts=0` ⇒ **zero** calls, not "1 attempt, no retry" as the "0 disables" claim states. Either move guard after the call or special-case 0.
+- **Provider retry undefined**: `provider_retries_used<1` separate from key retries, but pseudo-code re-enters main `pick` — no reset of the `attempted` set; same provider/same keys. The separate counter is theatre.
+- A.2 "indistinguishable-by-design is WRONG" — confusing negation; reads as self-contradiction.
+- "Both dialect variants ship as gateway migrations? No —" — rhetorical Q contradicts the clause that follows.
+
+**4. Missing requirements**
+- Periodic re-probe scheduler (TTL-driven), not coupled to `/api/models/sync`.
+- Hard ceiling on `failover_max_budget_ms` < `idle_timeout`.
+- Default value for `attempt` on pre-migration rows (legacy `usage_events`).
+- Probe protocol selection per provider — zhipu/Ark/DashScope specifics (only openai_chat + anthropic mentioned).
+- Code-table classifier ships in both dashboard (probe) and gateway (retry) — drift risk, no shared module path.
+
+**5. Architecture / design notes**
+- Dashboard write-ownership is clean; persistent_term knob delivery matches the repo invariant (no gen_server casts).
+- Per-attempt usage rows + `attempt=1 OR terminal` aggregation needs legacy backfill semantics.
+- 429 dual-meaning (rate vs balance) resolved by body classifier — but classification happens on every retry, including hot loop; ensure classifier call is O(1) (regex precompiled) to avoid latency tax on the failover path.
+
+**6. Top 5 concrete edits**
+1. Move attempt-budget guard to **after** the call (or special-case `max=0`) — fix off-by-one.
+2. Add hard ceiling on `failover_max_budget_ms` ≤ 280_000 ms — prevent bodiless 502.
+3. Add periodic re-probe scheduler (TTL-driven), independent of `/api/models/sync`.
+4. Shorten ok-TTL for `error_code='input_shape'` rows to 1h; keep 7d for plain `ok`.
+5. Rewrite test flow 12 — mock TTFB 50 s with `max_attempts=100` to actually hit the budget cutoff; current 2 s × 3 attempts = 6 s ≪ 90 s budget never exercises it.

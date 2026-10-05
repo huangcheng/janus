@@ -1,0 +1,35 @@
+**Verdict: GO WITH FIXES** — internal math contradictions, undefined mid-stream chunked behavior, and provider-specific code-extraction paths need pinning before Part C ships.
+
+**Critical risks**
+1. **Probe economics undercount at scale.** DashScope bootstrap of 5 keys × 262 listings = 1,310 calls = 26% of `JANUS_PROBE_DAILY_CALLS=5000`. Two simultaneous bootstraps breach the ≥25% healing reservation; input_shape's 1h re-probe compounds. Alphabet tail-cut risks probing away Router-bound listings.
+2. **First-call-vs-budget contradicts ceiling math.** "First call may exceed the budget" (60s TTFB + 30s body = 90s) yet the ceiling assumes retries fire (`budget + TTFB + body-cap + jitter`). If the first attempt eats the budget, `now < deadline` is false and no retries run — ceiling formula is unreachable in the case it bounds.
+3. **Chunked mid-stream stall unaddressed.** "Committed at first stream_body byte" is correct, but `transfer-encoding: chunked` lacks body-length; cowboy's idle_timeout may not catch silence after first chunk, leaving open-then-503 streams retry-ambiguous.
+4. **Balance-key thundering herd at TTL expiry.** Balance TTL 1h, healing loop 15min → up to 15 min of failing-key traffic before heal. No pool-level breaker; fleet-wide degraded upstreams hammer.
+5. **Rotation fail-open window unbounded.** Secret update clears rows; traffic hits new secret blind until probe completes. With 150ms pacing × 262 listings × N keys, large pools stay fail-open for many minutes.
+
+**Contradictions/stale claims**
+- "Key calls ≤ max_attempts + 2" — first + retries + pool_reuse + provider retry = `max_attempts + 3`.
+- `broken` TTL 24h but healed at ≥22h — margin unexplained.
+- janus-auto target WITH failover runs 45s+ atop judge budget; client-budget arithmetic missing.
+- "cooldown-EXPIRED, least-recently-used attempted key" mid-request is undefined: min cooldown 10s > typical retry interval, so no key can expire mid-loop.
+
+**Missing requirements**
+- Concurrent probe batch: 409 vs 202-dedupe?
+- Body-cap (30s/64KB) extraction: which fields per provider feed `error_code` (DashScope `code`, Ark `error.code`, zhipu `error.code`)?
+- `escalated` row retention/TTL — does it ship forever once set?
+- Secret-update queue priority (bootstrap, not healing).
+- Gateway-side clamp of `failover_max_budget_ms` (persistent_term:put bypasses settings validation — where does the clamp live?).
+- Legacy `is_terminal` backfill cannot distinguish crashed-in-flight from terminal without timestamps.
+
+**Architecture/design notes**
+- Per-request snapshot + binary-keyed deny map is correct for catalog atomicity.
+- Codes-table empty vs missing: spec conflates; both = fail-open but operationally distinct (wipe vs never-seeded).
+- `WHERE is_terminal` billing is right; non-terminal token totals should NOT feed per-key aggregates.
+- persistent_term knob delivery matches repo invariant.
+
+**Top 5 concrete edits**
+1. Reconcile "first call exceeds budget" with ceiling math — drop one, or define ceiling as floor-of-retries-firing.
+2. Fix attempt math to `max_attempts + 3` OR clarify pool_reuse/provider share the key counter.
+3. Specify per-provider `error_code` extraction paths under the 30s/64KB body cap.
+4. Define pool_reuse cooldown semantics (min cooldown ≤ retry interval) or remove the slot.
+5. Add concurrent-probe dedupe (409 if batch running) and document secret-update queue priority as bootstrap, ahead of healing.

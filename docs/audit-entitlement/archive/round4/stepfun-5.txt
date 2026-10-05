@@ -1,0 +1,29 @@
+**Verdict: GO WITH FIXES** — the design is sound and failure-mode-driven, but it contains two internal contradictions and four substantive gaps (rotation staleness, billing semantics, crash-orphan query, zero-margin timeout ceiling) that must be resolved before implementation begins.
+
+**Critical risks** (against the spec's own list):
+- **Probe cost/blowback**: a permanently balance-empty key is re-probed forever (balance ≥45min, loop every 15min, no quarantine/backoff); 1000-call caps bound a batch, not the per-key re-probe rate.
+- **False positives**: native-codes-first + regex scoped to `code`/`message` fields + fail-open default is the right structure; residual risk is localized message text at unlisted providers. Acceptable.
+- **Cowboy idle_timeout**: 240s ceiling + 60s TTFB = *exactly* 300s — zero margin, racing the timer. The 280s reduction math is right; the chosen 240s endpoint is still knife-edge.
+- **Retry storms**: provider-scoped 5xx doubles request rate during incidents; bounded by one provider retry — v1-acceptable, acknowledged.
+- **Reload races / balance starvation**: both correctly handled (snapshot at `dispatch/7`, 1h TTL + 45min heal).
+- **Rotation staleness — defect**: secret update deletes only deny/balance rows; orphan `ok` rows from the *old account* survive and mislead bind validation.
+- **Streaming boundary**: correct for 200-then-stall; the SSE `error`-event-after-200 case is also committed — should be documented as known behavior.
+
+**Contradictions / stale claims:**
+- A.2: "single-flight per provider (in-process lock)" vs "advisory lock — the single mechanism; there is no in-process lock."
+- A.1: `ok` "Valid 7 days" vs A.4 re-probe "ok older than 3 days."
+- E.1 lists `error_code` as prerequisite, but C.1 already classifies deny from the response body — dependency exists only for traffic demotion; label it so C isn't blocked on E.
+
+**Missing requirements:**
+- The 5-min crash-orphan rule has no detection query (how does the refresher find a `request_ref` whose newest row lacks a terminal successor?).
+- "Counts `WHERE is_terminal` ONLY — token totals…" makes failed attempts' real upstream input tokens permanently unbilled; state this is deliberate.
+- Probe shape defined only for `openai_chat`/`anthropic_messages`; scope v1 explicitly.
+
+**Architecture notes:** snapshot threading (failover path only, judge bypass) and advisory-lock ownership are consistent with repo invariants; per-attempt rows + `is_terminal` gating is the right billing split; 429 balance/rate split requires the body to be captured before closing gun — confirm. Attempt accounting (≤ 1 + max_attempts + 1 reserved) is consistent. Knob delivery via persistent_term is correct.
+
+**Top 5 concrete edits:**
+1. Delete the in-process-lock sentence; advisory lock is the only mechanism.
+2. Unify `ok` TTL (3d) — remove the 7d/3d split.
+3. Secret rotation: DELETE *all* rows for that key, then bootstrap.
+4. Probe: add per-key failure backoff/quarantine on the healing loop; cap re-probe rate across providers.
+5. Ceiling → 180000 (or idle_timeout − TTFB − margin), fix flow 18 math; specify the orphan-detection SQL.

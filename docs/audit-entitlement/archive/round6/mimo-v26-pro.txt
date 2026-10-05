@@ -1,0 +1,38 @@
+**1. Verdict: GO WITH FIXES** — the design is sound (probe+codes-table single-source, snapshot-threaded deny map, budget-bounded loop), but the carrier SQL and the input-shape retry contract are internally contradictory and would ship broken.
+
+**2. Critical risks**
+- Probe cost/blowback: 262-model × 3-key bootstrap shares live rate pools; 429-rate "halve in-flight 30s" plus 150ms pacing can bench healthy traffic. Reserved 25% healing share is right, but there's no per-model cap or provider daily % of live QPS.
+- Deny-regex FP: fail-open default (`input_shape`) is correct, but `entitlement_codes` seed quality is unreviewed; one bad row is systemic (probe + refresher + retry all read it).
+- Failover latency: budget 45s + TTFB 60s + 30s body-cap + jitter can reach 136s+ under a 300s idle_timeout — fine, but the ceiling formula subtracts from `idle_timeout` while `?TTFB_MS` runs *inside* a started attempt; worst-case per attempt is budget-independent. Clarify per-attempt vs per-request bounds.
+- Retry storms: N concurrent requests on a bad key all fail over to the same second key simultaneously (cooling applies only after failure, not before re-pick); no pool-level breaker by admission.
+- Reload races: one snapshot per request is good; but the fail-open path ("ignore matrix") reads nothing — document that it still uses the same snapshot.
+- Key rotation: row-less = eligible after secret swap means a broken new secret fails N live requests before probe.
+- Streaming: "2xx stream committed at stream_reply" is clear; error-status collect_drain retryability depends on body cap — specify what happens when the 64KB cap truncates classification.
+
+**3. Contradictions / stale claims**
+- **Carrier SQL never ships `broken` rows** — the WHERE clause selects only deny/balance, yet C.1/`__key__` depend on the broken row arriving. Fatal.
+- **Carrier query returns `provider_key_id` only**, but `deny_keys` is keyed `{ProviderId, ModelName}` — missing join to `provider_keys`.
+- Flow 8 ("input-shape 400 → NO retry") vs C.1 terminal class ("ONE failover attempt"). Pick one.
+- `JANUS_PROBE_MAX_CALLS` = per-batch (A.2) vs per-provider DAILY (A.4); A.4's priority order also overrides the reserved-share rule without saying which wins.
+- `failover_max_attempts=0` "no provider slot" vs the provider slot being "OUTSIDE the key budget".
+- Loop pseudocode: `retry_key` bound is `max_attempts`, but 400s should retry-once regardless.
+
+**4. Missing requirements**
+- Provider-id extraction/join in Part B; behavior when `provider_keys` row is gone mid-flight.
+- Definition + persistence of "coolest key" state for `attempted == pool`.
+- Truncated-body classification outcome; `escalated` re-admission timing (E.1 "later deny evidence").
+- Codes-table versioning/cache staleness on gateways.
+
+**5. Design notes**
+- ETS rebuild + snapshot threading is correct and lock-free per request; keep it.
+- `is_terminal`-only billing is right; document non-terminal rows excluded from cost reports to avoid double-count.
+- Write ownership (dashboard-only) is respected; refresher writes counts as dashboard.
+- 429 dual-class via codes table with default-rate is the right bias.
+- Attempt accounting (1 + max + 1 provider) is coherent once the 400 rule is fixed.
+
+**6. Top 5 edits**
+1. Fix carrier SQL: `OR status='broken'` + join `provider_keys` for `provider_id`.
+2. Unify input-shape 400: flow 8 vs C.1 vs pseudocode — choose "one failover, then terminal" and encode it.
+3. Rename/clarify: `JANUS_PROBE_MAX_CALLS` = per-batch; `JANUS_PROBE_DAILY_CALLS` = daily with reserved healing share; state precedence.
+4. Add concurrent-failover damping (pre-pick per-key cooling visibility; optional burst cap).
+5. Add tests: broken-key skip, empty/missing codes table fail-open, `failover_max_attempts=0`, mid-request generation bump.

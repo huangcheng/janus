@@ -1,0 +1,36 @@
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and the hard parts (TTL enforcement in SQL, snapshot threading, committed-response rule) are correctly solved, but there are two internal contradictions and several underspecified edges.
+
+## 2. Critical risks
+- **Probe budget vs catalog size**: 262+135 listings × N keys against a shared 1000-call/day budget means one sync can starve the healing loop for days; `ok` rows aging past 3 days then re-probe on an already-exhausted budget. Priority across triggers is asserted but not scheduled (which trigger wins when budget < demand?).
+- **Runtime deny classification is fail-closed in the wrong direction**: probes fail-open (unclassifiable 400 → `ok`), but the retry loop treats non-deny 400 as terminal — a NEW deny phrasing from an unlisted provider never fails over, reproducing the motivating bug for exactly the providers lacking seed rows.
+- **429 storm**: RATE-class retry without long cooldown plus 100–300ms jitter can ping-pong a throttled pool; no pool-level breaker in v1 is acknowledged but unmitigated for 429s specifically.
+- **Failover latency**: worst case 45s + 60s TTFB + jitter ≈ 105s is fine vs 300s idle_timeout, but vs *client* timeouts (30–60s) the client may abandon mid-failover — spec waves at this but doesn't define behavior on client disconnect mid-loop.
+- **Reload race**: deny-map snapshot is threaded, but the candidate list snapshot is not explicitly required to be the same generation — mixing generation-N candidates with generation-N+1 deny map is possible as written.
+
+## 3. Contradictions / stale claims
+- **Key-broken skip has no carrier**: C.1 says 401/403-proven keys are "skipped from candidates entirely," but A.2 aborts the probe leaving rows untouched, and the carrier ships only `deny|balance` per (key, model). No key-level broken state reaches the gateway. Dead requirement.
+- **429 rate-class action stated twice, differently**: A.2 says "halve in-flight for 30s" and later "pause that provider's probe for 30s." Pick one.
+- **Provider retry reuses "the coolest attempted key"** — that key is by definition cooling; reusing it contradicts "non-cooling" pick semantics everywhere else.
+- A.1's stable_input_shape re-admission depends on deny-shaped traffic evidence that v1 explicitly forbids (A.3) — fine as written ("once E.1 lands") but re-admission is unimplemented in v1; say so in A.1.
+
+## 4. Missing requirements
+- `entitlement_codes` schema/columns never defined (only inline signature); carrier payload format unspecified.
+- Gun connection-pool impact: failover multiplies concurrent upstream connections per client request; no pool-sizing note.
+- No failover observability besides `janus_entitlement_failopen` (retries/request, exhaustion rate, per-class counts).
+- Client-disconnect-mid-loop behavior (cancel upstream, still write usage rows?).
+- `stable_input_shape` is referenced in A.4/A.1 but the CHECK constraint only allows `ok|deny|balance|unknown` — where does the flag live?
+
+## 5. Architecture notes
+- TTL-in-SQL with fail-open absence is the right call; snapshot-per-request is correct — extend it to candidates.
+- `is_terminal` billing with 5-min crash backfill is sound; the 1s buffer loss window is honestly bounded.
+- Dashboard-writes/gateway-reads ownership is clean; advisory lock pattern matches model sync.
+- 429 dual-class in the seed table with rate-class default for unknown providers is correct.
+- Attempt accounting (1 + retries + reserved provider slot) is off-by-one-proof.
+
+## 6. Top 5 concrete edits
+1. Add a key-level `broken` carrier (or per-key probe-abort marker row) so C.1's "skip known-broken key" is implementable.
+2. Make runtime classification symmetric with probe classification: unclassifiable 400/404 at retry time → one failover attempt, then terminal (bounded cost, kills the unknown-provider deny blind spot).
+3. Require the candidate list AND deny map from the same generation snapshot at `dispatch/7` entry; reconcile provider-retry coolest-key reuse with cooling semantics.
+4. Resolve the two 429 rate-class probe actions into one rule; add `stable_input_shape` storage to the A.1 schema (column or status value).
+5. Define trigger-priority scheduling when the daily budget is partially exhausted (healing > bootstrap > sync, or explicit), and add failover metrics + client-disconnect handling to C.1.

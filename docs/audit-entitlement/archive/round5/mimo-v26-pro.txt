@@ -1,0 +1,34 @@
+**1. Verdict: GO WITH FIXES** — the design is sound and unusually well-guarded, but the latency ceiling math, probe-budget economics, and rate-limit cascade need correction before implementation.
+
+**2. Critical risks**
+- *Probe cost*: DashScope 262 models × 3 keys ≈ 800 calls per full sweep against a 1000/day budget — one sync-triggered sweep nearly starves healing (the starvation-loop closer is the *last* thing that should idle). ok-re-probe of the whole catalog every 3 days is uneconomic; probe bound models + failed rows first.
+- *Rate-limit blowback*: on provider-wide 429, every live request retries onto the next key — 3–4× amplification of an already-throttled pool. Needs a provider-level cascade breaker; probes alone "halving in-flight" won't damp it.
+- *Latency*: ceiling `300−60−30=210s` accounts only TTFB; non-stream error collection and `collect_drain` are bounded by TTFB **and BODY**, so worst case ≈ budget + TTFB + BODY + jitter can exceed idle_timeout. Formula is wrong.
+- *Deny-regex*: fail-open default is right (uni-api precedent), but `未开通` appearing in echoed prompt text is only safe if the code/message scoping is rigorously enforced — spec asserts it, nothing tests it except D.1's fixtures.
+- *Rotation*: secret swap deletes *deny* rows too, so a known-bad model set becomes eligible until re-probe — deliberate, but costs real failover attempts; worth one sentence of acceptance.
+
+**3. Contradictions / stale claims**
+- A.1 "consumers enforce by `checked_at`" vs Part B "the SQL is the ONLY TTL enforcement point; nothing re-checks gateway-side" — both true only if gateway poll interval ≪ 1h; the interval is never stated.
+- "One global queue" (A.4) with priority balance>deny>ok, yet triggers 1–3 "share one daily budget" — if sync consumes the budget first, priority is moot; ordering across triggers is unspecified.
+- C.1 "key calls ≤ 1 + max_attempts; total ≤ max_attempts + 2" ignores the fail-open pick — is it inside the key budget?
+
+**4. Missing requirements**
+- Gateway poll freshness invariant (and its test).
+- `Retry-After` parsing (header vs body) for RATE-class cooling.
+- `entitlement_codes` seed ROWS (the actual DashScope/Ark/zhipu keywords) — "seeded from production evidence" with no appendix means implementers invent the single source of truth.
+- Daily-budget counter: storage, atomicity across dashboard replicas (advisory lock covers single-flight, not the counter).
+- Legacy backfill (`attempt=1, is_terminal=true`): owner, batching, idempotency on a large table.
+- Probe cancellation on key delete mid-batch.
+
+**5. Design notes**
+- ETS snapshot threading through `dispatch/7` is correct and kills generation mixing; binary listing-name keys rightly called out.
+- Per-attempt rows + `is_terminal` billing is clean; the 1s-flush crash-loss is honestly bounded.
+- Ownership split is exemplary: dashboard-only writer, read-only carrier tolerant of missing table.
+- 429 dual-class in one shared table is right; unlisted-provider default-to-rate is the safe polarity.
+
+**6. Top 5 edits**
+1. Fix ceiling: `budget + TTFB + BODY + jitter < idle_timeout`; re-derive (e.g. 180s) and update C.2/flow 18.
+2. Add provider-wide 429 cascade breaker + Retry-After semantics.
+3. State gateway poll interval as a hard freshness invariant (≤60s) and add flow 13b.
+4. Append the concrete `entitlement_codes` seed rows; specify budget-counter atomicity.
+5. Re-budget probes (bound-first tiers; healing gets guaranteed daily share) and clarify fail-open's place in attempt accounting.

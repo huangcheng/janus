@@ -1,0 +1,36 @@
+**1. Verdict:** GO WITH FIXES — the architecture is sound (dashboard-only writer, snapshot-per-request, fail-open defaults), but several internal contradictions and one unbounded cost loop must be fixed before implementation.
+
+**2. Critical risks**
+- **Probe cost runaway:** `input_shape`-flagged `ok` rows re-probe every 1h *forever* (same probe shape → same 400 → row refreshed → re-probe again). On Ark-like catalogs (~120 non-callable models × 24/day × N keys) this is thousands of paid calls/day. "Quota-capped per batch" has no number.
+- **Retry storms:** during a provider-wide outage every client request now spends up to `max_attempts+2` upstream calls; no pool breaker in v1 → up to ~5× load on a dying upstream.
+- **Budget ceiling has zero margin:** 240s budget + 60s TTFB = exactly 300s = Cowboy `idle_timeout`; inter-attempt jitter (100–300ms × N) is wall time not counted in the budget, so worst case *exceeds* 300s → the bodiless-502 bug the ceiling exists to prevent.
+- **Deny-regex false positives:** mitigated by fail-open default, but regex quality across providers is the weak point; runtime misclassification only wastes retries (acceptable).
+- **Streaming boundary:** committed-on-first-byte is right, but the spec never states when non-stream responses forward the status line; retryability of 4xx depends on the collect-before-forward path being the only path.
+- **Balance starvation:** bounded correctly (1h TTL + healing loop); gap between TTL expiry and next probe re-discovers broke keys once per request path — acceptable via failover.
+- **Key rotation:** secret swap deletes only deny/balance; stale `ok` rows don't hurt routing (ok never ships) but corrupt dashboard counts/UI ("231/262 ok" for a different account).
+
+**3. Contradictions / stale claims**
+- A.2 opens with "Single-flight per provider (**in-process lock**)" then says "there is **no** in-process lock" (advisory lock only).
+- C.1: "known-broken key (401/403 probe evidence) is skipped from candidates" — but A.2 says probe 401/403 leaves rows *untouched*; no such evidence exists anywhere for the gateway to read.
+- 240+60=300 equals idle_timeout, yet the text argues as if strictly below it.
+- C.1 "deny evidence in the response body" vs A.2 "never whole response bodies" — reconcile wording (code/message fields inside the body).
+
+**4. Missing requirements**
+- Crash-marking refresher: which repo/module, schedule, and ordering vs billing aggregation (unmarked rows are unbilled until marked).
+- Gateway storage for `entitlement_codes` (ETS table?) and Erlang regex application unspecified.
+- Candidate key-list snapshot — only the deny map is snapshot; a mid-request generation swap can change the pool under `pick`.
+- Default 429 class when the code table has no match (rate vs balance) unspecified.
+- Fail-open when no non-cooling/non-attempted key exists → behavior implicit, not stated.
+
+**5. Architecture notes**
+- ETS atomic swap + dispatch-entry snapshot is the right model; extend it to candidates.
+- Billing `WHERE is_terminal` is correct; document the ≤5-min grace lag.
+- Write ownership and persistent_term knob delivery match repo invariants.
+- Attempt accounting (1 + N + 1 reserved provider slot) is internally consistent.
+
+**6. Top 5 edits**
+1. Delete "in-process lock"; advisory lock is the single mechanism.
+2. Set ceiling to ~225s or spell out wall-time arithmetic including jitter; keep worst case strictly < 300s.
+3. Write a key-level broken marker on probe 401/403 (or delete the "skipped entirely" claim).
+4. Cap `input_shape` re-probes (backoff 1h→24h or max N) and give the healing loop a numeric daily budget.
+5. Specify crash-marking ownership/schedule and snapshot candidates + deny map together at `dispatch/7` entry.

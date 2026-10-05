@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — the design is coherent and audit-hardened, but three learn-loop gaps can permanently preserve the exact churn this spec exists to kill.
+
+**2. Critical risks**
+- **Escalation freeze**: an unclassified deny (provider missing seed rows) is probe-written `ok+input_shape` (A.2 fail-open default), re-probed hourly, 3-strike `escalated=true`, then leaves the healing queue forever. Traffic can't demote until E.1, and codes-table edits don't re-queue escalated rows → perpetual per-request failover churn, now permanent.
+- **Balance discovery gap**: v1 traffic evidence only promotes; balance is learned solely by probes. `ok` rows re-probe at 3 days, and the healing loop only refreshes *already-marked* balance rows — a key that exhausts quota mid-cycle churns (429 → 60s cooldown → retry) for up to 3 days despite usage rows carrying status=429.
+- **Broken vs fail-open ambiguity**: Part B's zero-eligible fallback "ignores the matrix" for one attempt, but C.1 says known-broken keys are "skipped from candidates entirely." All-broken pool: undefined.
+- Ceiling validation assumes idle_timeout stays 300s; lowering Cowboy config invalidates the 180s cap silently.
+
+**3. Contradictions / stale claims**
+- A.2 opens with "single-flight per provider (in-process lock)" then mandates "advisory lock is the single mechanism" — the in-process wording is stale.
+- A.1's comment says probe-abort 401/403 writes the `__key__` broken row; A.2's matrix says only "leave prior rows untouched," never stating the write.
+- 429 probe handling states both "halve in-flight for 30s" and "pause that provider's probe for 30s" — duplicated mechanisms.
+
+**4. Missing requirements**
+- No `GET /api/entitlements` read API despite A.5's "SPA polls the matrix," nor probe-job status for the 202 path.
+- Codes-table writes must invalidate `escalated`/re-queue affected rows.
+- No flow exercises `__key__` skip (`broken_key_skips`), retry-time 429 rate-vs-balance dual class, or the A.3 refresher (flows 1–19 omit traffic learning entirely).
+- Retry-After parsing (absent header, non-numeric) unspecified for the rate-class cooldown.
+
+**5. Design notes**
+- Per-request generation snapshot threading and `{ProviderId, ModelName}` deny-map keying are correct; binary listing names enforced.
+- Ceiling arithmetic holds (180+60+30 < 300); crash grace correctly linked.
+- `is_terminal`-only billing + flushed-row backfill is sound; undercount bounded by the 1s buffer as accepted.
+- Probe `ok`-default vs retry unclassified-retry-once asymmetry is intentional fail-open but becomes toxic only via the escalation freeze above.
+
+**6. Top 5 edits**
+1. Codes-table write → reset `escalated` and re-queue affected (key, model) rows.
+2. Status-only repeated-429 traffic heuristic → enqueue a key-scoped balance canary probe (closes the 3-day balance blind spot without error_code).
+3. Define all-broken pools: fail-open pick includes broken (matrix is advisory) or explicit terminal error — pick one.
+4. Delete "in-process lock"; advisory lock only.
+5. Add flows: broken-key skip, retry-time 429 dual class, A.3 promotion; spec the matrix read endpoint and 202 job status.

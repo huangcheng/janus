@@ -1,0 +1,37 @@
+**1. Verdict:** GO WITH FIXES — design is sound, but traffic-based learning contradicts the usage schema and the English-only deny regex will misclassify Chinese-language provider errors.
+
+**2. Critical risks**
+- Probe blowback: ~786 requests against live production keys can itself trip 429s and disturb traffic; no backoff, jitter, or prod-aware scheduling.
+- Deny-regex false positives: regexes are English-only; DashScope/Ark/zhipu emit Chinese error text → misfiled as `ok/input_shape`; "no permission" also appears in content-policy 400s.
+- Latency: 3×60s TTFB = 180s vs Cowboy idle_timeout 300s — barely inside; with response streaming time, close to client-abort territory.
+- Retry storms: 3× amplification during partial outages; no global failover budget, and janus_lb cooldown vs matrix pre-filter can diverge.
+- Matrix races: `bump_generation` per row vs per batch unspecified → generation thrash; "more eligible keys remain" may read a stale ETS map.
+- Balance starvation: `balance` keys stay excluded with only sync-time/opportunistic refresh — a topped-up key can be dark up to 7d.
+- Key rotation: CASCADE wipes the matrix; a new key id = all-unknown = day-one failover flood.
+- First-byte boundary: retrying after `collect_drain` requires replaying the request body; replay safety is never addressed.
+
+**3. Contradictions / stale claims**
+- A.3 folds "recorded error shape" from usage rows, but usage_events has no error text today (per brief) — a hidden schema change.
+- A.3 maps traffic 400→`deny`, contradicting A.2's rule that non-matching 400 = `ok/input_shape` — exactly the uni-api bug the spec cites.
+- Gateway SQL filters `checked_at > now()-7d`, making "MUST treat stale as unknown" dead text.
+- Part B ships `ok` rows the ETS map then discards.
+
+**4. Missing requirements**
+- Behavior when pre-filter leaves zero eligible keys (fall back to trying, or error?).
+- Who writes `unknown` rows; `ok→balance` downgrade semantics vs "last write wins".
+- Knob delivery for `janus.failover_max_attempts`: sys.config vs settings-table/persistent_term — unspecified, violating the repo's config invariant.
+- Probe concurrency caps, 429-rate backoff, cancellation, RBAC/audit on probe endpoints.
+- Failover metrics for ops.
+
+**5. Architecture notes**
+- Atomic ETS rebuild is safe for per-request reads, but the loop must snapshot the deny map once per request or attempts see different generations mid-request.
+- Per-attempt usage rows break "1 request = 1 row" billing assumptions; attempts need labeling (attempt index) or dashboard-side dedupe.
+- Write ownership is muddled: A.1 says the gateway writes `source=traffic` rows while A.3's dashboard refresher also writes them — two writers, timestamp races.
+- 429 dual meaning hinges on error text; without capture, rate-limited keys get permanently excluded as `balance`.
+
+**6. Top 5 edits**
+1. Add `error_text`/`error_code` to usage_events (migration); reuse A.2's classifier in A.3.
+2. Make the deny regex multi-language and fail-closed to `input_shape`, never `deny`.
+3. Specify zero-eligible-key fallback, per-request matrix snapshot, batch-level `bump_generation`.
+4. Shorter TTL (24h) for `balance`; key-rotation bootstrap (inherit by position or probe-on-insert).
+5. Deliver the knob via settings table/persistent_term; add an E2E test pinning failover worst-case latency under idle_timeout.

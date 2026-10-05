@@ -1,0 +1,24 @@
+**1. Verdict:** GO WITH FIXES — the balance-failover rule and the retry budget contradict each other (quoted in §3) and there is no tie-breaker section.
+
+**2. Critical risks**
+- **Stream/first-byte contract:** C.1 leans on "the existing `Status >= 400` collect_drain path" being fully buffered before any client byte; a 200-header stream dying mid-body is unretryable but the spec never says attempts are forbidden after headers are flushed.
+- **Cowboy liveness:** worst case 3 key attempts + 1 provider retry × 60s TTFB = 240s vs the 300s listener `idle_timeout`; client disconnect during a retry is undefined.
+- **Counter semantics:** "every attempt writes its own usage row" inflates request counts the dashboard bills/quota-charges; attempt-vs-request is undefined. Worse, A.3 folds "400/404 with the recorded error shape" into `deny`, but usage rows only carry `provider_key_id` + status — input-shape 400s become `deny`, re-creating the uni-api denylist bug on the traffic path.
+- **Protocol compat:** one text probe (`max_tokens=1`) against per-listing endpoints that may not be chat-completions (zhipu coding endpoint); the deny regex is English-only and misses localized error text; Anthropic-style `max_tokens` minimums can 400.
+- **Fail-open:** absence = eligible means an empty/failed bundle (first boot, DB outage) silently makes every key usable — an undocumented invariant.
+
+**3. Contradictions / stale claims**
+- A.1: "routing treats it like `deny` until refreshed (a balance-exhausted key failing over once is acceptable, twice per request is not)" vs C.2: "Max 3 key attempts per request (config knob `janus.failover_max_attempts`, default 3; 0 disables failover)" — C.1 classifies 429 balance as retryable at every attempt, so two balance failovers per request are possible. No §10 resolves this.
+- The prompt's framing (Phase 1 SSE translate, /stats counters, Alpine image, deploy waits) describes a different document; `target.md` *is* the entitlement spec.
+- C.1 pseudocode hardcodes `attempts < 3` instead of the knob; Part B SELECTs `ok` rows the ETS store then discards.
+
+**4. Missing requirements:** error-shape field in usage events (and its SQL/column contract); who writes `unknown` and when; re-probe trigger for `balance` rows (A.4 covers only >7d staleness); response contract when the pre-filter empties the pool; probe URL derivation per provider face + endpoint auth/audit; bind-time "warning" mechanics; whether `max_tokens=1` rejections land in `input_shape`.
+
+**5. Architecture notes:** `deny_keys_by_model` must be rebuilt and swapped in the same generation-reload path as the catalog to avoid torn reads; the per-request attempt counter in the proxy process dict is safe (one Cowboy process per request) but must never apply to janus-auto judge calls; `note_key_failure`/cooldown on retried attempts double-punishes keys the matrix already excludes; the mock upstream (401 key A / 200 key B) belongs in `../janus-dashboard/scripts/` per dual-repo TEST-FLOWS rules.
+
+**6. Top 5 edits**
+1. Resolve §3 item 1: cap 429-balance-driven retries at one per request, or amend A.1.
+2. Add an error-shape column to usage rows and apply A.2's `input_shape` exception in A.3.
+3. State explicitly: retry only when zero client bytes have been flushed; 200-header-then-death is terminal.
+4. Define pool-exhausted behavior (status, body, usage row) and document the empty-bundle fail-open.
+5. Replace `attempts < 3` with the knob and drop `ok` from the bundle SELECT.

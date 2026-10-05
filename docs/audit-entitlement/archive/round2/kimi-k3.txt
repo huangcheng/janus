@@ -1,0 +1,34 @@
+## 1. Verdict
+**GO WITH FIXES** — sound architecture, but the carrier TTL, billing semantics, and latency claims contain concrete contradictions that will ship bugs if implemented as written.
+
+## 2. Critical risks
+- **Carrier TTL bug (highest):** A.1 gives `deny` 24h and `balance` 1h, but Part B's SQL filters both at a single `24 hours`. Balance keys stay excluded 24× longer than specced — the exact "topped-up key returns within an hour" promise breaks. SQLite variant inherits it, and its "epoch-seconds column semantics" contradicts A.1's `TIMESTAMPTZ`.
+- **Billing double-count:** D/E say dashboards count `WHERE attempt = 1 OR terminal`, but no `terminal`/is_terminal column is ever specced (E.2 adds only `attempt`), and a 2-attempt request matches BOTH clauses (attempt=1 fail + attempt=2 terminal). Unimplementable and wrong as written.
+- **Latency claim is false:** "worst case ≪ typical 30–60s client budgets" — the default budget is 90000ms, which *exceeds* 60s. Deadline is also only checked between attempts; one hung upstream call blows past it. Clients will time out first and failover work is wasted.
+- **Probe blowback:** probes share rate/quota pools with live traffic on the same keys; a 262-listing sweep can 429 production requests. "Halve in-flight on 429" doesn't address cross-traffic contention.
+- **Streaming gap:** the retry boundary covers error-status-before-first-byte, but says nothing about 200-status-then-stall/error before the first body byte (headers already committed — presumably unretryable, but must be stated).
+- **Secret rotation:** "entitlement follows the key account, not the secret" is wrong when a rotation swaps accounts — stale `ok` rows wrongly admit, stale `deny` rows wrongly exclude for up to 24h.
+
+## 3. Contradictions / stale claims
+- Balance TTL (A.1: 1h) vs carrier SQL (24h) — see above.
+- "≪ 300s idle_timeout and typical 30–60s client budgets" vs `failover_max_budget_ms=90000`.
+- `attempt=1 OR terminal` references a nonexistent terminal marker.
+- A.1's `unknown` paragraph contains a garbled sentence ("indistinguishable-by-design is WRONG") that undermines the semantics it defines.
+- Provider-retry starvation: `retry_provider` also passes the `attempts_total < max_attempts` guard, so 3 key-failures can consume the whole budget and the specced "one provider retry" never fires.
+
+## 4. Missing requirements
+- Anthropic probe omits the required `anthropic-version` header.
+- No probe trigger on secret change (re-probe, not row-clear).
+- No rule for whether fail-open attempts still write deny evidence/cooldown.
+- Probe concurrency across dashboard replicas (in-process lock only).
+- No cap on per-batch probe cost beyond wall-time.
+
+## 5. Architecture/design notes
+ETS snapshot-per-request, PT knob delivery, dashboard-only write ownership, and traffic-promote-only-until-error_code are all consistent with repo invariants. 429's dual meaning is handled correctly fail-open (unclassifiable → rate-limit class → skip, never deny). The timestamp-guarded upsert correctly prevents stale usage replay outranking fresh probes.
+
+## 6. Top 5 concrete edits
+1. Carrier SQL: per-status TTL — `WHERE (status='deny' AND checked_at > now()-interval '24 hours') OR (status='balance' AND checked_at > now()-interval '1 hour')`; fix sqlite variant and align column type with A.1.
+2. Add `is_terminal BOOLEAN` to the E.2 migration; billing counts `WHERE is_terminal` only; delete the `attempt=1 OR` clause.
+3. Lower default budget to ≤45s (or per-attempt deadline enforcement); fix the latency claim.
+4. Queue a re-probe on key-secret update; keep rows but mark stale.
+5. State explicitly: 200-received = committed, no retry; add `anthropic-version` to probe shape; reserve the final attempt slot for the provider retry (or exempt it from the key-attempt count).

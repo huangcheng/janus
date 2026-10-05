@@ -1,0 +1,34 @@
+**1. Verdict** — GO WITH FIXES: architecture is sound (matrix-as-catalog, bounded key-scoped retry), but A.3 is unimplementable against today's `usage_events`, `source='traffic'` ownership is self-contradictory, and several classification/retry edges are underspecified.
+
+**2. Critical risks**
+- **Probe blowback**: 786-request DashScope sweep on every sync/stale refresh; no global rate-limit backoff; a 429-rate "skip" leaves a stale `ok` that never re-verifies. Cost/limit figures are per-sweep, not steady-state.
+- **Deny-regex collision**: `invalid endpoint` / `unsupported operation for this model` also appear on input-shape rejects; deny-before-input-shape ordering can recreate the uni-api bug the spec claims to fix.
+- **401/403 never persisted**: probe aborts on key-level auth, and no key-level matrix state exists — a revoked key is retried 3× per request forever (retry storm, no guaranteed cooldown).
+- **Balance starvation**: `balance` is excluded until re-probe; top-up has no refresh trigger, so a refunded key stays benched indefinitely.
+- **Per-attempt usage rows** change request-count semantics with no aggregation key defined.
+
+**3. Contradictions / stale**
+- A.1 says traffic rows are "written by the gateway (Part C)"; A.3 says the dashboard refresher writes them. Part C never writes `key_entitlements` (gateway is reader-only). One owner needed.
+- A.3 classifies "400/404 with the recorded error shape," but `usage_events` has "no error text today." Unimplementable without a schema change.
+- Probe treats 429-rate as "skip"; failover treats 429 as retryable — same code, opposite handling, undefined for provider-wide limits.
+
+**4. Missing**
+- `usage_events.error_text/error_code` migration (prereq for A.3).
+- Provider-wide vs per-key 429 discrimination.
+- Key-rotation lifecycle (new key id → empty matrix → blind).
+- Model-name normalization between listing and `model_name`.
+- Knob delivery path (`settings`→persistent_term) for `failover_max_attempts`.
+- Request-level aggregation for usage stats after multi-row attempts.
+
+**5. Design notes**
+- Per-request ETS reads are safe (atomic generation swap), but pick and retry-pick can race a reload and re-pick the same key — dedupe within a request.
+- Budget: is the 5xx "one extra key" inside the 3-attempt cap? State it.
+- 300s `idle_timeout` > 3×60s worst case — OK, but gun connect timeout is unspecified.
+- Streaming boundary is sound (status known pre-byte); confirm `collect_drain` yields status before retry.
+
+**6. Top 5 edits**
+1. Add `error_text/error_code` to `usage_events`; define A.3 classification from it.
+2. Resolve traffic-row writer ownership (dashboard only).
+3. Persist key-level 401/403 (cooldown/key status) to stop retry storms.
+4. Check input-shape 400 before the deny regex; test both.
+5. Define the balance-refresh trigger and request-level usage aggregation.

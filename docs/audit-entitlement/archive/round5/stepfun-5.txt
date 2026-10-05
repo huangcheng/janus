@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — the design is coherent and most failure modes are anticipated, but internal contradictions (broken-key handling, probe-cap units, probe endpoint blocking) and one billing-semantics gap must be resolved before code.
+
+**2. Critical risks**
+- Probe budget math: DashScope 262 models × keys ≈ 786 calls; day-one bootstrap plus 1h re-probe of `input_shape` rows (image/audio models default to input_shape, per "out of scope") exceeds the 1000/day cap ~7× — the 3-strike `stable_input_shape` escalation may never complete, burning budget forever.
+- Deny-regex FPs are well-mitigated, but "provider error code/message fields only" assumes every provider envelope is parsed; no spec says where `code`/`message` live per provider.
+- Failover only helps fast failures: with a 45s budget and 60s TTFB, a slow-but-healthy upstream (TTFB 50s) blows both the deadline and any 30s client budget either way.
+- Retry storm: full-pool outage → 5 upstream calls/request (3 keys + provider retry reusing the coolest *failed* key); no pool breaker (acknowledged).
+- Balance-key healing is best-effort under the shared daily cap; starvation is bounded only because expired rows become `unknown`. State this explicitly.
+
+**3. Contradictions / stale claims**
+- "Known-broken key (401/403) skipped from candidates" vs A.2's "401 leaves prior rows untouched" and a schema with no key-level status — nothing can mark a key broken; flow 4 (401 key fails over) is the opposite behavior.
+- `JANUS_PROBE_MAX_CALLS` is both a batch abort (A.2) and a per-provider *daily* budget (A.4) — different units.
+- The fail-open branch isn't deadline-gated in the pseudocode (deadline lives only in the `retry_key` branch), though C.1 says the budget gates attempt starts.
+- The 210000 ceiling bakes gateway `idle_timeout`/TTFB constants into dashboard validation — knowledge the dashboard cannot verify.
+
+**4. Missing requirements**
+- Probe endpoints are synchronous but can run 10 min → need 202 + job/poll.
+- Probe spend is recorded nowhere (probes bypass usage rows) → no cost audit.
+- Failover billing: `WHERE is_terminal` hides non-terminal attempts' upstream tokens, which the provider still bills.
+- Crash-marking marks the orphan's last flushed row terminal, charging tokens for a client-visible failure; "abandoned" is undefined.
+- Whether `pick_listing_route` (unbound listings) runs through `dispatch/7`'s failover.
+
+**5. Architecture notes**
+- Generation snapshot at `dispatch/7` entry is right; `janus_lb` cooling stays outside the snapshot, read per pick — correct.
+- 429 dual-class via the shared table, single classifier — the right call.
+- janus_usage capacity: 100 rows/s flush + 10k buffer vs 5× rows/request during an outage → silent drops exactly when evidence is most needed; E.5's "absorbs without change" is optimistic.
+
+**6. Top 5 edits**
+1. Add a key-level status (`provider_keys.status`/`key_health`) or delete the "skip known-broken keys" claim.
+2. Split the cap semantics: per-batch hard stop vs per-provider daily budget, both explicit.
+3. Deadline-gate the fail-open branch; state the total-call bound in the pseudocode.
+4. Define failover billing: cost sums all attempts, volume/success counts terminal only, orphan rows excluded from both.
+5. Make probe endpoints async; record probe spend; pre-mark image/audio listings `stable_input_shape` on first probe to protect the budget.
