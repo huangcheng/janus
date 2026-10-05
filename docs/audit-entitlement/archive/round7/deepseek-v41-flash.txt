@@ -1,2 +1,0 @@
-## 1. Verdict
-**GO WITH FIXES** — the architecture is coherent, but

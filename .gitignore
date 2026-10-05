@@ -30,4 +30,5 @@ apps/janus_dashboard/priv/www/
 
 !docs/WSL2-DEV.md
 !docs/SCHEMA_ETS_CONTRACT.md
-!docs/audit/SYNTHESIS.md
+docs/audit*/
+!docs/audit*/SYNTHESIS.md
