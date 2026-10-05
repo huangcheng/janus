@@ -334,6 +334,17 @@ provider_keys(ProviderId) ->
 -spec entitlement_denied(provider_id(), binary(), term()) ->
     deny | balance | broken | false.
 entitlement_denied(ProviderId, ModelName, KeyId) when is_binary(ModelName) ->
+    %% Key-level '__key__' rows (probe-abort broken keys) apply to
+    %% EVERY listing and outrank listing-scoped marks; broken keys are
+    %% never fail-open candidates (spec A.2/C.1).
+    case denied_key_status(ProviderId, <<"__key__">>, KeyId) of
+        false -> denied_key_status(ProviderId, ModelName, KeyId);
+        Status -> Status
+    end;
+entitlement_denied(_, _, _) ->
+    false.
+
+denied_key_status(ProviderId, ModelName, KeyId) ->
     case ets_lookup(table(deny_keys), {ProviderId, ModelName}) of
         [{_, Map}] when is_map(Map) ->
             case maps:get(KeyId, Map, false) of
@@ -342,9 +353,7 @@ entitlement_denied(ProviderId, ModelName, KeyId) when is_binary(ModelName) ->
             end;
         _ ->
             false
-    end;
-entitlement_denied(_, _, _) ->
-    false.
+    end.
 
 %% Classification rows for the retry-time classifier, grouped per
 %% provider name (binary). Missing table = [] = fully fail-open.
