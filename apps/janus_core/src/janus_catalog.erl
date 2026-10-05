@@ -33,6 +33,7 @@
     routes_for_model/1,
     listings_for/1,
     listing_names/0,
+    listings_summary/0,
     lookup_model/1,
     lookup_provider/1,
     lookup_api_key/1,
@@ -171,6 +172,96 @@ listing_names() ->
                 Tid
             )
     end.
+
+%% @doc Name -> merged capability metadata across providers offering
+%% it: max context/output caps, OR-ed reasoning/vision flags. Fields
+%% are dropped when no provider reports them.
+-spec listings_summary() -> #{binary() => map()}.
+listings_summary() ->
+    case table(listings_by_name) of
+        undefined ->
+            #{};
+        Tid ->
+            ets:foldl(
+                fun({Name, Entries}, Acc) ->
+                    Merged = lists:foldl(
+                        fun(#{meta := Meta}, AccM) when is_map(Meta) ->
+                                merge_meta(Meta, AccM);
+                           (_, AccM) ->
+                                AccM
+                        end,
+                        #{},
+                        Entries
+                    ),
+                    %% `#{}` as a case pattern matches EVERY map (open
+                    %% subset matching) — size check is required for
+                    %% "nothing known".
+                    case map_size(Merged) of
+                        0 -> Acc;
+                        _ -> Acc#{Name => Merged}
+                    end
+                end,
+                #{},
+                Tid
+            )
+    end.
+
+%% Decoded JSON keys are binaries — every source/output key here is a
+%% binary so the merged map drops straight into the /v1/models entry.
+merge_meta(Meta, Acc) ->
+    CapKeys = [<<"context_window">>, <<"context_length">>, <<"max_input_tokens">>],
+    Acc1 = merge_max(Acc, Meta, CapKeys, <<"context_length">>),
+    Acc2 = merge_max(Acc1, Meta, [<<"max_output_tokens">>], <<"max_output_tokens">>),
+    Acc3 = merge_flag(
+        Acc2,
+        Meta,
+        [<<"reasoning">>, <<"supports_reasoning">>, <<"enable_reason">>],
+        <<"reasoning">>
+    ),
+    merge_flag(
+        Acc3,
+        Meta,
+        [<<"vision">>, <<"supports_image_in">>, <<"enable_vision_input">>],
+        <<"vision">>
+    ).
+
+merge_max(Acc, Meta, Sources, OutKey) ->
+    case first_known(Meta, Sources) of
+        V when is_integer(V), V > 0 ->
+            case Acc of
+                #{OutKey := Prev} when is_integer(Prev), Prev >= V -> Acc;
+                _ -> Acc#{OutKey => V}
+            end;
+        _ ->
+            Acc
+    end.
+
+merge_flag(Acc, Meta, Sources, OutKey) ->
+    case first_known(Meta, Sources) of
+        true -> Acc#{OutKey => true};
+        _ ->
+            Acc
+    end.
+
+first_known(Meta, [K | Ks]) ->
+    case maps:get(K, Meta, undefined) of
+        undefined -> first_known(Meta, Ks);
+        V -> V
+    end;
+first_known(_, []) ->
+    undefined.
+
+decode_meta(null) ->
+    null;
+decode_meta(Bin) when is_binary(Bin) ->
+    case thoas:decode(Bin) of
+        {ok, M} when is_map(M) -> M;
+        _ -> null
+    end;
+decode_meta(M) when is_map(M) ->
+    M;
+decode_meta(_) ->
+    null.
 
 -spec lookup_model(binary() | model_id()) -> {ok, map()} | error.
 lookup_model(Key) ->
@@ -338,11 +429,13 @@ insert_provider_keys(Tid, Rows) ->
 
 insert_listings(Tid, Rows) ->
     Grouped = lists:foldl(
-        fun(#{provider_id := P, name := N, enabled := E}, Acc) ->
+        fun(#{provider_id := P, name := N, enabled := E} = Row, Acc) ->
                 %% Postgres SMALLINT arrives as 0/1 — normalize to
                 %% booleans so pattern matches downstream see true/false.
                 Enabled = E =:= 1 orelse E =:= true,
-                Entry = #{provider_id => P, enabled => Enabled},
+                %% meta is JSONB/TEXT — decode defensively (bad JSON or
+                %% a driver-encoded value must never break a reload).
+                Entry = #{provider_id => P, enabled => Enabled, meta => decode_meta(maps:get(meta, Row, null))},
                 maps:update_with(N, fun(Entries) -> [Entry | Entries] end, [Entry], Acc)
         end,
         #{},

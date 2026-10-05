@@ -58,16 +58,22 @@ list_models() ->
                     ets:insert_new(Seen, {Name, true})
                 ],
                 Names = lists:sort(Bound ++ Listings) ++ auto_names(),
-                [
-                    #{id => Name, object => <<"model">>, owned_by => <<"janus">>}
-                 || Name <- Names
-                ]
+                Meta = janus_catalog:listings_summary(),
+                [model_entry(Name, maps:get(Name, Meta, #{})) || Name <- Names]
             after
                 ets:delete(Seen)
             end;
         _ ->
             []
     end.
+
+%% Capability fields captured from provider catalogs appear only when
+%% at least one provider reports them: context_length / max_output_tokens
+%% (integers) and reasoning / vision (true).
+model_entry(Name, Meta) when map_size(Meta) =:= 0 ->
+    #{id => Name, object => <<"model">>, owned_by => <<"janus">>};
+model_entry(Name, Meta) ->
+    maps:merge(#{id => Name, object => <<"model">>, owned_by => <<"janus">>}, Meta).
 
 %% The janus-auto virtual model appears when any tier is configured.
 auto_names() ->

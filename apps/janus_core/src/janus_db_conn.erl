@@ -229,10 +229,10 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
             ]},
         {provider_models,
             <<
-                "SELECT pm.id, pm.provider_id, pm.name, pm.enabled "
+                "SELECT pm.id, pm.provider_id, pm.name, pm.enabled, pm.meta "
                 "FROM provider_models pm ORDER BY pm.provider_id, pm.name"
             >>,
-            [id, provider_id, name, enabled]}
+            [id, provider_id, name, enabled, meta]}
     ],
     fetch_all(M, C, Queries, #{}).
 
