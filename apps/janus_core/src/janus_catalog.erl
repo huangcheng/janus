@@ -206,39 +206,46 @@ listings_summary() ->
             )
     end.
 
-%% Decoded JSON keys are binaries — every source/output key here is a
-%% binary so the merged map drops straight into the /v1/models entry.
+%% Pass-through merge of raw provider catalog entries (binary JSON
+%% keys): numbers take the max across providers, booleans OR, and every
+%% other value keeps the first non-null under the upstream's own field
+%% name — no curation. `context_length` is additionally synthesized
+%% (max of the upstream context-field spellings) as a cross-provider
+%% convenience for clients that want one canonical key.
 merge_meta(Meta, Acc) ->
-    CapKeys = [<<"context_window">>, <<"context_length">>, <<"max_input_tokens">>],
-    Acc1 = merge_max(Acc, Meta, CapKeys, <<"context_length">>),
-    Acc2 = merge_max(Acc1, Meta, [<<"max_output_tokens">>], <<"max_output_tokens">>),
-    Acc3 = merge_flag(
-        Acc2,
-        Meta,
-        [<<"reasoning">>, <<"supports_reasoning">>, <<"enable_reason">>],
-        <<"reasoning">>
-    ),
-    merge_flag(
-        Acc3,
-        Meta,
-        [<<"vision">>, <<"supports_image_in">>, <<"enable_vision_input">>],
-        <<"vision">>
-    ).
+    Acc1 =
+        maps:fold(
+            fun
+                (K, V, A) when is_integer(V), V > 0 ->
+                    case A of
+                        #{K := Prev} when is_integer(Prev), Prev >= V -> A;
+                        _ -> A#{K => V}
+                    end;
+                (K, true, A) ->
+                    %% boolean true ORs in (false never overrides true)
+                    case A of
+                        #{K := true} -> A;
+                        _ -> A#{K => true}
+                    end;
+                (K, V, A) ->
+                    case maps:is_key(K, A) of
+                        true -> A;
+                        false -> A#{K => V}
+                    end
+            end,
+            Acc,
+            Meta
+        ),
+    canonical_ctx(Acc1).
 
-merge_max(Acc, Meta, Sources, OutKey) ->
-    case first_known(Meta, Sources) of
+canonical_ctx(Acc) ->
+    Sources = [<<"context_length">>, <<"context_window">>, <<"max_input_tokens">>],
+    case first_known(Acc, Sources) of
         V when is_integer(V), V > 0 ->
             case Acc of
-                #{OutKey := Prev} when is_integer(Prev), Prev >= V -> Acc;
-                _ -> Acc#{OutKey => V}
+                #{<<"context_length">> := Prev} when is_integer(Prev), Prev >= V -> Acc;
+                _ -> Acc#{<<"context_length">> => V}
             end;
-        _ ->
-            Acc
-    end.
-
-merge_flag(Acc, Meta, Sources, OutKey) ->
-    case first_known(Meta, Sources) of
-        true -> Acc#{OutKey => true};
         _ ->
             Acc
     end.
