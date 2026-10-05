@@ -411,6 +411,28 @@ loop:                                    // first call unconditional
   rows, so undercounting is possible only within that 1s window.
 - Committed-response rule, precisely: a request is committed once any
   byte is passed to `cowboy_req:reply/stream_reply/stream_body`.
+  IMPLEMENTATION ORDER: this spec's Part C lands AFTER next-phase
+  Slice A (streaming translate, `docs/superpowers/specs/2026-10-05-next-phase-design.md`).
+  Slice A redefines the proxy drain loop (`translate_sse` fold +
+  `finalize_sse` in `try/after`); writing the failover loop against
+  the pre-Slice-A path would be reworked. On the translate path the
+  commit point is the first TRANSLATED client frame — SSE headers go
+  out only after the first provider byte, so a provider that errors
+  or stalls pre-first-byte stays retryable; once any translated frame
+  is written the request is committed (502 finalize, no failover).
+  The include_usage retry-once (Slice A §4.1.1.5) layers INSIDE one
+  attempt (same key, same listing, body rewrite only); this spec's
+  failover retries layer OUTSIDE it (different key/listing) — a
+  pre-200 400 consumed by the include_usage retry must not also
+  consume a failover attempt, and vice versa.
+  Streaming candidate constraint (post-Slice-A): the per-attempt pick
+  filters candidates by REQUEST FEATURES, not by stream alone —
+  requests carrying tools or image parts may only fail over to
+  listings of the SAME client protocol (translate stays 400 for
+  them); plain text/thinking streaming requests may fail over across
+  protocols (Slice A made that translatable). `maybe_route/3`'s
+  current blanket stream constraint is superseded by this
+  feature-based rule once Slice A is live.
   Scope: the streaming retry analysis covers the chat faces
   (openai_chat / anthropic_messages / their translate) — the only
   agent-facing surfaces in v1; embeddings/batch endpoints are out of

@@ -538,6 +538,21 @@ Phase 1 D:
 4. Slice D (deploy wait) — with the next production ship
 5. Stop. New spec for Phase 2.
 
+**Coordination with the entitlement-failover spec**
+(`docs/superpowers/plans/2026-10-05-entitlement-failover.md`): its
+Part C (in-request key failover) implements AFTER this Phase 1 —
+Slice A redefines the proxy drain loop it must wrap. Interaction
+points settled in that spec: (a) commit point = first translated
+client frame, so pre-first-byte upstream errors stay retryable;
+(b) the include_usage retry-once layers inside one failover attempt
+(same key/listing, body rewrite), never consumes a failover slot;
+(c) after Slice A the streaming candidate filter for janus-auto
+tiers AND failover picks becomes request-feature-based (tools/vision
+→ same protocol only; text+thinking → translate-capable), superseding
+the blanket stream constraint; (d) Slice B counters count client
+calls only — failover retries and the include_usage retry are inner
+attempts of one counted call and never bump total/failed themselves.
+
 ## 10. Closed decisions (do not re-open)
 
 These were raised in pi-audit rounds 1–4 and are **already specified**.
