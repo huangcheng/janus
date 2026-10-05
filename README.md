@@ -85,11 +85,13 @@ Three layers, in the order they should fail:
 2. **Local E2E** — `bash ../janus-dashboard/scripts/e2e_local.sh` (from
    the dashboard repo) boots this release in Docker against a real
    Postgres and runs the full TEST-FLOWS suite with real upstream
-   calls; it is the acceptance gate for every change.
-3. **Live checks** — the gateway image is rebuilt and deployed to the
-   three production nodes by the dashboard repo's scripts; the same
-   flows run against production (`scripts/run_test_flows.py`, prod
-   mode).
+   calls; it is the acceptance gate for every change. All testing is
+   local — production data is never touched by tests.
+3. **Publish + read-only smoke** — `bash ../janus-dashboard/scripts/
+   deploy_prod.sh` reruns the local gate, ships the image to the three
+   production nodes, then verifies production with a READ-ONLY smoke
+   (health, nodes, generation sync, model surface, one real chat). No
+   test ever mutates production state.
 
 ## Usage statistics
 
