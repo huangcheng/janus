@@ -187,3 +187,27 @@ chat_resp_to_messages_test() ->
     ?assertEqual(2, maps:get(<<"output_tokens">>, maps:get(<<"usage">>, Out))),
     Content = maps:get(<<"content">>, Out),
     ?assertMatch([#{<<"type">> := <<"text">>, <<"text">> := <<"ok">>}], Content).
+
+thinking_blocks_to_reasoning_content_test() ->
+    %% Kimi/MiniMax thinking models: text + thinking blocks in an
+    %% anthropic response must translate (thinking -> reasoning_content),
+    %% not crash the proxy (throw/bad_part used to escape the fold).
+    AnthropicResp =
+        #{
+            <<"id">> => <<"msg_1">>,
+            <<"model">> => <<"kimi-for-coding">>,
+            <<"stop_reason">> => <<"end_turn">>,
+            <<"content">> => [
+                #{<<"type">> => <<"thinking">>, <<"thinking">> => <<"let me think">>},
+                #{<<"type">> => <<"text">>, <<"text">> => <<"ok">>},
+                #{<<"type">> => <<"thinking">>, <<"signature">> => <<"enc...">>}
+            ],
+            <<"usage">> => #{<<"input_tokens">> => 5, <<"output_tokens">> => 9}
+        },
+    {ok, Chat} = janus_protocol_translate:translate_response(
+        openai_chat, anthropic_messages, AnthropicResp
+    ),
+    [#{<<"message">> := Msg}] = maps:get(<<"choices">>, Chat),
+    ?assertEqual(<<"ok">>, maps:get(<<"content">>, Msg)),
+    ?assertEqual(<<"let me think">>, maps:get(<<"reasoning_content">>, Msg)),
+    ?assertEqual(9, maps:get(<<"completion_tokens">>, maps:get(<<"usage">>, Chat))).

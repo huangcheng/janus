@@ -163,7 +163,14 @@ do_pick_route(ModelId, Opts, #state{cooldowns = Cool, cursors = Cursors, infligh
                     ],
                     case Available of
                         [] ->
-                            {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}};
+                            %% All routes filtered out: cooling is only the
+                            %% diagnosis when at least one provider is
+                            %% enabled — a disabled provider must not
+                            %% surface as a cooldown.
+                            case lists:any(fun(R) -> provider_enabled(R) end, Routes1) of
+                                false -> {error, provider_disabled};
+                                true -> {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}}
+                            end;
                         Candidates ->
                             case
                                 pick_usable_route(ModelId, Candidates, Cool, Cursors, Now, Inflight)

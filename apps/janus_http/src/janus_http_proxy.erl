@@ -428,6 +428,11 @@ reply_pick_error(ClientProto, Req, State, {all_cooling, Ms}) when is_integer(Ms)
         <<"all upstream routes are cooling down">>,
         #{<<"retry-after">> => integer_to_binary(Sec)}
     );
+reply_pick_error(ClientProto, Req, State, provider_disabled) ->
+    reply_err(
+        ClientProto, Req, State, 503, <<"provider_disabled">>,
+        <<"the provider for this model is disabled">>
+    );
 reply_pick_error(ClientProto, Req, State, keys_disabled) ->
     reply_err(ClientProto, Req, State, 503, <<"no_usable_key">>, <<"no enabled upstream keys">>);
 reply_pick_error(ClientProto, Req, State, missing_provider_key) ->

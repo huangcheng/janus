@@ -590,40 +590,58 @@ expand_user_parts(_, _, _) ->
 assistant_from_anthropic(C) when is_binary(C) ->
     {ok, #{<<"role">> => <<"assistant">>, <<"content">> => C}};
 assistant_from_anthropic(List) when is_list(List) ->
-    {Texts, ToolCalls} = lists:foldl(
-        fun
-            (#{<<"type">> := <<"text">>, <<"text">> := T}, {Ts, Cs}) when is_binary(T) ->
-                {[T | Ts], Cs};
-            (
-                #{<<"type">> := <<"tool_use">>, <<"id">> := Id, <<"name">> := Name, <<"input">> := Input},
-                {Ts, Cs}
-            ) when is_binary(Id), is_binary(Name), is_map(Input) ->
-                Args = iolist_to_binary(thoas:encode(Input)),
-                Call = #{
-                    <<"id">> => Id,
-                    <<"type">> => <<"function">>,
-                    <<"function">> => #{<<"name">> => Name, <<"arguments">> => Args}
-                },
-                {Ts, [Call | Cs]};
-            (#{<<"type">> := <<"tool_use">>}, _) ->
-                throw(bad_tool);
-            (#{<<"type">> := _}, _) ->
-                throw(bad_part);
-            (_, Acc) ->
-                Acc
-        end,
-        {[], []},
-        List
-    ),
+    %% The try must wrap the FOLD itself: the throw(bad_*) clauses fire
+    %% inside lists:foldl, so a catch around the post-fold construction
+    %% never sees them (a thinking block used to crash the proxy here).
     try
+        {Texts, Reasons, ToolCalls} = lists:foldl(
+            fun
+                (#{<<"type">> := <<"text">>, <<"text">> := T}, {Ts, Rs, Cs}) when is_binary(T) ->
+                    {[T | Ts], Rs, Cs};
+                %% Thinking models (Kimi, MiniMax, …): surface the text
+                %% reasoning as the OpenAI-style reasoning_content field
+                %% (same shape DeepSeek/StepFun emit natively). Encrypted
+                %% or non-text thinking payloads are skipped.
+                (#{<<"type">> := <<"thinking">>, <<"thinking">> := R}, {Ts, Rs, Cs}) when
+                    is_binary(R)
+                ->
+                    {Ts, [R | Rs], Cs};
+                (#{<<"type">> := <<"thinking">>}, Acc) ->
+                    Acc;
+                (
+                    #{<<"type">> := <<"tool_use">>, <<"id">> := Id, <<"name">> := Name, <<"input">> := Input},
+                    {Ts, Rs, Cs}
+                ) when is_binary(Id), is_binary(Name), is_map(Input) ->
+                    Args = iolist_to_binary(thoas:encode(Input)),
+                    Call = #{
+                        <<"id">> => Id,
+                        <<"type">> => <<"function">>,
+                        <<"function">> => #{<<"name">> => Name, <<"arguments">> => Args}
+                    },
+                    {Ts, Rs, [Call | Cs]};
+                (#{<<"type">> := <<"tool_use">>}, _) ->
+                    throw(bad_tool);
+                (#{<<"type">> := _}, _) ->
+                    throw(bad_part);
+                (_, Acc) ->
+                    Acc
+            end,
+            {[], [], []},
+            List
+        ),
         Msg0 = #{<<"role">> => <<"assistant">>, <<"content">> => iolist_to_binary(lists:reverse(Texts))},
+        Msg1 =
+            case Reasons of
+                [] -> Msg0;
+                _ -> Msg0#{<<"reasoning_content">> => iolist_to_binary(lists:reverse(Reasons))}
+            end,
         case lists:reverse(ToolCalls) of
-            [] -> {ok, Msg0};
-            Calls -> {ok, Msg0#{<<"tool_calls">> => Calls}}
+            [] -> {ok, Msg1};
+            Calls -> {ok, Msg1#{<<"tool_calls">> => Calls}}
         end
     catch
-        bad_tool -> {error, {translate_unsupported, <<"invalid tool_use">>}};
-        bad_part -> {error, {translate_unsupported, <<"vision/multimodal content not supported">>}}
+        throw:bad_tool -> {error, {translate_unsupported, <<"invalid tool_use">>}};
+        throw:bad_part -> {error, {translate_unsupported, <<"vision/multimodal content not supported">>}}
     end;
 assistant_from_anthropic(_) ->
     {error, {translate_unsupported, <<"invalid assistant content">>}}.
