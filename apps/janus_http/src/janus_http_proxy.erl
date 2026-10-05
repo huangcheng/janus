@@ -25,6 +25,7 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_usage_ctx),
     erase(janus_usage_head),
     erase(janus_usage_tail),
+    erase(janus_req_model),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
         agent => Agent,
@@ -109,6 +110,7 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
     end.
 
 do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
+    put(janus_req_model, ModelName),
     case resolve_model(ModelName) of
         {ok, ModelId} ->
             proxy_picked(
@@ -481,6 +483,18 @@ reply_err(ClientProto, Req, State, Status, Code, Msg) ->
     reply_err(ClientProto, Req, State, Status, Code, Msg, #{}).
 
 reply_err(ClientProto, Req, State, Status, Code, Msg, Extra) ->
+    %% Every agent-facing rejection is logged (warning): the dashboard
+    %% Logs page is the first place operators look when a client reports
+    %% "provider rejected my request" — silent 400s forced Caddy-log
+    %% archaeography once too often.
+    logger:warning(#{
+        what => janus_agent_reject,
+        status => Status,
+        code => Code,
+        model => get(janus_req_model),
+        method => cowboy_req:method(Req),
+        path => cowboy_req:path(Req)
+    }),
     reply_json(Req, State, Status, error_map(ClientProto, Code, Msg), Extra).
 
 error_map(anthropic_messages, Code, Msg) ->
@@ -593,6 +607,15 @@ track(Status, Route, Usage) ->
                     microsecond,
                     millisecond
                 ),
+            logger:info(#{
+                what => janus_request,
+                model => maps:get(model_id, Route, null),
+                model_name => get(janus_req_model),
+                provider => maps:get(provider_id, Route, null),
+                status => Status,
+                stream => usage_bool_int(Stream),
+                latency_ms => LatencyMs
+            }),
             janus_usage:record(#{
                 ts => erlang:system_time(second),
                 agent_key_id => maps:get(id, Agent, null),

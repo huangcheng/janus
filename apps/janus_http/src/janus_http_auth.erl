@@ -70,6 +70,13 @@ first_matching_key(Token, [_ | Rest]) ->
     first_matching_key(Token, Rest).
 
 unauthorized(Req, Msg) ->
+    logger:warning(#{
+        what => janus_agent_reject,
+        status => 401,
+        code => unauthorized,
+        method => cowboy_req:method(Req),
+        path => cowboy_req:path(Req)
+    }),
     Body = thoas:encode(#{
         error => #{
             message => Msg,
