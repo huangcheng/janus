@@ -15,13 +15,14 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([maybe_route/2, stats/0, snapshot/0]).
+-export([maybe_route/2, stats/0, snapshot/0, apply_db_settings/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(CACHE, janus_auto_cache).
 -define(AUX, janus_auto_aux).
 -define(STATS, janus_auto_stats).
 -define(PT_KEY, {janus, auto_cfg}).
+-define(DB_PT_KEY, {janus, auto_cfg_db}).
 -define(CAP, 4096).
 -define(SWEEP_BATCH, 128).
 -define(RECONCILE_EVERY, 64).
@@ -127,6 +128,17 @@ stat_key(A) when is_atom(A) ->
 stat_key(Other) ->
     iolist_to_binary(io_lib:format("~p", [Other])).
 
+%% @doc Hot-reload dashboard-managed settings (settings.auto_router row,
+%% distributed by janus_config on every catalog publish). Keys present in
+%% the DB map override the sys.config app-env value; missing keys keep
+%% the app-env default. Merged raw joins the config fingerprint, so the
+%% cached #acfg{} invalidates automatically.
+-spec apply_db_settings(map()) -> ok.
+apply_db_settings(Map) when is_map(Map) ->
+    gen_server:cast(?MODULE, {apply_db_settings, Map});
+apply_db_settings(_) ->
+    ok.
+
 %%%===================================================================
 %%% gen_server (owns cache/aux/stats tables + semaphore atomics)
 %%%===================================================================
@@ -143,6 +155,9 @@ init([]) ->
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
+handle_cast({apply_db_settings, Map}, State) when is_map(Map) ->
+    persistent_term:put(?DB_PT_KEY, Map),
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -891,7 +906,9 @@ semaphore_release(_) ->
 %%%===================================================================
 
 normalized() ->
-    Raw0 = application:get_env(janus, auto_router, #{}),
+    AppEnv = as_config_map(application:get_env(janus, auto_router, #{})),
+    Db = as_config_map(persistent_term:get(?DB_PT_KEY, #{})),
+    Raw0 = maps:merge(AppEnv, Db),
     Raw = normalize_raw(Raw0),
     FP = erlang:phash2(Raw),
     case persistent_term:get(?PT_KEY, undefined) of
@@ -902,6 +919,15 @@ normalized() ->
             persistent_term:put(?PT_KEY, {FP, Cfg}),
             Cfg
     end.
+
+as_config_map(#{} = M) ->
+    M;
+as_config_map(L) when is_list(L) ->
+    deep_proplist(
+        maps:from_list([KV || KV <- L, is_tuple(KV), tuple_size(KV) =:= 2])
+    );
+as_config_map(_) ->
+    #{}.
 
 %% sys.config values arrive as lists; the rest of the module works in
 %% binaries. Normalize once per config fingerprint.
@@ -923,14 +949,58 @@ normalize_map(Raw0) ->
         false ->
             #{};
         true ->
-            Raw = maps:map(fun(_K, V) -> to_bin(V) end, Raw0),
+            Raw = atomize_keys(maps:map(fun(_K, V) -> to_bin(V) end, Raw0)),
             case maps:get(tiers, Raw, undefined) of
                 Tiers when is_map(Tiers) ->
-                    Raw#{tiers => maps:map(fun(_T, Names) -> to_bin(Names) end, Tiers)};
+                    %% Tier keys may arrive as binaries (decoded JSON from
+                    %% dashboard settings) or atoms (sys.config) — the rest
+                    %% of the module addresses tiers by atom.
+                    Raw#{tiers => atomize_tier_keys(maps:map(fun(_T, Names) -> to_bin(Names) end, Tiers))};
                 _ ->
                     Raw
             end
     end.
+
+%% Decoded JSON objects key by binary while sys.config keys by atom;
+%% normalize both to atoms. Safe conversion only — an unknown binary
+%% key (not an existing atom) is dropped, validate() ignores unknowns.
+atomize_keys(Map) ->
+    maps:fold(
+        fun
+            (K, V, Acc) when is_binary(K) ->
+                case catch binary_to_existing_atom(K, utf8) of
+                    A when is_atom(A) -> Acc#{A => V};
+                    _ -> Acc
+                end;
+            (K, V, Acc) ->
+                Acc#{K => V}
+        end,
+        #{},
+        Map
+    ).
+
+tier_atom(fast) -> fast;
+tier_atom(big) -> big;
+tier_atom(flagship) -> flagship;
+tier_atom(<<"fast">>) -> fast;
+tier_atom(<<"big">>) -> big;
+tier_atom(<<"flagship">>) -> flagship;
+tier_atom(_) -> undefined.
+
+atomize_tier_keys(Tiers) ->
+    maps:fold(
+        fun
+            (fast, V, Acc) -> Acc#{fast => V};
+            (<<"fast">>, V, Acc) -> Acc#{fast => V};
+            (big, V, Acc) -> Acc#{big => V};
+            (<<"big">>, V, Acc) -> Acc#{big => V};
+            (flagship, V, Acc) -> Acc#{flagship => V};
+            (<<"flagship">>, V, Acc) -> Acc#{flagship => V};
+            (_Other, _V, Acc) -> Acc
+        end,
+        #{},
+        Tiers
+    ).
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) ->
@@ -964,7 +1034,7 @@ validate(Raw) ->
     JM = judge_or_none(maps:get(judge_model, Raw, undefined), Model),
     Tiers = validate_tiers(maps:get(tiers, Raw, #{}), Def#acfg.tiers, Model),
     DefaultTier =
-        case maps:get(default_tier, Raw, fast) of
+        case tier_atom(maps:get(default_tier, Raw, fast)) of
             T when T =:= fast; T =:= big; T =:= flagship -> T;
             _ ->
                 log_cfg_error("invalid default_tier; using fast"),
@@ -1244,6 +1314,16 @@ now_ms() ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+db_settings_override_test() ->
+    application:unset_env(janus, auto_router),
+    %% keys as binaries, exactly as decoded from the dashboard's JSON row
+    persistent_term:put(?DB_PT_KEY, #{<<"tiers">> => #{<<"fast">> => [<<"m-a">>]}}),
+    Cfg = normalized(),
+    ?assertEqual([<<"m-a">>], maps:get(fast, Cfg#acfg.tiers, [])),
+    persistent_term:erase(?DB_PT_KEY),
+    Cfg2 = normalized(),
+    ?assertEqual([], maps:get(fast, Cfg2#acfg.tiers, [])).
 
 cfg() ->
     #acfg{

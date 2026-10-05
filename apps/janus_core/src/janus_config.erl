@@ -295,7 +295,47 @@ cancel_poll(Ref) when is_reference(Ref) ->
 publish_catalog(Gen, Rows) when is_integer(Gen), is_map(Rows) ->
     ok = janus_catalog:publish(Gen, janus_catalog:build(Rows)),
     _ = maybe_write_snapshot(Gen, Rows),
+    _ = distribute_settings(Rows),
     ok.
+
+%% Hand dashboard-managed settings (settings table) to their consumers.
+%% Soft dependencies — the consumer app may not be running (or loaded)
+%% on this node; a missing consumer is not an error.
+distribute_settings(Rows) ->
+    Settings = maps:get(settings, Rows, []),
+    lists:foreach(
+        fun
+            (#{key := <<"auto_router">>, value := V}) ->
+                case decode_json(V) of
+                    {ok, Map} when is_map(Map) ->
+                        %% Write the shared persistent_term key janus_auto's
+                        %% normalized/0 merges over sys.config. A direct PT
+                        %% write (not a gen_server cast) is immune to start
+                        %% order: janus_core boots before janus_http, and a
+                        %% cast to the then-unregistered janus_auto name
+                        %% would be silently dropped.
+                        persistent_term:put({janus, auto_cfg_db}, Map);
+                    _ ->
+                        logger:warning(#{
+                            what => janus_settings_bad_value, key => auto_router
+                        })
+                end;
+            (_) ->
+                ok
+        end,
+        Settings
+    ).
+
+decode_json(Bin) when is_binary(Bin) ->
+    try
+        thoas:decode(Bin)
+    catch
+        _:_ -> {error, bad_json}
+    end;
+decode_json(Term) when is_map(Term) ->
+    {ok, Term};
+decode_json(_) ->
+    {error, bad_json}.
 
 maybe_write_snapshot(Gen, Rows) ->
     case code:ensure_loaded(janus_snapshot) of

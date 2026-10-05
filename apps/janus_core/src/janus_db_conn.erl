@@ -232,7 +232,8 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
                 "SELECT pm.id, pm.provider_id, pm.name, pm.enabled, pm.meta "
                 "FROM provider_models pm ORDER BY pm.provider_id, pm.name"
             >>,
-            [id, provider_id, name, enabled, meta]}
+            [id, provider_id, name, enabled, meta]},
+        {settings, <<"SELECT key, value FROM settings">>, [key, value]}
     ],
     fetch_all(M, C, Queries, #{}).
 

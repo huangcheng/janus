@@ -75,18 +75,14 @@ model_entry(Name, Meta) when map_size(Meta) =:= 0 ->
 model_entry(Name, Meta) ->
     maps:merge(#{id => Name, object => <<"model">>, owned_by => <<"janus">>}, Meta).
 
-%% The janus-auto virtual model appears when any tier is configured.
+%% The janus-auto virtual model appears when any tier has members —
+%% from the LIVE config (sys.config overlaid by dashboard settings).
 auto_names() ->
-    Env = application:get_env(janus, auto_router, []),
-    Tiers = proplists:get_value(tiers, Env, #{}),
-    HasMembers = lists:any(
-        fun
-            ({_, [_ | _]}) -> true;
-            (_) -> false
-        end,
-        maps:to_list(maps:filter(fun(_K, V) -> is_list(V) end, Tiers))
-    ),
-    case HasMembers of
-        true -> [<<"janus-auto">>];
-        false -> []
+    try
+        case janus_auto:snapshot() of
+            #{configured := true, model := M} when is_binary(M) -> [M];
+            _ -> []
+        end
+    catch
+        _:_ -> []
     end.
