@@ -1,3 +1,31 @@
+# ---------- Stage T (test): prebuilt compile/eunit image ----------
+# Slice C: one prebuilt image so Windows-local compile/eunit never
+# touches dl-cdn.alpinelinux.org (default Alpine CDN hangs on China
+# networks). apk goes through the Aliyun mirror, rebar3 lives outside
+# /app so bind mounts cannot shadow the escript, and the hex package
+# cache plus the erlfmt (rebar3 fmt) plugin are warmed at build time
+# so a later named-volume _build mount forces no first-run hex fetch.
+FROM erlang:27-alpine AS test
+# APK mirror override: defaults to Aliyun; CI may override to the
+# Alpine CDN via --build-arg if mirrors.aliyun.com is unreachable.
+ARG APK_MIRROR=https://mirrors.aliyun.com
+# Hex mirror override for China networks. rebar3 3.25 reads env
+# HEX_CDN first, then HEX_MIRROR; the default is the official CDN
+# (a no-op). At runtime `docker run -e HEX_CDN=...` still wins.
+ARG HEX_MIRROR=
+ENV HEX_MIRROR=${HEX_MIRROR:-https://repo.hex.pm}
+WORKDIR /app
+RUN sed -i "s#https://dl-cdn.alpinelinux.org#${APK_MIRROR}#g" /etc/apk/repositories \
+    && apk add --no-cache git build-base
+COPY rebar3 /usr/local/bin/rebar3
+COPY rebar.config rebar.lock* ./
+COPY apps apps
+COPY config config
+# Default profile compile bakes _build into the image; the hex cache
+# under /root/.cache/rebar3 persists in the layer for mounted runs.
+RUN chmod +x /usr/local/bin/rebar3 && rm -rf _build && rebar3 compile \
+    && rebar3 plugins list > /dev/null
+
 # ---------- Stage 1: compile the Erlang release ----------
 FROM erlang:27-alpine AS build
 WORKDIR /app

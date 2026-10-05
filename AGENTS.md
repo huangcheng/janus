@@ -43,9 +43,22 @@ English. Respond in the user's language (Chinese → Chinese).
 ## Build & deploy
 
 - Compile/eunit in a container (Windows host Erlang is broken; local
-  `_build` gets stale — build in Docker): `docker build --target build
-  -t janus-build:test .` then `docker run --rm -w /app janus-build:test
-  sh -c './rebar3 fmt --check && ./rebar3 eunit'`. CI runs the same.
+  `_build` gets stale — build in Docker). The only documented commands:
+
+  ```bash
+  docker build --target test -t janus-build:test .
+  docker run --rm -v F:/Janus/apps:/app/apps -v F:/Janus/config:/app/config -v F:/Janus/rebar.config:/app/rebar.config -v F:/Janus/rebar.lock:/app/rebar.lock -v janus-ebin-otp27:/app/_build -w /app janus-build:test sh -c 'rebar3 fmt --check && rebar3 eunit'
+  ```
+
+  Never bind-mount the repo root over `/app` (the image owns
+  `/usr/local/bin/rebar3` and the warm hex cache under
+  `/root/.cache/rebar3`); mount only `apps/`, `config/`, and the rebar
+  files, with `_build` on the named volume. Recreate the volume
+  (`docker volume rm janus-ebin-otp27`) when `rebar.lock`,
+  `rebar.config`, or the OTP version changes, else stale beams. The
+  `test` stage never hits `dl-cdn.alpinelinux.org` (Aliyun apk mirror
+  inside the image). CI runs the same image without mounts
+  (`eunit-docker` job).
 - Deploy = `bash ../janus-dashboard/scripts/deploy_prod.sh` (from the
   dashboard repo): rebuild → run local gate → rolling rollout (aliyun is
   the migration leader; followers only after its migration is verified)

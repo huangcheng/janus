@@ -36,3 +36,18 @@ jobs:
 
       - name: EUnit
         run: rebar3 eunit
+
+  # Slice C: prove the prebuilt test image (the documented Windows-local
+  # workflow) is self-contained — compile is baked in, no source mount.
+  # If mirrors.aliyun.com is unreachable from a runner, override with
+  # --build-arg APK_MIRROR=https://dl-cdn.alpinelinux.org
+  eunit-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build --target test -t janus-build:test .
+
+      - name: Format check and EUnit (no source mount)
+        run: docker run --rm janus-build:test sh -c 'rebar3 fmt --check && rebar3 eunit'

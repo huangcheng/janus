@@ -19,13 +19,18 @@ Working today:
 
 ## Quick start
 
-**Compile via Docker on Windows** (host OTP may crash). Linux/macOS with OTP 27 + gcc can use `./rebar3` directly.
+**Compile/eunit via Docker on Windows** (host OTP may crash). The prebuilt `test` image never touches `dl-cdn.alpinelinux.org` (Aliyun apk mirror inside), so it works on China networks:
 
 ```bash
-docker pull erlang:27-alpine
-docker run --rm -v F:/Janus:/app -w /app erlang:27-alpine \
-  sh -c 'apk add --no-cache git build-base curl && chmod +x rebar3 && ./rebar3 get-deps && ./rebar3 compile'
+docker build --target test -t janus-build:test .
+docker run --rm -v F:/Janus/apps:/app/apps -v F:/Janus/config:/app/config -v F:/Janus/rebar.config:/app/rebar.config -v F:/Janus/rebar.lock:/app/rebar.lock -v janus-ebin-otp27:/app/_build -w /app janus-build:test sh -c 'rebar3 fmt --check && rebar3 eunit'
 ```
+
+Do not bind-mount the repo root over `/app` (the image owns
+`/usr/local/bin/rebar3` and the warm hex cache); recreate the named
+volume (`docker volume rm janus-ebin-otp27`) when `rebar.lock`,
+`rebar.config`, or the OTP version changes. Linux/macOS with OTP 27 +
+gcc can use `./rebar3` directly.
 
 ### Local run (SQLite)
 
