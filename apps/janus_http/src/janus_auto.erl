@@ -15,7 +15,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([maybe_route/2, stats/0, snapshot/0, apply_db_settings/1]).
+-export([maybe_route/2, maybe_route/3, stats/0, snapshot/0, apply_db_settings/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(CACHE, janus_auto_cache).
@@ -62,11 +62,21 @@ start_link() ->
     | {error, no_route}
     | {error, request_too_large}.
 maybe_route(Name, ReqMap) when is_binary(Name), is_map(ReqMap) ->
+    maybe_route(Name, ReqMap, #{}).
+
+%% Constraint may carry #{client_proto => atom(), stream => boolean()}:
+%% a STREAMING client cannot stream through a cross-protocol provider
+%% (translate is non-stream only), so tier resolution skips
+%% protocol-incompatible members instead of returning a target the
+%% proxy would reject with 400 stream_requires_native.
+maybe_route(Name, ReqMap, Constraint) when
+    is_binary(Name), is_map(ReqMap), is_map(Constraint)
+->
     try
         Cfg = normalized(),
         case Name =:= Cfg#acfg.model of
             false -> pass;
-            true -> route_auto(Cfg, ReqMap)
+            true -> route_auto(Cfg, ReqMap, Constraint)
         end
     catch
         Class:Reason ->
@@ -74,7 +84,7 @@ maybe_route(Name, ReqMap) when is_binary(Name), is_map(ReqMap) ->
             logger:warning(#{what => janus_auto_degraded_to_pass, class => Class, reason => Reason}),
             pass
     end;
-maybe_route(_, _) ->
+maybe_route(_, _, _) ->
     pass.
 
 -spec stats() -> map().
@@ -188,13 +198,16 @@ advisory_loop() ->
 %%%===================================================================
 
 route_auto(Cfg, ReqMap) ->
+    route_auto(Cfg, ReqMap, #{}).
+
+route_auto(Cfg, ReqMap, Constraint) ->
     case features(ReqMap, Cfg) of
         {error, malformed} ->
             %% Malformed input degrades to pass -> plain model_not_found.
             bump(pass_malformed),
             pass;
         F ->
-            Decision = decide(Cfg, F),
+            Decision = decide(Cfg, F, Constraint),
             _ = logger:debug(#{
                 what => janus_auto_decision,
                 reason => element(2, Decision),
@@ -206,21 +219,31 @@ route_auto(Cfg, ReqMap) ->
     end.
 
 %% Returns {Result, Reason, Tier, Target} for uniform debug logging.
-decide(Cfg, F) ->
+decide(Cfg, F, Constraint) ->
     case rules_gate(F, Cfg) of
         {error, request_too_large} ->
             bump(too_large),
             {{error, request_too_large}, too_large, undefined, undefined};
         judge_zone ->
             {Tier, Origin} = judge_tier(Cfg, F),
-            finish(resolve_soft(Cfg, Tier), Origin, Tier);
+            finish(resolve_soft(Cfg, Tier, Constraint), Origin, Tier);
         {Tier, hard} ->
-            finish(resolve_hard(Cfg, Tier), rules, Tier);
+            case resolve_hard(Cfg, Tier, Constraint) of
+                {ok, _} = Ok ->
+                    finish(Ok, rules, Tier);
+                error when is_map_key(stream, Constraint) ->
+                    %% The hard tier has no stream-compatible member
+                    %% (cross-protocol): serving on the default tier
+                    %% beats failing the client with no_route.
+                    finish(resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint), fallback, Tier);
+                error ->
+                    finish(error, rules, Tier)
+            end;
         {Tier, soft_route} ->
             %% Rule 5 (fast): directed hard, availability soft.
-            case resolve_hard(Cfg, Tier) of
+            case resolve_hard(Cfg, Tier, Constraint) of
                 {ok, _} = Ok -> finish(Ok, rules, Tier);
-                error -> finish(resolve_soft(Cfg, Cfg#acfg.default_tier), fallback, Tier)
+                error -> finish(resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint), fallback, Tier)
             end
     end.
 
@@ -754,7 +777,10 @@ is_punct(C) ->
 %%%===================================================================
 
 resolve_hard(Cfg, Tier) ->
-    case first_available(tier_names(Cfg, Tier)) of
+    resolve_hard(Cfg, Tier, #{}).
+
+resolve_hard(Cfg, Tier, Constraint) ->
+    case first_available(tier_names(Cfg, Tier), Constraint) of
         {ok, _} = Ok ->
             Ok;
         error ->
@@ -763,11 +789,14 @@ resolve_hard(Cfg, Tier) ->
     end.
 
 resolve_soft(Cfg, Tier) ->
-    case first_available(tier_names(Cfg, Tier)) of
+    resolve_soft(Cfg, Tier, #{}).
+
+resolve_soft(Cfg, Tier, Constraint) ->
+    case first_available(tier_names(Cfg, Tier), Constraint) of
         {ok, _} = Ok ->
             Ok;
         error ->
-            case first_available(tier_names(Cfg, Cfg#acfg.default_tier)) of
+            case first_available(tier_names(Cfg, Cfg#acfg.default_tier), Constraint) of
                 {ok, _} = Ok ->
                     Ok;
                 error ->
@@ -779,13 +808,50 @@ resolve_soft(Cfg, Tier) ->
 tier_names(Cfg, Tier) ->
     maps:get(Tier, Cfg#acfg.tiers, []).
 
-first_available([]) ->
+first_available(Names) ->
+    first_available(Names, #{}).
+
+first_available([], _) ->
     error;
-first_available([Name | Rest]) ->
-    case model_available(Name) of
+first_available([Name | Rest], Constraint) ->
+    case model_available(Name) andalso stream_compatible(Name, Constraint) of
         true -> {ok, Name};
-        false -> first_available(Rest)
+        false -> first_available(Rest, Constraint)
     end.
+
+%% A streaming client cannot cross protocol boundaries (translate is
+%% non-stream only): skip members whose provider protocol differs.
+stream_compatible(Name, #{stream := true, client_proto := ClientProto}) when
+    is_atom(ClientProto)
+->
+    case provider_protocol_of(Name) of
+        {ok, ClientProto} -> true;
+        {ok, _Other} -> false;
+        error -> true %% unknown provider: let the proxy decide
+    end;
+stream_compatible(_, _) ->
+    true.
+
+provider_protocol_of(Name) ->
+    case janus_catalog:lookup_model(Name) of
+        {ok, #{id := Id}} ->
+            case janus_catalog:routes_for_model(Id) of
+                [#{provider_id := Pid} | _] ->
+                    case janus_catalog:lookup_provider(Pid) of
+                        {ok, #{protocol := ProtoBin}} -> normalize_proto(ProtoBin);
+                        _ -> error
+                    end;
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end.
+
+normalize_proto(<<"openai_chat">>) -> {ok, openai_chat};
+normalize_proto(<<"openai_responses">>) -> {ok, openai_responses};
+normalize_proto(<<"anthropic_messages">>) -> {ok, anthropic_messages};
+normalize_proto(_) -> error.
 
 model_available(Name) when is_binary(Name) ->
     %% Read-only catalog probe: pick_route/2 mutates LB state (RR cursors,

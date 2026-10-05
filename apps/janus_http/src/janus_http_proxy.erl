@@ -79,7 +79,11 @@ extract_model(_Proto, Map) ->
     end.
 
 proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
-    case janus_auto:maybe_route(ModelName, Map) of
+    AutoConstraint = #{
+        client_proto => ClientProto,
+        stream => janus_protocol_translate:wants_stream(Map)
+    },
+    case janus_auto:maybe_route(ModelName, Map, AutoConstraint) of
         {ok, Target} ->
             do_proxy(ClientProto, Target, Body, Map#{<<"model">> => Target}, Req, State);
         pass ->
