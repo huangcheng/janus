@@ -6,13 +6,31 @@
 -module(janus_http_proxy).
 
 -export([handle/5, model_field/1]).
+%% Exported for eunit (usage capture helpers).
+-export([maybe_trim/2, maybe_inject_stream_usage/4]).
 
 -define(MAX_BODY, 10 * 1024 * 1024).
+
+-define(USAGE_HEAD_BYTES, 4096).
+-define(USAGE_TAIL_BYTES, 16384).
+-define(USAGE_TAIL_CHUNKS, 256).
 
 %% ClientProto = openai_chat | openai_responses | anthropic_messages
 -spec handle(atom(), map(), binary(), cowboy_req:req(), term()) ->
     {ok, cowboy_req:req(), term()}.
 handle(ClientProto, Agent, Body, Req, State) ->
+    %% Per-request usage context. Cowboy reuses the process across
+    %% HTTP/1.1 keep-alive requests, so erase first — stale keys from a
+    %% previous request must never leak into this one.
+    erase(janus_usage_ctx),
+    erase(janus_usage_head),
+    erase(janus_usage_tail),
+    put(janus_usage_ctx, #{
+        started => erlang:monotonic_time(microsecond),
+        agent => Agent,
+        client_proto => ClientProto,
+        stream => false
+    }),
     case thoas:decode(Body) of
         {ok, Map} when is_map(Map) ->
             case extract_model(ClientProto, Map) of
@@ -124,6 +142,10 @@ provider_protocol(#{provider_id := Pid}) ->
 
 dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
     WantStream = janus_protocol_translate:wants_stream(Map),
+    case get(janus_usage_ctx) of
+        undefined -> ok;
+        Ctx0 -> put(janus_usage_ctx, Ctx0#{stream => WantStream})
+    end,
     Native = ClientProto =:= ProviderProto,
     case {Native, WantStream} of
         {false, true} ->
@@ -137,7 +159,8 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
                 <<"streaming requires a same-protocol provider route">>
             );
         {true, _} ->
-            call_native(ClientProto, ProviderProto, Route, Body, Map, WantStream, Req, State);
+            {Body2, Map2} = maybe_inject_stream_usage(ClientProto, WantStream, Body, Map),
+            call_native(ClientProto, ProviderProto, Route, Body2, Map2, WantStream, Req, State);
         {false, false} ->
             call_translate(ClientProto, ProviderProto, Route, Map, Req, State)
     end.
@@ -213,15 +236,24 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
     ),
     case
         Drain(fun(Chunk) ->
-            ok = cowboy_req:stream_body(Chunk, nofin, Req2)
+            capture_usage_chunk(Chunk),
+            %% `_ =`: a client disconnect makes stream_body fail; the
+            %% drain surfaces it as {error, _} below (recorded as 502)
+            %% instead of crashing the request process mid-callback.
+            _ = cowboy_req:stream_body(Chunk, nofin, Req2)
         end)
     of
         ok ->
-            ok = cowboy_req:stream_body(<<>>, fin, Req2),
+            %% Record BEFORE the final frame so a dying client can
+            %% never cost us the usage row.
             _ = note_key_success(Route),
             _ = note_route_success(Route),
+            _ = track(Status, Route, stream_usage(ClientProto)),
+            _ = cowboy_req:stream_body(<<>>, fin, Req2),
             {ok, Req2, State};
         {error, Reason} ->
+            %% Mid-stream failure: record 502, not the already-sent 200.
+            _ = track(502, Route, stream_usage(ClientProto)),
             SafeReason = sanitize_upstream_error(Reason),
             _ = note_provider_failure(Route, SafeReason),
             _ = release_route_inflight(Route),
@@ -237,40 +269,59 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 401
 ->
+    _ = track(401, Route, #{}),
     _ = note_auth_failure(Route, Status),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 403
 ->
+    _ = track(403, Route, #{}),
     _ = note_route_failure(Route, retry_reason(Headers, Status)),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 429
 ->
+    _ = track(429, Route, #{}),
     _ = note_key_failure(Route, Headers, Status),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status >= 500
 ->
+    _ = track(Status, Route, #{}),
     _ = note_provider_failure(Route, retry_reason(Headers, Status)),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status >= 400
 ->
+    _ = track(Status, Route, #{}),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) ->
     _ = note_key_success(Route),
     _ = note_route_success(Route),
+    _ = track(
+        Status,
+        Route,
+        usage_or_undef(janus_usage_parse:from_response_body(ProviderProto, RespBody))
+    ),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate, Req, State) ->
+    _ = track(500, Route, #{}),
     _ = release_route_inflight(Route),
     reply_err(ClientProto, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
 handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate, Req, State) ->
+    _ = track(
+        case Reason of
+            provider_disabled -> 503;
+            _ -> 502
+        end,
+        Route,
+        #{}
+    ),
     SafeReason = sanitize_upstream_error(Reason),
     case is_transient(Reason) of
         true ->
@@ -478,6 +529,145 @@ note_route_success(Route) ->
 
 release_route_inflight(Route) ->
     janus_lb:release_inflight(route_target(Route)).
+
+%%--------------------------------------------------------------------
+%% Usage capture (data-plane stats; rows land in usage_events via
+%% janus_usage)
+%%--------------------------------------------------------------------
+
+key_id_of(#{provider_key := #{id := Kid}}) -> Kid;
+key_id_of(#{provider_key := _}) -> null;
+key_id_of(_) -> null.
+
+usage_bool_int(true) -> 1;
+usage_bool_int(1) -> 1;
+usage_bool_int(_) -> 0.
+
+usage_or_undef(undefined) -> #{};
+usage_or_undef(U) -> U.
+
+%% Token counts default to null (= upstream did not report usage),
+%% NOT 0 — a missing usage must stay distinguishable from a real zero.
+track(_Status, Route, _Usage) when not is_map(Route) ->
+    ok;
+track(Status, Route, Usage) ->
+    case get(janus_usage_ctx) of
+        undefined ->
+            ok;
+        #{started := Started, agent := Agent, client_proto := Proto, stream := Stream} when
+            is_map(Agent)
+        ->
+            LatencyMs =
+                erlang:convert_time_unit(
+                    erlang:monotonic_time(microsecond) - Started,
+                    microsecond,
+                    millisecond
+                ),
+            janus_usage:record(#{
+                ts => erlang:system_time(second),
+                agent_key_id => maps:get(id, Agent, null),
+                model_id => maps:get(model_id, Route, null),
+                provider_id => maps:get(provider_id, Route, null),
+                provider_key_id => key_id_of(Route),
+                protocol => Proto,
+                stream => usage_bool_int(Stream),
+                status => Status,
+                prompt => maps:get(prompt, Usage, null),
+                completion => maps:get(completion, Usage, null),
+                latency_ms => LatencyMs
+            });
+        _ ->
+            ok
+    end.
+
+%% Ask OpenAI-compatible upstreams to always emit the terminal usage
+%% chunk on streams. Skip when the client set its own stream_options
+%% (respect explicit choices) or the operator disabled injection
+%% (strict upstreams may 400 on unknown fields). The usage chunk is
+%% spec-compliant and forwarded to the client like any other chunk.
+maybe_inject_stream_usage(openai_chat, true, Body, Map) ->
+    Inject = application:get_env(janus_core, usage_inject_include_usage, true),
+    case {Inject, maps:get(<<"stream_options">>, Map, undefined)} of
+        {true, undefined} ->
+            Map2 = Map#{<<"stream_options">> => #{<<"include_usage">> => true}},
+            {iolist_to_binary(thoas:encode(Map2)), Map2};
+        _ ->
+            {Body, Map}
+    end;
+maybe_inject_stream_usage(_, _, Body, Map) ->
+    {Body, Map}.
+
+capture_usage_chunk(Chunk) ->
+    Head0 =
+        case get(janus_usage_head) of
+            undefined -> <<>>;
+            H -> H
+        end,
+    case byte_size(Head0) < ?USAGE_HEAD_BYTES of
+        true ->
+            Need = ?USAGE_HEAD_BYTES - byte_size(Head0),
+            Take = binary:part(Chunk, 0, min(byte_size(Chunk), Need)),
+            put(janus_usage_head, <<Head0/binary, Take/binary>>);
+        false ->
+            ok
+    end,
+    %% Tail is a newest-first {Chunks, TotalBytes} tuple; prepending is
+    %% O(1) and the refold only runs when a cap is exceeded (both caps
+    %% bound the fold size, so per-chunk cost stays constant).
+    case Chunk of
+        <<>> ->
+            ok;
+        _ ->
+            {Chunks0, Size0} =
+                case get(janus_usage_tail) of
+                    undefined -> {[], 0};
+                    T0 -> T0
+                end,
+            put(
+                janus_usage_tail,
+                maybe_trim([Chunk | Chunks0], Size0 + byte_size(Chunk))
+            )
+    end.
+
+maybe_trim(Chunks, Size) when Size =< ?USAGE_TAIL_BYTES ->
+    case length(Chunks) =< ?USAGE_TAIL_CHUNKS of
+        true ->
+            {Chunks, Size};
+        false ->
+            Kept = lists:sublist(Chunks, ?USAGE_TAIL_CHUNKS),
+            {Kept, lists:sum([byte_size(C) || C <- Kept])}
+    end;
+maybe_trim(Chunks, _Size) ->
+    %% Over the byte cap: refold newest-first, keeping whole chunks
+    %% that fit (whole-chunk granularity; the parser tolerates the
+    %% remaining partial first line).
+    {Kept, Size} =
+        lists:foldl(
+            fun(C, {Acc, S}) ->
+                case S + byte_size(C) =< ?USAGE_TAIL_BYTES of
+                    true -> {[C | Acc], S + byte_size(C)};
+                    false -> {Acc, S}
+                end
+            end,
+            {[], 0},
+            Chunks
+        ),
+    {lists:reverse(Kept), Size}.
+
+stream_usage(ClientProto) ->
+    Head =
+        case get(janus_usage_head) of
+            undefined -> <<>>;
+            H -> H
+        end,
+    Tail =
+        case get(janus_usage_tail) of
+            undefined -> <<>>;
+            {Chunks, _} -> iolist_to_binary(lists:reverse(Chunks))
+        end,
+    erase(janus_usage_head),
+    erase(janus_usage_tail),
+    usage_or_undef(janus_usage_parse:from_sse(ClientProto, Head, Tail)).
 
 retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
     case maps:get(<<"retry-after">>, Headers, undefined) of

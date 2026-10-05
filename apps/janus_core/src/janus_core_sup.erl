@@ -23,6 +23,18 @@ init([]) ->
                     modules => [janus_lb]
                 },
 
+                %% Data-plane usage events (buffered writer + retention
+                %% sweep); 15s shutdown budget gives terminate/2 room to
+                %% flush a full buffer.
+                #{
+                    id => janus_usage,
+                    start => {janus_usage, start_link, []},
+                    restart => permanent,
+                    shutdown => 15000,
+                    type => worker,
+                    modules => [janus_usage]
+                },
+
                 #{
                     id => janus_config,
                     start => {janus_config, start_link, []},

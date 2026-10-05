@@ -61,7 +61,8 @@ handle(<<"GET">>, [], Req) ->
         backend => janus_db:select_backend(),
         uptime_sec => uptime_sec(),
         routes_cooling => janus_lb:cooling_count(),
-        models_serving => models_serving()
+        models_serving => models_serving(),
+        usage_writer => janus_usage:stats()
     },
     reply_json(200, Stats, Req);
 handle(<<"GET">>, [<<"logs">>], Req) ->
