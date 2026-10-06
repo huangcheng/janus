@@ -174,9 +174,9 @@ get(K, Rows) ->
 
 -define(TABLE, janus_metrics).
 
-%% Duration buckets (seconds): fast path 0.05 → reasoning upstreams 600s.
-%% Precomputed once — the hot path never formats floats, and the
-%% descending order observe/3 bumps in is a literal (no per-call reverse).
+%% BUCKETS_DESC is the single source: the literal descending ladder the
+%% hot path bumps in (no per-call reverse, no allocation). buckets/0
+%% (the renderer's canonical ascending ladder) is derived from it.
 -define(BUCKETS_DESC, [
     {600.0, <<"600">>}, {300.0, <<"300">>}, {120.0, <<"120">>},
     {60.0, <<"60">>}, {30.0, <<"30">>}, {10.0, <<"10">>}, {5.0, <<"5">>},
@@ -184,17 +184,8 @@ get(K, Rows) ->
     {0.1, <<"0.1">>}, {0.05, <<"0.05">>}
 ]).
 
--define(TABLE, janus_metrics).
-
-%% Duration buckets (seconds): fast path 0.05 → reasoning upstreams 600s.
-%% Precomputed [{Float, RenderedBinary}] once — the hot path never
-%% formats floats.
-%% buckets/0 documents the canonical ladder (ascending); observe/3 bumps
-%% in descending order (BUCKETS_DESC). The renderer unions the ladder
-%% with ETS-present bounds, so order-of-record never matters at scrape.
-%% buckets/0 documents the canonical ladder (ascending); observe/3 bumps
-%% in descending order (BUCKETS_DESC). The renderer unions the ladder
-%% with ETS-present bounds, so order-of-record never matters at scrape.
+%% The canonical ladder (ascending). Derived from BUCKETS_DESC — the two
+%% can never drift.
 -spec buckets() -> [{float(), binary()}].
 buckets() ->
     [
@@ -206,10 +197,6 @@ buckets() ->
 
 buckets_desc() ->
     ?BUCKETS_DESC.
-
-%% The table is looked up by name on every bump (ets:whereis on a named
-%% table is a constant-time atomic read — no persistent_term lifecycle
-%% traps across app restarts).
 
 -spec init() -> ok.
 init() ->
@@ -308,7 +295,13 @@ to_bin(B) when is_binary(B) -> B;
 to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
 to_bin(I) when is_integer(I) -> integer_to_binary(I);
 to_bin(F) when is_float(F) -> float_to_binary(F, [short]);
-to_bin(L) when is_list(L) -> unicode:characters_to_binary(L).
+to_bin(L) when is_list(L) ->
+    case unicode:characters_to_binary(L) of
+        B when is_binary(B) -> B;
+        _ -> <<"unknown">>
+    end;
+to_bin(_) ->
+    <<"unknown">>.
 ```
 
 - [ ] **Step 3: Wire init**
@@ -449,15 +442,21 @@ families_dedup_test() ->
     ?assertEqual(1, count_occ(Out, <<"# HELP janus_requests_total">>)).
 
 mixed_snapshot_exact_test() ->
-    %% One of each kind: registered counter, unregistered counter
-    %% (renders without HELP), histogram, gauge, untyped build_info.
+    %% One of each kind: registered counter, registered handler-appended
+    %% counter, histogram (one 30s observation — a SUFFIX ladder, as
+    %% observe/3 actually writes it), gauge, untyped build_info.
+    L = [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"0">>}],
     Rows = [
         {{counter, requests_total, [{<<"endpoint">>, <<"chat">>}, {<<"status_class">>, <<"2xx">>}]}, 1},
         {{counter, usage_writer_dropped_total, []}, 2},
-        {{hist, request_duration_seconds, [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"0">>}], <<"0.05">>}, 1},
-        {{hist, request_duration_seconds, [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"0">>}], <<"+Inf">>}, 1},
-        {{hist_sum_us, request_duration_seconds, [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"0">>}]}, 30000},
-        {{hist_count, request_duration_seconds, [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"0">>}]}, 1}
+        {{hist, request_duration_seconds, L, <<"30">>}, 1},
+        {{hist, request_duration_seconds, L, <<"60">>}, 1},
+        {{hist, request_duration_seconds, L, <<"120">>}, 1},
+        {{hist, request_duration_seconds, L, <<"300">>}, 1},
+        {{hist, request_duration_seconds, L, <<"600">>}, 1},
+        {{hist, request_duration_seconds, L, <<"+Inf">>}, 1},
+        {{hist_sum_us, request_duration_seconds, L}, 30000000},
+        {{hist_count, request_duration_seconds, L}, 1}
     ],
     Gauges = [
         {build_info, 1, #{<<"version">> => <<"0.1.0">>}},
@@ -473,21 +472,21 @@ mixed_snapshot_exact_test() ->
         "janus_usage_writer_dropped_total 2\n"
         "# HELP janus_request_duration_seconds End-to-end request duration (streams include client drain).\n"
         "# TYPE janus_request_duration_seconds histogram\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.05\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.1\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.25\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.5\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"1\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"2.5\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"5\"} 1\n"
-        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"10\"} 1\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.05\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.1\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.25\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"0.5\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"1\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"2.5\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"5\"} 0\n"
+        "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"10\"} 0\n"
         "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"30\"} 1\n"
         "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"60\"} 1\n"
         "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"120\"} 1\n"
         "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"300\"} 1\n"
         "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"600\"} 1\n"
         "janus_request_duration_seconds_bucket{protocol=\"openai_chat\",stream=\"0\",le=\"+Inf\"} 1\n"
-        "janus_request_duration_seconds_sum{protocol=\"openai_chat\",stream=\"0\"} 0.03\n"
+        "janus_request_duration_seconds_sum{protocol=\"openai_chat\",stream=\"0\"} 30.0\n"
         "janus_request_duration_seconds_count{protocol=\"openai_chat\",stream=\"0\"} 1\n"
         "# HELP janus_build_info Build/version info.\n"
         "# TYPE janus_build_info untyped\n"
@@ -730,11 +729,10 @@ norm_labels(L) when is_map(L) ->
 norm_labels(L) when is_list(L) ->
     lists:sort(L).
 
-to_bin(B) when is_binary(B) -> B;
-to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
-to_bin(I) when is_integer(I) -> integer_to_binary(I);
-to_bin(F) when is_float(F) -> float_to_binary(F, [short]);
-to_bin(L) when is_list(L) -> unicode:characters_to_binary(L).
+%% Delegates to the registry's total to_bin/1 (one coercion
+%% implementation for both modules — no drift).
+to_bin(V) ->
+    janus_metrics:to_bin(V).
 
 labels_bin([]) ->
     <<>>;
@@ -1155,16 +1153,16 @@ generate() ->
     %% encode_hex is uppercase; lowercase to match the documented
     %% req_[0-9a-f]{16} shape. crypto:strong_rand_bytes is guarded:
     %% request ids must never 500 a request — fall back to a
-    %% unique_integer-derived hex PADDED to 8 bytes if crypto is
-    %% unavailable (the 16-hex shape holds either way).
+    %% unique_integer-derived id PADDED to 8 bytes first (the 16-hex
+    %% shape holds either way). NOTE: binary:encode_unsigned/2's second
+    %% arg is the ENDIANNESS, not a pad size — pad via a binary pattern.
     try
         Hex = string:lowercase(binary:encode_hex(crypto:strong_rand_bytes(8))),
         <<"req_", Hex/binary>>
     catch
         _:_ ->
-            Hex = string:lowercase(
-                binary:encode_hex(binary:encode_unsigned(erlang:unique_integer([positive]), 8))
-            ),
+            I = erlang:unique_integer([positive]),
+            Hex = string:lowercase(binary:encode_hex(<<I:64/big>>)),
             <<"req_", Hex/binary>>
     end.
 ```
@@ -1202,14 +1200,14 @@ bin_or_null(B) when is_binary(B) -> B;
 bin_or_null(_) -> null.
 ```
 
-The insert shape test lives **inside `janus_usage.erl` under `-ifdef(TEST)`** (not a separate test module) — update it there: 2-row fixture → 32 placeholders, 32 params; row-2 assertions: `status` at position 19 (unchanged — `request_id` is appended after it), `request_id` at 32. Also note: `fk_salvage/3` rebuilds rows when an FK race drops a referenced parent — verify it carries `request_id` through (add it to the salvage keep-list if absent).
+The insert shape test lives **inside `janus_usage.erl` under `-ifdef(TEST)`** (not a separate test module) — update it there: 2-row fixture → 32 placeholders, 32 params; row-2 assertions: `status` at position 24 (16 columns per row: row-1 `status` is 8, row-2 `status` is 24), `request_id` at 32. Also note: `fk_salvage/3` rebuilds rows when an FK race drops a referenced parent — verify it carries `request_id` through (add it to the salvage keep-list if absent).
 
 - [ ] **Step 6: Compile + full eunit** (container). Expected: green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/janus_http/src/janus_request_id.erl apps/janus_http/test/janus_request_id_tests.erl apps/janus_http/src/janus_http_*.erl apps/janus_http/src/janus_http.app.src apps/janus_core/src/janus_usage.erl apps/janus_core/test/janus_usage_sql_tests.erl
+git add apps/janus_http/src/janus_request_id.erl apps/janus_http/test/janus_request_id_tests.erl apps/janus_http/src/janus_http_*.erl apps/janus_http/src/janus_http.app.src apps/janus_core/src/janus_usage.erl
 git commit -m "End-to-end request ids: echo x-request-id, log it, store it on usage rows"
 ```
 
@@ -1224,7 +1222,7 @@ The gate's correlation step reads the latest usage row's `request_id` — the da
 - Modify: `../janus-dashboard/spa/src/pages/shared.tsx` — `UsageEvent.request_id: string | null`
 - Modify: `../janus-dashboard/spa/src/pages/usage.tsx` — recent table gains a mono truncated `request_id` column (click copies full id)
 
-- [ ] **Step 1: Backend column** (read the usage router's existing SELECT; add `ue.request_id` following its existing column conventions; response event gains `"request_id": row.get("request_id")`). **Deploy order:** gateways with migration 005 ship BEFORE this dashboard change (deploy_prod rebuilds gateway images first) — a dashboard reading `request_id` from an unmigrated Postgres would 500.
+- [ ] **Step 1: Backend column** (read the usage router's existing SELECT; add `ue.request_id` following its existing column conventions; response event gains `"request_id": row.get("request_id")`). **Deploy order:** gateways with migration 009 ship BEFORE this dashboard change (deploy_prod rebuilds gateway images first) — a dashboard reading `request_id` from an unmigrated Postgres would 500.
 - [ ] **Step 2: SPA type + column** (mono font, truncated with title tooltip, copy-on-click like the endpoints panel)
 - [ ] **Step 2b: Browser verification (testing rule 4)** — open the usage page in a real browser, confirm the request id column renders and copy-on-click works, save the screenshot with the run artifacts.
 - [ ] **Step 3: SPA build** (`cd ../janus-dashboard/spa && npm run build`)
@@ -1246,7 +1244,7 @@ New gate steps (all local, real stack; the gate self-heals seed provider/key/bin
 2b. Tokenless `GET :8090/stats` still → **401** (regression guard for the auth extraction).
 3. One real non-stream chat completion → metrics bump synchronously (no flush wait; scrape immediately after the call): the scrape delta for `janus_requests_total{endpoint="chat",protocol="openai_chat",status_class="2xx"}` is ≥ 1 vs the pre-call scrape (label-set delta, not a global count — other gate traffic may interleave); `janus_request_duration_seconds_count{protocol="openai_chat",stream="0"}` ≥ +1; and the `endpoint="other"` series count does NOT increase across this call (a global no-`other` assertion would false-fail on stray probes).
 4. A streaming chat call → same scrape shape with `stream="1"`; the streamed response carries `x-request-id`.
-4b. A translated-path call (Anthropic `/v1/messages` against an OpenAI-protocol provider, or vice versa if seeded) → response carries `x-request-id` (verifies the translate chain reuses the same Req).
+4b. A translated-path call (Anthropic `/v1/messages` against an OpenAI-protocol provider, or vice versa if seeded) → response carries `x-request-id` (verifies the translate chain reuses the same Req); the scrape delta shows `janus_requests_total{endpoint="messages",protocol="anthropic_messages"}` (pins the protocol label to the CLIENT dialect on translate paths).
 4c. The STREAMING call from step 4 → poll `/api/usage/events?limit=5` until its row appears; that row's `request_id` equals the streamed response's header (proves `track/3` sees the pdict id on the stream path — the exact process-boundary risk).
 5. Bad-key call → 401 and `status_class="4xx"` +1 on the full label set (`endpoint="chat"`, `protocol="openai_chat"` — locks the classifier wiring); the 401 response carries `x-request-id`.
 5b. A no-route call (unknown model, valid key) → 404 and `status_class="4xx"` increments (covers the `reply_err` path).
@@ -1254,7 +1252,7 @@ New gate steps (all local, real stack; the gate self-heals seed provider/key/bin
 7. Call without the header → response `x-request-id` matches `^req_[0-9a-f]{16}$`.
 8. Call with `x-request-id: "bad id with spaces"` → generated id instead (regex, NOT the inbound value).
 9. `GET :8090/stats/logs?limit=50` (token-auth) → parse the JSON events; the newest `janus_request` event for the call has a structured `request_id` field equal to `e2e-fixed-id-1` (not a substring match).
-10. `promtool check metrics` on the captured `/metrics` sample — **required**, not optional (the gate image installs promtool; a hand-rolled format must not ship unverified). Parse errors fail the gate; lint advisories are recorded in the artifact log without failing.
+10. `promtool check metrics` on the captured `/metrics` sample — **required**, not optional (the gate image installs promtool AND the image build verifies it with `promtool --version`; a hand-rolled format must not ship unverified). Parse errors fail the gate; lint advisories are recorded in the artifact log without failing. At quiescence (no in-flight calls), also assert `le="+Inf"` == `_count` per label set.
 
 Smoke (`run_test_flows.py --smoke`, read-only prod): `GET /metrics` with the node's stats token → 200 + contains `janus_build_info`.
 
@@ -1311,6 +1309,7 @@ scrape_configs:
 - rev 5: round-4 audit (7/7 GO WITH FIXES; deepseek-v4-pro substituted for the flaky flash id) folded inline — observe bump order (buckets → +Inf → sum → count), `janus_req_counted` erased at handler init, `lb_stat` → `janus_lb_stats_total{stat=...}` counter (promlint counter-suffix), `bool01` SMALLINT, bad-bound drop+warn, family sort by name binary, init failure logs, `models_serving` extracted to `janus_http_stats`, mixed-snapshot byte-exact eunit, gate: token-POST 405, agent-plane 404, +Inf==count + monotonicity, scoped no-`other`, promtool parse-vs-lint policy, README scoping.
 - rev 6 (this document): round-5 audit (7/7 GO WITH FIXES after retries) folded inline — `+Inf` whitelisted before the bad-bound partition (it never parses as a float; the partition was dropping it from every histogram), renderer purity restored (bad bounds drop silently — defense-in-depth, byte-exact gate asserts catch real breakage), observe order settled to +Inf → descending ladder → sum → count last (monotone buckets + count ≤ +Inf at every interleaving; exact equality asserted only at quiescence), handler `to_bin` delegates to the registry's total one (exported), LB skip-warning batched one-per-scrape, `crypto` added to `janus_http.app.src` (the admin auth's `hash_equals` worked only via cowboy's transitive dep), `generate/0` guarded with a unique-integer fallback, Task 4 commit list includes `janus_http_stats.erl`, gate gains tokenless-`/stats` 401 regression + 401 full-label-set + streamed-row `request_id` assertions, SPA column browser-verified per testing rule 4, token-rotation + Grafana-provisioning ops notes, concurrent-observe final-consistency eunit.
 - rev 7 (this document): round-6 audit (7/7 GO WITH FIXES) folded inline — **migration renumbered 005→009 and re-rooted to the executing subdirs** (the runner is `janus_db_postgres/sqlite.erl` reading `priv/migrations/{postgres,sqlite}/`; `usage_events` already has 15 columns post-008), `build_insert` is its 16th column (shape test lives in `janus_usage.erl -ifdef(TEST)`, 32 params), `fk_salvage` carry-through called out, messages handler keeps `require_agent/2` opts, auth-reject warning already existed (only the bump + flag are new), handler row assembly moved inside the render try, `whereis` hoisted once per inc/observe (`bump/3`), `BUCKETS_DESC` literal (no per-call reverse), `int_or_zero` guards on writer-stat values, fallback id padded to 16 hex, `crypto` app dep committed in Task 6's add list, `janus_req_counted` erase moved into Task 5, cumulative production-shaped histogram fixtures, numeric-dedupe of equal-spelling bounds with count merge, classifier eunit (boundary table), Task 5 step renumbering, gate: promtool mandatory, stale "ONLY async" wording fixed, README histogram scope note.
+- rev 8 (this document): round-7 audit (7/7 GO WITH FIXES) folded inline — deduplicated the `-define(TABLE)`/comment splice artifact in the `janus_metrics` listing, single-sourced the ladder (`buckets/0` derives from `?BUCKETS_DESC`), Task 7 deploy note renumbered to 009, shape-test positions corrected (status 8/24, request_id 16/32), Task 6 commit list reconciled with the in-module test, `generate/0` fallback uses `<<I:64/big>>` (`encode_unsigned/2` takes endianness, not pad size), `to_bin` catch-all, handler `maps:get`/`to_list` inside the render try, gate 4b pins the client-dialect label set, gate image verifies promtool, quiescent `_sum`/`+Inf` consistency line.
 
 ---
 
