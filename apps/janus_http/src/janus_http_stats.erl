@@ -16,7 +16,7 @@
 %%%-------------------------------------------------------------------
 -module(janus_http_stats).
 
--export([init/0, inc_total/0, inc_failed/0, snapshot/0]).
+-export([init/0, inc_total/0, inc_failed/0, snapshot/0, models_serving/0]).
 
 -define(PT_KEY, {janus_http_stats, refs}).
 
@@ -53,6 +53,25 @@ snapshot() ->
                 requests_failed => atomics:get(F, 1),
                 started_at => S
             }
+    end.
+
+%% Unique models in the serving catalog (table has id and name keys —
+%% the comprehension keeps only id-keyed rows). Shared by /stats and
+%% /metrics.
+-spec models_serving() -> non_neg_integer().
+models_serving() ->
+    case janus_catalog:get() of
+        #{catalog := #{models := Tid}} ->
+            try
+                Rows = ets:tab2list(Tid),
+                %% Count unique model ids (table has id and name keys).
+                Ids = sets:from_list([Id || {Id, #{id := Id}} <- Rows], [{version, 2}]),
+                sets:size(Ids)
+            catch
+                _:_ -> 0
+            end;
+        _ ->
+            0
     end.
 
 %%% internal

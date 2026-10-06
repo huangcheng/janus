@@ -28,7 +28,8 @@ init([]) ->
         {'_', [
             {"/healthz", janus_http_health, []},
             {"/stats", janus_gateway_stats, []},
-            {"/stats/[...]", janus_gateway_stats, []}
+            {"/stats/[...]", janus_gateway_stats, []},
+            {"/metrics", janus_http_metrics, []}
         ]}
     ]),
     %% idle_timeout must exceed the longest legitimate upstream wait
