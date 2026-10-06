@@ -525,7 +525,7 @@ translate_track(Status, Route, ClientProto) ->
             ok;
         _ ->
             put(janus_sse_tracked, true),
-            _ = track(Status, Route, stream_usage(ClientProto)),
+            _ = track_proxied(Status, Route, stream_usage(ClientProto)),
             ok
     end.
 
@@ -542,7 +542,7 @@ call_adapter(anthropic_messages, Route, Body, Map, Opts) ->
 
 native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
     %% Mid-stream failure: record 502, not the already-sent 200.
-    _ = track(502, Route, stream_usage(ClientProto)),
+    _ = track_proxied(502, Route, stream_usage(ClientProto)),
     SafeReason = sanitize_upstream_error(Reason),
     _ = note_provider_failure(Route, SafeReason),
     _ = release_route_inflight(Route),
@@ -583,7 +583,7 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
             %% never cost us the usage row.
             _ = note_key_success(Route),
             _ = note_route_success(Route),
-            _ = track(Status, Route, stream_usage(ClientProto)),
+            _ = track_proxied(Status, Route, stream_usage(ClientProto)),
             _ = cowboy_req:stream_body(<<>>, fin, Req2),
             {ok, Req2, State};
         {error, Reason} ->
@@ -595,53 +595,53 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 401
 ->
-    _ = track(401, Route, #{}),
+    _ = track_proxied(401, Route, #{}),
     _ = note_auth_failure(Route, Status),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 403
 ->
-    _ = track(403, Route, #{}),
+    _ = track_proxied(403, Route, #{}),
     _ = note_route_failure(Route, retry_reason(Headers, Status)),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 429
 ->
-    _ = track(429, Route, #{}),
+    _ = track_proxied(429, Route, #{}),
     _ = note_key_failure(Route, Headers, Status),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status >= 500
 ->
-    _ = track(Status, Route, #{}),
+    _ = track_proxied(Status, Route, #{}),
     _ = note_provider_failure(Route, retry_reason(Headers, Status)),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status >= 400
 ->
-    _ = track(Status, Route, #{}),
+    _ = track_proxied(Status, Route, #{}),
     _ = release_route_inflight(Route),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) ->
     _ = note_key_success(Route),
     _ = note_route_success(Route),
-    _ = track(
+    _ = track_proxied(
         Status,
         Route,
         usage_or_undef(janus_usage_parse:from_response_body(ProviderProto, RespBody))
     ),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate, Req, State) ->
-    _ = track(500, Route, #{}),
+    _ = track_proxied(500, Route, #{}),
     _ = release_route_inflight(Route),
     reply_err(ClientProto, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
 handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate, Req, State) ->
     Status = error_http_status(Reason),
-    _ = track(Status, Route, #{}),
+    _ = track_proxied(Status, Route, #{}),
     SafeReason = sanitize_upstream_error(Reason),
     case is_transient(Reason) of
         true ->
@@ -1276,9 +1276,17 @@ usage_or_undef(U) -> U.
 
 %% Token counts default to null (= upstream did not report usage),
 %% NOT 0 — a missing usage must stay distinguishable from a real zero.
-track(_Status, Route, _Usage) when not is_map(Route) ->
-    ok;
 track(Status, Route, Usage) ->
+    do_track(Status, Route, Usage, false).
+
+%% Proxied terminals only: the duration histogram never sees early
+%% rejects (pick errors, translate rejections, unknown_protocol).
+track_proxied(Status, Route, Usage) ->
+    do_track(Status, Route, Usage, true).
+
+do_track(_Status, Route, _Usage, _Observe) when not is_map(Route) ->
+    ok;
+do_track(Status, Route, Usage, Observe) ->
     put(janus_stats_tracked, true),
     bump_failed_maybe(Status),
     case get(janus_usage_ctx) of
@@ -1308,14 +1316,19 @@ track(Status, Route, Usage) ->
                 protocol => janus_http_classify:protocol(get(janus_req_path)),
                 status_class => janus_http_classify:status_class(Status)
             }),
-            janus_metrics:observe(
-                request_duration_seconds,
-                #{
-                    protocol => janus_http_classify:protocol(get(janus_req_path)),
-                    stream => usage_bool_int(Stream)
-                },
-                LatencyMs / 1000
-            ),
+            case Observe of
+                true ->
+                    janus_metrics:observe(
+                        request_duration_seconds,
+                        #{
+                            protocol => janus_http_classify:protocol(get(janus_req_path)),
+                            stream => usage_bool_int(Stream)
+                        },
+                        LatencyMs / 1000
+                    );
+                false ->
+                    ok
+            end,
             case maps:get(provider_id, Route, undefined) of
                 undefined ->
                     ok;
