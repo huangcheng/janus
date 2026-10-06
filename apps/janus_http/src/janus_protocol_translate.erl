@@ -1278,6 +1278,8 @@ sse_events(Buffer, Chunk) ->
 
 sse_loop(Bin, Ev, Datas, Acc) ->
     case binary:split(Bin, <<"\n">>) of
+        [_Incomplete] when byte_size(Bin) > ?SSE_LEFTOVER_CAP ->
+            {error, leftover_cap};
         [_Incomplete] ->
             {ok, lists:reverse(Acc), Bin};
         [Line0, Rest] ->
@@ -1329,8 +1331,11 @@ sse_event(Ev, Datas) ->
     Data = iolist_to_binary(lists:join(<<"\n">>, lists:reverse(Datas))),
     Decoded =
         case thoas:decode(Data) of
-            {ok, Map} when is_map(Map) -> Map;
-            _ -> Data
+            {ok, Map} when is_map(Map) ->
+                Map;
+            _ ->
+                _ = logger:warning(#{what => janus_translate_sse_bad_json}),
+                Data
         end,
     case Data of
         <<"[DONE]">> -> #{type => <<"done">>, data => <<>>};
@@ -1450,6 +1455,24 @@ anthro_to_chat(#{type := <<"message_delta">>, data := D}, St) when
     is_map(D)
 ->
     StopIn = maps:get(<<"stop_reason">>, maps:get(<<"delta">>, D, #{}), undefined),
+    case StopIn of
+        <<"tool_use">> ->
+            {error, translate_unsupported, St};
+        _ ->
+            anthro_message_delta_finish(D, StopIn, St)
+    end;
+anthro_to_chat(#{type := <<"message_delta">>}, St) ->
+    {ok, [], St};
+anthro_to_chat(#{type := <<"message_stop">>}, St) ->
+    {UsageFrames, St1} = chat_pending_usage(St),
+    {ok, UsageFrames ++ [<<"data: [DONE]\n\n">>], St1#sse_st{terminal_sent = true}};
+anthro_to_chat(#{type := <<"error">>}, St) ->
+    {error, translate_unsupported, St};
+anthro_to_chat(#{type := _}, St) ->
+    %% content_block_stop / unknown events: no-op.
+    {ok, [], St}.
+
+anthro_message_delta_finish(D, StopIn, St) ->
     FR = chat_finish_reason(StopIn),
     U = maps:get(<<"usage">>, D, #{}),
     OutTok = int_or_undef(maps:get(<<"output_tokens">>, U, undefined)),
@@ -1461,15 +1484,7 @@ anthro_to_chat(#{type := <<"message_delta">>, data := D}, St) when
         <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{}, <<"finish_reason">> => FR}]
     },
     %% Usage is NEVER on the finish chunk — message_stop emits it.
-    {ok, [chat_frame(Chunk)], St#sse_st{finish_sent = true, finish_reason = FR, out_tokens = OutTok}};
-anthro_to_chat(#{type := <<"message_stop">>}, St) ->
-    {UsageFrames, St1} = chat_pending_usage(St),
-    {ok, UsageFrames ++ [<<"data: [DONE]\n\n">>], St1#sse_st{terminal_sent = true}};
-anthro_to_chat(#{type := <<"error">>}, St) ->
-    {error, translate_unsupported, St};
-anthro_to_chat(#{type := _}, St) ->
-    %% content_block_stop / unknown events: no-op.
-    {ok, [], St}.
+    {ok, [chat_frame(Chunk)], St#sse_st{finish_sent = true, finish_reason = FR, out_tokens = OutTok}}.
 
 chat_to_anthropic(#{type := <<"done">>}, St) ->
     {CloseFrames, St1} = close_open_block(St),
@@ -1582,10 +1597,14 @@ anthropic_ensure_start(D, St) ->
 chat_chunk_body(D, St, Acc) ->
     Choice = first_choice(D),
     Delta = maps:get(<<"delta">>, Choice, #{}),
-    case maps:get(<<"tool_calls">>, Delta, undefined) of
-        TC when TC =/= undefined ->
+    case {maps:get(<<"tool_calls">>, Delta, undefined), maps:get(<<"finish_reason">>, Choice, undefined)} of
+        {TC, _} when TC =/= undefined ->
             {error, translate_unsupported, St};
-        _ ->
+        {_, <<"tool_calls">>} ->
+            {error, translate_unsupported, St};
+        {_, <<"function_call">>} ->
+            {error, translate_unsupported, St};
+        {_, _} ->
             chat_chunk_usage(D, Choice, Delta, St, Acc)
     end.
 
@@ -1685,6 +1704,7 @@ close_open_block(St) ->
 anthropic_stop_reason(<<"stop">>) -> <<"end_turn">>;
 anthropic_stop_reason(<<"length">>) -> <<"max_tokens">>;
 anthropic_stop_reason(<<"content_filter">>) -> <<"refusal">>;
+anthropic_stop_reason(<<"tool_calls">>) -> <<"tool_use">>;
 anthropic_stop_reason(Other) when is_binary(Other), Other =/= <<>> ->
     _ = logger:warning(#{what => janus_translate_sse_unknown_stop, stop_reason => Other}),
     <<"end_turn">>;

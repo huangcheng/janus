@@ -392,6 +392,30 @@ chat_tool_calls_error_test() ->
         janus_protocol_translate:translate_sse(anthropic_messages, openai_chat, Ev, #sse_st{})
     ).
 
+%% finish_reason=tool_calls with an empty delta is a tool round, not text.
+chat_finish_reason_tool_calls_error_test() ->
+    Ev = #{
+        type => <<"chunk">>,
+        data => #{
+            <<"id">> => <<"c">>,
+            <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{}, <<"finish_reason">> => <<"tool_calls">>}]
+        }
+    },
+    ?assertMatch(
+        {error, translate_unsupported, #sse_st{}},
+        janus_protocol_translate:translate_sse(anthropic_messages, openai_chat, Ev, #sse_st{})
+    ).
+
+anthro_stop_reason_tool_use_error_test() ->
+    Ev = #{
+        type => <<"message_delta">>,
+        data => #{<<"delta">> => #{<<"stop_reason">> => <<"tool_use">>}, <<"usage">> => #{}}
+    },
+    ?assertMatch(
+        {error, translate_unsupported, #sse_st{}},
+        janus_protocol_translate:translate_sse(openai_chat, anthropic_messages, Ev, #sse_st{role_sent = true})
+    ).
+
 chat_instream_error_object_test() ->
     Ev = #{type => <<"chunk">>, data => #{<<"error">> => #{<<"message">> => <<"quota">>}}},
     ?assertMatch(

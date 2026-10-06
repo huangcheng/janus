@@ -232,9 +232,9 @@ decide(Cfg, F, Constraint) ->
                 {ok, _} = Ok ->
                     finish(Ok, rules, Tier);
                 error when is_map_key(stream, Constraint) ->
-                    %% The hard tier has no stream-compatible member
-                    %% (cross-protocol): serving on the default tier
-                    %% beats failing the client with no_route.
+                    %% Hard tier has no member this stream can use
+                    %% (native-only or stream_translate_blocked). Serving
+                    %% the default tier beats failing with no_route.
                     finish(resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint), fallback, Tier);
                 error ->
                     finish(error, rules, Tier)

@@ -108,8 +108,8 @@ extract_model(_Proto, Map) ->
 proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
     WantStream = janus_protocol_translate:wants_stream(Map),
     %% janus-auto skips cross-protocol tier members ONLY when the
-    %% translate path cannot serve the stream (tools/vision/n>1 or a
-    %% responses client); plain text/thinking streams translate now.
+    %% stream translate path is blocked (tools/vision/n>1 or a
+    %% responses client). Plain text/thinking streams translate now.
     AutoConstraint = #{
         client_proto => ClientProto,
         stream => WantStream andalso janus_protocol_translate:stream_translate_blocked(ClientProto, Map)
@@ -174,6 +174,7 @@ proxy_picked(ClientProto, Pick, Body, Map, Req, State) ->
                 {ok, ProviderProto} ->
                     dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State);
                 {error, unknown_protocol} ->
+                    _ = track(502, Route, #{}),
                     _ = release_route_inflight(Route),
                     reply_err(
                         ClientProto,
@@ -212,7 +213,7 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
                     call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
                 true ->
                     _ = release_route_inflight(Route),
-                    _ = bump_failed_maybe(400),
+                    _ = track(400, Route, #{}),
                     case translatable_stream_pair(ClientProto, ProviderProto) of
                         true ->
                             %% Tools/vision/n>1 on a translate pair: the
@@ -260,7 +261,7 @@ call_translate(ClientProto, ProviderProto, Route, Map, WantStream, Req, State) -
     case janus_protocol_translate:translate_request(ClientProto, ProviderProto, Map) of
         {error, {translate_unsupported, Msg}} ->
             _ = release_route_inflight(Route),
-            _ = bump_failed_maybe(400),
+            _ = track(400, Route, #{}),
             reply_err(ClientProto, Req, State, 400, <<"translate_unsupported">>, Msg);
         {ok, ProviderMap0} ->
             %% chat_to_messages hardcodes stream=false; the streaming
@@ -429,7 +430,30 @@ guard_chat_multi_choice(_, _) ->
     ok.
 
 write_frames(Frames, Req2) ->
-    lists:foreach(fun(F) -> _ = (catch cowboy_req:stream_body(iolist_to_binary(F), nofin, Req2)) end, Frames).
+    lists:foreach(fun(F) -> stream_client_frame(F, nofin, Req2) end, Frames).
+
+%% Cowboy returns ok | {ok, Req} on a live socket and errors/throws when
+%% the client is gone. Throw janus_client_disconnect so the drain's
+%% after-clause can close gun and the handler records 502.
+stream_client_frame(Data, Fin, Req2) ->
+    try cowboy_req:stream_body(iolist_to_binary(Data), Fin, Req2) of
+        ok -> ok;
+        {ok, _} -> ok;
+        {error, _} -> throw(janus_client_disconnect)
+    catch
+        throw:janus_client_disconnect ->
+            throw(janus_client_disconnect);
+        error:closed ->
+            throw(janus_client_disconnect);
+        error:{closed, _} ->
+            throw(janus_client_disconnect);
+        exit:{noproc, _} ->
+            throw(janus_client_disconnect);
+        exit:{shutdown, _} ->
+            throw(janus_client_disconnect);
+        throw:{error, _} ->
+            throw(janus_client_disconnect)
+    end.
 
 finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
     St0 = get(janus_sse_state),
@@ -449,8 +473,13 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
     %% Record BEFORE the final frame so a dying client can never cost
     %% us the usage row.
     translate_track(TrackStatus, Route, ClientProto),
-    write_frames(Frames, Req2),
-    catch cowboy_req:stream_body(<<>>, fin, Req2),
+    try
+        write_frames(Frames, Req2),
+        catch cowboy_req:stream_body(<<>>, fin, Req2)
+    catch
+        throw:janus_client_disconnect ->
+            ok
+    end,
     _ = release_route_inflight(Route),
     {ok, Req2, State}.
 
@@ -480,6 +509,20 @@ call_adapter(anthropic_messages, Route, Body, Map, Opts) ->
 %% Upstream result handling
 %%--------------------------------------------------------------------
 
+native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
+    %% Mid-stream failure: record 502, not the already-sent 200.
+    _ = track(502, Route, stream_usage(ClientProto)),
+    SafeReason = sanitize_upstream_error(Reason),
+    _ = note_provider_failure(Route, SafeReason),
+    _ = release_route_inflight(Route),
+    logger:warning(#{
+        what => janus_proxy_stream_error,
+        reason => SafeReason,
+        client_proto => ClientProto
+    }),
+    catch cowboy_req:stream_body(<<"\n">>, fin, Req2),
+    {ok, Req2, State}.
+
 handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain}, Route, false, Req, State) when
     Status >= 400
 ->
@@ -498,13 +541,10 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
         filter_stream_headers(Headers),
         Req
     ),
-    case
+    try
         Drain(fun(Chunk) ->
             capture_usage_chunk(Chunk),
-            %% `_ =`: a client disconnect makes stream_body fail; the
-            %% drain surfaces it as {error, _} below (recorded as 502)
-            %% instead of crashing the request process mid-callback.
-            _ = cowboy_req:stream_body(Chunk, nofin, Req2)
+            stream_client_frame(Chunk, nofin, Req2)
         end)
     of
         ok ->
@@ -516,19 +556,10 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
             _ = cowboy_req:stream_body(<<>>, fin, Req2),
             {ok, Req2, State};
         {error, Reason} ->
-            %% Mid-stream failure: record 502, not the already-sent 200.
-            _ = track(502, Route, stream_usage(ClientProto)),
-            SafeReason = sanitize_upstream_error(Reason),
-            _ = note_provider_failure(Route, SafeReason),
-            _ = release_route_inflight(Route),
-            logger:warning(#{
-                what => janus_proxy_stream_error,
-                reason => SafeReason,
-                client_proto => ClientProto
-            }),
-            %% Best-effort close; connection may already be half-closed.
-            catch cowboy_req:stream_body(<<"\n">>, fin, Req2),
-            {ok, Req2, State}
+            native_stream_fail(ClientProto, Route, Req2, State, Reason)
+    catch
+        throw:janus_client_disconnect ->
+            native_stream_fail(ClientProto, Route, Req2, State, closed)
     end;
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) when
     Status =:= 401
@@ -578,14 +609,8 @@ handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate
     _ = release_route_inflight(Route),
     reply_err(ClientProto, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
 handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate, Req, State) ->
-    _ = track(
-        case Reason of
-            provider_disabled -> 503;
-            _ -> 502
-        end,
-        Route,
-        #{}
-    ),
+    Status = error_http_status(Reason),
+    _ = track(Status, Route, #{}),
     SafeReason = sanitize_upstream_error(Reason),
     case is_transient(Reason) of
         true ->
@@ -600,12 +625,20 @@ handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate,
         provider => route_provider_name(Route),
         model => route_model_name(Route)
     }),
-    Status =
-        case Reason of
-            provider_disabled -> 503;
-            _ -> 502
+    {Code, Msg} =
+        case Status of
+            504 -> {<<"upstream_timeout">>, <<"upstream first-byte timeout">>};
+            503 -> {<<"upstream_error">>, <<"upstream request failed">>};
+            _ -> {<<"upstream_error">>, <<"upstream request failed">>}
         end,
-    reply_err(ClientProto, Req, State, Status, <<"upstream_error">>, <<"upstream request failed">>).
+    reply_err(ClientProto, Req, State, Status, Code, Msg).
+
+%% TTFB (gun await of the response headers) is 504; a disabled provider
+%% is 503; everything else that never produced headers is 502.
+error_http_status(provider_disabled) -> 503;
+error_http_status({await, timeout}) -> 504;
+error_http_status({await, {timeout, _}}) -> 504;
+error_http_status(_) -> 502.
 
 reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, true, Req, State) when
     Status >= 200, Status < 300
@@ -994,10 +1027,9 @@ first_bin([]) -> undefined.
 %%--------------------------------------------------------------------
 
 reply_pick_error(ClientProto, Req, State, Reason) ->
-    %% Pick failures happen INSIDE do_proxy (already counted) and are
-    %% client-visible failures — bump the failed counter for the
-    %% status this reason will produce.
-    _ = bump_failed_maybe(pick_error_status(Reason)),
+    %% Pick failures happen INSIDE do_proxy (already counted). track/3
+    %% writes the usage row (null route ids) and bumps failed.
+    _ = track(pick_error_status(Reason), #{}, #{}),
     do_reply_pick_error(ClientProto, Req, State, Reason).
 
 pick_error_status({all_cooling, _}) -> 503;
@@ -1095,19 +1127,15 @@ filter_headers(Headers) when is_map(Headers) ->
 filter_headers(_) ->
     #{<<"content-type">> => <<"application/json">>}.
 
-filter_stream_headers(Headers) when is_map(Headers) ->
-    Base = #{
+filter_stream_headers(_Headers) when is_map(_Headers) ->
+    %% Always SSE, even if the upstream advertised JSON (some OpenAI-
+    %% compatible proxies lie on the streaming face).
+    #{
         <<"content-type">> => <<"text/event-stream">>,
         <<"cache-control">> => <<"no-cache">>,
         <<"connection">> => <<"keep-alive">>,
-        %% Disable proxy buffering (nginx/Caddy) so translated frames
-        %% reach the client as they are produced.
         <<"x-accel-buffering">> => <<"no">>
-    },
-    case maps:get(<<"content-type">>, Headers, undefined) of
-        CT when is_binary(CT) -> Base#{<<"content-type">> => CT};
-        _ -> Base
-    end;
+    };
 filter_stream_headers(_) ->
     #{<<"content-type">> => <<"text/event-stream">>}.
 
@@ -1141,13 +1169,17 @@ bump_failed_maybe(_Status) ->
     ok.
 
 maybe_crash_bump_failed() ->
-    case
-        {get(janus_stats_counted), get(janus_stats_inner), get(janus_stats_tracked), get(janus_stats_failed)}
-    of
-        {true, false, undefined, undefined} ->
+    %% Cowboy keep-alive leaves inner as undefined after erase/1, not
+    %% the atom false. Only skip when this process is an inner call.
+    Counted = get(janus_stats_counted) =:= true,
+    Inner = get(janus_stats_inner) =:= true,
+    Tracked = get(janus_stats_tracked) =:= true,
+    Failed = get(janus_stats_failed) =:= true,
+    case Counted andalso (not Inner) andalso (not Tracked) andalso (not Failed) of
+        true ->
             janus_http_stats:inc_failed(),
             put(janus_stats_failed, true);
-        _ ->
+        false ->
             ok
     end.
 
