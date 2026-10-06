@@ -41,6 +41,9 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_stats_failed),
     erase(janus_stats_inner),
     erase(janus_req_counted),
+    %% janus_request_id is deliberately NOT erased here: the handler
+    %% resolves and puts it (fresh for every request, incl. keep-alive
+    %% reuse) before calling the proxy; track/3 reads it below.
     put(janus_req_path, cowboy_req:path(Req)),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
@@ -1092,7 +1095,8 @@ reply_err(ClientProto, Req, State, Status, Code, Msg, Extra) ->
         code => Code,
         model => get(janus_req_model),
         method => cowboy_req:method(Req),
-        path => cowboy_req:path(Req)
+        path => cowboy_req:path(Req),
+        request_id => get(janus_request_id)
     }),
     case get(janus_req_counted) of
         true ->
@@ -1269,7 +1273,8 @@ track(Status, Route, Usage) ->
                 provider => maps:get(provider_id, Route, null),
                 status => Status,
                 stream => usage_bool_int(Stream),
-                latency_ms => LatencyMs
+                latency_ms => LatencyMs,
+                request_id => get(janus_request_id)
             }),
             janus_metrics:inc(requests_total, #{
                 endpoint => janus_http_classify:endpoint(get(janus_req_path)),
@@ -1309,7 +1314,8 @@ track(Status, Route, Usage) ->
                 error_code => pd(janus_failover_err_code, null),
                 attempt => pd(janus_failover_attempt, 1),
                 request_ref => pd(janus_failover_ref, null),
-                is_terminal => true
+                is_terminal => true,
+                request_id => get(janus_request_id)
             });
         _ ->
             ok

@@ -75,7 +75,8 @@ unauthorized(Req, Msg) ->
         status => 401,
         code => unauthorized,
         method => cowboy_req:method(Req),
-        path => cowboy_req:path(Req)
+        path => cowboy_req:path(Req),
+        request_id => get(janus_request_id)
     }),
     janus_metrics:inc(requests_total, #{
         endpoint => janus_http_classify:endpoint(cowboy_req:path(Req)),

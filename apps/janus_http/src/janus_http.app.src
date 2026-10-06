@@ -7,6 +7,7 @@
         kernel,
         stdlib,
         cowboy,
+        crypto,
         thoas,
         janus_core,
         janus_providers

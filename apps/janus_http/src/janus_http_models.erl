@@ -5,8 +5,11 @@
 
 init(Req0, State) ->
     erase(janus_req_counted),
-    case janus_http_auth:require_agent(Req0) of
-        {ok, Agent, Req1} ->
+    ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
+    Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
+    put(janus_request_id, ReqId),
+    case janus_http_auth:require_agent(Req1) of
+        {ok, Agent, Req2} ->
             Data =
                 try
                     list_models(Agent)
@@ -22,7 +25,7 @@ init(Req0, State) ->
                     <<"content-type">> => <<"application/json">>
                 },
                 Body,
-                Req1
+                Req2
             ),
             janus_metrics:inc(requests_total, #{
                 endpoint => models,

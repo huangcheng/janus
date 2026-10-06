@@ -11,12 +11,15 @@
 
 init(Req0, State) ->
     erase(janus_req_counted),
-    case janus_http_auth:require_agent(Req0) of
-        {ok, Agent, Req1} ->
-            case cowboy_req:read_body(Req1, #{length => ?MAX_BODY}) of
-                {ok, Body, Req2} ->
-                    janus_http_proxy:handle(openai_responses, Agent, Body, Req2, State);
-                {more, _, Req2} ->
+    ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
+    Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
+    put(janus_request_id, ReqId),
+    case janus_http_auth:require_agent(Req1) of
+        {ok, Agent, Req2} ->
+            case cowboy_req:read_body(Req2, #{length => ?MAX_BODY}) of
+                {ok, Body, Req3} ->
+                    janus_http_proxy:handle(openai_responses, Agent, Body, Req3, State);
+                {more, _, Req3} ->
                     Body = thoas:encode(#{
                         error => #{
                             message => <<"body exceeds limit">>,
@@ -24,10 +27,10 @@ init(Req0, State) ->
                             code => <<"request_too_large">>
                         }
                     }),
-                    Req3 = cowboy_req:reply(
-                        413, #{<<"content-type">> => <<"application/json">>}, Body, Req2
+                    Req4 = cowboy_req:reply(
+                        413, #{<<"content-type">> => <<"application/json">>}, Body, Req3
                     ),
-                    {ok, Req3, State}
+                    {ok, Req4, State}
             end;
         {error, ReqErr} ->
             {ok, ReqErr, State}

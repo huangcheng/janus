@@ -206,7 +206,7 @@ do_flush(#state{buf = Buf} = State) ->
     Cols =
         <<"(ts, agent_key_id, model_id, provider_id, provider_key_id, "
           " protocol, stream, status, prompt_tokens, completion_tokens, latency_ms, "
-          " error_code, attempt, request_ref, is_terminal)">>,
+          " error_code, attempt, request_ref, is_terminal, request_id)">>,
     Failed =
         lists:foldl(
             fun(Rows, Acc) ->
@@ -250,7 +250,7 @@ fk_salvage(Cols, Rows, Reason) ->
         false ->
             keep;
         true ->
-            KeepKeys = [ts, protocol, stream, status, prompt, completion, latency_ms],
+            KeepKeys = [ts, protocol, stream, status, prompt, completion, latency_ms, request_id],
             Stripped = [maps:with(KeepKeys, Ev) || Ev <- Rows],
             {Sql, Params} = build_insert(Cols, Stripped),
             case q(Sql, Params) of
@@ -282,7 +282,7 @@ build_insert(Cols, Rows) ->
     {ValuesSql, Params} =
         lists:foldl(
             fun(Ev, {SqlAcc, PAcc}) ->
-                Ph = string:join(lists:duplicate(15, "?"), ", "),
+                Ph = string:join(lists:duplicate(16, "?"), ", "),
                 Params = [
                     maps:get(ts, Ev, erlang:system_time(second)),
                     int_or_null(maps:get(agent_key_id, Ev, null)),
@@ -298,7 +298,8 @@ build_insert(Cols, Rows) ->
                     err_code_bin(maps:get(error_code, Ev, null)),
                     int_or_null(maps:get(attempt, Ev, 1)),
                     ref_bin(maps:get(request_ref, Ev, null)),
-                    bool_val(maps:get(is_terminal, Ev, true))
+                    bool_val(maps:get(is_terminal, Ev, true)),
+                    bin_or_null(maps:get(request_id, Ev, null))
                 ],
                 {SqlAcc ++ ["(" ++ Ph ++ ")"], PAcc ++ Params}
             end,
@@ -312,6 +313,9 @@ build_insert(Cols, Rows) ->
 
 int_or_null(N) when is_integer(N) -> N;
 int_or_null(_) -> null.
+
+bin_or_null(B) when is_binary(B) -> B;
+bin_or_null(_) -> null.
 
 %% is_terminal is a REAL BOOLEAN on postgres (epgsql bool codec
 %% rejects 0/1); the sqlite path normalizes to 1/0 in q/2 below.
@@ -416,21 +420,23 @@ build_insert_shape_test() ->
         <<"(a, b)">>,
         [#{status => 200, prompt => 1, stream => true}, #{status => 502}]
     ),
-    %% 15 placeholders per row (11 base + failover evidence), one
-    %% VALUES group per row.
-    ?assertEqual(30, length(Params)),
+    %% 16 placeholders per row (11 base + failover evidence + request_id),
+    %% one VALUES group per row.
+    ?assertEqual(32, length(Params)),
     ?assertMatch(
         <<"INSERT INTO usage_events (a, b) VALUES "
-          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), "
-          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
+          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), "
+          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
         Sql
     ),
     %% row 2: status 502 present, prompt defaults to null (not 0);
-    %% attempt defaults to 1 and is_terminal to true (legacy shape).
-    ?assertEqual(502, lists:nth(23, Params)),
-    ?assertEqual(null, lists:nth(24, Params)),
-    ?assertEqual(1, lists:nth(28, Params)),
-    ?assertEqual(true, lists:nth(30, Params)).
+    %% attempt defaults to 1, is_terminal to true, request_id to null
+    %% (legacy shape).
+    ?assertEqual(502, lists:nth(24, Params)),
+    ?assertEqual(null, lists:nth(25, Params)),
+    ?assertEqual(1, lists:nth(29, Params)),
+    ?assertEqual(true, lists:nth(31, Params)),
+    ?assertEqual(null, lists:nth(32, Params)).
 
 chunk_test() ->
     ?assertEqual([[1, 2], [3]], janus_usage:chunk([1, 2, 3], 2)),
