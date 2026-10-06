@@ -134,7 +134,10 @@ bump(Tid, Key, Incr) when is_integer(Incr) ->
     _ = ets:update_counter(Tid, Key, Incr, {Key, 0}),
     ok.
 
-norm_labels(Labels) ->
+norm_labels(L) when is_list(L) ->
+    %% Registry rows already carry [{KBin, VBin}] — the sort is a no-op.
+    lists:sort(L);
+norm_labels(Labels) when is_map(Labels) ->
     lists:sort([
         {to_bin(K), to_bin(V)}
      || {K, V} <- maps:to_list(Labels)
