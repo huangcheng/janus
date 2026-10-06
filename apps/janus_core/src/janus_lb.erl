@@ -23,6 +23,9 @@
     release_inflight/1,
     pick_route/2,
     pick_listing_route/2,
+    %% Pure prefer-proto filter (eunit-tested with an injected lookup
+    %% fun; production wires it to the catalog).
+    prefer_proto_filter/3,
     %% Entitlement carrier observability (spec Part B/C)
     bump_stat/1,
     stats/0
@@ -165,6 +168,35 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internals
 %%--------------------------------------------------------------------
 
+%% A streaming request that cannot ride the translate path (responses
+%% client, or tools/vision/n>1) must land on a same-protocol route.
+%% When the caller passes prefer_proto, keep only the routes whose
+%% provider speaks that protocol — but fall back to ALL routes when
+%% none matches, so the dispatch-level 400 (which explains exactly
+%% what is missing) stays the reachable outcome instead of no_route.
+prefer_proto_routes(Routes, Opts) ->
+    case Opts of
+        #{prefer_proto := Proto} when is_binary(Proto) ->
+            prefer_proto_filter(Routes, Proto, fun route_protocol/1);
+        _ ->
+            Routes
+    end.
+
+%% Pure filter (eunit-tested): unknown-provider routes never match and
+%% never crash the pick.
+prefer_proto_filter(Routes, Proto, RouteProto) ->
+    Match = [R || R <- Routes, RouteProto(R) =:= Proto],
+    case Match of
+        [] -> Routes;
+        _ -> Match
+    end.
+
+route_protocol(R) ->
+    case janus_catalog:lookup_provider(maps:get(provider_id, R, undefined)) of
+        {ok, #{protocol := P}} when is_binary(P) -> P;
+        _ -> undefined
+    end.
+
 do_pick_route(ModelId, Opts, State) ->
     case catalog_generation_ok(Opts) of
         false ->
@@ -182,9 +214,11 @@ do_pick_listing_route(Name, Opts, State) ->
     end.
 
 pick_from_routes(
-    PickKey, Routes0, _Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}
+    PickKey, Routes0, Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}
 ) ->
-    Routes1 = [R || R <- Routes0, maps:get(enabled, R, true)],
+    Routes1 = prefer_proto_routes(
+        [R || R <- Routes0, maps:get(enabled, R, true)], Opts
+    ),
     case Routes1 of
         [] ->
             {error, no_route};
