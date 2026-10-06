@@ -25,7 +25,7 @@
 - Release version: `application:get_key(janus, vsn)`.
 - `statistics(wall_clock)` returns `{TotalMs, SinceLastCallMs}`; the gauge reads element 1 (total) — correct. The `SinceLastCall` element is VM-global and advances per call; verify no other consumer reads it (grep before wiring).
 - A handler-process hard crash (Cowboy's own 500, off the Req chain) carries no `x-request-id` and is uncounted — documented exclusion alongside router 404s.
-- Prometheus text format: `# HELP` + `# TYPE` lines ONCE per metric family (group by family name), buckets numerically ascending with `+Inf` last, float values via `float_to_binary(F, [short])` (`~g` loses precision), labels sorted by key, values escaped (`\`, `"`, newline).
+- Prometheus text format: `# HELP` + `# TYPE` lines ONCE per metric family (group by family name), buckets numerically ascending with `+Inf` last, float values via `float_to_binary(F, [short])` (`~g` loses precision), labels sorted by key (bucket lines append `le` last by convention — the text format has no label-ordering MUST), values escaped (`\`, `"`, newline; NUL stripped).
 
 ---
 
@@ -154,9 +154,9 @@ get(K, Rows) ->
 %%%                                    update_counter is integer-only;
 %%%                                    the renderer divides by 1e6)
 %%%   {hist_count, Name, Labels}
-%%% The table is looked up by name per bump via ets:whereis/1
-%%% (constant-time, and never returns a stale tid — survives app
-%%% restart). `ets:update_counter/4` with a default tuple
+%%% The table is looked up by name once per inc/observe call via
+%%% ets:whereis/1 (constant-time — no persistent_term lifecycle traps
+%%% across app restarts). `ets:update_counter/4` with a default tuple
 %%% creates-and-bumps atomically (no registry race on first use).
 %%% inc/observe are whole-body try/catch — observability must never
 %%% crash the data plane.
@@ -188,12 +188,7 @@ get(K, Rows) ->
 %% can never drift.
 -spec buckets() -> [{float(), binary()}].
 buckets() ->
-    [
-        {0.05, <<"0.05">>}, {0.1, <<"0.1">>}, {0.25, <<"0.25">>},
-        {0.5, <<"0.5">>}, {1.0, <<"1">>}, {2.5, <<"2.5">>}, {5.0, <<"5">>},
-        {10.0, <<"10">>}, {30.0, <<"30">>}, {60.0, <<"60">>},
-        {120.0, <<"120">>}, {300.0, <<"300">>}, {600.0, <<"600">>}
-    ].
+    lists:reverse(?BUCKETS_DESC).
 
 buckets_desc() ->
     ?BUCKETS_DESC.
@@ -312,13 +307,13 @@ In `apps/janus_http/src/janus_http_app.erl`, after `ok = janus_http_stats:init()
     ok = janus_metrics:init(),
 ```
 
-- [ ] **Step 4: Compile in the build container** (per AGENTS.md — never host Erlang; canonical command from AGENTS.md, including fmt --check):
+- [ ] **Step 4: Compile in the build container** (per AGENTS.md — never host Erlang; the canonical command, fmt included):
 
 ```bash
 docker build --target test -t janus-build:test .
-docker run --rm -v F:/Janus/apps:/app/apps -v F:/Janus/config:/app/config -v F:/Janus/rebar.config:/app/rebar.config -v F:/Janus/rebar.lock:/app/rebar.lock -v janus-ebin-otp27:/app/_build -w /app janus-build:test sh -c 'rebar3 compile'
+docker run --rm -v F:/Janus/apps:/app/apps -v F:/Janus/config:/app/config -v F:/Janus/rebar.config:/app/rebar.config -v F:/Janus/rebar.lock:/app/rebar.lock -v janus-ebin-otp27:/app/_build -w /app janus-build:test sh -c 'rebar3 fmt --check && rebar3 eunit'
 ```
-Expected: compiles clean.
+Expected: compiles clean + `janus_metrics_tests` green (after Task 3/5 land; at this step the module compiles and existing suites stay green).
 
 - [ ] **Step 5: Commit**
 
@@ -814,47 +809,54 @@ init(Req0, State) ->
     {ok, Req, State}.
 
 render(Req) ->
-    Usage = safe(fun janus_usage:stats/0, #{}, usage_stats),
-    LbStats = safe(fun janus_lb:stats/0, #{}, lb_stats),
+    Usage = safe(fun janus_usage:stats/0, usage_stats),
+    LbStats = safe(fun janus_lb:stats/0, lb_stats),
     {WallMs, _} = statistics(wall_clock),
-    Version =
-        case application:get_key(janus, vsn) of
-            {ok, V} -> to_bin(V);
-            _ -> <<"unknown">>
-        end,
-    %% Dropped/buffered come from another process's map — validate
-    %% before they reach integer_to_binary (one bad value must not
-    %% 500 the whole scrape).
-    Dropped = int_or_zero(maps:get(dropped, Usage, 0), usage_dropped),
-    Buffered = int_or_zero(maps:get(buffered, Usage, 0), usage_buffered),
-    %% Cumulative counters appended as counter rows (registered
-    %% families in the renderer): the writer's dropped count, plus the
-    %% LB failover counters from janus_lb:stats/0 (one call; a skipped
-    %% non-integer value logs once per scrape, not silently).
-    LbList = maps:to_list(LbStats),
-    BadStats = [K || {K, V} <- LbList, not is_integer(V)],
-    case BadStats of
-        [] -> ok;
-        _ -> logger:warning(#{what => janus_metrics_lb_stat_skip, stats => BadStats})
-    end,
-    %% A render failure must not wedge the scrape: 500 + log. ALL row
-    %% assembly lives INSIDE the try — a dead ETS table or a bad gauge
-    %% shape must never escape as an uncaught 500.
+    %% A render failure must not wedge the scrape: 500 + log. ALL
+    %% consumption of scrape-time values lives INSIDE the try — a dead
+    %% ETS table, a wrong-shape stats return, or a bad gauge must never
+    %% escape as an uncaught 500.
     try
+        Version =
+            case application:get_key(janus, vsn) of
+                {ok, V} -> janus_metrics:to_bin(V);
+                _ -> <<"unknown">>
+            end,
+        LbList = case is_map(LbStats) of
+            true -> maps:to_list(LbStats);
+            false -> []
+        end,
+        BadStats = [K || {K, V} <- LbList, not is_integer(V)],
+        case BadStats of
+            [] -> ok;
+            _ -> logger:warning(#{what => janus_metrics_lb_stat_skip, stats => BadStats})
+        end,
         LbRows = [
             {{counter, lb_stats_total, [{<<"stat">>, janus_metrics:to_bin(K)}]}, V}
          || {K, V} <- LbList, is_integer(V)
         ],
-        Rows =
-            janus_metrics:snapshot() ++
-                [{{counter, usage_writer_dropped_total, []}, Dropped}] ++
-                LbRows,
+        %% usage writer down/wrong-shape → the dropped series is
+        %% OMITTED (a counter must never report a fabricated 0).
+        DropRows =
+            case is_map(Usage) of
+                true ->
+                    [{{counter, usage_writer_dropped_total, []},
+                      int_or_zero(maps:get(dropped, Usage, 0), usage_dropped)}];
+                false ->
+                    []
+            end,
+        Buffered =
+            case is_map(Usage) of
+                true -> int_or_zero(maps:get(buffered, Usage, 0), usage_buffered);
+                false -> 0
+            end,
+        Rows = janus_metrics:snapshot() ++ DropRows ++ LbRows,
         Gauges =
             [
-                {catalog_generation, safe(fun janus_config:generation/0, 0, catalog_generation), #{}},
-                {catalog_ready, bool01(safe(fun janus_config:ready/0, false, catalog_ready)), #{}},
-                {models_serving, safe(fun janus_http_stats:models_serving/0, 0, models_serving), #{}},
-                {lb_routes_cooling, safe(fun janus_lb:cooling_count/0, 0, lb_cooling), #{}},
+                {catalog_generation, gauge_val(fun janus_config:generation/0, 0, catalog_generation), #{}},
+                {catalog_ready, bool01(gauge_val(fun janus_config:ready/0, false, catalog_ready)), #{}},
+                {models_serving, gauge_val(fun janus_http_stats:models_serving/0, 0, models_serving), #{}},
+                {lb_routes_cooling, gauge_val(fun janus_lb:cooling_count/0, 0, lb_cooling), #{}},
                 {usage_writer_buffered_rows, Buffered, #{}},
                 {uptime_seconds, WallMs div 1000, #{}},
                 {build_info, 1, #{<<"version">> => Version}}
@@ -874,17 +876,27 @@ render(Req) ->
             }, <<"render error\n">>, Req)
     end.
 
-%% Scrape-time sources get logged defaults on failure — a perpetually
-%% failing gauge source is visible in the gateway log, not just zeros.
-safe(Fun, Default, What) ->
-    try Fun()
+%% Scrape-time sources return {ok, V} | error (logged). A crashing
+%% source is an error; a wrong-shape return is an error; the caller
+%% decides the fallback (omit series / substitute gauge value).
+safe(Fun, What) ->
+    try Fun() of
+        V -> {ok, V}
     catch
         Class:Reason ->
             logger:warning(#{
                 what => janus_metrics_gauge_error, source => What,
                 class => Class, reason => Reason
             }),
-            Default
+            error
+    end.
+
+gauge_val(Fun, Default, What) ->
+    case safe(Fun, What) of
+        {ok, V} when is_integer(V) -> V;
+        {ok, V} when is_boolean(V) -> V;
+        {ok, V} when is_float(V) -> V;
+        _ -> Default
     end.
 
 bool01(true) -> 1;
@@ -1067,7 +1079,7 @@ The four agent handlers (`janus_http_chat|messages|responses|models`) erase `jan
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/janus_http/src/janus_http_classify.erl apps/janus_http/test/janus_http_classify_tests.erl apps/janus_http/src/janus_http_proxy.erl apps/janus_http/src/janus_http_auth.erl apps/janus_http/src/janus_http_models.erl
+git add apps/janus_http/src/janus_http_classify.erl apps/janus_http/test/janus_http_classify_tests.erl apps/janus_http/src/janus_http_proxy.erl apps/janus_http/src/janus_http_auth.erl apps/janus_http/src/janus_http_models.erl apps/janus_http/src/janus_http_chat.erl apps/janus_http/src/janus_http_messages.erl apps/janus_http/src/janus_http_responses.erl
 git commit -m "Bump request/upstream counters and duration histogram at terminal paths"
 ```
 
@@ -1183,17 +1195,11 @@ init(Req0, State) ->
     case janus_http_auth:require_agent(Req1) of
 ```
 
-(The handler's Req chain shifts: `require_agent(Req1)`, body read from its returned Req, proxy called with it. **The messages handler currently calls `require_agent(Req0, #{allow_x_api_key => true})` — preserve the 2-arity options** (or x-api-key auth silently breaks). `set_resp_header` covers all later replies incl. `stream_reply` on that Req. Each handler also erases `janus_req_counted` BEFORE any reply path — a leftover `true` from a previous request on a keep-alive process would silently suppress the early-reject bump:
-
-```erlang
-    erase(janus_req_counted),
-```
-
-The proxy `handle/5` entry also erases it — belt and braces; the handler erase is the authoritative per-request reset. Note `janus_req_path` is self-contained at proxy entry (put there); only `janus_request_id` must survive from the handler.)
+(The handler's Req chain shifts: `require_agent(Req1)`, body read from its returned Req, proxy called with it. **The messages handler currently calls `require_agent(Req0, #{allow_x_api_key => true})` — preserve the 2-arity options** (or x-api-key auth silently breaks). `set_resp_header` covers all later replies incl. `stream_reply` on that Req. The `erase(janus_req_counted)` line at handler `init/2` was added in Task 5 — do NOT add it twice; Task 6's handlers already carry it. Note `janus_req_path` is self-contained at proxy entry (put there); only `janus_request_id` must survive from the handler.)
 
 Proxy `track/3`: add `request_id => get(janus_request_id)` to the `logger:info` map AND the `janus_usage:record` map. Reject log (`reply_err/6`): add `request_id => get(janus_request_id)`. Auth-reject log (`janus_http_auth:unauthorized/2` — the warning already exists; Task 5 adds the bump): add `request_id => get(janus_request_id)` (the handler puts it before `require_agent` runs). `handle/5` erase list: keep `janus_request_id` OUT of it (comment why: the handler puts it before the proxy runs).
 
-`janus_usage:build_insert` gains the **16th** column — the current column list (post-008) is `(ts, agent_key_id, model_id, provider_id, provider_key_id, protocol, stream, status, prompt_tokens, completion_tokens, latency_ms, error_code, attempt, request_ref, is_terminal)`; append `request_id` LAST. Params list gains `bin_or_null(maps:get(request_id, Ev, null))` as the 16th param:
+`janus_usage:build_insert` gains the **16th** column — the current column list (post-008) is `(ts, agent_key_id, model_id, provider_id, provider_key_id, protocol, stream, status, prompt_tokens, completion_tokens, latency_ms, error_code, attempt, request_ref, is_terminal)`; append `request_id` LAST. Params list gains `bin_or_null(maps:get(request_id, Ev, null))` as the 16th param. **Pre-flight: confirm `bin_or_null/1` does not already exist in `janus_usage.erl`** (duplicate definition = compile error; if it exists under another name, reuse it):
 
 ```erlang
 bin_or_null(B) when is_binary(B) -> B;
@@ -1240,7 +1246,7 @@ New gate steps (all local, real stack; the gate self-heals seed provider/key/bin
 
 1. `GET :8090/metrics` without token (gate env sets `JANUS_STATS_TOKEN`) → **401**; a tokenless `POST` → **401** (auth runs before the method check); a **token-carrying** `POST` → **405** with `allow: GET`.
 1b. `GET :8080/metrics` (agent plane) → **404** — metrics must never leak onto the agent plane.
-2. With token → **200**, `content-type` contains `text/plain` (substring assert), body contains `janus_build_info` (present on an idle node — never assert a requests series before any call bumped it), `janus_usage_writer_dropped_total` (appended even at 0), `janus_lb_stats_total` when the LB has counters (seeded stack does), and gauges with real values on the seeded stack (after the gate's catalog warmup): `janus_catalog_generation` ≥ 1, `janus_models_serving` ≥ 1, `janus_uptime_seconds` > 0 (guards against silently-wrong zero gauges). Histogram sanity: for every `janus_request_duration_seconds` label set present, bucket counts are monotonically non-decreasing in NUMERIC `le` order (parsed as float, `+Inf` last), and `le="+Inf"` ≥ `_count` (exact equality holds at quiescence; under concurrent traffic count trails +Inf by at most the in-flight count — ETS has no multi-key transaction).
+2. With token → **200**, `content-type` contains `text/plain` (substring assert), body contains `janus_build_info` (present on an idle node — never assert a requests series before any call bumped it), `janus_usage_writer_dropped_total` (appended even at 0), `janus_lb_stats_total` when the LB has counters (an idle pre-traffic scrape may legitimately have none — assert conditionally), and gauges with real values on the seeded stack (after the gate's catalog warmup AND ≥1.1s after node boot so `uptime_seconds` > 0 can't flake on the first-second boundary): `janus_catalog_generation` ≥ 1, `janus_models_serving` ≥ 1, `janus_uptime_seconds` > 0 (guards against silently-wrong zero gauges). Histogram sanity: for every `janus_request_duration_seconds` label set present, bucket counts are monotonically non-decreasing in NUMERIC `le` order (parsed as float, `+Inf` last), and `le="+Inf"` ≥ `_count` (exact equality holds at quiescence; under concurrent traffic count trails +Inf by at most the in-flight count — ETS has no multi-key transaction).
 2b. Tokenless `GET :8090/stats` still → **401** (regression guard for the auth extraction).
 3. One real non-stream chat completion → metrics bump synchronously (no flush wait; scrape immediately after the call): the scrape delta for `janus_requests_total{endpoint="chat",protocol="openai_chat",status_class="2xx"}` is ≥ 1 vs the pre-call scrape (label-set delta, not a global count — other gate traffic may interleave); `janus_request_duration_seconds_count{protocol="openai_chat",stream="0"}` ≥ +1; and the `endpoint="other"` series count does NOT increase across this call (a global no-`other` assertion would false-fail on stray probes).
 4. A streaming chat call → same scrape shape with `stream="1"`; the streamed response carries `x-request-id`.
@@ -1252,7 +1258,7 @@ New gate steps (all local, real stack; the gate self-heals seed provider/key/bin
 7. Call without the header → response `x-request-id` matches `^req_[0-9a-f]{16}$`.
 8. Call with `x-request-id: "bad id with spaces"` → generated id instead (regex, NOT the inbound value).
 9. `GET :8090/stats/logs?limit=50` (token-auth) → parse the JSON events; the newest `janus_request` event for the call has a structured `request_id` field equal to `e2e-fixed-id-1` (not a substring match).
-10. `promtool check metrics` on the captured `/metrics` sample — **required**, not optional (the gate image installs promtool AND the image build verifies it with `promtool --version`; a hand-rolled format must not ship unverified). Parse errors fail the gate; lint advisories are recorded in the artifact log without failing. At quiescence (no in-flight calls), also assert `le="+Inf"` == `_count` per label set.
+10. `promtool check metrics` on the captured `/metrics` sample — **required**, not optional (the gate image installs promtool pinned to the latest 2.x — Prometheus 3.x reshaped the `check` subcommands — and the image build asserts `promtool --version`; a hand-rolled format must not ship unverified). Parse errors fail the gate; lint advisories are recorded in the artifact log without failing. At quiescence (no in-flight calls), also assert `le="+Inf"` == `_count` per label set.
 
 Smoke (`run_test_flows.py --smoke`, read-only prod): `GET /metrics` with the node's stats token → 200 + contains `janus_build_info`.
 
@@ -1309,7 +1315,8 @@ scrape_configs:
 - rev 5: round-4 audit (7/7 GO WITH FIXES; deepseek-v4-pro substituted for the flaky flash id) folded inline — observe bump order (buckets → +Inf → sum → count), `janus_req_counted` erased at handler init, `lb_stat` → `janus_lb_stats_total{stat=...}` counter (promlint counter-suffix), `bool01` SMALLINT, bad-bound drop+warn, family sort by name binary, init failure logs, `models_serving` extracted to `janus_http_stats`, mixed-snapshot byte-exact eunit, gate: token-POST 405, agent-plane 404, +Inf==count + monotonicity, scoped no-`other`, promtool parse-vs-lint policy, README scoping.
 - rev 6 (this document): round-5 audit (7/7 GO WITH FIXES after retries) folded inline — `+Inf` whitelisted before the bad-bound partition (it never parses as a float; the partition was dropping it from every histogram), renderer purity restored (bad bounds drop silently — defense-in-depth, byte-exact gate asserts catch real breakage), observe order settled to +Inf → descending ladder → sum → count last (monotone buckets + count ≤ +Inf at every interleaving; exact equality asserted only at quiescence), handler `to_bin` delegates to the registry's total one (exported), LB skip-warning batched one-per-scrape, `crypto` added to `janus_http.app.src` (the admin auth's `hash_equals` worked only via cowboy's transitive dep), `generate/0` guarded with a unique-integer fallback, Task 4 commit list includes `janus_http_stats.erl`, gate gains tokenless-`/stats` 401 regression + 401 full-label-set + streamed-row `request_id` assertions, SPA column browser-verified per testing rule 4, token-rotation + Grafana-provisioning ops notes, concurrent-observe final-consistency eunit.
 - rev 7 (this document): round-6 audit (7/7 GO WITH FIXES) folded inline — **migration renumbered 005→009 and re-rooted to the executing subdirs** (the runner is `janus_db_postgres/sqlite.erl` reading `priv/migrations/{postgres,sqlite}/`; `usage_events` already has 15 columns post-008), `build_insert` is its 16th column (shape test lives in `janus_usage.erl -ifdef(TEST)`, 32 params), `fk_salvage` carry-through called out, messages handler keeps `require_agent/2` opts, auth-reject warning already existed (only the bump + flag are new), handler row assembly moved inside the render try, `whereis` hoisted once per inc/observe (`bump/3`), `BUCKETS_DESC` literal (no per-call reverse), `int_or_zero` guards on writer-stat values, fallback id padded to 16 hex, `crypto` app dep committed in Task 6's add list, `janus_req_counted` erase moved into Task 5, cumulative production-shaped histogram fixtures, numeric-dedupe of equal-spelling bounds with count merge, classifier eunit (boundary table), Task 5 step renumbering, gate: promtool mandatory, stale "ONLY async" wording fixed, README histogram scope note.
-- rev 8 (this document): round-7 audit (7/7 GO WITH FIXES) folded inline — deduplicated the `-define(TABLE)`/comment splice artifact in the `janus_metrics` listing, single-sourced the ladder (`buckets/0` derives from `?BUCKETS_DESC`), Task 7 deploy note renumbered to 009, shape-test positions corrected (status 8/24, request_id 16/32), Task 6 commit list reconciled with the in-module test, `generate/0` fallback uses `<<I:64/big>>` (`encode_unsigned/2` takes endianness, not pad size), `to_bin` catch-all, handler `maps:get`/`to_list` inside the render try, gate 4b pins the client-dialect label set, gate image verifies promtool, quiescent `_sum`/`+Inf` consistency line.
+- rev 8 (this document): round-7 audit (7/7 GO WITH FIXES) folded inline — deduplicated the `-define(TABLE)`/comment splice artifact in the `janus_metrics` listing, single-sourced the ladder (`buckets/0` derives from `?BUCKETS_DESC`), Task 7 deploy note renumbered to 009, shape-test positions corrected (status 8/24, request_id 16/32), Task 6 commit list reconciled with the in-module test, `generate/0` fallback uses `<<I:64/big>>` (`encode_unsigned/2` takes endianness, not pad size), `to_bin` catch-all, handler `maps:get`/`to_list` inside the render try, gate 4b pins the client-dialect label set, gate image verifies promtool, quiescent `_count`/`+Inf` consistency line.
+- rev 9 (this document): round-8 audit (7/7 GO WITH FIXES — all claim-vs-code drift, zero runtime-breaking) folded inline — ladder single-source made real in the listing, promtool pinned <3, `num_bin` callers pre-validated via `gauge_val` (numeric-only), "per bump" doc wording → "per call", `bin_or_null` collision pre-flight, Task 2 compile command uses the canonical fmt+eunit one, uptime first-second gate flake guard.
 
 ---
 
