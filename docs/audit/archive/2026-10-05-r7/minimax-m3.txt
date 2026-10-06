@@ -1,0 +1,38 @@
+**Verdict: GO WITH FIXES**
+
+**Critical risks**
+
+1. **Failed-bump semantics contradict within §4.2.** Table: after-clause bumps failed "only if counted **and not** inner **and not** tracked **and not** failed". Text: "Failed is `inc_failed()` from `track/3` when Status >= 400, else `after`, each gated by `janus_stats_failed`." Track(200) ⇒ `tracked=true`, `failed=false`. Table ⇒ no bump (correct). Text ⇒ bump (wrong; clean after-clause after a successful track would mark the request failed). §10 does not pick a winner.
+
+2. **`#sse_st` no-op arms** (§4.1.2): "Every arm returns St" doesn't require preserving `usage_sent`/`finish_sent`/`terminal_sent`/`created` when untouched. Missed `St#{usage_sent := true}` duplicates the Chat usage chunk.
+
+3. **Inner janus-auto track** (§4.2): "inner `track` writes usage rows only; must **not** set `janus_stats_tracked`" is review-time only. If a helper inside the inner path sets the flag, the outer after-clause silently skips its failed bump.
+
+4. **Atomics on hot reload** (§4.2): "hot reload keeps counters" but atomics live in `persistent_term` written somewhere in `janus_http_app`. Spec doesn't say where; if the write happens in a non-`start/2` init path, that path re-runs on hot reload and resets counters.
+
+5. **Cowboy idle wording** (§4.1.4): "no bytes on the request (including SSE)" — SSE is response, not request. Intent is connection-level inactivity; wording will mislead.
+
+**Contradictions**: only the §4.2 table-vs-text one; §10 closes every other tension.
+
+**Missing requirements**
+
+- gun:cancel timing vs next drain fold iteration.
+- HTTP/1.1 only? Cowboy 2 can do HTTP/2; SSE semantics differ.
+- "Anthropic `model_delta`" (§4.1.2) not in Anthropic's SSE spec — clarify.
+- janus-auto over streamed text+thinking path (only counter behavior is specified).
+- §4.1.4 "Forward provider `ping`" reads as universal; OpenAI Chat has no `ping` — Anthropic→Chat only.
+- §4.3 "`rebar3 compile` fetches hex" is wrong; test stage must `RUN rebar3 get-deps && rebar3 compile` and pre-warm `rebar3_fmt`.
+
+**Architecture notes**
+
+- Handler owns `#sse_st{}`; pdict flags live on the handler process only. Clean.
+- Drain fold has no frame buffer — correct for backpressure.
+- Dual-repo paired-PR rule for TF-6.8/6.8b is the right model.
+
+**Top 5 concrete edits**
+
+1. §4.2: replace "Failed is `inc_failed()` from `track/3` when Status >= 400, else `after`, each gated by `janus_stats_failed`" with "Failed is `inc_failed()` from outer `track/3` when Status ≥ 400, else from after-clause **only when `janus_stats_tracked` is false**, gated by `janus_stats_failed`". Removes the contradiction.
+2. §4.1.2: require `translate_sse` arms to preserve `usage_sent`/`finish_sent`/`terminal_sent`/`created` when not modifying them.
+3. §4.1.4: replace "no bytes on the request (including SSE)" with "no TCP-level activity in either direction for 300 s".
+4. §4.2: rename inner usage writer to `record_inner_usage/2` so the name itself enforces "never call track/3 from inner do_proxy".
+5. §4.3: replace "`rebar3 compile` fetches hex" with `RUN rebar3 get-deps && rebar3 compile`, add `rebar3 plugins install rebar3_fmt`, confirm `.dockerignore` excludes `_build`.

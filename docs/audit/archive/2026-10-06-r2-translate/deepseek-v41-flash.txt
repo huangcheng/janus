@@ -1,0 +1,33 @@
+## 1. Verdict
+**GO WITH FIXES** — direction is sound, but C1/C3 event ordering and the "no synthetic frames" rule contradict each other and must be resolved before Phase 1.
+
+## 2. Critical risks
+- **Usage-at-terminator vs chat skeleton.** OpenAI chat emits `finish_reason` chunk, then a usage-only chunk (empty `choices`), then `[DONE]`. C1's →chat skeleton omits the usage-only chunk, yet C3 says "emit usage at terminator." For chat→anthropic, `message_start` needs usage before any block but chat gives no early usage → you must emit null usage then real usage in `message_delta`, which contradicts "never invent token counts." Fix the skeleton and state the null-placeholder rule.
+- **Anthropic `input_json_delta`.** `partial_json` fragments can split mid-JSON/mid-UTF8; they must be concatenated raw per `content_block.index`, never parsed per-fragment. C5 maps indexes but doesn't state this.
+- **C4 "first translated frame" undefined.** For anthropic targets, `message_start` is synthesized immediately → retry window is zero. Define the window as "first upstream-derived content flushed," or defer synthesis until the first real upstream event.
+- **Per-attempt state.** C4 resets `translate_sse`, but block-index maps, arg buffers, and synthesized ids must also reset. "Ids unstable across retries" is a client-visible regression absent from the error taxonomy.
+- **Unblocking + entitlements.** Removing `has_tools`/`has_non_text_content`/responses gate (1.3, 2.3) unblocks traffic that today 400s. No per-route kill switch despite 2/7 auditors; default relies only on the global predicate.
+- **Arg buffer bound.** 1MiB leftover cap is per-leftover; per-call tool args are unbounded → 3.4 soak can OOM.
+
+## 3. Contradictions / stale claims
+- prompt says "revision 1"; target says "rev 2 — audit round 1 (7× GO WITH FIXES)."
+- Gate size: AGENTS.md 47 steps, prompt 69, plan rev2 note 47.
+- "existing 1MiB leftover cap FROM PHASE 1 (not 3.4)" is ambiguous; 3.4 also cites it.
+- C3 "never invent tokens" vs rev2 "non-zero-token E2E assertions."
+
+## 4. Missing first-ship requirements
+- No eunit tasks for C2 `stop_sequence`/`refusal`/`X-Janus-Mapped-Stop`.
+- 2.2 omits `instructions`, `reasoning` items, `item_reference`, `previous_response_id` strip-header test.
+- No target-format mid-stream error-event taxonomy (C4).
+- No auth/base_url task for responses provider (3.1).
+- No ping/keepalive handling either direction.
+
+## 5. Architecture notes
+Keep `sse_st` opaque; add per-direction pure event-map functions, block↔tool index map, per-block arg buffer, synthesized-id set. Error taxonomy: `{upstream_error, target_format_error_event, terminal_usage_row}`. Capture vs synthetic fixtures must be explicitly separated.
+
+## 6. Top 5 edits
+1. Amend C1 →chat skeleton (usage-only chunk) and add null-usage `message_start` rule.
+2. Split fixture policy: real captures for happy path, marked-synthetic for truncation/failure.
+3. Expand 2.2 to `instructions`/`reasoning`/`item_reference`/`previous_response_id`.
+4. Define C4 "first translated frame" per direction, plus id/buffer reset.
+5. Reconcile rev/gate numbers; assign owner for per-route kill-switch decision.

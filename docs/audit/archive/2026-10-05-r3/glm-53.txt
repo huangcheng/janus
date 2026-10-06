@@ -1,0 +1,35 @@
+# Audit — Janus next-phase spec (round 3)
+
+## 1. Verdict
+**GO WITH FIXES** — scope and slicing are right, but the SSE function contracts, Slice B crash accounting, and the deploy equality check are defective as written.
+
+## 2. Critical risks
+- **`sse_events/2` type has no error return** (`{Events, Rest}`), yet §4.1.2 mandates a 1 MiB leftover cap → `{error, upstream}`. Either add the error clause or move the cap to the handler fold; as typed it's unimplementable.
+- **`n>1` → `invalid_request` "before any 200"** is unplaceable: choice count only manifests in response chunks. To error pre-200 you must validate request `n` in §4.1.1 (not mentioned); otherwise it degenerates into a §4.1.4 mid-stream case.
+- **Slice B `try…after` overcounts**: after a successful `track(200)`, the `after` clause still fires; "total counted && failed-flag unset" then +1s `failed` on a succeeded request that crashes later. Need a `janus_stats_tracked` flag set by `track/3`.
+- **Process-dict flags** assume `do_proxy`, `track/3`, `after` share one process — true for Cowboy, but state it as an invariant; janus-auto inner calls must not re-enter the funnel.
+- **Disconnect → track(502) + `inc_failed`**: client-side aborts (Cursor preflights) will inflate the very error rate Slice B surfaces. Separate abort counter or exclude from `failed`.
+- **Deploy equality is brittle**: follower gen "equal to captured leader gen" halts on any concurrent config write during the ship. Use `> gen0` + stable-across-two-polls.
+- **Docker ABI**: named OTP27 volume is right, but bind-mounted `apps` + cached `_build` can serve stale beams when `rebar.lock` changes; `rm -rf _build` is only "if needed" — tie it to lock changes.
+
+## 3. Contradictions / stale claims
+- `sse_events` signature vs leftover cap (above); `n>1` placement vs §4.1.4.
+- Slice B touch map omits `../janus-dashboard` SPEC.md/backend: if FastAPI proxies `/stats`, new fields need passthrough + SPEC sync, not just `nodes.tsx`.
+- §4.1.4 says disconnect usage row "is written" — confirm `janus_usage` schema tolerates null tokens.
+
+## 4. Missing requirements
+- No rule for Chat chunks with empty `delta` and no `finish_reason`; no Anthropic `model_delta` handling.
+- No client-face heartbeat when provider sends no pings (long thinking behind proxies).
+- TF-6.8 usage assertion is weak — Anthropic SSE always reports usage; assert tokens non-null.
+- Chat-face `created`: Anthropic sends no timestamp — specify gateway clock at `message_start`.
+- Deploy artifact path undefined (§4.4.5 says "into the artifact").
+
+## 5. Architecture / design notes
+Handler-owned `#sse_st{}`, single `finalize_sse` in `try/after`, usage on provider bytes, no `collect_drain` on translating streams — correct shape. Atomics via persistent_term before listeners, per-node (never cluster-summed) counters, dual-repo paired-PR enforcement: all sound. Keep `translate_sse` total (no bare `skip`) as specified.
+
+## 6. Top 5 concrete edits
+1. Add `{error, upstream}` to `sse_events/2` (or relocate the cap check); specify request-leg `n`/`stream_options` validation.
+2. Fix Slice B `after` gating with a tracked flag; document the single-process invariant.
+3. Relax Slice D to `gen > gen0` + two-poll stability; define artifact path.
+4. Add dashboard SPEC.md/backend passthrough to Slice B's touch map.
+5. Split client-abort from `requests_failed` (or justify 502 semantics against SPEC §2.4).

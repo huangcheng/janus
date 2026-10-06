@@ -1,0 +1,33 @@
+## 1. Verdict
+**GO WITH FIXES** — two defects would fail the plan's own byte-exact eunit tests and gate (`+Inf` never renders; observe-order race), plus one data-plane crash risk.
+
+## 2. Critical risks
+- **Exposition correctness (blocking).** `le_num(<<"+Inf">>)` → `binary_to_float` badarg → `binary_to_integer` badarg → `invalid`, so `lists:partition` files `+Inf` into **Invalid**: it's dropped and warning-logged. Every histogram loses its `+Inf` series, the `<<"+Inf">>` sort clauses are dead code, and `histogram_zero_filled_order_exact_test` / `mixed_snapshot_exact_test` / gate step 2 all fail.
+- **Histogram race (newly introduced).** Ascending bumps mean a concurrent scrape can see `le=0.5` incremented but `le=1` not — **monotonicity violated**, exactly what gate step 2 asserts. Descending order (largest→smallest, then sum, then count) is the safe direction. Separately, `+Inf == _count` is unreachable atomically across two ETS keys; the equality assert will flake on any live traffic.
+- **Request-id crash risk.** `crypto:strong_rand_bytes/1` is unguarded inside `resolve/1`; entropy failure or `crypto` missing from `janus_http`'s app deps/release ⇒ every agent request 500s. Observability must not be able to do that.
+- **Hot path / cardinality.** ~17 `ets:whereis`+`update_counter` ops plus 3 `norm_labels` sorts per request (self-review's "ns-scale" is optimistic under `write_concurrency` contention on shared keys). `provider` and `lb_stats_total{stat}` are the only unbounded-ish labels; both need the closed-set check in 1b to be a hard gate, not a comment.
+- **Auth.** Reusing the stats token is fine, but admin 401s are unlogged — no brute-force visibility; and the loopback fallback leaks provider names/versions if :8090 is ever Caddy-fronted tokenless.
+
+## 3. Contradictions / stale claims
+- rev5 "observe bump order fixed … count==+Inf invariant" vs. the dropped `+Inf` and monotonicity race.
+- Renderer called "pure/deterministic" but now does `logger:warning` — per bad bound, per series, **every scrape** (unbounded spam).
+- Task 4 Step 1c moves `models_serving` into `janus_http_stats.erl`, which is **absent from Step 5's `git add`** ⇒ broken commit.
+- Comment says `safe/2`; code defines `safe/3` (rev3 history repeats it).
+- `track/3` uses `get(janus_req_path)`, `reply_err/6` uses `cowboy_req:path(Req)` — two sources for one label; unset pdict silently yields `endpoint="other"`.
+
+## 4. Missing first-ship requirements
+- No token-volume counter (`janus_tokens_total{provider,direction}`) — the highest-value gateway metric, data already in `janus_usage`.
+- No assertion that a **streamed** call's usage row carries `request_id` (pdict/process-boundary risk; gate only checks the header). No proof `track/3` and `reply_err/6` share a process, on which `janus_req_counted` depends.
+- No verification that `janus_lb:stats/0` keys are monotonic; `_total` naming on a windowed/resetting source makes `rate()` lie.
+- eunit ETS ownership: `init/0` from the test process means `ets:delete_all_objects` badargs if the owner dies — needs a spawned owner.
+- No upstream propagation of `x-request-id` (document as follow-up), no note that duplicate inbound ids comma-join ⇒ generated id (correct, but say so).
+
+## 5. Architecture notes
+Registry-driven renderer, `ets:whereis` per bump, and `janus_http_classify` as the single mapper are right. Two structural smells: the "pure" renderer reaching into `janus_metrics:buckets()` (pass the ladder as an arg — it also decouples the eunit) and `models_serving` living in `janus_http_stats` rather than `janus_catalog` (core owns catalog shape). Header echo via `set_resp_header` at handler entry is sound given `filter_headers`; keep that verification in the gate, not a comment.
+
+## 6. Top 5 edits
+1. `le_num(<<"+Inf">>) -> infinity` (or partition `+Inf` out before the validity filter) and re-add it after sorting; add an eunit case asserting `+Inf` renders when it's the *only* bound present.
+2. Flip `observe` to descending bucket order (600→0.05), then `+Inf`, sum, count; change gate step 2 to `+Inf >= _count` plus a second-scrape equality check, and document the race.
+3. Guard `generate/0`: try `crypto:strong_rand_bytes`, fall back to `rand:bytes`/`unique_integer`-derived hex; add `crypto` to `janus_http.app.src` + release; add an eunit for the fallback.
+4. Add `janus_http_stats.erl` to Task 4's commit list; move the bad-bound log to a once-per-family `persistent_term`/dedupe flag (or `debug` level).
+5. Gate additions: streamed call ⇒ usage row `request_id` matches; `janus_lb:stats/0` key-monotonicity check before the `_total` rename ships; assert `endpoint="other"` stays 0 after a normal chat call (catches unset `janus_req_path`).

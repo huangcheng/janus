@@ -1,0 +1,29 @@
+## 1. Verdict
+GO WITH FIXES — rev 6 resolves all round-5 flags correctly (+Inf whitelist placement, bump-order invariant, renderer purity, crypto dep, batched skip-warning are all verifiably right in the inline code), but four small defects remain.
+
+## 2. Critical risks
+- **Exposition format:** Now sound. +Inf whitelisted before the validity partition; zero-fill union with ETS bounds; descending-bump order genuinely guarantees monotone buckets under concurrent `tab2list`, and count-last guarantees count ≤ +Inf. Byte-exact eunits lock the format; promtool gate step is the right backstop.
+- **Hot path:** ~16 `update_counter` calls with per-bump `whereis` — ns-scale, try/catch'd, no formatting. Fine.
+- **Cardinality:** Closed enums + operator provider names; no id/key/model labels. OK.
+- **Auth reuse:** Extracted `janus_admin_auth` preserves token + socket-peer loopback semantics; X-Forwarded-For never consulted; README documents the Caddy exposure rule. OK.
+- **Migration:** Nullable column, ledger-deduped, both dialects, index-lock caveat documented. OK.
+- **Residual robustness bug:** `maps:get(dropped, Usage, 0)` trusts the value's shape. `safe/2` catches exceptions, not wrong types — a non-integer `dropped` makes `integer_to_binary` crash the renderer → **every scrape 500s** (logged, gateway unaffected, but the observability surface is down). Same for `buffered`. Validate with `is_integer` filters like `LbRows` does.
+- **Request-id hygiene:** sanitize/echo/injection story is solid (filter_headers verified, comma-join rejection documented).
+
+## 3. Contradictions / stale claims
+- Header/architecture claims "echo on **every** response incl. errors," but a handler-process *hard crash* (cowboy's own 500, bypassing `track/3` and the Req chain) carries no `x-request-id` and is uncounted. The uncounted part is documented; the missing echo is not. Fix the claim or the doc.
+- `families_sorted_once_test` asserts dedup, not sorting (ordering is only covered transitively by the byte-exact mixed test). Rename or strengthen.
+- `generate/0`'s unique-integer fallback can emit fewer than 16 hex digits, violating the documented `req_[0-9a-f]{16}` shape that gate step 7 regex-asserts. Pad to 8 bytes (`binary:encode_unsigned(I, 8)`).
+
+## 4. Missing first-ship requirements
+None blocking — alert rules, tracing, log shipping are explicitly scoped out; promtool + Grafana + smoke cover the surface.
+
+## 5. Architecture notes
+ETS registry (whereis-per-bump, idempotent init), pure renderer, `reply_err/6` guard with handler+proxy double erase of `janus_req_counted`, and shared classifier are all coherent; no drift vectors left.
+
+## 6. Top 5 concrete edits
+1. Handler: `Dropped`/`buffered` through an `is_integer` guard (default 0 + warn) before row/gauge construction.
+2. Document hard-crash 500s as an echo exclusion (or wrap handler bodies so the crash fallback reuses the Req chain).
+3. Pad the `generate/0` fallback to 16 hex chars.
+4. Rename `families_sorted_once_test` → `families_dedup_test` (or assert cross-family order).
+5. Gate step 2: also assert `janus_lb_stats_total` family presence (it's registered and appended unconditionally when LB has stats — currently unasserted).

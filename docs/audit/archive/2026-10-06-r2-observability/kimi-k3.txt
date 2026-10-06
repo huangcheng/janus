@@ -1,0 +1,28 @@
+## 1. Verdict
+**GO WITH FIXES** — round-1 items are genuinely resolved, but rev 2 introduces one exposition-breaking defect (a contracted series is never emitted) and one lifecycle hole (stale tid after app restart).
+
+## 2. Critical risks
+- **Exposition correctness (critical):** `render/2` hardcodes families `requests_total`, `upstream_requests_total`, `x_total`, `request_duration_seconds`. The handler appends `{{counter, usage_writer_dropped_total, []}, Dropped}` to the snapshot, but the renderer never renders that family — **the contracted `janus_usage_writer_dropped_total` is silently dropped**. Task 4's prose ("rendered as a counter family by the renderer") contradicts its own code. Same root cause: `x_total` is a test-only family baked into production code to make `label_escape_test` pass.
+- **ETS registry lifecycle:** `init/0` checks only persistent_term. PT survives an app restart; the ETS table (owned by the dead app master) does not. Post-restart, `tid()` returns a dead tid, every bump badargs into the catch, and **metrics silently no-op forever**. Must also check `ets:info(Tid) =/= undefined` and recreate.
+- **Crash-safety claim overstated:** "bumps are try/catch'd" — only `safe_bump` is. `observe/3`'s guards (`is_number(Seconds), Seconds >= 0`) function_clause *before* any try, from inside `track/3` on the data plane. Wrap the whole `inc/observe` bodies or drop the guards.
+- **`models_serving/0`** guesses the catalog ETS row shape (`{Id, #{id := Id}}`); comprehension patterns silently skip mismatches → silently wrong gauge. Not on the "verify before wiring" list alongside `janus_lb`/`janus_config` (`generation/0`, `ready/0` are assumed, never verified).
+- **Auth reuse, migration, buckets, hygiene:** solid. Dual-dialect SQL is valid on both; `null`-atom binding follows precedent; bucket sort pins `+Inf` correctly (`fun(+Inf,+Inf)->false` is unreachable since map keys are unique); sanitize-else-generate with `[A-Za-z0-9-_]`≤128B is sound; `set_resp_header` at handler entry covers 401/stream on the same Req chain; keep-alive staleness is impossible because handlers always `put` before proxy.
+
+## 3. Contradictions / stale claims
+- Task 4 code contains the unused `LbGauges` variable and calls `janus_lb:stats()` twice, while the trailing note says "drop the unused variable / build once" — fix the code block, don't annotate. As-is it compiles with a warning.
+- "deterministic renderer" vs. the handler's hand-appended `lb_stat` lines: unsorted (`maps:to_list`), unescaped label values, HELP emitted even with zero series.
+- `upstream_requests_total` counts terminal *client* outcomes labeled by provider, not upstream attempts (failover inner attempts excluded by design) — the name lies; document or rename.
+
+## 4. Missing first-ship requirements
+- Handler-level 400s (body-parse rejects pre-proxy) are uncounted and not in the "uncounted by design" list — only crashes/disconnects are documented.
+- No eunit/gate assertion that `janus_usage_writer_dropped_total` actually appears (would have caught defect #1).
+
+## 5. Architecture notes
+Renderer purity is good; the flaw is it's not *generic*. Registry/API split is right. Hook placement (`track/3` terminal-only, auth-reject, models) is correct and double-count-free. Gauge-at-scrape with `safe/2` defaults is the right failure posture.
+
+## 6. Top 5 concrete edits
+1. Make `render/2` derive families from the rows (group counters by name, sort); delete the hardcoded list and the `x_total` hack; omit HELP when the map lacks the name. Add a test asserting `usage_writer_dropped_total` renders.
+2. `init/0`: on PT hit, verify `ets:info(Tid)`; recreate + re-put if dead.
+3. Task 4: rewrite the handler block — one `LbStats`, no `LbGauges`, escape + sort `lb_stat` lines (or route them through the renderer as a gauge family).
+4. Move try/catch to wrap all of `inc/2` and `observe/3` (or remove the `Seconds >= 0` guard).
+5. Add pre-coding verification of `janus_catalog` ETS shape, `janus_config:generation/0`, `ready/0` to Task 4's steps; add gate step asserting `janus_usage_writer_dropped_total` presence.

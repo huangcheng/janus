@@ -1,0 +1,30 @@
+**1. Verdict: GO WITH FIXES** 鈥?the skeleton and DB/ETS split are sound, but streaming retry semantics, translation scope, and secret handling are under-specified to the point of schedule risk.
+
+**2. Critical risks**
+- *Streaming fidelity:* no mention of incremental SSE framing (frames split across TCP chunks), backpressure, idle/total timeouts, or propagating client disconnect to upstream cancel. Cowboy chunked streaming leaks connections without explicit abort handling.
+- *Retry after flush:* plan says "on failure, cool channel and retry next" 鈥?unsafe once first byte reached the client. Retries must be gated to pre-stream failures, else clients get duplicated/partial turns. Tool-calling streams make this worse.
+- *Translation:* "stream + tools minimal" hides the hard part: tool_use鈫攖ool_calls delta mapping, tool_result roles, system鈫擿system` block, stop_reason鈫攆inish_reason, usage, error format mapping. This is weeks, not a follow-up.
+- *Secrets:* "encrypted at rest" needs one `JANUS_SECRETS_KEY` on every node 鈥?unstated. Agent keys should be stored hashed (DB leak = all agent keys). Admin auth "cookie or bearer" is undecided.
+- *DB failover:* "optional" disk snapshot means cold start with DB down is broken. ETS reload with clear+insert is non-atomic mid-reload.
+- *Cool-down races:* per-node cool-down 鈬?N nodes 脳 retries amplification against a sick upstream.
+
+**3. Contradictions / vague claims**
+- "Rate limits" on `api_keys` and phase 6 vs billing/rate limits listed as non-goals.
+- "Native cluster LB" but LB state is explicitly per-node 鈥?it's node-local LB; naming overclaims and weight/RR gives skewed distribution across nodes.
+- "Same schema migrations" across Postgres and SQLite 鈥?dialects differ (upsert, types, RETURNING); migrations must be dialect-aware.
+- Health screen "node list" requires clustering, yet "distributed Erlang optional". NOTIFY can be missed; no generation counter or reconcile loop is defined.
+
+**4. Missing first-ship requirements**
+Timeouts (connect/idle/max body), client-abort propagation, observability counters (latency, upstream errors, cooldowns), retryable-error taxonomy, key hashing + rotation, migration/rollback + admin bootstrap, error-shape mapping between protocols, streaming memory/concurrency test.
+
+**5. Architecture notes**
+- ETS tables should have a designated owner/heir (`gen_server`) with atomic generation swap (new table + pointer), not in-place mutation.
+- `janus_db`: behaviour with `query/transaction/notify` callbacks + `postgres`/`sqlite` dialect modules; epgsql LISTEN/NOTIFY needs a dedicated long-lived connection with reconnect backoff; SQLite falls back to local reload only.
+- Cowboy: `stream_body` with per-frame `data:` reassembly buffer; drain-on-abort to free upstream sockets.
+
+**6. Top 5 plan edits**
+1. Make disk snapshot mandatory; define generation-based atomic ETS swap + periodic reconcile (NOTIFY is lossy).
+2. Gate retries to pre-first-byte; specify cool-down as circuit breaker; rename to node-local LB.
+3. Publish the stream event mapping table (incl. tools + errors) and split translation into non-tool-streaming 鈫?tool-streaming milestones.
+4. Hash agent keys, unify `JANUS_SECRETS_KEY` across nodes, settle admin auth, document rotation.
+5. Cut rate limits from v1 schema or name the phase; add timeouts/abort/observability requirements to every phase's DoD.

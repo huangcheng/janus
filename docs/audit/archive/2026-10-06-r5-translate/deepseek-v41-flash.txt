@@ -1,0 +1,23 @@
+1. **Verdict: GO WITH FIXES** — contracts are sound, but failure-path terminators and two degradation channels are protocol-invalid as written.
+
+2. **Critical risks**
+- **"Error + terminator" (C2/C4) is invalid for 2 of 3 targets.** Anthropic and Responses treat `error`/`response.failed` as terminal; appending `message_stop` or `response.completed` is rejected by strict SDKs. Define per-direction failure terminators (`error` alone; `response.failed` alone) and update C1's table.
+- **`x-janus-mapped-stop` has no carrier on →chat** when upstream omits usage — there is no terminal JSON frame, only `[DONE]`. Specify: fold into the finish chunk or always synthesize a usage-only chunk on mapped stops.
+- **Pre-commit retry claim contradicts header emission.** "pre-commit retries emit nothing client-visible" is false once `stream_reply` sent 200+SSE headers. State the client sees headers, and a retried-and-failed attempt must still emit the error event.
+- **Memory bound conflict:** 256KiB/call × N parallel calls can exceed the 1MiB `sse_st` cap with N>4; global-trip behavior unspecified. Add a per-stream total cap + C2 error path.
+- **Structured output → anthropic is silent semantic loss.** Stripping `response_format` leaves the caller without JSON. Use forced `tool_choice:{type:tool}` synthetic tool, or reject — don't just strip.
+- **Unblock ships default-ON** with only a global knob, no canary; previously-400 requests change routing/cost instantly. Add per-route kill + rollback runbook.
+- **Non-stream `n>1`** is "not regressed" but never documented; billing footgun remains. Capture today's behavior in 1.5.
+
+3. **Contradictions/stale**: C3 "never invent token counts" vs C1 zeroed `message_start` usage (acknowledged, but state 0 ≠ unreported in the usage row). 1.3 "runs only after 1.4-1.8" vs 1.4b pre-unblock ordering is fine as a ship unit, but 1.4a must be a hard dependency, not a sibling. Current-coverage table says responses→chat "req only" yet 2.2 asserts non-stream exists; reconcile.
+
+4. **Missing first-ship**: Phase 1 — reply-side vision/image output; `content_filter`/`stop_sequence` finish mappings have no owning task (C2 only). Phase 2 — responses non-stream `output`/`reasoning` reverse request translate; `reasoning` effort → chat has no native target (strip+record). Phase 3 — responses-provider usage mapping back to chat/anthropic usage events.
+
+5. **Architecture notes**: keep four index spaces in one per-attempt `sse_st` record; one `map_stop_reason/2` 3×3 table shared by stream and non-stream; failure taxonomy `{error, Target, Reason, PartialUsage}`; a single degradation recorder feeding header (non-stream) and terminal payload (stream).
+
+6. **Top 5 edits**
+- Fix C1/C2 failure terminators per direction (docs + translate).
+- Add `x-janus-mapped-stop` carrier rule + synthesized usage chunk.
+- Define global per-stream args cap + overflow error path.
+- Make structured output → anthropic forced-tool or reject.
+- Add canary/per-route kill + non-stream `n>1` docs to 1.3/1.5.

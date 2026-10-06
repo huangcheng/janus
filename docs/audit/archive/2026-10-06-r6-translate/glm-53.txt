@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — C1–C6 are sound after five rounds; what remains is stale task references, one unspecified failure path, and missing rollout discipline for Phases 2–3.
+
+**2. Critical risks**
+- **Pre-commit total failure with early headers.** C4 permits headers via `stream_reply` before commit, but if every attempt fails pre-first-byte *after headers flushed*, the client contract is undefined (a committed connection can't return 502). Lazy skeleton emission is specified; lazy *header* emission is not.
+- **Phase 2 deploy hazard.** If the operator flipped `stream_translate_enabled` ON after 1.9, landing 2.3 activates responses-client translation mid-rollout — exactly the default-on rolling change R4 banned. No re-flip/soak sequence is stated for 2.3.
+- **Phase 3 has no ship discipline:** no task removes the responses-provider stream-block predicate, no e2e gate mirroring 1.9 (entitlement, per-attempt usage rows, C4 cut), no rollout note.
+- **Hot-path cost:** soaks assert memory only; no TTFB/latency budget for translated vs native streams.
+
+**3. Contradictions / stale claims**
+- Task 1.3 no longer exists (merged into 1.9) yet 1.4a ("before 1.3 lands"), 1.4b ("activate in 1.3's ship unit"), and 1.8c ("the moment 1.3 unblocks") still cite it. An agentic worker will implement a phantom task.
+- Impossibles bullet: `cache_control` strip → `X-Janus-Dropped` header violates C2's own rule — stream degradations ride the terminal event + usage row, never committed headers.
+- Coverage table "(text+thinking only)" qualifies rows that also contain non-stream req; clarify non-stream tools already translate today.
+
+**4. Missing first-ship requirements**
+- **P1:** header-emission timing decision (flush at commit vs earlier) + the all-attempts-fail-pre-first-byte response.
+- **P2:** knob interaction at 2.3 (ship gate removal behind an off-by-default flip or documented re-flip + smoke); entitlement/LB assertions for responses-client streams (1.9 equivalents).
+- **P3:** explicit predicate-removal task + e2e gate; 3.3 overlaps 1.0/C6 — retitle "extend corpus", don't re-capture.
+
+**5. Architecture notes**
+- Express C2 stop/error maps as declarative per-direction tables shared by stream and non-stream paths; eunit can diff table vs corpus fixtures.
+- Keep per-attempt reset (C4) as a single `translate_sse:new/1`; enforce C5 caps inside the accumulator, not at emission.
+- One `janus_sse_corpus` loader shared by eunit, mock replay, and conformance prevents fixture drift across phases.
+
+**6. Top 5 edits**
+1. target.md Phase 1: rename stale `1.3` → `1.9` in 1.4a, 1.4b, 1.8c.
+2. C4: add "headers flush at commit; if all attempts fail pre-first-byte after headers sent, emit target-format error event + terminator + terminal usage row."
+3. Add task 2.3a: Phase-2 flip procedure (per-pair default-off or documented re-flip + smoke before 2.3 ships).
+4. Add task 3.5: remove responses-provider stream-block predicate + e2e gate mirroring 1.9's assertions.
+5. Impossibles list: cache_control strip on streams → terminal event + usage row per C2; header is non-stream only.

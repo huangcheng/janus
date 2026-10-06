@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — rev 5 resolves all round-4 findings credibly, but one claimed fix (avg null-on-empty) is not actually in the code, plus a handful of small defects remain.
+
+**2. Critical risks**
+- **SSE fidelity:** Max-per-field merge is correct for cumulative dialects; genuine-zero now survives symmetrically. Regex fallback only fires when *zero* lines decode — a partially-decodable tail (one good non-usage line + truncated usage event) silently returns `undefined` instead of falling back. Low probability, real gap.
+- **Dual-DB SQL:** `DELETE … LIMIT` in subquery is valid both dialects; `percentile_disc`, `strftime`/`to_char` parity OK. `bucket_expr` Postgres day label hardcodes `T00:00` — matches SPA slicing, fine.
+- **p95 cost (SQLite):** `ORDER BY latency_ms LIMIT 1 OFFSET ?` sorts the whole window per summary call, every 30s poll, over up to 31 days of rows. No index on `(stream, latency_ms)`. This is the heaviest recurring query in the plan.
+- **Buffer failure modes:** `whereis(undefined)` in `guarded_cast` drops events **uncounted** — writer-down is visible via `writer.alive` but the loss is invisible in `dropped`. `terminate/2` flush of a full 10k buffer = 200 sequential INSERTs; exceeding the 15s shutdown kills the rest silently (no count, no log).
+- **`maybe_trim` chunk-cap branch:** keeps stale `Size` after dropping chunks (byte count no longer matches kept chunks) — correctness survives via the refold, but the invariant is broken and the test ignores it.
+- **Migration/identity:** FK type-check and PRAGMA checks are properly deferred to Step 3; SET NULL-inert fallback documented. Sound.
+
+**3. Contradictions / stale claims**
+- Rev-5 history claims "avg null-on-empty" but Task 4 still `COALESCE(AVG(...), 0)` → returns `0` on empty windows; SPA type says `number`. Claim and code diverge.
+- Task 2 Step 4 expects "All 12 tests passed" but 13 test functions are listed (Task 4's "parser (13)" agrees with 13).
+- Task 6 has two "Step 4"s (compile + commit).
+- Doc says sweep runs "daily" but first sweep fires at 60s (intentional? undocumented).
+
+**4. Missing first-ship requirements**
+- Zero-fill spec is under-specified: `ts_from = now − N·86400` is not bucket-aligned; the SPA must floor to hour/day UTC or 24h renders 25 buckets. Not stated.
+- No drop accounting/logging for the writer-not-running path (see above).
+- Kill switch `usage_inject_include_usage` has no documented default in any config file — only `application:get_env` fallback.
+
+**5. Architecture notes**
+Buffered writer design (drop-newest cap, mailbox guard via `process_info`, atomics created in `init`) is solid; process-dictionary hook with erase-at-entry is keep-alive-safe; head/tail capture is now genuinely O(1) amortized; read path correctly runs in the caller's process.
+
+**6. Top 5 concrete edits**
+1. Make avg null-on-empty real (drop COALESCE on the two AVG columns, map `null` through) or retract the rev-5 claim.
+2. Fix Task 2 expected count to 13; renumber Task 6 steps.
+3. Recompute `Size` in `maybe_trim`'s chunk-cap branch (or store chunks only).
+4. Specify bucket-aligned zero-fill: floor `ts_from` to the bucket boundary in `usage_window/1` and return the aligned value.
+5. Count writer-down drops in the atomics counter, and add a `usage_events (stream, latency_ms)` index or accept-and-document the p95 sort cost; log rows lost to terminate-timeout.

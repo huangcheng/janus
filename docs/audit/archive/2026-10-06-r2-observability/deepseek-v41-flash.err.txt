@@ -1,0 +1,2 @@
+Warning: Model "deepseek-v4-1-flash" not found for provider "deepseek". Using custom model id.
+400: {"message":"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-v4-1-flash. (request_id: 32c179f9-2e7f-401a-a54d-cbcc7f933831)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}

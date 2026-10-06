@@ -1,0 +1,36 @@
+# Protocol Translation Matrix Plan — Audit (rev 6)
+
+## 1. Verdict
+GO WITH FIXES — the design is coherent and the contracts (C1-C6) are unusually precise, but the responses direction is under-specified relative to chat↔anthropic and three dependencies are ordered against the gate that is supposed to prove them.
+
+## 2. Critical risks
+
+**Responses-side skeleton is asserted, not derived.** C1 names the responses skeleton but 2.1 defers grammar to "eunit ← chat chunks". Responses clients validate strictly (SDK rejects missing `sequence_number`, `item_id`, `output_index`, missing `content_part.added`, `response.created.status`). The plan never states the `sequence_number` field, monotonic per response and reused across the event family — an unstated mandatory field is exactly the class of bug that makes the SDK hard-fail at 1am.
+
+**Terminator/usage interaction under failure is only half-specified.** C2 says the error event replaces the success terminator; C1 says usage rides on the success terminator. When a response fails after commit, does `response.failed.usage` exist? OpenAI does include it; the silent data point is billing drift against `unreported`.
+
+**n>1 is stated as one policy with two different mechanisms.** 1.5 says reject everywhere; Phase 3 says impossible "because the API has no `n`". These are unrelated reasons and 1.5's blanket "fanning out N billable calls is a footgun" cannot be applied to a protocol with no `n`.
+
+**Fixture realism for the reverse direction is deferred, not planned.** 2.4 tests responses-client via a *mock chat* SSE. There is no task capturing real responses-provider transcripts before 3.2 consumes them; 1.0 captures only chat/anthropic plus the "OpenAI reference", which is not the same as captured kimi/dashscope-shaped data.
+
+**1.4b is described as running "against the not-yet-unblocked state machine directly."** This contradicts the ship-unit framing: the E2E versions of the same assertions "activate in 1.3's ship unit." The phase numbering is internally inconsistent (1.3 is never defined; 1.4a/1.4b precede a task that does not exist as a node).
+
+## 3. Stale claims vs the codebase
+- "eunit 123" is cited as the current suite and "reject n>1 on ALL cross-protocol pairs, stream AND non-stream (`n_unsupported`) as a documented behavior change" while Phase 1 unblock is on top of it. Fine, but C4's "synthesised ids never repeat across attempts (eunit-asserted)" is listed as future while the id-space work only exists for chat↔anthropic — responses id spaces don't exist yet, so the claim is forward-looking, not audited.
+
+## 4. Missing first-ship requirements
+- Phase 1: no task asserting that a legacy-400 client is *unchanged* when the knob is off (the back-compat guarantee is the whole reason the knob ships off). 1.9 asserts knob-on behavior; knob-off is only "legacy 400" by implication.
+- Phase 2: no task for `stream_options.include_usage` composition with the chat→responses direction (C3 mentions it but 2.x owns no test).
+- Phase 3: `response.incomplete` mid-stream is in 3.4; it should be in C2's map, since it is a *failure-like* terminal event that may arrive instead of `response.completed`.
+
+## 5. Design notes
+- The error taxonomy conflates "anthropic overloaded_error → temporarily_unavailable" with the chat transport error shape. Keep one `translate_error` module returning `{TargetFormat, Code, Message, Retryable}` and let each direction render its own frame — the current prose embeds rendering rules in the contract.
+- C5's four index spaces should become an explicit table `{source_index_space, source_id, target_index_space, target_id}` per block, asserted in eunit, not left as "maintain per-stream maps".
+- The lazy-emission rule and Cowboy `stream_reply` need one sentence on which headers are already committed at failover time; today C4 says "headers carry no degradation info **by design**" and then requires degradations in a pre-commit header — these conflict.
+
+## 6. Top 5 edits
+1. **Make 1.4b a child of 1.9, or renumber 1.4a/1.4b as 1.9a/1.9b.** Internal ordering must match the ship unit.
+2. **Add `sequence_number` monotonicity to C1 + a 2.1 eunit fixture.** Non-negotiable for responses clients.
+3. **State `response.failed.usage` and `message_delta` on failure explicitly in C2/C3.** Billing invariant, one line.
+4. **Merge 1.5 and 3.2b into one n>1 policy** with "chat/anthropic: explicit `n_unsupported`; responses: unsupported at the API layer" — two reasons, one rule.
+5. **Fix the C4 contradiction** (headers cannot be both "no degradation info" and the location for degradation info); put degradations in headers for non-streaming only and delete the pre-commit-header sentence for streams.

@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — rev 11 is tight on contracts (C1–C5 read implementable), but three items (400→200 unblock compat, an un-arbitrated 2×2 matrix, mis-scoped abort/concurrency tests) will bite during 1.9/2.3.
+
+**2. Critical risks**
+
+- **Unblock = breaking contract change.** Today clients get a deterministic 400 for tools-stream; 1.9 turns that into 200 + a partial-shaped SSE they have never parsed (tool-call deltas, `[DONE]`, usage chunk). Changelog ≠ mitigation. Same class as n>1: it must ride the knob, which it does — but the plan never says the knob also *changes the status contract*, so the flip procedure/2.3a lacks a client-communication step.
+- **2×2 matrix un-arbitrated.** Responses-knob on × tools-knob off, request carrying tools: plan never says whether it 400s (tools predicate) or emits function-call events without the tools gate. "No hidden coupling" is asserted, not specified.
+- **Abort/concurrency tests mislabeled eunit.** 1.4b's client-abort cleanup (no orphan gun), client-abort *cancels* upstream (1.9), and 10-stream concurrency are E2E-only; eunit can't produce a real client disconnect or a real listener. The e2e halves are owned by 1.9 but 1.4b isn't labeled as partially unbuildable.
+- **Response-incomplete semantics.** `response.incomplete` is allowed as a terminal per C1, but is it emitted when upstream finishes `length` *while the failover window is still open* (no data frame yet)? Pre-commit, C4 says emit nothing client-visible; post-commit, terminal. The incomplete-vs-empty interaction is unsaid.
+- Usage-row writes in E2E (1.9 "one usage row per attempt") assume idempotent retries; unspoken whether a cancelled attempt's row is written after the replacement attempt's (both carry `stream=1`).
+- Hot-path cost is fine (persistent_term reads); per-stream maps in `sse_st` are the memory risk 3.4 measures.
+
+**3. Stale / contradictory**
+
+- Phase-2 "responses client tools on non-responses providers" — overview table says today it 400s. Under a 2.3-only knob (tools off), that path = 400. No such behavior is stated anywhere, causing the matrix gap above.
+- `n>1` request-side mapping is provider-dependent and lossy (`reasoning.effort` → thinking config "where supported, else stripped+recorded") but the *dropped* payload schema (1.6) enumerates only structured output and cache_control — unknown knobs aren't covered.
+- "eunit 123" total isn't revised after new suites land; cosmetic but the gate counts flake on it.
+
+**4. Missing first-ship**
+
+- 1.9: enter/exit of the 400 contract documented as a versioned API change, plus a roll-forward/rollback statement if a translated stream misbehaves post-flip (kill-switch flips *new* streams; in-flight streams must drain).
+- 2.3: mid-stream failure-event naming for `response.failed` (the "wire order" for the failure event family: `.delta`/`.done` vs terminal) is only asserted ad hoc in 2.4.
+- 3.3: captures must include **tool-call and vision** responses-provider transcripts, else 3.2a has fixtures only for text.
+- 1.8c: a knob default seed (`stream_translate_tools_enabled=off`) in the same commit, so the dashboard UI ships against a knob the gateway already has — the reverse ordering ships a UI before its value exists.
+
+**5. Top 5 concrete edits**
+
+1. **1.9**: add "this unblock changes the 400 contract to 200 for translated tool/vision streams; announce + gate rollback; in-flight streams drain, new streams 400 off".
+2. **1.4b**: mark client-abort/concurrency assertions "E2E-owned in 1.9; eunit asserts state-machine cleanup only".
+3. **2.3**: write the four matrix cells explicitly — responses-on×tools-off + tools/n>1 in request → target-format error (400) per 1.5 precedence, never a partial tool frame.
+4. **1.9/1.8b**: specify upsert/idempotent usage-row write on retry (`UNIQUE(request_ref, attempt)`), cancelled-attempt row still written post-commit.
+5. **3.3**: extend the corpus list with responses tool + image fixtures for 3.2a; 3.2a eunit asserts `function_call` construction from that material, not text-only.

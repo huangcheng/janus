@@ -1,0 +1,34 @@
+1. **Verdict: GO WITH FIXES** — ship after fixing the histogram bucket ordering, adding HELP lines, and resolving the request-id/auth interaction in reject handlers.
+
+2. **Critical risks**
+- **Bucket lex-sort bug**: `render_hists` does `Les = lists:sort(maps:keys(BucketMap))` on binaries, putting `+Inf` (0x2B) before `"0.1"`/`"1"`… breaks `histogram_quantile()` because Prometheus requires numeric ascending order with `+Inf` last.
+- **Hot-path cost**: 14 `ets:update_counter/4` calls/req (3 counters + 11 buckets + count + sum) on the data plane; benchmark before claiming "no overhead".
+- **Request-id/401 gap**: Task 5 bumps `requests` in `janus_http_auth:unauthorized` but doesn't include `request_id => get(janus_request_id)` — auth-reject events won't correlate to logs/usage.
+- **Loopback auth behind Caddy**: `is_loopback/1` likely uses `peer` IP; the README says admin sits behind Caddy — X-Forwarded-For must not be trusted, document explicitly.
+- **Histogram coverage**: top bucket is 300s; upstream TTFT can exceed 5 min on slow providers (already noted) but also add 0.05s for fast path p50.
+
+3. **Contradictions/stale claims**
+- "TYPE line only" — Prometheus spec expects `# HELP` with every metric family; calling it "standard" while omitting it is wrong.
+- `janus_build_info` rendered as `gauge`; convention since Prometheus 2.x is `# TYPE … info` (always value 1 with labels).
+- Task 8 scrape example uses one `credentials_file` for three nodes — that file would contain one shared token, not "per-node tokens". Split into one job per node or note the trust model.
+- AGENTS.md subdir-vs-flat layout: plan creates both — confirm which is canonical for migration-boot (`janus_db_conn` reads from where?).
+
+4. **Missing first-ship requirements**
+- HELP lines on every metric family.
+- `build_info` TYPE = `info`.
+- E2E step 9 ("log contains request_id=…") — `/stats/logs` is undefined; pick a path (file scrape? new admin route?) or commit to a concrete grep target.
+- Cardinality guard test — assert no row in `janus_metrics` carries a label whose value isn't from a closed enum (regression test).
+- Migration verification: prove boot with a pre-005 row + new INSERT writes 12th column.
+
+5. **Architecture/design notes**
+- ETS named-table `update_counter/4` with default tuple is the right call — no registry race.
+- Renderer is correctly pure (snapshot + gauges list).
+- `set_resp_header` before `require_agent` works iff all error replies go through `cowboy_req:reply`/`stream_reply` (not `Req:reply/2` with a fresh Req). Verify `reply_err/6` honors prior headers.
+- `track/3` `is_terminal` guard correctly avoids janus-auto double-count.
+
+6. **Top 5 concrete edits**
+1. Sort buckets numerically (`{0.1, 0.25, …}` parsed to floats, `+Inf` pinned last) — fix `Les = …` in `render_hists`.
+2. Emit `# HELP <name> <doc>` for every family.
+3. Render `janus_build_info` as `# TYPE janus_build_info info`, value 1.
+4. Add `request_id => get(janus_request_id)` to the `janus_http_auth` reject bump path.
+5. Document loopback-auth caveat in README and harden `is_loopback/1` to ignore `X-Forwarded-For`.

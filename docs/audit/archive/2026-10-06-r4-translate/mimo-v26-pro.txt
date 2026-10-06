@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — the architecture is sound and audits have hardened it, but several cross-cutting contracts reference storage/behavior no task actually implements.
+
+**2. Critical risks**
+- *Degradation recording gap:* C2/C5 say stream degradations (mapped stop, dropped feature) go into "the terminal event + usage row", but 1.8b adds only `cache_read_input_tokens`. There is no column/metric for `x-janus-mapped-stop` or `X-Janus-Dropped`-equivalents — the contract is unimplementable as written.
+- *Commit-point edge cases:* C4 defines commit as first DATA frame and C1 mandates lazy skeleton emission, but nothing specifies the zero-event upstream close (connect, then EOF): skeleton? error event only? Same for truncated-args-at-close on `→responses` — C5 forbids `output_item.done`, but strict SDKs may also require `content_part.done`/`response.failed` shape; untested against real SDK parsing.
+- *Fixture rule self-contradiction:* C6 forbids invented frames "at any phase", yet 1.4 requires mid-stream-cut and truncated-args tests. These can only be corpus-frames-cut-early; state that explicitly or the rule blocks its own gate.
+- *Unblock regression:* removing `has_tools`/`has_non_text_content` changes an API contract (400 → translated stream). Clients that relied on the 400 to trigger their own retry/same-protocol selection now silently get a translated stream with lossy stop-sequence mapping. Also unaddressed: `stream_translate_enabled` toggled mid-stream must not kill in-flight attempts.
+- *Non-stream `n>1`:* "whatever the request translate already does today" is exactly the billing/footgun hazard 1.5 cites for streams — unspecified semantics cannot be "not regressed".
+
+**3. Contradictions / stale claims**
+- 3.3 duplicates 1.0 (same corpus, same providers); as written it is a second corpus-creation task, violating C6's "ONE corpus".
+- C2 `stop_sequence↔stop` is lossy by design, yet 1.8 translates `stop↔stop_sequences` with no note that round-tripping loses the distinction (mapped-stop header covers it — cross-reference missing).
+- No task touches entitlement/quota accounting for translated streams with cache/vision tokens.
+
+**4. Missing first-ship requirements**
+- Phase 1: observability for the unblock (translated-stream error/terminator-rate metric), knob in-flight semantics, explicit non-stream `n>1` policy.
+- Phase 2: `instructions`/reasoning "stripped+recorded" — recorded *where*? (same gap as #1).
+- Phase 3: reverse-direction target-grammar fixtures for 3.2 (1.0's captures are sources, not chat/anthropic *target* expectations).
+
+**5. Design notes**
+State-machine extension points (`sse_st` per-attempt tool accumulator, responses target in `translate_sse`) are correctly placed and C4's fresh-state-per-attempt rule is well drawn. Error taxonomy (C2) is complete for the happy failure set but omits *idle* upstream close and *invalid skeleton sequence* from upstream. Keep per-stream id maps (4 spaces) as pure data in `sse_st`, not process dictionary.
+
+**6. Top 5 edits**
+1. Extend the 1.8b migration with a degradation field (`mapped_stop`/`dropped_features`) or add a dedicated counter task; make C2/C5 reference it.
+2. Add to 1.4: zero-event-close and corpus-cut (not invented) fault cases; resolve `→responses` half-open-block frame set against a real SDK.
+3. Add knob semantics: applies at request admit; in-flight streams unaffected; add error-rate metric to 1.8c.
+4. Replace 1.5's non-stream clause with an explicit policy (recommend `n_unsupported` parity).
+5. Merge/redefine 3.3 as "extend the 1.0 corpus with responses-provider transcripts", and add a 3.2 fixture-prep task.

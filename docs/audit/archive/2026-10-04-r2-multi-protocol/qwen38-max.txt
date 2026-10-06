@@ -1,0 +1,37 @@
+**1. Verdict**
+GO WITH FIXES 鈥?routing/streaming decisions are sound, but the translation contract, error envelopes, and SSE operational details are underspecified enough to break SDK clients at first ship.
+
+**2. Critical risks**
+- **`max_tokens` is mandatory for Anthropic** but optional/absent in Chat/Responses. Plan never addresses injection or 400 鈥?chat鈫抦essages will fail upstream.
+- **Error envelopes:** OpenAI `{error:{message,type,code}}` vs Anthropic `{type:"error",error:{...}}`. Plan says 鈥渆rror shapes鈥?without mandating per-client envelopes; SDKs will choke. Same gap for `stop_reason`, `usage`, `tool_choice` mapping.
+- **SSE ops missing:** gun flow control/idle timeout (long generations get killed), client-disconnect 鈫?upstream cancel (wasted tokens), and cooldown keyed on HTTP status misfires when upstream returns 200 then an SSE error event.
+- **Tool fidelity:** 鈥渂asic shapes鈥?is undefined 鈥?`tool_choice` (`none`/`any`/`auto`/named), `parallel_tool_calls`, multiple `tool_result` blocks vs multiple `role:"tool"` messages, ordering. High silent-drop risk despite the no-silent-drop rule.
+- **Auth ambiguity:** precedence when both Bearer and `x-api-key` arrive; whether client-sent `anthropic-version`/`anthropic-beta` are forwarded, overridden, or rejected.
+- **Dispatch:** bare `maps:get(protocol, Provider)` crashes on missing/unknown protocol values.
+- **Auto-router contradiction:** 鈥渃hat-shaped internally 鈥?translate after tier pick鈥?forces messages鈫抍hat鈫抦essages round-trips even when the picked provider matches the client protocol, violating the locked 鈥減refer native鈥?decision.
+
+**3. Contradictions / stale claims**
+- Translate module 鈥減refer `janus_http`鈥?but tests allowed under `janus_core/test/` 鈥?pick one owner.
+- Native-first decision vs auto鈥檚 mandatory chat pivot (above).
+- Baseline claims (501 stubs, forced `stream => false`) need verification against current code before refactor.
+
+**4. Missing first-ship requirements**
+- Per-client error JSON + status mapping (incl. Anthropic 529 overload).
+- System-message handling: chat `system`/`developer` 鈫?Messages `system` 鈫?Responses `instructions`.
+- Usage/stop_reason mapping table.
+- Body-size limits, request timeouts, cancellation propagation.
+- Explicit 400 policy for unsupported params (`previous_response_id`, `store`, `anthropic-beta`) 鈥?enforce the stated rule.
+- Logging/metrics per path 脳 native/translate.
+
+**5. Architecture/design notes**
+- Shared proxy core is right; keep handlers thin.
+- Chat-pivot minimizes matrix but doubles loss surface; prefer direct chat鈫攎essages, pivot only for messages鈫攔esponses.
+- Gun streaming needs explicit flow control, upstream idle timeout > max generation, HTTP/1.1-safe pooling; Cowboy chunked via `stream_body` preserving upstream event framing without re-buffering.
+- Protocol dispatch via an explicit adapter map with fallback (502), never raw `maps:get`.
+
+**6. Top 5 concrete edits**
+1. Add a normative mapping table: roles/system, `tool_choice`, `stop_reason`, `usage`, and `max_tokens` injection for `*鈫抦essages`.
+2. Mandate per-client-protocol error envelopes; normalize upstream errors before cooldown accounting.
+3. Fix auto path: passthrough native when the picked provider matches client protocol; document pivot only as fallback.
+4. Add streaming ops section: timeouts, backpressure, client-disconnect cancels upstream, cooldown on terminal SSE events.
+5. Specify `x-api-key` vs Bearer precedence and a safe protocol-dispatch fallback (502, no crash).

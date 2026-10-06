@@ -1,0 +1,38 @@
+## 1. Verdict
+**GO WITH FIXES** — storage/rollup/UI spine is sound, but four code-level defects ship broken behavior (SSE tail truncation, `maps:filter` misuse, hard `{ok,Rows}` matches, NULL `||` in the provider-key name) and the `?`-literal guard test asserts nothing.
+
+## 2. Critical risks
+- **SSE fidelity (Responses):** `response.completed` embeds the *entire* response object; >16KB is normal. Keeping only the tail yields `…"usage":{…}}}` with no opening brace → decode fails → usage silently lost. Head/tail size is not the fix; you need a backward brace-matching `"usage":{…}` extractor or a rolling list of *complete* `data:` lines.
+- **Task 7 filters are dead code:** `maps:filter/2` expects a boolean, not `{true, V}`. Result is `#{<<"key_id">> => <<"1">>}`, so `recent_filters`' `{key_id, V} when is_integer(V)` never matches → drill-down silently returns **unfiltered** rows.
+- **`{ok, Rows} = q(...)` in all four read functions** crashes the dashboard handler on any DB error (missing table, busy, timeout) — contradicting the "exception-safe `q/2`" claim.
+- **Hot-path cost:** `capture_usage_chunk` rebuilds a 16KB binary *per chunk* → O(chunks × 16KB) copying + GC in the cowboy process. Keep a bounded chunk list instead.
+- **Writer failure modes:** `?MAX_BUF` bounds state, not the mailbox; a stalled DB blocks `do_flush` while casts pile at full request rate. `stats()` is a `gen_server:call` from the dashboard → couples read availability to writer health, and catches only `noproc`, not `timeout`. Dead writer returns `#{buffered=>0,dropped=>0}` = indistinguishable from healthy.
+- **Dual-DB:** Postgres lane is "optional"; `provider_keys`/BIGINT parent preconditions unverified there (002 is postgres-only, so lineages differ) — 004 could hard-fail. No index supports a ts-range `ORDER BY latency_ms` sort; 30d p95 × 2 × 8 queries per 30s poll is unmeasured. SQLite: no `PRAGMA journal_mode` (WAL?) check, and DELETE-based retention never shrinks the file (no `auto_vacuum`/VACUUM).
+- **Capture completeness:** no `try/after` — client disconnect or an exception before a terminal clause records nothing and increments no counter.
+- **Injection:** changes the upstream request *and* adds a client-visible `choices: []` chunk. Kill switch is an undocumented global env key, no per-provider opt-out, no auto-disable on a 400 mentioning `stream_options`.
+
+## 3. Contradictions / stale claims
+- Migration: "status = upstream HTTP status; 502 on mid-stream failure" vs Task 5: 502/503 = gateway-side. Synthetic and real 502 are indistinguishable.
+- `avg_latency_ms` still mixes stream drain with call latency (round-1 fix applied to p95 only) and renders on **no** Task 8 card — dead, misleading payload.
+- "NULL distinguishable from a real zero" is false: `norm/1` collapses `{0,0}` → NULL; a truncated stream records `completion=0`, not NULL, and escapes `unreported`.
+- Task 4 Step 5's expectation is self-contradictory and wrong: `CAST(NULL AS TEXT) || …` is NULL in **both** dialects, not `'unknown #null'`.
+- `no_qmark_literals_test` names the invariant and only asserts `length(Src) > 0`.
+- Task 8 defers all page code to "the executing session" — rev 3's own fix (tasks = single source of truth) unapplied to the largest deliverable.
+
+## 4. Missing first-ship requirements
+- Zero tests for `janus_usage` (cap drop, flush at 100, `terminate` flush, sweep stop/100-batch cap — which currently exits **silently**).
+- No test that actually executes dialect SQL (esqlite `:memory:`); Postgres unverified.
+- No recorded-vs-served counter; no TTFT (the only stream latency operators want).
+- No zero-filling of empty series buckets → charts misrender gaps.
+- No breakdown LIMIT (unbounded rows), no statement timeout.
+- No row-volume/disk sizing for 31 days.
+
+## 5. Architecture notes
+Buffered writer: drop-newest is right; move counters to ETS, guard `handle_cast` on `message_queue_len`, re-queue or spill one chunk on transient busy rather than dropping. pdict hook: safe given erase-at-entry, but needs `try/after` for coverage. Parser: independent max per field can fabricate a pair never emitted; prefer last-complete-usage-event with max as fallback. `rewrite_pg` is O(n²) byte-wise binary concat — use an iolist/`re:replace` counter. Page: `writer.dropped` is cumulative-since-boot with no timeframe; badge will read as an active incident.
+
+## 6. Top 5 concrete edits
+1. **Task 7:** replace `maps:filter` with an explicit fold building `#{key_id => integer()}`; add an eunit asserting `recent_filters/1` sees atom keys and integers.
+2. **Task 2/6:** add a backward `"usage":{…}` brace-matching extractor over the tail plus a rolling complete-`data:`-line list; add a `openai_responses` eunit with a >16KB `response.completed` payload.
+3. **Task 4:** convert every `{ok, Rows} = q(...)` to a `case` with logged fallback; fix `breakdown_dim(provider_key)` to `COALESCE(pp.name,'unknown') || ' #' || COALESCE(CAST(ue.provider_key_id AS TEXT),'none')` and rewrite Step 5's expectation.
+4. **Task 3/6:** bounded chunk-list tail capture; ETS counters + `message_queue_len` guard; `stats/0` catches timeouts and returns `alive => false`, surfaced in the UI.
+5. **Task 4 tests:** make `no_qmark_literals_test` walk abstract code for literals containing `?`; add an esqlite `:memory:` integration test running totals/series/breakdown/recent; add `janus_usage` gen_server tests; make the Postgres precondition + verification lane mandatory, not optional.

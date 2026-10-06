@@ -1,0 +1,38 @@
+## 1. Verdict
+**GO WITH FIXES** — structure and most rev‑4 closures hold, but four defects sit on the data‑plane hot path or change upstream wire behavior.
+
+## 2. Critical risks
+**Hot path.** `guarded_cast/1` runs `process_info(Pid, message_queue_len)` on *every* request — a lock on the single writer from every core; worse contention than the `persistent_term:put` it replaced. When `whereis` is `undefined`, events vanish with **no counter and no log** (crash‑loop = silent total loss).
+
+**Tail trim isn't O(1) amortized.** `Size0 + byte_size(Chunk)` accumulates over *all* chunks, including ones discarded by the 256‑chunk `sublist`; the byte branch never recomputes Size. Past 16KB cumulative, *every* chunk runs the O(min(256, cap/avg)) refold — a 100k×64B token stream does ~10M+ ops inside the request process.
+
+**SSE fidelity.** Parser logic is correct (genuine‑zero, cache tokens, nesting; `lists:flatten` over binaries is safe). Two gaps: the regex fallback fires only when **no** data line yielded usage, so an oversized `response.completed` is lost if the head produced any; and `_ = cowboy_req:stream_body(...)` swallows disconnects — the drain continues, upstream tokens keep burning, and you record a full‑latency 200.
+
+**Injection.** `usage_inject_include_usage` defaults **true**: first deploy rewrites every OpenAI‑chat stream and appends an empty‑choices chunk some SDKs mishandle; strict upstreams may 400. The key is never added to config or docs, so the kill switch is unreachable.
+
+**FK/identity.** `track/3` guards `Route` but not `Agent` — `maps:get(id, Agent, null)` raises in the request process if `Agent` isn't a map. With `foreign_keys=ON`, an id deleted between capture and flush fails the **whole 50‑row chunk**.
+
+**Sweep.** COUNT‑then‑DELETE rescans the old set each batch (O(n²)); the 100‑batch ceiling caps deletion at **500k rows/day**, so above ~16k req/day the table grows forever. Two nodes on shared Postgres race with no advisory lock; SQLite never reclaims the file.
+
+**p95/dual‑DB.** Nearest‑rank and `percentile_disc` are right, but p95 costs two full window sorts per poll (~10 queries/30s, no cache, no latency index). Postgres ships on faith — `GROUP BY <alias>`, `CAST(... AS TEXT)`, `to_char(date_trunc(... AT TIME ZONE 'UTC'))`, numeric `AVG` are only covered by an *optional* manual lane. `provider_keys.provider_id` and supervisor start/stop ordering vs `janus_db_conn` are unverified preflights.
+
+## 3. Contradictions / stale
+- Task 2 expects "All **12** tests"; file has 13 (Task 4 says 13).
+- Rev‑5 claims "avg null‑on‑empty"; SQL is `COALESCE(AVG(...),0)` → empty windows show 0 ms next to p95 "—".
+- Rev‑5 claims trim is O(1) amortized — false past the cap.
+- Task 6 has two "Step 4"s; Files omits the new test file and the required `maybe_trim/2` / `maybe_inject_stream_usage/4` exports.
+- `dropped` mixes cap/malformed/insert‑failure, but the badge says "dropped (writer)".
+- 503 `provider_disabled` may be unreachable (no Route ⇒ guard drops it).
+
+## 4. Missing first‑ship
+Cache tokens folded irreversibly into `prompt_tokens` (add `cache_creation_tokens`/`cache_read_tokens` to 004). `/usage/events` has no time filter, so drill‑down ignores the range; summary omits the bucket unit, forcing SPA duplication. No operator‑docs task, no `writer.dropped` alert, no check that proxy retries don't double‑count.
+
+## 5. Architecture notes
+Writer shape, caps and single funnel are sound. `rewrite_pg`'s byte‑wise `<<C,(recurse)/binary>>` is O(n²) copying per read query — use an iolist. The `?`‑literal eunit only scans `breakdown_dim`, not `recent`/`series`/`p95`. `(p95 ?? "—") + "ms"` renders "—ms"; error share % needs a zero guard.
+
+## 6. Top 5 edits
+1. Task 6: recompute retained size in the chunk‑count branch, refold only at >2× cap; add a 100k‑chunk bounded‑work test.
+2. Task 3: remove per‑request `process_info`; count drops when `whereis` is undefined; per‑row retry on chunk failure; `is_map(Agent)` guard in `track/3`.
+3. Task 6: default injection **false**, wire config + docs, abort drain on `stream_body` `{error,_}`.
+4. Task 4: null avg on empty, single‑query p95 or `(stream,ts,latency_ms)` index, extend `?`‑guard to all SQL, make Postgres verification mandatory.
+5. Task 1/7: add cache‑token columns, preflight `provider_keys.provider_id` + supervisor ordering, add `from`/`to` to events and `bucket` to summary, fix Task 6 numbering/Files.

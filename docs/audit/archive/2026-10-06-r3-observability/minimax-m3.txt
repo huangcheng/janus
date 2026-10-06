@@ -1,0 +1,32 @@
+**Verdict: GO WITH FIXES** — shippable after verifying the uptime-gauge math, the cross-protocol header echo, and the log-site enumeration.
+
+**Critical risks:**
+- **Uptime gauge math**: `{WallMs, _} = statistics(wall_clock)` assumes OTP 18+ millisecond return. Build-OTP is OTP 27 — correct, but the claim is asserted nowhere. Silent format regression → wildly wrong gauge.
+- **Cross-protocol translate header echo**: handler-entry `set_resp_header` covers the same Req chain ONLY if `janus_http_protocol_translate` reuses that Req. Plan verifies `reply`/`stream_reply`, not translate paths.
+- **`lb_stat` label cardinality**: `counter="..."` rides on every key of `janus_lb:stats/0`. No whitelist; new LB counters become unbounded labels.
+- **Migration 005 rollback**: `ADD COLUMN TEXT` is forward-only; no down-migration. Acceptable for first ship but document.
+- **Per-node token rotation**: `JANUS_STATS_TOKEN` env-var; rotation requires restart. Document.
+
+**Contradictions / stale claims:**
+- "Pure parsers/logic may get eunit first" — but `janus_uptime_seconds`, `models_serving/0`, `lb_stat` parsing have **no tests**. Violates the project rule.
+- T4 Step 1b (pre-coding verification) is listed **after** Step 1 — reversed order; must gate the wiring.
+
+**Missing first-ship requirements:**
+- No alert seed (e.g., `dropped_total` rate > 0, no-requests-in-5m).
+- Gate step 9 substring-matches the log; should assert a structured logger key, not arbitrary substring.
+- No cardinality self-check in the gate (distinct label combinations ≤ N).
+- No `active_requests` gauge to diagnose stuck upstreams.
+- No `x-request-id` echo on mid-stream socket-level disconnects (acknowledge in README; gate cannot assert).
+
+**Architecture/design notes:**
+- **Registry-driven renderer**: correct fix for rev 2's hardcoded-family bug; `ets:whereis` per bump correctly avoids the persistent_term trap.
+- **Renderer purity**: deterministic + total + escaped. But `escape/1` strips only NUL + escapes `\`, `"`, `\n` — `tab`, `cr` survive into client-controlled `x-request-id`. Add a strip pass.
+- **Hook placement**: `track/3` is the right single terminal site; auth and models documented as exceptions. Good.
+- **Header echo mechanics**: sound IF every reply path uses the returned Req. `reply_err/6`, `reply_json`, stream, and translate must all be audited (first three asserted, translate not).
+
+**Top 5 concrete edits:**
+1. **Eunit the uptime gauge**: assert `statistics(wall_clock)` returns milliseconds in the build OTP and `WallMs div 1000` produces a plausible integer. Catches silent regression at test time.
+2. **Whitelist `lb_stat` labels** in `janus_lb` (or filter at bump time); reject unknown counters with a one-time warning. Bounds cardinality.
+3. **Add `active_requests` gauge** (inc at handler entry, dec at exit) — cheap and high-signal for stuck upstreams.
+4. **Verify translate chain**: assert `janus_http_protocol_translate` reuses the same Req for `x-request-id`; add a gate step hitting `/v1/messages` and checking the response header.
+5. **Tighten gate step 9**: assert `request_id` appears as a structured logger key in the `janus_request` event, not a free-form substring match.

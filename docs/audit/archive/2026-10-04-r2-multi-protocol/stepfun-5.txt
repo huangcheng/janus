@@ -1,0 +1,28 @@
+**Verdict:** GO WITH FIXES 鈥?clean scaffold, but exact protocol matching, Anthropic-required fields, per-dialect errors, auth forwarding, and SSE-error cooldown are underspecified enough to regress existing clients.
+
+**Critical risks**
+- **Protocol match must be exact enum, not "OpenAI family":** `openai_chat` is not native for `/v1/responses`. "matches the client API" invites a Responses body 鈫?`/chat/completions` passthrough 鈫?break. Enforce `openai_chat|openai_responses|anthropic_messages`; anything else 鈫?translate or 400.
+- **Auth confusion:** client `x-api-key` must terminate at Janus (agent-key) and never reach upstream; the Anthropic adapter uses the provider's catalog credential. Define precedence when Authorization + `x-api-key` both present.
+- **Error dialect:** native passthrough = provider error verbatim; translated = error must be in the *client's* dialect or SDK parsers break. A Janus 400 on `/v1/messages` should be Anthropic-shaped. Plan says "error shapes" but not per-side.
+- **Anthropic-required fields:** `max_tokens` mandatory (chat optional) 鈥?inject default or 400; extract top-level `system` from `role:system`; map `stop_reason`鈫擿finish_reason`.
+- **Tool chat-pivot:** `call_id`鈫擿tool_use_id` namespaces differ; Anthropic enforces tool_use鈫攖ool_result pairing. Parallel calls / orphaned results are the silent corruptors.
+- **Auto-router ordering:** messages/responses client 鈫?chat-pivot tier pick 鈫?provider translate means a two-hop; ensure `stream:true` is still rejected before upstream and tool IDs stay coherent across the pivot.
+- **Silent drops:** image "passthrough if present" is drop-in-disguise 鈥?`image_url` data-URI 鈮?Anthropic `source` blocks 鈫?malformed upstream.
+
+**Contradictions / stale**
+- Baseline claims `protocol` is "stored/catalogued," yet all routing depends on it 鈥?confirm non-null seeding or `maps:get/2` crashes on legacy rows.
+
+**Missing first-ship**
+- Explicit `translate_unsupported` 400 list (system, vision, tool_choice, parallel tools, thinking/reasoning) 鈥?reject, don't default.
+- Guard `stream:true` before upstream; raise non-stream gun timeout for translate.
+
+**Design notes**
+- Thin shared `proxy/5` over auth+resolve+LB is right.
+- Cooldown keyed on "terminal status" misses mid-200 SSE `error` events 鈥?parse terminal/`error` SSE events on the native stream path and feed LB too. Backpressure is beyond first ship.
+
+**Top 5 edits**
+1. Exact-enum `maps:get(protocol, P, openai_chat)` + guard; reject unknown labels.
+2. Anthropic-field middleware (max_tokens default, system extraction, stop/finish map); per-dialect errors; never forward client `x-api-key`.
+3. SSE `error` event 鈫?LB cooldown on native streaming.
+4. Tool-ID + pairing rules; explicit `translate_unsupported` 400s; drop the image passthrough escape.
+5. Aliyun verification matrix (success / stream鈫?00 / unsupported鈫?00 / error-stays-client-dialect) + eunit scope matching the locked translate pairs.

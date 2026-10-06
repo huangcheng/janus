@@ -1,0 +1,35 @@
+**1. Verdict:** GO WITH FIXES 鈥?sound OTP skeleton, but streaming translation scope, distributed LB semantics, and the dual-database adapter are under-specified enough to sink v1.
+
+**2. Critical risks**
+- **Streaming fidelity**: SSE event translation (Anthropic鈫扥penAI chat, tool-call deltas, `finish_reason`/usage mapping) is lossy and hard; plan omits client-disconnect cancellation, upstream idle/overall timeouts, and a bounded retry budget per request.
+- **Translation scope**: `/v1/responses` 鈫?chat/messages is the largest unknown; the matrix implies a bidirectional translator that will dwarf proxy + admin combined.
+- **DB failover vs ETS**: "DB down, traffic up" is fine for reads, but writes are not defined atomically, and a missed `NOTIFY` during partial partition silently desyncs nodes.
+- **Multi-node LB**: marking "Distributed Erlang optional" while placing cool-downs/in-flight/RR in *local* gen_server/ETS guarantees non-deterministic spreading and hot-spotting across unclustered nodes.
+- **Secrets**: single `JANUS_SECRETS_KEY` with no rotation/loss story means a lost key = unrecoverable provider config.
+
+**3. Contradictions / vague claims**
+- "Same schema migrations" through one `janus_db` adapter for Postgres + SQLite is optimistic; `UPSERT`, `RETURNING`, JSONB, and migration DDL diverge immediately.
+- Success criteria demands clustered nodes + shared Postgres + live UI reload, yet architecture says clustering is "optional" and SQLite disables propagation 鈥?the success path is only exercisable in Postgres+cluster mode.
+- "Native cluster LB" has no algorithm, quorum, or failure semantics.
+
+**4. Missing first-ship requirements**
+- Transport guards: upstream connect/read timeouts, request cancellation, max body size.
+- Config reconciliation sweep (missed NOTIFY) + ETS generation counter for atomic pointer swap; never mutate in place.
+- Reconnect/backoff for Postgres and upstream connection pooling.
+- Schema version table and ordered migrations.
+- Rate-limit implementation sketch (table claims it, no design).
+- Minimal observability: structured logs, counters for cool-downs/upstream errors.
+- `/health` endpoint for Caddy node-level checks.
+
+**5. Architecture notes**
+- Supervise `janus_providers` (upstream connection pools) separately from `janus_http`; streaming handlers must not be per-request supervised children.
+- Name Cowboy 2.x `stream_body` for SSE; forbid `cowboy_req:reply` on streaming paths.
+- `janus_db` should be a behaviour with Postgres as the v1 implementation; inject SQLite only as a dev preset, never a runtime branch in the hot path.
+- ETS reload: build snapshot into new tables 鈫?atomically swap handles 鈫?delete old.
+
+**6. Top 5 concrete plan edits**
+1. Drop the runtime Postgres/SQLite switch; ship Postgres-backed v1, offer SQLite strictly as a local/dev single-node preset behind the same `janus_db` behaviour.
+2. Add a "transport guarantees" section: upstream timeouts, cancellation on client disconnect, retry budget (e.g. 鈮? retry, only on connect/handshake failures).
+3. Reduce v1 translation to Anthropic鈫擮penAI chat streaming + minimal tools; move `/v1/responses` translation to post-v1 (upstream passthrough only).
+4. Define cluster LB concretely: either "single Erlang distribution with global RR" or "node-local LB + coarse Caddy spread" 鈥?pick one for v1.
+5. Add periodic config reconciliation (poll every N sec) plus a generation counter so missed NOTIFY self-heals; document `JANUS_SECRETS_KEY` loss as unrecoverable, or require boot-time plaintext secrets with `0600` file perms.

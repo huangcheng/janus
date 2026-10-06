@@ -1,0 +1,31 @@
+1. **Verdict:** GO WITH FIXES — three concrete gaps (responses item-id space, reasoning-effort request mapping, capability-flag surface) before Phase 1 ships; otherwise the plan is sound and audit-round-2 fixes hold.
+
+2. **Critical risks**
+   - **C5 responses `output_item` identity space is undefined.** You enumerate four spaces and bind `responses output_item` to "identity", but never say whether chat→responses synthesizes `rs_*` ids or how they relate to tool-call ids. Without this, the four-space map collapses to three and eunit 1.1 will pass but real SDK clients will reject duplicate/empty item ids.
+   - **Reasoning-effort request mapping is orphaned.** Phase 1.8 covers `tool_choice`, `parallel_tool_calls`, `stop`, `cache_control` — but not `reasoning.effort` (chat) / `thinking` (anthropic) / `reasoning.effort` (responses). Phase 2.2 needs it; no phase owns it.
+   - **→responses skeleton interleaving.** C1 mandates `output_item.added → content_part.added → output_text.delta* → …` "per item (message + reasoning items)" lazily. Strict Responses-SDK clients reject interleaved reasoning/message parts or missing `content_part.added` on reasoning. Lazy emission makes the first upstream event decide whether the stream carries thinking — and the skeleton must include reasoning items only when source stream proves they exist. State-machine task missing.
+   - **Capability surface for `response_format` (1.6).** "Passes through when target supports it" requires per-listing capability flags; plan does not enumerate schema, LB injection, or generation-poll hot-reload.
+   - **Phase 1.4 load smoke on partial implementation.** 10-concurrent on freshly-built translate risks masking event-order bugs the conformance corpus should catch — assert against corpus fixtures, not synthetic timers.
+
+3. **Contradictions / stale claims**
+   - "Existing 1MiB cap (already enforced by SSE parser today — Phase 1 just keeps it)" — needs source pointer; current `sse_st` does not appear to enforce this. Verify or weaken to "Phase 1 introduces and asserts the cap".
+   - "OpenAI reference (responses)" in C6 lacks a capture source; the other three are named upstreams. Specify capture path.
+   - Phase 1.5 says "Native routes unaffected" but does not assert eunit for native n>1 — Phase 1 should add a regression assertion that the chat→chat n>1 path is unchanged.
+
+4. **Missing first-ship requirements per phase**
+   - **P1:** responses item-id synthesis rule + reasoning-effort request map + capability-flag schema + load smoke against corpus replays (not synthetic).
+   - **P2:** Reasoning-items skeleton branch eunit + `output_item` id synthesis eunit + entitlement mid-stream cut (provider disabled) test.
+   - **P3:** New `provider_protocol=openai_responses` enum migration + LB listing + capability flags + `previous_response_id` strip+header behavior on the request path.
+
+5. **Architecture / design notes**
+   - State-machine extension point: `translate_sse` gains a third target (`responses`); `sse_st` gains `responses_item_id_counter` + reasoning-item accumulator. Per-attempt fresh (C4).
+   - Event map: stop↔end_turn, tool_calls↔tool_use, length↔max_tokens (`incomplete`), `content_filter↔refusal` is correct; `stop_sequence→stop` is many-to-one and must be recorded in usage row, not header (streams).
+   - Error taxonomy: add `n_unsupported`, `feature_dropped` (header on non-stream, usage-row annotation on stream), `midstream_upstream_failure` (terminal error event per target). Include `response.failed` mapping both directions.
+   - Dependency: 1.3 → 2.3 → 3.2 (predicate removal sequenced); Phase 3.1 (provider adapter) blocks 3.2.
+
+6. **Top 5 concrete edits**
+   1. **1.1/1.8 — add a 1.8 sub-task:** "Reasoning/thinking effort request mapping (chat↔anthropic↔responses) on captured fixtures, before any stream work." Block 2.2 on it.
+   2. **C5 — define responses `output_item` id synthesis:** synthesized per attempt, monotonic, never collides with tool-call id space; eunit-asserted across attempts.
+   3. **C1 →responses — split skeleton:** reasoning-item branch (`reasoning_item` added → summary delta/done) emits only when source stream proves thinking present; eunit covers both branches with corpus fixtures.
+   4. **1.6 — add capability-flag schema task:** per-listing `supports_response_format` / `supports_structured_output` / `supports_tool_choice`; gate 1.6 strip branch on it; hot-reload via existing generation poll.
+   5. **1.4 — replace synthetic concurrency smoke with corpus replay:** mock upstream replays captured tool-call transcripts; assert C1 order, non-zero tokens, half-open-tool terminal, id non-reuse; add entitlement-mid-stream cut test.

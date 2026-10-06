@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — the plan is nearly shippable, but Task 2's module as printed won't compile (duplicate macro), and three stale rev-7 residues will mislead implementers.
+
+**2. Critical risks**
+- *Cardinality:* sound — closed enums + operator provider names; `provider` on `upstream_requests_total` documented as orphaning on delete.
+- *Hot path:* ~16 `ets:update_counter` on one `whereis`, precomputed bound binaries, whole-body try/catch. Fine. Minor: eunit's `init/0` table is owned by the test process and dies between tests (works by accident).
+- *Exposition:* shape is 0.0.4-correct (untyped `build_info`, one HELP/TYPE, `+Inf` last, `[short]` floats). Residual: `dedupe_bounds`/`sum_dupes` keep two non-canonical equal-value bounds ("2.50"/"2.500") → adjacent-equal `le` breaks `histogram_quantile`; defense-in-depth only, but cheap to close.
+- *Auth reuse:* clean extraction; gate 2b regression covers it.
+- *Histograms:* `+Inf`→DESC ladder→sum→count ordering gives monotone buckets and count ≤ +Inf at any interleaving. Consistent with gate assertions.
+- *Request-id hygiene:* charset whitelist + length cap, never echoes invalid inbound values; `janus_req_counted`/`janus_request_id` erase discipline coherent (handler authoritative, proxy belt).
+- *Migration/dialect:* 009 on both dialects, nullable, index-lock/CONCURRENTLY note present.
+- *Multi-node scrape:* per-node jobs + token files; `lb_stats_total` summable; resets documented.
+
+**3. Contradictions / stale claims**
+- Task 2's code block has `-define(TABLE, janus_metrics).` **twice** and the `buckets/0` doc comment twice — epp rejects macro redefinition; uncompiled-as-written.
+- Task 7 Step 1 still says "gateways with **migration 005**" — the 005→009 renumber missed this instance.
+- Task 6: "row-2 `status` at position 19" contradicts the plan's own 16-column list (2 rows × 16: status = 24, `request_id` = 32). Stale param assertion.
+- Task 6 `git add` still lists `apps/janus_core/test/janus_usage_sql_tests.erl` though rev 7 moved the shape test into `janus_usage.erl -ifdef(TEST)` — `git add` of a non-matching pathspec fails the step.
+
+**4. Missing first-ship**
+- `statistics(wall_clock)` SinceLastCall grep lives only in "key file facts", not in Task 4 Step 1b's checklist.
+
+**5. Architecture notes**
+- Renderer purity holds (registry `buckets/0` is a constant); registry-driven families + unknown-family rendering is the right fix.
+- `janus_http_metrics:render/1` guards row assembly inside the try, but `maps:get(dropped, Usage, 0)` and `maps:to_list(LbStats)` run **before** it — a non-map `stats/0` return escapes as an unlogged Cowboy 500, the exact class rev 7 closed.
+- `Proto` in `track/3` vs `classify:protocol(path)` in reply_err/auth: on cross-protocol translate these may disagree; gate 4b asserts only the header.
+
+**6. Top 5 edits**
+1. Delete the duplicate `-define(TABLE, ...)` + duplicated comment in Task 2.
+2. Task 7: "migration 005" → "009".
+3. Task 6: fix the shape-test positions (status 24, request_id 32) and drop `janus_usage_sql_tests.erl` from the commit list.
+4. Move `maps:get`/`maps:to_list`/`BadStats` inside the render `try`.
+5. Gate 4b: assert `janus_requests_total{endpoint="messages",protocol="anthropic_messages"}` delta (pin `Proto` = client protocol).

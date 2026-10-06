@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — the contracts are now testable and self-consistent, but one knob is unnamed/unshipped and Phase 2's e2e under-covers the very features Phase 2 exists to enable.
+
+**2. Critical risks**
+- The `n>1` streaming reject is "always knob-gated" (1.5) but no task ships a knob for it: the named knobs are `stream_translate_tools_enabled`, `stream_translate_responses_enabled`, `stream_translate_provider_responses_enabled`. Either the reject rides the tools knob (state it) or it has a fourth knob that 1.9/2.3 must ship. Today 1.9's assertions reference behavior with no carrier.
+- 1.5's non-stream evidence rule ships the reject UNGATED "as a bug fix" while streaming ships gated — two regimes, one changelog entry; the gate must assert legacy-off behavior for both transports, and error precedence (`n_unsupported` vs entitlement vs no-route) is unspecified.
+- →chat failure path: C1 mandates a usage-only chunk (when usage reported) before `[DONE]`, C2 says on failure "usage rides the usage row ONLY." Does the error-replaced stream still carry the usage chunk? Pick one; eunit the byte order both ways.
+- 2.4 asserts only event order/terminator/usage — no tools, vision, or structured-output assertions for the responses client, though C5's four index spaces (incl. `output_item` identity) apply to every pair. Phase 2's whole point is tools; shipping without a translated tool-call e2e repeats the Phase-1 "text-only stream" defect one level up.
+- 4MiB reconstruction cap is →responses-only, but the cap-exceed C2 error path has no named e2e in 2.4/3.4 (1.4b covers the other three caps).
+
+**3. Contradictions / stale**
+- 1.9 prerequisites list "1.6" but omit 1.6a, which 1.6 itself depends on for terminal-event schema — a ship-unit prerequisite gap.
+- C4(b) owes the terminal usage row "since the flush," but C4 defines commit as first DATA frame and 1.4b/1.9 test "retry after headers flush emits nothing" — the row-owed-since-flush rule is asserted nowhere and reads as a third commit definition.
+
+**4. Missing first-ship requirements**
+- Phase 2: tool-call + vision e2e for responses client; `output_item` id-space collision test at the E2E layer.
+- Phase 3: 3.2 has no non-stream error-mapping e2e (adapter non-2xx → C2 is named only in 3.5's stream scope).
+- No documented knob-flip runbook entry for `n>1` (2.3a covers only the responses knob).
+
+**5. Architecture notes**
+- State machine extension points (sse_st per-attempt accumulator, four index maps, single decode-at-close) are clean; error taxonomy `{type, code, message}` + per-protocol serialization is complete — add one eunit row for responses `response.failed.error.code` passthrough.
+- Lazy emission correctly protects the failover window; assert in 1.4b that pings after a content event still don't re-trigger skeleton double-emission.
+
+**6. Top 5 edits**
+1. 1.5: name the `n>1` reject's knob (or fold into `stream_translate_tools_enabled`) and specify error precedence.
+2. C1/C2: state whether the failure path emits the →chat usage-only chunk; eunit both byte orders.
+3. 2.4: add tool-call + vision + cap-exceed assertions for the responses client.
+4. 1.9 prerequisites: add 1.6a explicitly.
+5. C4: reconcile "usage row owed since flush" with commit = first DATA frame (e2e-asserted).

@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — structurally sound after six rounds, but one C4 e2e proof is orphaned, the n>1 knob semantic is ambiguous, and two normative contracts lack owning tasks.
+
+**2. Critical risks**
+- *Interleaved buffering (C5):* flattening interleaved chat tool deltas into sequential anthropic blocks reorders content; no task explicitly asserts text-order preservation round-trip, only that a fixture exists.
+- *Thinking + tool_use coexistence:* kimi streams interleave thinking blocks with tool_use; no 1.0 fixture or 1.1 eunit names this combination — highest real-world breakage probability.
+- *Hot path:* accumulators (256KiB/call, 1MiB total) have no append-strategy constraint; quadratic `<<>>` concat passes a 20-stream soak and dies at scale. Specify iolist + O(1) cap checks.
+- *Behavior change:* n>1 silent-degrade → reject is client-visible; gating unclear (below).
+
+**3. Contradictions / stale claims**
+- **C4 vs 1.4b/1.9:** C4 promises "one e2e proof … in 1.4b" of pre-commit retry-after-headers-flush, but 1.4b is explicitly eunit and 1.9's activated e2e list omits the retry/upstream-switch assertion. The contract has no E2E owner.
+- **1.5 knob ambiguity:** "non-stream reject rides in 1.9's commit (before the flip, behavior unchanged)" contradicts "e2e asserts both regimes" — undefined whether knob-off keeps legacy silent single-completion or rejects.
+- **C1 → 2.1:** `sequence_number` monotonicity is delegated to "2.1 eunit" but 2.1's task text never mentions it.
+- Cosmetic: task 1.3 no longer exists (gap 1.2→1.4); 3.4 is numbered after 3.5.
+
+**4. Missing first-ship requirements**
+- *Phase 1:* no task to update `../janus-dashboard/docs/TEST-FLOWS.md` (authoritative; gate steps grow per AGENTS.md); no translated-stream *error* counter (1.8b shows volume via `translated=1`, not failure rate) — needed before any flip; thinking+tool fixture.
+- *Phase 2:* only the 2.1 wording fix.
+- *Phase 3:* "conformance suite" has no runner/report artifact defined — 3.3 extends corpus, nothing consumes it as a suite.
+
+**5. Architecture notes**
+- Canonical `{type, code, message}` error struct is right; add one eunit asserting all three protocol serializations from a single struct.
+- Fresh per-attempt `sse_st` and unknown-event-skips-commit are correct invariants; keep the client-abort cleanup assertion in 1.4b.
+- prefer_proto as permanent backstop for remaining impossibles is correctly scoped.
+
+**6. Top 5 concrete edits**
+1. Move the C4 retry-after-headers-flush proof into 1.9's e2e assertion list; fix C4 wording ("1.4b" → "1.9").
+2. In 1.5, state knob-off n>1 behavior explicitly — recommend: non-stream reject rides unconditionally (silent degrade is the bug), e2e asserts both regimes only for streaming.
+3. 1.0: add kimi thinking+tool_use interleaved transcript; 1.1: assert text-order preservation through buffered interleaving.
+4. Add a dashboard-repo task: TEST-FLOWS.md flow additions per ship unit (1.9, 2.3); add a translated-stream error counter to 1.8b.
+5. 2.1: add explicit `sequence_number` monotonicity eunit; C5: mandate iolist accumulation with O(1) cap checks; fix 3.4/3.5 ordering.

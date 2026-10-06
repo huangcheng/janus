@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 2 correctly absorbs round-1 contracts, but C5's buffer-until-closed invariant contradicts task 1.1's delta streaming, and C1's usage-in-`message_start` contradicts C3's never-invent rule.
+
+## 2. Critical risks
+- **C5 ↔ 1.1 contradiction.** "NEVER emit a tool block/call downstream until its arguments buffer is closed" makes `input_json_delta` / `function_call_arguments.delta` un-emittable — yet 1.1's expected skeleton streams them. As written the invariant forbids the task. Realistic rule: deltas may flow, but the closing event (`content_block_stop` / `finish_reason=tool_calls`) must be withheld and replaced by the C4 error terminator on truncation. Rewrite C5 accordingly.
+- **C1 ↔ C3 contradiction.** `message_start` must precede all blocks (C1) and "has usage", but chat-provider usage only arrives in the trailing chunk (C3). Emitting `message_start` with usage forces invention. Fix: `message_start` omits/zeros usage; real counts ride `message_delta`. Reverse direction must buffer anthropic `message_start` input_tokens until the chat trailing usage chunk — state machine needs a usage-holdback field; not currently listed.
+- **Fixture realism vs fault injection.** C6 bans hand-invented frames "at any phase", but 2.4's mid-stream cut, malformed frames, and the 1MiB cap cannot be captured from real providers. Carve out: conformance fixtures captured; fault fixtures = captured transcripts mutated by a documented transform.
+- **Rollback.** Removing gates (1.3/2.3) with no kill switch means revert = redeploy. The settings-table/generation hot-reload path already exists; a global `stream_translate_enabled` flag is cheap first-ship, not incident-driven.
+- **Reasoning across responses.** 2.1's event grammar omits `response.reasoning_summary_text.delta` / reasoning items in multi-turn `input` (and `function_call_output`). Existing thinking↔reasoning_content handling must extend here or responses clients lose reasoning.
+
+## 3. Contradictions / stale claims
+- Prompt says "revision 1"; file header says rev 2 — audit-target mismatch.
+- 3.4 contains "内存" — language mixing violates AGENTS.md artifact rule.
+- C5's "1MiB cap FROM PHASE 1 (not 3.4)" is stale phrasing — the cap exists in current `translate_sse`; say so.
+
+## 4. Missing first-ship requirements
+- **Error-event taxonomy table** per target protocol (chat error JSON + `[DONE]`; anthropic `event: error`; responses `response.failed`) — C4 references "target-format error event" with no spec anywhere.
+- **Observability**: per-pair translated-stream counters, dropped-feature header counters, mapped-stop counters. Zero metrics tasks in all phases.
+- **janus-auto interaction**: adjudicated/tiered streams through translation unaddressed.
+- Phase 3.4 soak artifact: no durable-path/report requirement per testing rule 5.
+
+## 5. Architecture notes
+State machine needs three new fields: block↔tool index map (C5), usage holdback (above), first-frame-sent flag to enforce the C4 window inside `translate_sse` rather than dispatch. Event-mapping tables should land in a `docs/` contract file before 1.1, not live only in eunits.
+
+## 6. Top 5 concrete edits
+1. Rewrite C5: stream arg deltas; withhold close/finish on truncation; add truncation→error-terminator rule.
+2. Amend C1/C3: `message_start` usage omitted; usage rides `message_delta`/trailing chunk; add holdback requirement.
+3. Split C6 into captured-conformance vs mutated-fault fixtures; unblocks 2.4.
+4. Add Phase-1 task: global hot-reloadable translate-stream kill switch via settings table.
+5. Add error-event taxonomy doc task (pre-1.1) + reasoning-grammar coverage in 2.1/2.2; fix "内存" in 3.4.

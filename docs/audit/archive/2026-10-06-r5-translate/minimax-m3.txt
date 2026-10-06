@@ -1,0 +1,32 @@
+## Verdict
+**GO WITH FIXES** — the contracts (C1–C6) are sound and the audit roll-up into 1.3 is the correct shape, but C4's commit boundary is muddled at the HTTP level, several pieces are orphaned, and a few phase boundaries need explicit enumeration.
+
+## Critical risks
+1. **HTTP-level commit contradicts C4.** C4 says headers "may be sent earlier" via `cowboy_req:stream_reply` while commit = first DATA frame. Once `Transfer-Encoding: chunked` + status line go out, retry is impossible at HTTP level — the client already has a 200 response. The real failover window is *request-receipt → first byte to client*; chunked-encoding + first chunk must be held together. Right now C4 lets the plan silently commit the response early and still call it pre-commit.
+2. **Orphaned C5 256 KiB args cap.** The cap is stated as new and required (parser 1 MiB cap doesn't bound cross-event accumulation), but no task owns it. Belongs in 1.4b.
+3. **1.0 "OpenAI reference (Responses)"** is ambiguous — API vs. spec doc. Real SSE transcripts require API access. Need a named alternative provider before 2.x blocks.
+4. **1.6 stream degradation channel unspecified.** Non-stream uses `X-Janus-Dropped`; streams record in "terminal event + usage row". Chat has no standard field for this; `x-janus-mapped-stop`/`x-janus-dropped` need an explicit payload (which event, which field name).
+5. **Phase 2.3 gate removal is a black box.** Removing `openai_responses` from `stream_translate_blocked` must enumerate what *remains* in it (`n>1`, cache_control→non-anthropic, provider-exclusives). Substrate note gestures at this but the task doesn't say.
+6. **`stream_translate_enabled` hot-reload path unverified.** Generation poll writes `persistent_term`; AGENTS.md warns consumers may not be started at boot. `janus_protocol_translate` must read PT, not call generate. Not a new task — risk noted.
+8. **Entitlement/LB assertion in 1.3** says "one assertion" without naming the path.
+
+## Contradictions / stale
+- C4 commit semantics vs. `stream_reply` (see #1).
+- "123 eunit" is current; Phase 1+2 will inflate substantially with no tracking.
+
+## Missing first-ship per phase
+- Phase 1: args cap ownership; HTTP commit clarification; chat terminal-event payload field; 1.0 capture source for responses API; entitlement assertion path.
+- Phase 2: explicit remaining-blocked enumeration post-2.3.
+- Phase 3: conformance scope (grammar vs. full request/response); dashboard surfacing of dropped features on streams.
+
+## Architecture / design notes
+- `sse_st` extensions: per-attempt synth-id seed (C4 non-repeat), `call_id → acc_json` accumulator (C5), per-tool-call byte counter (cap). Responses target adds `output_item`/`content_part` states; reverse direction in 3.2 likely a second state machine, not a flag on the first.
+- Error taxonomy (C2): chat `data: {"error":...}`+`[DONE]`, anthropic `event: error`, responses `response.failed`. Half-open tool blocks close via error event only (no `content_block_stop`).
+- Lazy emission (C1): skeleton waits for first real upstream event; `message_start`/`response.created` is *not* eager — the failover window is the pre-walk window.
+
+## Top 5 concrete edits
+1. **1.4b**: add the 256 KiB per-tool-call args cap as an explicit sub-task; eunit on mid-stream oversized-args → C2 error path.
+2. **C4**: rewrite the commit clause — headers + first chunk are held together; commit = first byte to client. Drop "headers may be sent earlier".
+3. **2.3**: add "enumerate remaining `stream_translate_blocked` cases after removal" as a sub-task with explicit list (`n>1` stream→anthropic/responses; provider-exclusive features).
+4. **1.0**: replace "OpenAI reference (Responses)" with the concrete source (OpenAI Responses API w/ creds, or a named alternative provider for fixtures).
+5. **1.6**: specify the chat terminal-event payload field for `x-janus-dropped` and `x-janus-mapped-stop` (e.g. a final `choices[0].finish_reason` companion object or `usage`-attached metadata). Mirror for responses + anthropic.

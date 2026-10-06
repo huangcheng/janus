@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 3 resolves the round-1/2 findings credibly, but two functional defects (a likely inflight-counter leak and a SQLite float-OFFSET bug) plus several stale claims must be fixed before shipping.
+
+## 2. Critical risks
+- **SSE fidelity:** Head/tail capture, injection politeness, and cumulative-max parsing are sound; per-chunk-delta under-reporting is documented. Residual gap: clients that set their own `stream_options` without `include_usage` get NULL stream tokens — only visible via `unreported`, acceptable.
+- **LB leak (new):** Task 6's rewritten streaming `ok` branch calls `note_key_success`/`note_route_success`/`track` but omits `release_route_inflight(Route)` — present in the error branch. If the original success path released inflight, this permanently leaks the LB counter per successful stream. Must verify against current code.
+- **p95 dialect bug (new):** `ceil(0.95 * Count)` returns a **float** in Erlang; passed as an `OFFSET` param it risks SQLite datatype mismatch. Wrap with `trunc/1`.
+- **Read-path robustness:** `totals/series/breakdown/recent` all pattern-match `{ok, Rows} = q(...)`; a DB error crashes the dashboard handler (500). "Exception-safe q" doesn't extend to callers.
+- **Buffer failure modes:** Solid (cap, drop-newest, counted drops, trap_exit flush). Residual: `terminate/2` flush can exceed the 5000ms supervisor shutdown → silent row loss on shutdown; mailbox unbounded under stalled DB (acknowledged).
+- **Migration/FK:** Dialect splits are clean; SQLite FK-off inertness is handled via LEFT JOIN rendering. Postgres `BIGINT` parent check is required and present.
+
+## 3. Contradictions / stale claims
+- Task 4 Step 5: `'unknown #null'` is wrong — `||` with NULL yields NULL in **both** dialects, so name arrives NULL → `(deleted)`. The plan's stated expectation contradicts itself mid-paragraph.
+- `no_qmark_literals_test` asserts only that a source-path attribute exists — it never checks for `?` literals. The named guarantee is unenforced.
+- Parser collapses a genuine `{0,0}` usage to `undefined`, contradicting the migration comment "distinguishable from a real zero".
+- `thoas:encode/1` returns iodata; "Body2 is only for adapters that use the raw body" hand-waves a possible binary-vs-iodata mismatch.
+
+## 4. Missing first-ship requirements
+- No measurement that `capture_usage_chunk`'s per-chunk append (~16KB copy/chunk) and cast cost stay negligible on the hot path (acceptable risk, but unmeasured).
+- No cap/`LIMIT` on breakdown queries (fine at current cardinality; note it).
+
+## 5. Architecture notes
+Buffered writer, pdict scratch (erase-at-entry is correct for keep-alive reuse), dialect-agnostic max-merge parser, and nearest-rank p95 split by stream are all well-reasoned. The COUNT-loop sweep with inlined LIMIT is honest about the `query/2` contract.
+
+## 6. Top 5 edits
+1. Task 6 Step 2: verify and restore `release_route_inflight(Route)` in the stream `ok` branch.
+2. Task 4 p95: `Offset = max(0, trunc(ceil(0.95 * Count)) - 1)` (or integer arithmetic).
+3. Task 4: make read functions tolerate `{error, _}` from `q/2` and return a 500 JSON instead of crashing.
+4. Fix `no_qmark_literals_test` to actually grep the source for `?` outside placeholder positions, or rename it.
+5. Correct the Task 4 Step 5 expectation (NULL concat → `(deleted)`) and `binary:...(thoas:encode(Map2))` → wrap with `iolist_to_binary/1`.

@@ -1,0 +1,28 @@
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound, but the plan as written does not compile in Task 3, mislabels the SSE dialect, leaks capture state across keep-alive requests, and silently drops data on every failure path.
+
+## 2. Critical risks
+- **SSE dialect mismatch (correctness).** `capture_usage_chunk` records *upstream* bytes, but `stream_usage(ClientProto)` parses them with the **client** protocol. On any translated request the parser gets the wrong dialect → wrong/zero tokens. Use `ProviderProto`.
+- **Process-dictionary cross-request leak.** Cowboy reuses one process per keep-alive connection. `handle/5` re-`put`s `janus_usage_ctx`, but `janus_usage_head/tail` are erased *only* inside `stream_usage/1`. Error paths and non-stream requests leave the previous response's tail behind → tokens attributed to the wrong request. Erase all three keys at entry.
+- **`include_usage` injection.** Re-encoding the body changes its length; nothing updates `Content-Length`. And `stream_options` is rejected with 400 by several OpenAI-compatible upstreams — "spec-compliant" is asserted, not verified. No fallback, no per-provider gate.
+- **Mid-stream failures recorded as success.** The `{error, Reason}` streaming clause passes the header `Status` (200). Aborted streams land as 200 with partial tokens.
+- **Buffer crash = total loss.** `flush/1` uses non-defaulting `maps:get(ts|protocol|status, Ev)`; one malformed event raises inside `handle_cast`, killing the server and discarding up to 100 rows. Insert failures are `_ =`-ignored, so FK violations (if SQLite `foreign_keys` is on, or `provider_keys` is misnamed) produce silent total data loss.
+- **Unbounded buffer** with DB down; `length/1` per cast is O(n); 100 separate single-row inserts = 100 fsyncs.
+- **p95 is meaningless.** Stream TTLB and non-stream latency share one column; streams dominate. SQLite nearest-rank vs Postgres `percentile_cont` disagree.
+- **Dual-DB SQL.** `LIMIT ?` → `$1` commonly fails in Postgres ("could not determine data type"); inline it. SQLite `strftime(...,'unixepoch')` is UTC while `to_timestamp`+`date_trunc` uses session TZ — bucket boundaries differ per backend, and the SPA slices the label as if local.
+
+## 3. Contradictions / stale claims
+Task 3 exports `totals/2, series/3, breakdown/3, recent/1` but defines them in Task 4 → **compile error**. Self-review says "buffer is bounded by flush cadence" then admits it grows. `usage_ctx_route/1` writes a `route` key never read (dead). Task 1 Step 3 eval has broken nested shell quoting. Task 9's `start_link` under `janus eval` dies with the RPC process. Task 8 Step 2 ships an unresolved "requests Bar? No —" authoring artifact. `breakdown` orders by `completion_tokens` while the page describes ordering by requests.
+
+## 4. Missing first-ship requirements
+`stream` flag + `ttft_ms`; `usage_seen` flag (0 tokens ≠ missing usage — currently indistinguishable and skews averages); cache-token columns or an explicit decision; `request_id` (retry de-dup + log correlation); provider-key breakdown (scope claims it, nothing exposes it); dropped/failed-event counters + flush error logs; kill-switch config; **tests for anything but the pure parser** — the dialect SQL and proxy hook are the riskiest and untested.
+
+## 5. Architecture notes
+Buffered writer is the right call, but reads should not share the module namespace as the writer's mailbox neighbour — they already run in the caller, good. Batch insert in one transaction; cap the buffer with drop-oldest + counter. Tail capture: accumulate an iolist and slice once at stream end instead of copying 16KB per chunk. Sweep: `DELETE ... LIMIT 5000` loop, plus a VACUUM story. Rollups: consider a materialized hourly rollup before 30 days of raw rows makes `summary` six full scans.
+
+## 6. Top 5 edits
+1. Move read-path exports to Task 4; make `flush/1` total (`maps:get(K, Ev, Default)` everywhere) and wrap each insert in `try/catch` with a dropped-event counter.
+2. Parse SSE with `ProviderProto`; erase `janus_usage_ctx/head/tail` at `handle/5` entry; record the real status (502/499) on stream error.
+3. Gate `include_usage` on provider protocol, update `Content-Length`, and add a no-injection fallback; capture head bytes *before* injection changes nothing downstream.
+4. Fix SQL portability: inline `LIMIT`, `CAST($1 AS integer)` or literal, bucket in UTC on both backends (Postgres `AT TIME ZONE 'UTC'`), split p95 by `stream`.
+5. Add columns `stream BOOLEAN`, `ttft_ms`, `usage_seen`, `request_id` in migration 004 now — retrofitting is a second migration and a broken p95.

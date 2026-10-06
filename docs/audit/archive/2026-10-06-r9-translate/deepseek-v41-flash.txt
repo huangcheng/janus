@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the phase/knob structure is sound, but several cross-cutting stream contracts are internally inconsistent and two "corpus" fixtures are secretly synthetic.
+
+## 2. Critical risks
+- **Terminator rule self-contradicts.** C1 says terminator is "emitted exactly once per COMMITTED response," but C4(b) and the C2 zero-data-frame note emit a terminator for an *uncommitted* all-attempts-fail response. Reword to "once per terminated response."
+- **Overlapping caps, no memory budget.** C5 has 4MiB total content *and* 1MiB total args with undefined precedence, while 3.4 soaks 50 concurrent × 4MiB ≈ 200MiB/stream-set unaddressed.
+- **Lazy-emission trigger undefined.** C1/C4 gate skeleton emission on "CONTENT-bearing" events; unclear whether a role-only delta or a `tool_use` start with no args qualifies. Combined with C5's zero-arg tool, the empty-accumulation → `{}` decode rule is missing (empty string is not valid JSON).
+- **Fixture realism violated by 1.0 itself.** "one >64-calls transcript (cap proof)" and "mid-stream TRUNCATED" are hand-synthesized; C6 forbids hand-invented frames. No real provider emits >64 calls.
+- **Failure usage lost to clients.** C2 routes usage to the usage row only; the →chat usage-only chunk never appears on failure, so billing-visible clients see null tokens.
+
+## 3. Contradictions / stale claims
+- **Task 1.3 does not exist** in the Phase 1 list (1.2→1.4a gap), yet headers repeatedly say "unblock 1.3."
+- R7 header says "j-prefixed synthesized ids"; body/C5 use `jresp_/jmsg_/jfc_/jitem_`.
+- C3 says include_usage "composes with 1.8," but 1.8 is request-side knobs, not injection — stale ref.
+- 1.8b bullet mislabels "1.8c" mid-sentence.
+- "Semantically impossible" lists only n>1-stream→anthropic, but 1.5 rejects n>1 on *all* cross-protocol pairs — policy, not impossibility; the two sections disagree in framing.
+
+## 4. Missing first-ship requirements
+- **P1:** no task verifying `X-Janus-Dropped` plumbing exists; no knob-state observability beyond `translated=1`.
+- **P2:** 2.1/2.2 overlap on request grammar; no explicit responses-client request roundtrip eunit.
+- **P3:** 3.5 hedges "if any remains" — unverified; no adapter non-2xx eunit.
+
+## 5. Architecture notes
+Event mapping should be a per-(source,target) **data table**, not branching code — makes 1.1/2.1/3.2 testable identically. Canonical error struct needs a `retryable` flag. `sequence_number` monotonicity must be asserted per target stream, not globally.
+
+## 6. Top 5 edits
+1. Close the 1.3 gap and purge all header refs to 1.3.
+2. Rewrite C1 terminator rule to "once per terminated response (committed or zero-frame error)."
+3. Define single cap precedence + per-stream memory budget; add 50×4MiB to 3.4.
+4. Specify lazy-emission trigger set and zero-arg empty-args→`{}` rule in C5.
+5. Mark 1.0's >64-call and truncated fixtures as explicit synthetic exceptions to C6.

@@ -1,0 +1,33 @@
+## 1. Verdict
+
+GO WITH FIXES — the round-2 fixes landed correctly (registry-driven families, zero-filled ascending buckets, `untyped` build_info, `ets:whereis` bumps, whole-body try/catch, single `janus_lb:stats/0` call), but one latent TYPE bug, a `requests_total` coverage hole, and stale doc claims remain.
+
+## 2. Critical risks
+
+- **Cardinality:** endpoint/protocol/status_class/stream are closed enums — good; `provider` operator-managed with orphans documented — good. **`lb_stat{counter=…}` key set unverified**: if `janus_lb:stats/0` keys are per-route/per-model rather than per-provider, cardinality explodes; non-integer values are silently dropped, so the family can vanish without a trace.
+- **Hot-path cost:** 16 atomic `update_counter`s, try/catch'd, no formatting — fine.
+- **Exposition correctness:** cumulative buckets by construction, zero-fill, +Inf last, escape order (NUL→`\`→`"`→newline) correct, `[short]` floats — correct. One flaw: `render_gauge_family` takes TYPE from `fam_type/1`, which **defaults to `counter`** — an unregistered/misspelled gauge renders as `# TYPE … counter`. All current gauges are registered, so no live mislabel; latent trap.
+- **Histogram sanity:** sound; nit — `count` is bumped *before* buckets, so a kill mid-`observe` can emit `count > +Inf` bucket.
+- **Auth reuse / request-id hygiene / migration / multi-node scrape:** all correct (verbatim extraction, loopback reads socket peer, strict 1–128 `[A-Za-z0-9-_]` sanitize, per-node token files).
+
+## 3. Contradictions / stale claims
+
+- `janus_metrics` docstring: "The tid lives in persistent_term" contradicts the `whereis`-per-bump implementation (and its own next paragraph).
+- Task 2 commit message says "cached tid"; revision history says "safe/2" (it's `safe/3`); renderer doc says "families sorted by name" — output is grouped counters→hists→gauges, name-sorted only within.
+
+## 4. Missing first-ship requirements
+
+- Exact scope of `janus_requests_total` undocumented: 401 (in `unauthorized/2`) and models-2xx counted, but 400/404/429 and post-auth handler errors replied via `reply_err/6` are **never counted** — error-ratio panels silently under-report.
+- No verification that `janus_lb:stats/0` values are integer-only.
+
+## 5. Architecture notes
+
+ETS registry (named public set, whereis, idempotent init) and the hook site (`track/3` terminal choke point) are right; the auth/models bumps outside `track/3` are the coverage inconsistency. Header echo via `set_resp_header` on the same Req chain covers `stream_reply` — sound. Renderer is pure/total apart from the gauge TYPE default.
+
+## 6. Top 5 concrete edits
+
+1. `render_gauge_family`: default TYPE to `gauge`; use FAMILIES only to override (`build_info`→untyped).
+2. Define `requests_total` coverage: bump once in the shared error-reply path so 400/429/etc. count, or state "post-auth terminal outcomes + auth rejects only" in README/dashboard.
+3. Fix stale docs: docstring `whereis` (not persistent_term), commit message, `safe/3`, "grouped by type".
+4. Pre-coding: assert `janus_lb:stats/0` keys are a closed set and values integer; log-and-skip non-integers.
+5. Gate step 3: diff whole-body label-set deltas instead of exact +1 (drops the idle-node assumption); in `observe/3`, bump `+Inf`/count before lower buckets to shrink the partial-histogram window.

@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the phasing and failover/usage contracts are sound, but stale task IDs, invented responses event names, an unspecified error-serialization layer, and an unstated routing behavior change must be fixed before implementation.
+
+## 2. Critical risks
+- **C4 self-contradiction:** "pre-commit retries emit nothing client-visible at all" vs headers sent via `stream_reply` are client-visible. Reword to "no DATA frame"; otherwise implementers may buffer headers and break the 300s idle path.
+- **Routing side-effect of unblocking:** `prefer_proto` bias only applies to *blocked* requests. Removing `has_tools`/`has_non_text_content` silently removes the same-protocol preference, so tool/vision traffic can shift to a different upstream protocol than today. Not mentioned in 1.9; needs an explicit rollout note + metric.
+- **Responses grammar under-specified:** real Responses SSE requires `sequence_number` on every event and named `event:` lines; strict SDKs reject frames without it. C1/2.1 never state this. `reasoning_item` is invented — real events are `response.reasoning_summary_part.added` / `response.reasoning_summary_text.delta`.
+- **Error taxonomy incomplete:** C2 gives the anthropic error-type map only. There is no canonical internal error struct → per-target serialization for chat/responses targets (message/type/code shape). Without it, translated error frames will diverge per call site.
+- **Request fidelity gap:** 1.6/2.2/3.2a cover tools/vision/structured/tool_choice/stop but not `logprobs`, `seed`, penalties, `metadata`, `service_tier`, anthropic `top_k`. No per-pair allow/deny + strip-and-record policy exists; this is the largest remaining "toy 400" surface.
+
+## 3. Contradictions / stale claims
+- Task **1.3 does not exist** (renamed to 1.9 in R4), yet 1.4a ("before 1.3 lands"), 1.4b ("activate in 1.3's ship unit"), and the Decisions block ("together with 1.3/2.3") all reference it.
+- C1 table writes `output_item.added`/`content_part.added` while claiming "the corpus is NORMATIVE for exact event names" — mixed prefixing.
+- C3 emits a usage-only chunk "when upstream reported usage" without conditioning on client `stream_options.include_usage`; deviation should be documented.
+
+## 4. Missing first-ship requirements
+- Phase 2: `sequence_number` monotonicity, stable `response.id`, named-event emission.
+- Phase 1/3: aggregate memory bound (50 streams × 1 MiB args) — caps are per-stream only.
+- Tool *results* accumulation is unbounded (only args capped).
+
+## 5. Design notes
+Add an explicit canonical `janus_error` struct with per-target serializers; make the four index maps first-class state (not ad-hoc), with a `close(block)` invariant; document reasoning as a distinct item family with its own added/delta/done names.
+
+## 6. Top 5 edits
+1. Replace every stale `1.3` with `1.9` (1.4a/1.4b/Decisions).
+2. Rewrite C4 "nothing client-visible" → "no DATA frame"; add header-buffering rule.
+3. Add responses `sequence_number` + exact event-name table to C1/2.1; delete `reasoning_item`.
+4. Specify canonical error struct + per-target serialization in C2.
+5. Add per-pair request-field allow/deny+strip table (1.6/2.2/3.2a) and a 1.9 note on the `prefer_proto` bias loss.

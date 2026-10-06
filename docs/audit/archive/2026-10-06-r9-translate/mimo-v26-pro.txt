@@ -1,0 +1,30 @@
+**1. Verdict: GO WITH FIXES** — the contract set (C1–C6) is sound, but the plan still ships a ship-unit whose implementation work has no checkbox, and rev 9's id-unification claim is contradicted inside its own Phase 3 text.
+
+**2. Critical risks**
+- **Missing implementation task:** 1.1/1.2 are eunit-only; no task builds the `sse_st` tool accumulator / multi-block serializer that Phase 1's intro assumes. 1.9 then "activates e2e assertions" against code nobody was assigned to write. Same in Phase 2: 2.1 is eunit-first, 2.3 is the ship unit — the translator wiring has no owner.
+- **Chat error path double-terminal:** C2 says failure *replaces* the success terminator, yet →chat emits `error` then `[DONE]`. `[DONE]` is chat's terminator — so the stream carries two terminal signals. Pick one rule and state which clients see.
+- **Cap asymmetry:** the 4MiB total-content cap is justified only by `response.completed` needing the full object, but is written as a global per-stream cap — →chat/→anthropic streams now fail on payloads they could stream through. Scope it to targets that must re-materialize the object, or justify it per direction.
+- **Kill-switch misname:** `stream_translate_tools_enabled` also gates vision streams (1.9). An operator disabling "tools" incident response also kills vision translation.
+- **Hot path:** full-accumulate-emit-at-close means interleaved tool streams lose incremental `input_json_delta` streaming only if the serializer buffers everything; confirm fragments still stream per C5's allowance, else TTFB regresses on long tool args.
+
+**3. Contradictions / stale claims**
+- Rev 9 claims id prefixes unified to `jresp_/jmsg_/jfc_/jitem_`, but 3.2a still says "synthesized `item_`/`fc_` ids", and C5's example (`item_…`/`fc_…`) blurs server vs synthesized space.
+- 1.8c authors TEST-FLOWS for **2.3** in Phase 1 — exactly the cross-phase coupling r8 condemned for the knob.
+- 1.5's "evidence rule" leaves the non-stream reject's gating undecided at plan time; a plan shouldn't defer a ship-blocking API decision to a characterization run without a named decision owner/date.
+
+**4. Missing first-ship requirements**
+- Phase 1: no task for the actual stream state-machine implementation (accumulator, caps, close-time decode) — only its tests.
+- Phase 2: no explicit wire task for responses-target serialization in `translate_sse` (2.1 is eunit, 2.3 is removal+knob).
+- No rollback spec for a flipped knob (settings revert path, in-flight streams).
+- No assertion that post-unblock dispatch still 400s *non-translatable* requests with the same diagnostic.
+
+**5. Architecture notes**
+- C1–C6 are coherent; corpus-normative event names correctly avoid invention. Commit-point (C4) rule is now complete and testable. Error taxonomy (`{type,code,message}` + per-target serialization) is right; add a stable `X-Janus-Error-Code` for the non-stream case so operators can grep.
+- Terminal-event degradation schema as a standalone pre-1.9 eunit task is the correct isolation.
+
+**6. Top 5 edits**
+1. Add task "1.1i implement `sse_st` tool accumulator + caps + close-time decode" (and 2.1i for responses target) before their eunit tasks.
+2. Fix 3.2a/C5 to the j-prefixed scheme only.
+3. Rewrite C2 chat failure rule: `error` JSON + exactly one `[DONE]`, framed as "error frame replaces the *finish_reason* chunk, `[DONE]` remains the transport terminator" — consistent with C4's "terminator once".
+4. Scope 4MiB cap per target family, or add per-direction justification.
+5. Rename the knob `stream_translate_enabled`/two keys (tools, vision) or document its vision scope in the dashboard UI + TEST-FLOWS; move 2.3's TEST-FLOWS authoring to Phase 2.

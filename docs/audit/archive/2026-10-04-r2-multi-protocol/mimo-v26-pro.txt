@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** 鈥?the split (native passthrough / non-stream translate / 400 on exotic) is sound, but the plan under-specifies lossy mappings, error envelopes, and header hygiene, which are exactly where this feature silently corrupts traffic.
+
+## 2. Critical risks
+- **Tool fidelity:** Anthropic requires `tool_result` as a user content block *immediately* after `tool_use`; `tool_choice` (auto/any/tool/none vs none/required/auto/function), parallel-tool flags, and `strict` have no clean mapping. "Basic shapes" is undefined 鈥?the boundary must be a fail-closed allowlist, or fields vanish silently.
+- **Silent drops beyond tools:** `system`鈫抰op-level `system`, `stop`鈫抈stop_sequences`, **`max_tokens` required by Anthropic but optional in OpenAI** (must synthesize), `n>1`, `response_format`, `logprobs`, `seed`, `stream_options.include_usage`, Responses `store`/`previous_response_id`/`background`/reasoning items. Usage (`input/output_tokens`) and `stop_reason`鈫擿finish_reason` (`tool_use`鈫?`tool_calls`) must be translated back or clients break.
+- **SSE/streaming:** passthrough is fine only if the handler drains gun into Cowboy chunked with backpressure and `gun:stop` on client disconnect; with HTTP/2 upstreams, per-stream teardown differs. Cooldown can only key off the status line 鈥?an error event after `200` can't flip status; define that contract.
+- **Auth confusion:** on `/v1/messages`, if both `Authorization: Bearer` and `x-api-key` are present (different keys) there's no precedence rule. Worse, if inbound `x-api-key`/`anthropic-version` are forwarded upstream, the **agent key leaks** or the provider sees the wrong key. Header filtering must strip-and-inject.
+- **Auto-router:** `maps:get(protocol, Provider)` crashes (500) on rows lacking the key; auto + `stream:true` + translate must fail fast to 400 *before* tier pick/cooldown.
+- **Cooldown/error contracts:** local `translate_unsupported` 400s must not count as provider failures; error body must match client protocol (Anthropic `{"type":"error",...}` vs OpenAI `{"error":{...}}`).
+
+## 3. Contradictions / stale claims
+- "Exotic 鈫?400" vs "silent feature drops" 鈥?needs an enumerated deny list, not a vibe.
+- "Stop forcing `stream => false`" while "translate non-stream only" 鈥?the shared call site can't distinguish; the flag must be set per-path.
+- "No CT suite 鈥?add eunit" 鈥?fine, but tests must live where `janus_protocol_translate` lives (`janus_http`) or deps invert.
+- Routes living in `janus_http_sup` is stale structure; verify where Cowboy dispatch actually builds.
+
+## 4. Missing first-ship requirements
+- Per-client error envelope + status mapping table; `anthropic-version` default/override source named.
+- `/v1/messages/count_tokens` 鈫?404/501 decision (SDKs call it).
+- Request/`x-request-id` passthrough; `model` echo in translated responses.
+
+## 5. Design notes
+Pivot via chat for messages鈫攔esponses is right (2 adapters, not 3脳3), but pivot must be a *lossless-enough* intermediate record with explicit unsupported markers. Keep translate pure (unit-testable), do header/HTTP in the proxy core. Default protocol to `openai_chat`.
+
+## 6. Top 5 edits
+1. Add explicit per-pair field allowlist + 400 codes (incl. `max_tokens` synthesis, system/stop mapping).
+2. Add response-translation table: usage, `stop_reason`鈫擿finish_reason`, error envelopes per client proto.
+3. Specify header rules: strip client `x-api-key`/`anthropic-version`/`Authorization`; auth precedence when both present.
+4. Define streaming state machine (gun drain, backpressure, disconnect cleanup, cooldown-on-status-only).
+5. Validate-before-route: `translate_unsupported`/`stream_requires_native_protocol` 400s emitted pre-LB, never counted as cooldown; `maps:get(protocol, P, openai_chat)`.

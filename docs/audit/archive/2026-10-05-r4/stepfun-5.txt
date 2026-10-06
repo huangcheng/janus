@@ -1,0 +1,36 @@
+## 1. Verdict
+
+**GO WITH FIXES** — the spec is implementable and §10 closes most prior rounds, but two defects remain undecided: janus-auto inner judge/target calls can inflate `requests_failed` with no matching `requests_total`, and Chat→Anthropic `message_start` has no fallback when a provider's first delta omits `role`.
+
+## 2. Critical risks
+
+- **Counter fallout (§4.2/§10):** `track/3` is the single failed-bump site, and janus-auto presets only `janus_stats_counted`. Inner judge/target `do_proxy` calls run in the same handler process and still reach `track/3`; the first inner 4xx/5xx sets `failed=1` for the whole request. Client sees 200 after fallback; dashboard shows 100% error rate. `failed<=total` holds numerically, so E2E cannot catch it — a silent lie.
+- **Chat→Anthropic envelope (§4.1.3):** OpenAI-compatible providers aren't guaranteed to send `delta.role` (content-only first chunks, `"delta":{}` keepalives, finish-only trailing chunks exist in the wild). The rule fires `message_start` on the first role chunk only; absence breaks the client face (content_block_start with no message_start).
+- **Deploy gen wait (§4.4):** spec never says whether follower `generation` reflects *applied* catalog or merely an observed bump. A follower could report new gen mid-ETS-rebuild; halt-check passes, traffic hits a partial catalog.
+- Low residual: abort/`[DONE]`-less EOF after finish is covered via `finalize_sse(normal)`.
+
+## 3. Contradictions / stale claims
+
+- §4.2's `after`-reasoning ("counted AND not tracked AND not failed") works only if `janus_stats_failed` is gated for inner auto calls too — §10 decided only `janus_stats_counted`. Not a contradiction, an under-specification.
+- §4.2 counts authenticated 404 (both counters) but excludes "400 missing model **before** do_proxy" — spec must pin *where* the 404-vs-400 branch sits relative to `do_proxy` entry, else E2E TF-6.1's expectations are ambiguous.
+
+## 4. Missing requirements
+
+- `message_start` fallback rule for role-less / keepalive-first chunks.
+- janus-auto presets `janus_stats_failed` **and** `janus_stats_tracked`; inner `track` still writes usage rows but never touches counters.
+- Follower gen-read ordering (catalog-applied semantics); definition of the `--code-only` "ship window" clock for `uptime_sec`.
+- Dashboard SPEC §2.4 wording: counters cover the counted-request population only, so failure rate ≠ client-visible error rate (pre-proxy 401/400 invisible).
+
+## 5. Architecture / design notes
+
+- Handler-owned `#sse_st{}` is correct; `sse_events` must enforce the per-`data:`-line cap *inside* its accumulator, not only on `Rest`.
+- Gun cancel handler-only is right; the usage writer cannot see the process dict, so `janus_stats_*` must never be read outside the handler.
+- Atomics created in app init before listeners: `/stats` returning 0 pre-init is benign.
+
+## 6. Top 5 concrete edits
+
+1. §4.1.3: "emit `message_start` on the **first provider chunk** if not yet sent; role optional; copy `id`/`model` when present, else synthesize; still open no block until first delta."
+2. §10/§4.2: janus-auto presets all three flags before inner `do_proxy`; inner judge/target `track` writes usage rows only.
+3. §4.4: leader gen captured only after catalog apply; follower "stable" means catalog reload completed; pin `--code-only` window = deploy start → script end.
+4. §4.2/dashboard SPEC §2.4: document counted-population semantics explicitly.
+5. Add eunit fixtures: role-less first chunk, `{"delta":{},"finish_reason":null}` keepalive, finish-only chunk; TF-6.8b asserts the client's first event is always `message_start`.

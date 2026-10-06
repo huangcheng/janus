@@ -1,0 +1,31 @@
+**1. Verdict**
+GO WITH FIXES — the contracts and phasing discipline are sound, but one real Phase-2 ordering contradiction, unvalidated error-frame shapes, and two coverage gaps must be fixed first.
+
+**2. Critical risks**
+- *Error-frame realism vs C6:* →chat failure emits `data:{"error":...}` and zero-frame failures flush a skeleton; neither is capturable from a happy-path corpus nor among the two allowed synthetic exceptions (1.0). OpenAI SDKs may not parse a mid-stream error chunk. SDK-validate or promote to documented exceptions.
+- 1.0 mandates real `response.failed`/`response.incomplete` captures, but providers don't emit those deterministically; capture feasibility is unaddressed.
+- Interleaving extends 4MiB deferred-text buffering onto previously zero-copy →chat/→anthropic paths; 50×4MiB=200MiB and the TTFT p95<10% check land only in 3.4 (last), so latency regressions surface last.
+- Four index-space maps + full-accumulate-emit-at-close add per-frame overhead to every translated stream; no cost budget for native-pair passthrough.
+
+**3. Contradictions / stale claims**
+- 2.3 is declared "physically last, after 2.4" yet listed *before* 2.4; Phase 2 lacks an execution-order header unlike Phase 3. Top-to-bottom execution ships before its E2E prerequisite.
+- 2.3 prerequisites cite "2.4's eunit halves," but 2.4 is E2E-only — stale ref from the 1.4b eunit/E2E split.
+- Numbering gap 1.2→1.4a (1.3 folded into 1.9, never renumbered) invites stale cross-references.
+- Phase-1 intro claims image parts "pass through translate on the REQUEST side already," yet 1.2 is an open task and the coverage matrix shows vision uncovered — reconcile.
+
+**4. Missing first-ship requirements**
+- Phase 2: no responses structured-output (`text.format`/json_schema) mapping in 2.2's request grammar; 1.6 covers chat↔anthropic only.
+- Phase 3: title promises a "conformance suite" but no numbered task exists; 3.3 is only corpus extension.
+- No knob-state audit/metrics or rollback drill beyond the migration down-path.
+
+**5. Architecture/design notes**
+- `translate_sse` will accumulate all targets + reverse machines in one module; split per-target emitters and make mapping tables data-driven so the matrix is auditable, not buried in function clauses.
+- Index maps + tool accumulators must be GC'd on abort; keep cleanup per-attempt per C4.
+- Clarify 1.5(c): reject client `n>1` on janus-auto without conflating internal adjudication fan-out.
+
+**6. Top 5 concrete edits**
+1. Reorder Phase 2 so 2.3 physically follows 2.4 (or add a Phase-3-style execution-order header); fix "2.4's eunit halves" in 2.3 prerequisites.
+2. Add a Phase-3 conformance-suite task: corpus-replay runner across all 9 client×provider pairs as the gate artifact.
+3. Add responses `text.format` structured-output translation to 2.2, reusing 1.6's drop-and-record channel.
+4. Promote error-frame + zero-frame-skeleton shapes to 1.0's documented synthetic exceptions or SDK-validate them; amend C6 to match.
+5. Renumber the 1.2→1.4a gap and clarify 1.5(c)'s janus-auto `n` scope.

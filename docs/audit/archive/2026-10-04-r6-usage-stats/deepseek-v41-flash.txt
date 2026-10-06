@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the design is sound, but two hard defects (SSE zero-collapse, duplicate test function) and a hot-path cost must be fixed before shipping.
+
+## 2. Critical risks
+- **SSE fidelity / genuine zero (real bug).** `from_sse/3` returns `undefined` on `{0,0}`, so a stream that reports a genuine zero usage chunk is recorded as *unreported*. Rev-4's fix was applied only to `from_response_body`; the `genuine_zero_usage_test` never exercises `from_sse`. This directly contradicts the claimed fix.
+- **Test module won't compile.** Task 4 defines `no_qmark_literals_test/0` twice (abstract-code scan + fragment scan). Duplicate function/arity is a compile error, so the "run tests, verify they fail" gate and full `rebar3 eunit` both break.
+- **Hot-path cost.** `record/1` calls `erlang:process_info(Pid, message_queue_len)` on every proxied request. That's a cross-process inspect on the data plane; under load it contends with the writer and can stall the caller. Also `drop_counter/0` lazily `persistent_term:put`s from the hot path (race loses counts; global GC).
+- **Missing indexes.** Only `ts`, `(agent_key_id,ts)`, `(model_id,ts)` exist. `breakdown(provider)` / `breakdown(provider_key)` and both p95 queries scan the whole window. Add `(provider_id,ts)` and `(provider_key_id,ts)`.
+- **p95 stream semantics.** `stream=1` p95 is end-to-end *drain* duration (client-limited), not provider latency. Acknowledged but should be labeled in the UI as such, not just "end-to-end".
+
+## 3. Contradictions / stale claims
+- Title says **rev 3**; history says rev 4 folded inline.
+- Task 4 Step 4 expects "parser (10) + SQL-shape (3)"; actual counts are 12 parser and 5 shape tests.
+- `chunk/2` is still O(n²) via `length/1` per recursion — the rev-4 "O(n²) fixed" claim only covered the SSE tail.
+- Rev 4 claims an "insert eunit"; none is written (only `build_insert` shape).
+
+## 4. Missing first-ship requirements
+- No insert/flush eunit (only SQL-shape). DB-down and buffer-cap paths are untested.
+- No test for the `record/1` mailbox-saturation branch or the `atomics` counter.
+- No `agent_key_id`-only index for the filtered `recent` path beyond `(agent_key_id,ts)` (fine, but document).
+- No migration rollback / `PRAGMA foreign_keys` enforcement decision recorded in-repo.
+
+## 5. Architecture notes
+Buffered writer, per-request PD context, and dialect-agnostic parser are correct shapes. `rewrite_pg` blind `?` rewrite is acceptable given the guard, but the guard test must actually run. Sweep's COUNT-then-DELETE loop is safe. Breakdown NULL-concat → `(deleted)` is consistent.
+
+## 6. Top 5 concrete edits
+1. In `from_sse`, track whether any usage map decoded (carry a flag out of `filtermap`) and return `#{prompt=>0,completion=>0}` for a present-but-zero usage instead of `undefined`; add an SSE zero test.
+2. Delete the first `no_qmark_literals_test/0`; fix expected counts to 12/5.
+3. Add `(provider_id,ts)` and `(provider_key_id,ts)` indexes to both migrations.
+4. Replace per-request `process_info` with a cheap in-flight counter or server-side drop; pre-create the atomics ref at `init/1`.
+5. Add a `janus_usage` insert/flush eunit (fake `janus_db_conn` error) and rewrite `chunk/2` with `lists:split/2` only.

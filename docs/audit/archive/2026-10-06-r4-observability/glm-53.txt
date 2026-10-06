@@ -1,0 +1,28 @@
+1. **Verdict: GO WITH FIXES** — one doc/code type contradiction that will fail the new promtool gate step, plus two small gaps; all eight round-3 flags verified genuinely resolved inline (tests-before-module, total `to_bin`, gauge label-sort/default-type, ladder-union zero-fill, count/+Inf-first ordering, handler try/catch, `janus_req_counted` chokepoint, auth-log `request_id`, stronger gate assertions).
+
+2. **Critical risks**
+- **Cardinality**: bounded — closed enums + operator provider names only; orphaned deleted-provider series until restart (documented). Sound.
+- **Hot-path cost**: ~18 `update_counter`s + per-bump `whereis`, no formatting, whole-body guards. Sound.
+- **Exposition**: HELP/TYPE-once, zero-fill, numeric sort with `+Inf` last, escape order (backslash before quote), `[short]` floats — all correct. **But** rev 4 typed `janus_lb_stat` as `counter`, and promlint's counter-suffix rule ("counters should end `_total`") makes `promtool check metrics` exit non-zero — gate step 10 goes red on any host with promtool installed.
+- **Auth reuse**: verbatim extraction, same token/loopback semantics. Sound.
+- **Histogram sanity**: integer µs, consistency-safe bump order. Sound.
+- **Request-id hygiene**: charset/length whitelist blocks header injection; echo via same-Req `set_resp_header`; asserted on 2xx/401/stream. Sound.
+- **Migration**: identical dialects, ledger dedupe, CONCURRENTLY caveat, gateway-before-dashboard order. Sound.
+- **Multi-node**: per-node jobs; only cooling gauges must not be summed. Sound.
+
+3. **Contradictions/stale claims**
+- Header naming contract still says `janus_lb_stat{...}` "(**gauge**)" and Task 9 says "never `sum` LB **gauges**" — but the registry/handler emit it as **counter** (cumulative). The Grafana note is now wrong advice: failover counters should be `rate()`d/summed across nodes.
+- Task 4 Step 1b mandates "one-time `logger:warning` on skipped non-integer LB values"; the Step 2 handler's `is_integer` filter is silent — instruction unimplemented.
+
+4. **Missing first-ship requirements**
+- Promtool failure policy (step 10 only skips when promtool is *absent*, not when it lints).
+- Cowboy-router 404s (unmatched paths) are uncounted, but only crash/disconnect bypass is documented as "uncounted by design".
+
+5. **Architecture notes**: `whereis`-per-bump registry, registry-driven pure renderer, `reply_err/6` + `janus_req_counted` as single early-reject chokepoint, and entry-point `set_resp_header` are all the right shapes; no structural concerns.
+
+6. **Top 5 edits**
+1. Fix the `lb_stat` mismatch: either type it `untyped` (dodges promlint) or rename to `janus_lb_stats_total`; sync the header contract paragraph and Task 9 note (counters may be summed; only `lb_routes_cooling` must not).
+2. Implement the promised skip-warning in the `LbRows` comprehension (or delete the Step 1b sentence).
+3. Gate step 10: record promtool output as advisory-with-artifact or whitelist the known lint; a lint ≠ stack failure.
+4. Add one line to Task 5 rules / README: router-level 404s are uncounted.
+5. Task 5 Step 2 prose: state that `janus_req_path` is self-contained at proxy entry; only `janus_request_id` must survive the erase list.

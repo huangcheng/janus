@@ -1,0 +1,29 @@
+**Verdict:** GO WITH FIXES — the unblock task (1.3, default-on knob) is numbered before the substrate it depends on, and two "reuse existing" premises (usage injection, parser cap) are unverified against a translate module described as text+thinking-only.
+
+**Critical risks**
+- *Ordering trap:* 1.3 sits above 1.4a/1.4b/1.4–1.8 yet declares it "runs only after 1.4-1.8 exist". Nothing mechanically prevents landing 1.3 first, exposing translated tool/vision streams before skeleton, C4-cut, id-non-reuse, and entitlement assertions exist. One-commit ship units don't fix a bad number.
+- *Premise risk:* C3/C5 lean on "the existing include_usage injection+retry" and "existing 1MiB parser leftover cap". If injection is scoped to chat clients, a chat upstream behind anthropic/responses clients (new in Phase 2) never reports usage — combined with "never invent tokens", gate assertions on non-zero tokens (2.4) fail or pass vacuously.
+- *Usage/failover:* pre-commit retries after headers flush can loop (connect→die→retry), each writing a partial usage row; 1.3's single entitlement assertion doesn't bound this.
+- *Hot path:* 256KiB per-call accumulation × 50 concurrent streams (3.4); plan never says whether `translate_sse` runs in the connection process or a shared gen_server (a shared one serializes).
+- *Backward compat:* default-on with no canary/staged plan; substrate bias correctly noted as shrinking, but no rollback beyond the knob.
+
+**Contradictions / stale claims**
+- Fixture repo split: corpus lands in `test/fixtures/sse/` (gateway repo) but the replaying mock upstream lives in `../janus-dashboard` — no task defines the path/sync contract; drift breaks every later phase's fixtures.
+- C1 mandates reasoning items in →responses, but 2.1's grammar omits `reasoning_summary_*` events, and neither addresses `sequence_number` (present in real Responses SSE; strict clients validate).
+- 3.3 re-captures the same families 1.0 captured (dashscope/volcengine/kimi) despite the R4 claim "extends, not creates a second one".
+- Stale checkbox: 2.5 still listed under Phase 2 though moved to 1.8c; 3.4 contains Chinese "内存" (artifact-language violation).
+
+**Missing first-ship requirements**
+- Phase 1: knob default-off initially (or canary) + an E2E byte-parity check that existing text/thinking streams are unchanged on the wire (eunit can't catch framing regressions).
+- Phase 2: `instructions`/`input` precedence, `tool_choice.allowed_tools`, `max_tokens` injection for anthropic targets (anthropic 400s without it — chat→anthropic presumably covers it; responses→anthropic is new).
+- C2 names failure *event types* but no JSON *payload schema* per family; the non-stream `n>1` hole (1.5/3.2b only reject streaming) silently drops choices to anthropic targets.
+
+**Architecture notes**
+Keep `translate_sse` pure per attempt (maps only); target family as a behavior module so C1 skeletons are data-driven tables with three thin emitters, eunit-enumerated per family. One `translate_error(Type, Detail)` type mapped to the three wire shapes at the connection edge; terminal usage row written exactly once by the connection process.
+
+**Top 5 edits**
+1. Renumber: 1.4a/1.4b first, then 1.4–1.8, unblock last as 1.9 (or bold "DO NOT START UNTIL" on 1.3); default knob OFF with flip gated in E2E.
+2. Add a task verifying/re-scoping include_usage injection per provider leg (eunit: chat-upstream usage reaches anthropic- and responses-client translated streams).
+3. Extend the n>1 rejection to all translated pairs targeting anthropic/responses, not just streaming.
+4. Add reasoning-summary events + `sequence_number`/event-id policy to C1 and 2.1, sourced from the 1.0 captured responses transcript.
+5. Add cross-repo fixture path/sync contract task; rewrite 3.3 as extension-only; fix 3.4 wording and define a concrete leak metric (process count + binary memory snapshot).

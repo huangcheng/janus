@@ -1,0 +1,33 @@
+# Audit — Janus Observability Plan (rev 3)
+
+## 1. Verdict
+**GO WITH FIXES** — rev 3 resolves all round-2 findings correctly; what remains are step-level ambiguities and stale text, not architecture.
+
+## 2. Critical risks
+- **Cardinality:** closed enums + operator provider names only; `lb_stat{counter}` bounded by `janus_lb:stats/0` keys. Sound.
+- **Hot-path cost:** ~16 `ets:update_counter` + `ets:whereis` per request, ns-scale, whole-body try/catch. Sound.
+- **Exposition:** registry-driven families, one HELP/TYPE, cumulative zero-filled buckets ascending with `+Inf` last, correct escape order (backslash before quote/newline). Sound; `le` appended unsorted is cosmetic.
+- **Auth reuse:** verbatim extraction + delegate; peer-IP loopback, never XFF. Sound.
+- **Bucket sanity:** `observe` bumps every bound ≥ value (cumulative); renderer shares the same canonical ladder — no drift possible.
+- **Request-id hygiene:** `[A-Za-z0-9-_]{1,128}` blocks header injection; generated ids lowercase; echo verified on 401/stream.
+- **Migration/dialects:** ledger-deduped `ADD COLUMN` + `IF NOT EXISTS` index, identical SQL, `null`-atom binding precedent. Sound.
+- **Multi-node:** per-node jobs/tokens; never-sum-LB-gauges note. Sound.
+
+## 3. Contradictions or stale claims
+1. `janus_metrics` doc header still says "tid lives in persistent_term"; Task 2's commit message and the self-review say "cached tid" — rev 3 removed both. Three stale references to a deleted design.
+2. Task 5 Step 3: auth-reject log gains `request_id` "in Task 6" — Task 6 never modifies `janus_http_auth.erl`. Dangling promise; the goal statement ("auth-reject logs") is unmet.
+3. Gate step 1: "a POST → 405" — the handler authorizes **before** method dispatch, so a tokenless POST yields 401. The step doesn't say the POST carries the token.
+4. Track snippet uses `Proto`/`Status`/`Stream` unverified; only `usage_bool_int/1` and `route_provider_name/1` are on the pre-coding check list.
+
+## 4. Missing first-ship requirements
+Nothing structural. Minor: gate never asserts `# TYPE janus_build_info untyped` (the rev-2 fix has no E2E guard).
+
+## 5. Architecture/design notes
+`ets:update_counter/4` with a default tuple is race-free create-and-bump; whereis-per-bump trades one hash lookup for restart safety — right call. Renderer purity justifies the eunit-first fixtures. Single terminal hook at `track/3` is correct; inner failover attempts can't double-count. `set_resp_header` at handler entry on the one Req chain covers `stream_reply` — verified by construction plus gate asserts. Note: families sort **within type group** (counters→histograms→gauges), not globally as the docblock implies — harmless, fix the wording.
+
+## 6. Top 5 concrete edits
+1. Gate step 1: the POST must send the stats token (expect 405 + `allow: GET`); tokenless POST expects 401.
+2. Task 6: add `request_id => get(janus_request_id)` to the `janus_http_auth:unauthorized/2` warning (pdict is set before `require_agent`), and list `janus_http_auth.erl` in Task 6's files.
+3. Purge "persistent_term"/"cached tid" from the `janus_metrics` doc header, Task 2 commit message, and self-review notes.
+4. Task 5 Step 1b: extend pre-coding verification to `Proto`, `Status`, `Stream` variable names in `track/3`.
+5. Renderer: default `fam_type` for unknown **gauge** families should be `gauge`, not `counter`; docblock "labels sorted by key" → "sorted by key, `le` last".

@@ -1,0 +1,33 @@
+## 1. Verdict
+
+**GO WITH FIXES** — rev 9 is internally consistent and correctly ordered; remaining defects are a dangling task reference, two fixture gaps that undermine their own rules, and Phase-2 feature omissions against the stated goal.
+
+## 2. Critical risks
+
+- **C1 terminator table is incomplete for →responses.** C2 maps `length ↔ incomplete(max_output_tokens)`, but the C1 table lists only `response.completed` as terminal. `response.incomplete` appears solely in 3.4, provider-side. Phase 2 must *emit* it (chat upstream `finish_reason=length` → responses client) with no skeleton slot or 2.1 eunit.
+- **Dangling task.** C2 mandates "terminal-event degradation payload schema (`x-janus-mapped-stop`, structured-output, cache_control drops) eunit'd as its own pre-1.9 task" — no such numbered task exists in Phase 1; 1.9's assertions depend on it.
+- **Fixture gaps vs. own rules.** 1.0 DONE lacks (a) a usage-less transcript (C3's unreported path is asserted nowhere), (b) a UTF-8-multibyte-split-across-deltas transcript — the exact rationale C5 cites for single-decode-at-close. 1.4a fault modes omit stream_options-rejection, leaving C3's include_usage fallback untestable.
+- **Phase 2 feature scope vs. goal.** 2.2 covers `input` string/array/function_call but never mentions `input_image` or `text.format` (responses structured output); 2.4 asserts neither vision nor structured output. The goal promises both matrix-wide.
+- **Knob scope ambiguity.** Responses-client + tools stream: gated by Phase-2 knob, Phase-1 knob, or both? Unstated; double-gating risk.
+
+## 3. Contradictions / stale claims
+
+None material vs. the described codebase. Editorial: 1.3 deleted but 1.4a/1.4b numbering retained; Phase 3 title says "conformance suite" yet no task delivers one beyond corpus + e2e.
+
+## 4. Missing first-ship requirements
+
+- **Phase 1:** the degradation-schema eunit task (number it, e.g. 1.6a); usage-less + multibyte-boundary fixtures in 1.0.
+- **Phase 2:** `input_image` and `text.format` request mappings in 2.2; vision + structured-output e2e assertions in 2.3/2.4.
+- **Phase 3:** `response.incomplete` as a legal terminal in the 3.2 reverse machines; rename or add the conformance task.
+
+## 5. Architecture notes
+
+C1–C6 remain sound. Two additions: give the C1 table a terminal-variant column (`completed`/`incomplete`/`failed` per direction), and add a pair × feature × knob scope matrix so gate authors know which knob governs each assertion.
+
+## 6. Top 5 concrete edits
+
+1. **C1 table + 2.1:** add `response.incomplete(incomplete_details.reason=max_output_tokens)` as a →responses terminal variant; eunit it from a length-stopped chat fixture.
+2. **Phase 1 list:** insert the numbered degradation-payload-schema eunit task C2 already requires, prerequisite to 1.9.
+3. **1.0 DONE:** add usage-less, UTF-8-fragment-boundary, and (via 1.4a new mode) stream_options-rejected transcripts.
+4. **2.2/2.4:** add `input_image` and `text.format` mappings plus vision + structured-output e2e assertions.
+5. **Decisions section:** state knob scope explicitly — Phase-1 knob governs chat↔anthropic pairs only; Phase-2 knob governs all responses-client streams; never both.

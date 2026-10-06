@@ -1,0 +1,25 @@
+**Verdict: MISMATCH — the attached file is not the spec described in the prompt.**
+
+The attached `target.md` is the Janus **Phase 1 streaming/ops** spec (slices A–D: Chat↔Messages SSE translate, `/stats` counters, prebuilt test image, deploy wait). The prompt asks me to audit a spec about:
+
+- (A) per-(provider-key, model) **entitlement matrix** — probe runner + passive learning from usage rows
+- (B) **shipping the matrix inside the catalog bundle**
+- (C) **in-request key failover** in the gateway proxy (bounded retry across a provider's key pool)
+- (D) E2E test plan
+
+None of those constructs appear in `target.md`. There is no entitlement matrix, no probe runner, no passive learning from usage rows, no key pool failover, no retry-budget vs cooldown interaction, no per-(provider-key, model) deny regex. I cannot meaningfully answer the prompt's required sections (probe rate-limit blowback, classification false-negatives, failover latency amplification, retry storms, catalog reload races between matrix and routes, matrix staleness during key rotation, HTTP 429 dual meaning, max-attempts vs LB cooling) against this file — doing so would be fabrication.
+
+**What `target.md` actually is** (so you can confirm intent):
+
+- Slice A: streaming cross-protocol translate; `sse_events/2` + `translate_sse/4` + `finalize_sse/3`; thinking→`reasoning_content`; streaming tools explicitly 400; no `openai_responses`.
+- Slice B: `requests_total` / `requests_failed` counters + Nodes table; janus-auto inner `do_proxy` excluded from `inc_*`.
+- Slice C: Dockerfile `test` stage, Aliyun apk mirror, named `_build` volume; documented `docker run`.
+- Slice D: deploy wait — leader gen capture after catalog apply; follower poll 2s/300s in parallel; `--code-only` uses `uptime_sec` window for changed-image-digest nodes; halt on deadline, dump `docker logs --tail 200` to `/tmp/janus-deploy-<UTC>/<node>.log`.
+
+**To proceed, confirm one:**
+
+1. Attach the entitlement-matrix / key-failover spec and I'll audit it under the required format.
+2. Re-issue the prompt adapted to `target.md` (e.g. SSE drain correctness, counter funneling atomicity, deploy wait race window).
+3. State that `target.md` is the target and the prompt's A–D is a mislabel — I'll then run a streaming-translate audit under the same 6-section format.
+
+I won't invent risks for a spec I haven't read.

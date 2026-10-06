@@ -1,0 +1,32 @@
+**Verdict:** GO WITH FIXES — the invariant set (C1–C6) is genuinely strong, but a Phase-1 ordering contradiction plus several unstated terminal/usage edges must be resolved before coding starts.
+
+**Critical risks**
+- Pair-matrix explosion: the plan specifies per-pair event tables (9 ordered wire pairs). Without a neutral delta-stream IR this becomes nine divergent state machines with nine terminator bugs waiting. Force one composition point.
+- Terminator-exactly-once vs lazy skeleton + C4 commit boundary: the single hardest correctness area; only safe as one `close_stream/emit_failure` exit per target.
+- Terminal timing: →responses must HOLD `response.completed` until usage arrives (chat emits its usage chunk *after* the finish chunk); →anthropic lands usage in `message_delta`; →chat order is covered.
+- Unblocking `stream_translate_blocked` inverts existing gate expectations — current E2E steps asserting the 400 will fail post-1.3; the plan never mentions flipping them.
+- Fixture realism: kimi tool transcripts must include text→tool_use→text interleaving (anthropic block index counts text blocks); a contiguous-only corpus won't catch remap off-by-ones.
+
+**Contradictions / stale claims**
+- 1.3 "LAST (after 1.4–1.8)" vs 1.4: E2E through the real gateway cannot exercise translated streams while dispatch still 400s them. Either unblock lands first behind the knob in a dev build, or 1.4 runs after 1.3.
+- 1.5 "non-stream keeps whatever it does today" — undocumented behavior (n>1 cross-protocol non-stream almost certainly 400s upstream); pin it, don't inherit it.
+- prompt says "69-step gate"; AGENTS.md says 47-step `e2e_local.sh`. The plan never names the gate or where new steps land.
+- C5 "1MiB cap already enforced today" — unverified for *tool-arg* fragments; verify before "just keeps it".
+- 3.4 "leftover/内存" — mixed-language artifact, violates the project's English-only rule.
+
+**Missing first-ship items**
+- Phase 1: flipped legacy-400 gate steps; knob default + rollback runbook (off → 400); keep-alive policy for lazy skeletons (upstream silent >60s must not hang the client); confirm Cowboy 300s idle_timeout survives long tool streams.
+- Phase 2: `call_id`↔`tool_call_id` persistence across turns; closing open `output_item`s on `response.failed`; reasoning-item skeleton eunit.
+- Phase 3: conformance fixtures run in fast eunit, not E2E only; mark 3.3 strictly as provider-family extension of 1.0 (text overlaps).
+
+**Architecture notes**
+- IR: normalize every stream to delta events (text/reasoning/tool_start/tool_frag/tool_end/usage/terminal); one wire adapter per protocol; pair = compose.
+- Per-stream `sse_st` maps: chat_tool_index ↔ internal key ↔ anthropic block index ↔ responses item id; anthropic index consumes text blocks; synthesized ids monotonic per attempt.
+- One `emit_failure(Target, Reason)` writing error event + terminator + terminal usage row; commit = first DATA frame atomically flipping the retry-loop flag. Knob read once per request (persistent_term), never per chunk.
+
+**Top 5 edits**
+1. Reorder: unblock+knob ships to a dev build before 1.4 E2E; renumber so E2E depends on it; state knob default = on + rollback path.
+2. In 1.4, add: "update existing gate steps asserting the translate 400; new steps in `../janus-dashboard/docs/TEST-FLOWS.md`, run via `scripts/e2e_local.sh`".
+3. C1/C3: add rule — →responses buffers `response.completed` until a usage-bearing event arrives.
+4. 1.8b: add `cache_creation_input_tokens` and map chat `prompt_tokens_details.cached_tokens`; Anthropic cache-creation tokens are otherwise silently dropped.
+5. 1.0/1.1: require an interleaved text→tool_use transcript; eunit asserts block-index remap with the interleaved text block present.

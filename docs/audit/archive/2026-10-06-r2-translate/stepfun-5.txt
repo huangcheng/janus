@@ -1,0 +1,27 @@
+**Verdict: GO WITH FIXES** — a well-scoped plan that underestimates SSE-state complexity (four tool-index spaces, not one) and lacks a capture-harness task before its fixture promises, but its phase ordering and invariant contracts (C1–C6) are sound once fixed.
+
+## Critical risks
+- **C5 is underspecified.** You have *two* index spaces per direction (`content_block.index` counts text+tool+image; chat `tool_calls[i].index` counts tools only), and responses adds a third: output items (`message`/`function_call` items index globally, `function_call_arguments.delta` has *no* index at all — identity is positional per output item and per `item_id`). Anthropic→responses needs the item-index map; responses→anthropic needs a synthesized tool-index map. "Block-index↔tool-index map" doesn't cover the responses pair. Also name it in C4's per-attempt list.
+- **C1 terminator claim is wrong for responses.** `response.created` is not a terminator guarantee — a pre-first-byte abort must still emit `response.created`+`response.completed` if the client stream has been created, or `response.failed`. Native passthrough behavior needs to be the reference, not the generic "translator emits `.completed`".
+- **C3 omit `message_start` for chat.** Chat usage is the trailing chunk *only* under `include_usage`; the "reuse existing injection+retry" must be an explicit subtask, plus a false-usage guard on anthropic→chat when the upstream never sends `message_delta` usage.
+- **C4 fails C5 under latency.** Translating before the first byte leaves argument buffers open pre-emit — define the pre-first-byte frame as the *first materialized event*, not the first TCP write, else tool calls are lost on failover.
+- **1.6 is a policy change, not a passthrough.** Stripping `response_format` changes upstream contract for *native* request shapes too — the response header plus entitlement/LB interaction on retry after strip is unspecified.
+- **1.7 unblocks types on the request path** — `input_json_delta` → chat `arguments` string trimming; images inside `tool_result` blocks have no chat equivalent, must be a documented reject (`tool_result_image_unsupported`), not a drop.
+
+## Contradictions / stale claims
+- "Phase 1 opens with a capture harness task" was absent until rev 2; renumber so 1.0 is harness and eunit 1.1/1.2 consume it; move 3.3 fixtures to "keep per-provider refresh cadence" to avoid a Phase-3 dependency on Phase-1 captures.
+- The kill-switch split is recorded as agreeing with the default — but an audit 2/7 dissent needs the rollback path actually recorded (`stream_translate_blocked` predicate plus generation hot-reload reload time), not just "rely on".
+- "no hand-invented frames at any phase" (3.3) conflicts with 2.1's eunit needing frames for responses→anthropic before provider captures exist — either capture OpenAI responses SSE first or authorize edge-case frames.
+
+## Missing first-ship (abbreviated)
+Per phase: metrics/latency counters per pair; error taxonomy table (decoupled translation errors from upstream errors); structured `Test` set cost estimate for 3.4 (50 streams × full sse_st growth assertions); and a documented failure matrix per pair listing translate errors (e.g. missing `input_json_delta` fields, tool id collisions).
+
+## Architecture / design notes
+Extend `translate_sse` with an options tuple per target, not `if` ladders; keep the original translation machine and add a table-driven map for stop-reasons and tool events; add "block-index↔item-index" pairing keys; make `stream_translate_blocked` a pair-specific predicate.
+
+## Top 5 concrete edits
+1. **1.0**: capture real transcripts first (dashscope/kimi/volcengine chat, kimi anthropic, OpenAI responses reference) with provider+date metadata, committed to `test/fixtures/sse/`; rename 1.0 to the harness task.
+2. **C1/C5**: add the responses output-item identity model + the chat↔anthropic three-way index maps to the contracts; corrections above.
+3. **1.3/1.5**: cut `has_non_text_content`/`has_tools`; add the explicit rejection of `n>1` on translations plus `n_unsupported`.
+4. **2.1/2.2**: production-shaped fixtures for responses grammar, and include the OpenAI-responses capture in 1.0.
+5. **2.4**: E2E asserts non-zero token usage rows (already present) + the translate-error taxonomy documented in-file.

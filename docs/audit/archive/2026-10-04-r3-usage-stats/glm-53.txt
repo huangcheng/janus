@@ -1,0 +1,41 @@
+# Audit: Janus Usage-Statistics Plan
+
+**1. Verdict:** GO WITH FIXES — sound architecture, but the SQLite p95 query is broken as written, and buffer-failure/streaming-abort behavior contradicts the plan's own claims.
+
+**2. Critical risks**
+
+- **SSE fidelity:** head is captured from the *first chunk only* — a `message_start` split across chunks or arriving in chunk 2 is lost. Client disconnect mid-stream kills the cowboy request process → `track` never runs → undercount. `include_usage` injection is unconditional: some OpenAI-compatible upstreams 400 on unknown `stream_options`, and it overrides a client's explicit `include_usage:false`.
+- **SQLite p95:** SQLite prohibits subqueries in `LIMIT`/`OFFSET` — the `OFFSET (SELECT ...)` query fails at runtime on the default backend.
+- **gen_server failure modes:** `flush/1` ignores insert results and the buffer is cleared regardless → silent row drop when DB is down (contradicting the self-review). No `process_flag(trap_exit, true)` → `terminate/2` never runs on supervisor shutdown; the ≤1s buffer is lost. 100-row inline flush with a slow DB grows the mailbox unboundedly.
+- **No transaction:** up to 100 autocommit INSERTs per flush = fsync storm on SQLite; partial flushes on crash.
+- **epgsql numerics:** `AVG`/`percentile_cont` return `numeric`, which epgsql may decode as binary → `num/1` clamps to 0 silently.
+- **FK correctness:** `ON DELETE SET NULL` is inert on SQLite unless `PRAGMA foreign_keys=ON` per connection.
+- **p95 accuracy:** stream latency = full drain time (includes slow client consumption); p95 mixes bimodal stream/non-stream populations.
+- **protocol column** stores `client_proto`, not the upstream dialect actually parsed.
+
+**3. Contradictions / stale claims**
+
+- Self-review: "permanently failing DB would grow the buffer" — code drops it.
+- "Head ~4KB" vs single-first-chunk capture.
+- "Every proxied request" vs uncounted no-route, mid-stream-abort, and pre-route-crash paths.
+- `stream_usage(ClientProto)` parses a *provider*-dialect stream; harmless today only because the parser ignores the proto arg — a latent trap once it branches.
+
+**4. Missing first-ship**
+
+- Flush-failure logging (deferred, but silent data loss shouldn't ship).
+- Disconnect/abort accounting decision (even status=499-style rows).
+- Cross-protocol e2e test (anthropic client → openai provider streaming).
+- UTC bucket labels presented without timezone note in the SPA.
+- `PRAGMA foreign_keys` verification.
+
+**5. Architecture notes**
+
+Pure parser + TDD, pdict scratch pad in the request process, bounded head/tail, and dialect-branched rollups are all right. Migrations are idempotent and correctly numbered. Prefer: two-step Erlang p95 (count, then `OFFSET $1`), head accumulated across chunks up to 4KB, flush wrapped in BEGIN/COMMIT.
+
+**6. Top 5 edits**
+
+1. Replace SQLite p95 with an Erlang count query + parameterized `OFFSET` (params are legal in OFFSET; subqueries aren't).
+2. Accumulate head across chunks to 4KB; ensure `track` fires on client abort (e.g., wrap drain in catch/after).
+3. Wrap flush in a transaction; on failure retain buffer with a cap + one-line log; add `trap_exit`.
+4. Gate `include_usage` injection (config flag or provider allowlist); don't override explicit `false`.
+5. Store provider protocol (or both) in `protocol`; correct the self-review buffer claim.

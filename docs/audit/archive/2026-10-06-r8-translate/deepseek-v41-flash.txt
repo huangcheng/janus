@@ -1,0 +1,29 @@
+1. **Verdict:** GO WITH FIXES — the phasing and kill-switch discipline are sound, but C4's commit rule, response event naming, and usage-injection retry carry correctness/billing risks that must be resolved before 1.9.
+
+2. **Critical risks**
+- **C4:** outcome (b) assumes headers flushed ("already-owed"). When zero bytes were sent, an SSE error frame is wrong — the client gets 200 + a malformed stream. Split: headers flushed → SSE error; not flushed → HTTP 502.
+- **C3 include_usage "inject+retry":** retrying a STREAM after the upstream call started risks double billing/duplicate upstream streams and violates C4's no-carryover. Restrict retry to non-stream chat calls; on streams fall back to unreported tokens.
+- **C5:** 4MiB full-content accumulation × 300s idle_timeout × concurrency is effectively unbounded; there is no global cap until 3.4. Add a byte budget in Phase 1 and make 1.9's soak measure RSS, not just stream count.
+- **Event names:** the plan alternates `output_item.added` and `response.output_item.added`. If 1.0 never captures responses reasoning-item events, 2.1 will invent them — violating the corpus-normative rule.
+- **Phase 3 order:** 3.2 "then wire" precedes 3.1 (adapter); state machines cannot be wired without the adapter.
+
+3. **Contradictions / stale**
+- Coverage table marks responses→chat/anthropic as "req only", yet 2.2 claims non-stream versions exist. One is wrong.
+- No task **1.3** exists, but summaries repeatedly cite 1.3→1.9. Renumber or state the gap.
+- C2 routes request-side degradations (known pre-stream) into the terminal event, though they could be headers. Justify or move.
+- 1.0 DONE lists THINKING but not responses reasoning items, which C1 requires.
+
+4. **Missing first-ship**
+- Phase 1: knob config schema/validation + flip-back e2e; global memory bound; 1.8b down-path is hedged ("or additive-only").
+- Phase 2: non-stream responses-client e2e; request-grammar roundtrip eunit is implied, not explicit.
+- Phase 3: gun reconnect/idle test at the adapter level.
+
+5. **Architecture notes**
+- Make `translate_sse` direction a behavior module; add explicit `commit_state` to `sse_st` for C4; error struct should carry `retryable`. Event maps as data tables.
+
+6. **Top 5 edits**
+1. Split C4(b): headers-flushed → SSE error; else HTTP 502.
+2. Fix all responses event names to full `response.*`; make reasoning-item capture a 1.0 DONE criterion.
+3. Drop include_usage retry on streams (non-stream only).
+4. Resolve the coverage-table/2.2 contradiction; renumber the 1.3 gap.
+5. Add a Phase-1 global memory budget + RSS assertion in 1.9's soak, and a knob schema/rollback task in 1.8c.

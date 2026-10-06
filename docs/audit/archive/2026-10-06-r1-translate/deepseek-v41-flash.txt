@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the matrix is sound, but the plan under-specifies stream semantics (usage/terminators, tool-index remapping), mandates real fixtures only *after* building on invented ones, and silently drops "structured output" from its own goal.
+
+## 2. Critical risks
+- **SSE FSM:** anthropic `content_block.index` ≠ chat `tool_calls.index`; text blocks occupy indices, so reverse mapping must remap, not reuse. Parallel tool calls, interleaved text+`tool_use`, and id stability are unspecified. Tool-arg accumulation is unbounded until `content_block_stop` — the 1 MiB cap appears only in 3.4.
+- **Terminator/usage:** anthropic carries `usage` in `message_start`/`message_delta`; chat sends usage in a trailing chunk. chat→anthropic requires synthesizing/backfilling `message_start` usage. finish_reason↔stop_reason table (`tool_calls`↔`tool_use`, `length`↔`max_tokens`) is undefined; dropping it regresses usage rows (`stream=1`, tokens set).
+- **Request fidelity:** responses `input` items (`function_call_output`), `instructions`→system, anthropic `tool_use`/`tool_result` block ordering vs chat `role:"tool"` + `tool_call_id` pairing. No task covers structured output despite the goal.
+- **Fixture realism:** 1.1 says "real captured SSE lines" but capture lands in 3.3 — ordering violation of the AGENTS.md rule.
+- **Failover/entitlement/LB:** unblocking cross-protocol pairs interacts with the failover loop; mid-stream failure after headers cannot retry. Entitlement may be protocol-blind. Unblocking `has_non_text_content`/`has_tools` silently converts 400 diagnostics into lossy fallback.
+
+## 3. Contradictions / stale claims
+- Goal names structured output; zero tasks address it.
+- Phase 3.3 captures fixtures that Phases 1–2 already required.
+- "content blocks… pass through on REQUEST side already" vs 1.3 removing `has_non_text_content` from the *stream* predicate — the non-stream/stream asymmetry is unstated.
+- No eunit target count vs the "123" baseline.
+
+## 4. Missing first-ship items
+- **P1:** usage synthesis, stop_reason map, tool-index remap, parallel/interleaved tools, accumulator cap, anthropic `error` event ↔ chat error chunk.
+- **P2:** `sequence_number`/`output_index`/`item_id` invariants, `response.incomplete`, usage in `response.completed`.
+- **P3:** provider auth/version pinning, conformance runner harness.
+
+## 5. Architecture notes
+- Make `sse_st` an explicit `{source_proto, target_proto}` FSM; pure mapping tables (finish_reason, block↔delta, error) tested first.
+- Error taxonomy: keep `n_unsupported`; add `translate_unsupported`; post-header errors must emit protocol-native error events, never 400.
+
+## 6. Top 5 edits
+1. Add structured-output tasks or move it to Non-goals.
+2. Insert **Phase 1.0 real-SSE capture**; make 3.3 corpus expansion.
+3. Add usage+terminator mapping spec/eunit to 1.1 and 2.1.
+4. Add tool-index remapping, parallel/interleaved cases, and accumulator cap to Phase 1.
+5. Gate unblocking behind a per-route capability flag; specify mid-stream failover + entitlement checks.

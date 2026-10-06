@@ -1,0 +1,31 @@
+1. **Verdict:** GO WITH FIXES — the architecture is sound and most round-3 fixes landed, but Task 4's test module does not compile as written, the SSE path re-collapses genuine zeros, and several verification evals have broken shell quoting.
+
+2. **Critical risks**
+- **SSE fidelity:** capture/injection/regex-fallback are solid, but `from_sse` maps an all-zero max to `undefined`, so a genuine-zero stream counts as *unreported* — the body path preserves zeros, the stream path doesn't.
+- **Dual-DB SQL:** `||`, CAST, strftime/to_char, `percentile_disc` ≈ ceil-nearest-rank all consistent; the blind-`?` rewrite hazard is real but no fragment contains one — its only guard test is broken (below).
+- **Hot-path cost:** well bounded (4KB head, 16KB chunk-list, ≤~160-entry trim walk, one cast/request). Fine.
+- **Migration:** idempotent DDL, 004 correct, PG lane unexercised by default; PRAGMA-off SET-NULL fallback documented.
+- **Retention/sweep:** 31d margin, batched, worker-spawned, capped+logged. Fine.
+- **Writer:** trap_exit flush, drop-newest cap, mailbox guard (TOCTOU-bounded), throttled logs ✓; the lazily created `persistent_term` atomics counter has a create race (undercount only).
+- **Identity/FK:** ids from auth meta/route map; SET NULL → `(deleted)` consistent.
+- **p95:** cross-backend consistent; note avg/p95 include error latencies (only `unreported` is success-gated).
+
+3. **Contradictions / stale claims**
+- `janus_usage_sql_tests` defines `no_qmark_literals_test/0` **twice** (duplicate-function compile error) and `<<"?'",>>` is a **syntax error**; the first variant remains vacuous. Rev 4's "real `?`-guard test" claim is false as written; T4 Step 4's "green" expectation is unreachable.
+- T4 "parser (10) + SQL-shape (3)" — actual counts: 12 and 6 (5 unique).
+- Rev 4's "genuine-zero vs absent" holds only for `from_response_body`.
+- T1 Step 3 / T9 Step 3 expected outputs are unreachable: under sh quoting, `''usage_events''` collapses to a bare identifier → SQL error, not `{ok,[{<<"usage_events">>}]}`.
+
+4. **Missing first-ship**
+- Client disconnect mid-stream: `ok = cowboy_req:stream_body(...)` inside the Drain callback badmatches → the request process crashes before `track` → no row.
+- No code path records the documented "500 gateway crash" (proxy exception); only `{error, crashed}` → 500 does.
+- Postgres lane optional; no provider/provider_key composite index (ts_idx suffices for range scans — acceptable).
+
+5. **Architecture notes** — single buffered writer + erased-at-entry pdict scratch (correct for HTTP/1.1 reuse) + dialect-agnostic total parser + total read paths is the right shape; provider_key COALESCE concat rendering nulls as `(deleted)` is consistent; zero-filled buckets and `writer` badges are good operator signals.
+
+6. **Top 5 edits**
+1. Fix the SQL test module: delete the vacuous beam-scan test, dedupe the function name, repair the malformed binary literal; correct T4's counts.
+2. `from_sse`: return the decoded usage map even when {0,0}; fall back to regex/undefined only when no usage was found; add a genuine-zero SSE test.
+3. Parameterize string literals in the eval probes (`query("... = ?", [<<"usage_events">>])`) so T1/T9 verification actually runs.
+4. Wrap the Drain callback's `stream_body` in `case` and still record a row on client abort instead of badmatching.
+5. Initialize the drop counter atomics in `init/1` rather than lazily in `record/1`.

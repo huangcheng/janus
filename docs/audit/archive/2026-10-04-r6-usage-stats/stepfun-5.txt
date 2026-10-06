@@ -1,0 +1,23 @@
+1. **Verdict:** GO WITH FIXES — the architecture is sound and the rev‑4 fixes are real, but a genuine‑zero SSE stream still collapses to "unreported", the Task 4 test module cannot compile as written, and the tail capture is unbounded on degenerate chunk streams.
+
+2. **Critical risks**
+- **SSE fidelity:** `from_sse/3` ends with `case {P, C} of {0,0} -> undefined` — the exact genuine-zero bug rev 4 fixed in `norm/1` survives on the streaming path, untested (the zero test only covers `from_response_body`). A head/tail cut can also split a `data:` line mid-head, silently losing Anthropic input tokens.
+- **Dialect SQL:** `percentile_disc` vs nearest-rank parity is verified only "if a Postgres instance exists" — scope demands both. `to_char`/`strftime`, `CAST(x AS TEXT) ||`, and the `?`→`$N` rewrite are sound.
+- **Hot path:** per-request `process_info(message_queue_len)` is the one real cost (acceptable); the drop-path `persistent_term:get` has a first-drop race — concurrent racers overwrite the ref and lose counts.
+- **Migration/sweep:** SQLite `PRAGMA foreign_keys` likely off → SET NULL inert (documented, LEFT JOIN renders `(deleted)` — fine); sweep runs `COUNT(*)` over the old range per 5000-row batch — heavy but daily; no down migration.
+- **gen_server:** a crash loses ≤10k buffered rows *uncounted*; `stats/0`'s 1s call timeout flips `alive => false` during a legitimate 10k flush (false "writer down" alert); the mailbox-full `logger:warning` is per-event and unthrottled — log flood when the DB stalls.
+- **Identity/FK:** `#{provider_key := #{id := K}}` extraction is correct; `(deleted)` rendering is consistent.
+- **Latency/p95:** nearest-rank offset math is right; p95 and avg silently exclude NULL-latency rows (undocumented).
+
+3. **Contradictions/stale claims:** document title says "rev 3" while history and prompt say rev 4 is folded inline; Task 2's "~200 bytes, only pathological" comment predates the regex-fallback framing; `stats/0` "never hangs the caller" sits beside `alive => false` on timeout.
+
+4. **Missing first-ship:** no proof that every terminal `handle_upstream` clause tracks (7+ hand-inserted call sites, no test — translate-path 502s and non-2xx stream statuses are the likely misses); `record/1` silently no-ops while the writer is unregistered without incrementing any drop counter (invisible loss).
+
+5. **Architecture notes:** drop-newest cap, 50-row chunks (550 params, under SQLite's legacy 999 limit), reads running in the dashboard caller's process, PD erase-at-entry for keep-alive safety — all correct. Prefer one wrapper/macro at the reply boundaries over N `track` call sites. Parser purity and the writer back-pressure model are genuinely good.
+
+6. **Top 5 edits**
+1. `from_sse`: return `undefined` only when *no* usage map was seen (carry it through `filtermap`), not on `{0,0}`; add a genuine-zero `from_sse` test.
+2. Delete the duplicated `no_qmark_literals_test/0` in Task 4 (compile error as written) — keep the fragment-scan version.
+3. `trim_tail/1`: cap list length and skip zero-byte chunks — empty stream chunks grow the tail list without bound.
+4. Throttle the mailbox-full warning; derive `writer.alive` from `whereis`, not the 1s call timeout.
+5. Funnel all terminal proxy outcomes through one `track` wrapper (translate errors → 502) and count drops when `whereis(janus_usage) =:= undefined`.

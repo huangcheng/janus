@@ -1,0 +1,28 @@
+## 1. Verdict
+**GO WITH FIXES** — architecture is stable and near-shippable, but one claimed rev-8 fix is not actually implemented in the code and two operational holes remain.
+
+## 2. Critical risks
+- **Exposition format** — the renderer is otherwise correct (zero-fill, numeric sort, +Inf last, `[short]` floats, escaped labels), but `buckets/0` is a hand-written literal, not derived from `?BUCKETS_DESC`, so the "single source" invariant is unenforced.
+- **promtool** — `promtool check metrics` was removed in Prometheus 3.x. The mandatory gate step installs promtool unpinned; a 3.x image fails with "unknown command." Pin `<3.0` or use a scrape-based validator.
+- **Gauge shape vs. whole-scrape 500** — `safe/3` catches exceptions only; `int_or_zero` guards Dropped/Buffered/LB, but `catalog_generation`/`models_serving`/`cooling_count` pass a non-number through to `num_bin/1` (non-total) → render throws → 500. Contradicts the plan's own "one bad value must not 500 the whole scrape."
+- Cardinality, hot-path cost (≈16 ns-scale `update_counter`), auth reuse (tokenless `/stats` 401 regression guard present), histogram order (count-last ⇒ +Inf ≥ count at every interleaving), request-id hygiene (whitelist charset+length ⇒ no CRLF injection), dual-dialect migration, per-node scrape — all sound.
+
+## 3. Contradictions / stale claims
+- Rev 8 claims "single-sourced the ladder (`buckets/0` derives from `?BUCKETS_DESC`)"; the listing returns a hardcoded ascending list. Fix: `buckets() -> lists:reverse(?BUCKETS_DESC).`
+- Module header says table is "looked up by name **per bump**"; `observe/3` hoists `whereis` once per call — stale wording.
+- Task 5 Step 3b says the four handlers erase `janus_req_counted` "in THIS task," but chat/messages/responses handler edits land in Task 6 (harmless: proxy `handle/5` erase covers the interim state).
+
+## 4. Missing first-ship requirements
+- Pin promtool version in the gate image build.
+- Confirm `bin_or_null/1` doesn't already exist in `janus_usage.erl` (duplicate definition = compile error).
+- Nothing else material; tracing/alerting are correctly scoped out.
+
+## 5. Architecture notes
+ETS ownership (app-master, idempotent init, `whereis`-per-call, no persistent_term tid) is right; renderer is pure except `num_bin/1`; hook placement (terminal-only `track/3`, `reply_err` guard + `janus_req_counted`, auth bump, models bump) is correctly double-count-proof; header echo via `set_resp_header` on the shared Req chain covers 401/stream by construction and is gate-asserted.
+
+## 6. Top 5 concrete edits
+1. `buckets() -> lists:reverse(?BUCKETS_DESC).` (delete the duplicate literal).
+2. Pin promtool `<3.0` (or swap validator) and assert the version in the image build.
+3. Make `num_bin/1` total (fallback `0` + warn) or coerce all numeric gauges with `int_or_zero`.
+4. Fix header docstring "per bump" → "per inc/observe call."
+5. Add a `bin_or_null` collision check to Task 6 Step 5; fix Task 5 Step 3b "in THIS task" wording.

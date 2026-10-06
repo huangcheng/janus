@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound and prior rounds are genuinely resolved, but Task 7's filter code is broken as written and two claimed safeguards are illusory.
+
+## 2. Critical risks
+- **Task 7 `handle_usage_events`**: `maps:filter/2` predicate must return `boolean()`; it returns `{true, {key_id, N}}` → badarg/500 (or all filters dropped). Even as `filtermap`, the map keys stay `<<"key_id">>` while `recent_filters/1` pattern-matches `{key_id, V}` (atom) → filters silently ignored. Breaks the "filtered drill-down" requirement.
+- **Sweep SQL as written**: `LIMIT ?BATCH` goes through `rewrite_pg` → `$NBATCH` (or `?BATCH` unbound on SQLite). The note says "inline 5000" but the copyable code is wrong.
+- **`no_qmark_literals_test` is a no-op** — it reads a `file` attribute and asserts `length > 0`; it never scans SQL. The "`?` literal is enforced by eunit" claim is false.
+- **Read path not exception-safe**: `{ok, Rows} = q(...)` badmatches on DB error → dashboard endpoint 500 (writer is safe, reader isn't).
+- Tail capture copies ≤16KB per chunk; head/tail overlap (4–20KB streams) double-decodes events — safe only because `lists:max` is idempotent; delta emitters would inflate both axes.
+- Per-event `logger:warning` at cap = log flood under a stalled DB. `avg_latency_ms` still mixes stream/non-stream (and is exported but never rendered).
+- Postgres lane (`percentile_disc`, `to_char`, SMALLINT binds) is verification-optional → effectively untested.
+
+## 3. Contradictions / stale claims
+- Task 1 comment "502 on mid-stream failure" vs Task 5's 503 for `provider_disabled` (status doc incomplete).
+- Task 4 Step 5 expected output hedges `unknown #null` as "acceptable OR filter … OR note it" — ambiguous acceptance.
+- Self-review calls the delta-emitter caveat a "p95 caveat"; it's usage-fidelity.
+- Header says inject into "upstream OpenAI streams"; code injects only `openai_chat`.
+
+## 4. Missing first-ship requirements
+- No automated tests for `janus_usage` write path (flush threshold, cap drop, malformed drop, terminate flush) — smoke-only.
+- No task to document/land `usage_inject_include_usage` (no sys.config/ops note).
+- Recent list is fixed-`limit`, no pagination (acceptable v1, but undocumented).
+
+## 5. Architecture notes
+Buffered writer design (drop-newest cap, 50-row atomic chunks, trap_exit flush, unlinked sweep worker) is right; note `shutdown 5000` vs slow terminate flush. pdict erase-at-entry correctly handles cowboy keep-alive reuse. Parser is pure/total; `{0,0} → undefined` conflates genuine zero with absent. Rollup SQL is dialect-correct: `ceil(0.95N)-1` == `percentile_disc(0.95)`, bucket exprs are UTC on both, `||`/`CAST AS TEXT` valid in both.
+
+## 6. Top 5 edits
+1. Rewrite `handle_usage_events` with `maps:filtermap` emitting `#{key_id => N}` / `#{model_id => N}` matching `recent_filters`, or match binary keys there.
+2. Inline `LIMIT 5000` in the sweep DELETE; delete `?BATCH` from all shipped code.
+3. Replace `no_qmark_literals_test` with a real scan of builder SQL for `?` inside quoted literals (assert `nomatch` for `'?`/`?'` across `breakdown_dim`/`recent` SQL).
+4. Replace read-path `{ok, Rows} =` with `case` returning safe defaults; split or drop `avg_latency_ms`.
+5. Add eunit for `janus_usage` write path + a config task for `usage_inject_include_usage`.

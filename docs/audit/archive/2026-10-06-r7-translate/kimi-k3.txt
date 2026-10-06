@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the plan is unusually battle-hardened after 6 rounds; remaining risks are concentrated in responses-target buffering, LB/translation cost interplay, and retry-composition bookkeeping.
+
+## 2. Critical risks
+- **response.completed reconstruction (biggest gap).** C1 requires `response.completed` to carry the full `output` array. The translator must therefore buffer the ENTIRE text/reasoning content, not just tool args — yet the C5 caps (256KiB/call, 64 calls, 1MiB) bound only tool args. Unbounded text accumulation per stream is a memory hole, and 3.4's soak asserts "caps hold" against caps that don't cover this.
+- **include_usage retry × C4 failover composition.** C3 says inject+retry retries once; C4 defines per-attempt fresh state and usage rows. Whether the injection retry consumes a failover attempt, produces its own usage row, or resets the commit window is unspecified — exactly the bookkeeping class that produced past double-row bugs.
+- **LB cost inversion when knob is on.** `prefer_proto` biases only *blocked* requests. Post-1.9, a streaming chat request with a native chat route available can land on an anthropic route and pay full translate cost forever. The substrate note never addresses bias-as-cost-optimization after unblocking.
+- **Fixture realism residue.** Kimi corpus must contain pings (C2) and 1.1 must contain interleaved tool deltas — but 1.0's capture task doesn't enumerate these as capture requirements; a real transcript without them silently weakens the eunits that depend on them.
+
+## 3. Contradictions / stale claims
+- C4: "a stream whose every attempt fails... still owes the client a target-format error event" — but headers flushed via `stream_reply` are a 200; clients (esp. OpenAI SDKs) that error on non-2xx will now parse an in-body error. Undocumented client-visible behavior change; contradicts nothing internally but deserves a C2 note.
+- 1.5's non-stream n>1 reject "rides in 1.9's commit" while 1.9's e2e list asserts only `n>1 stream → n_unsupported`. Non-stream assertion missing from the ship unit.
+
+## 4. Missing first-ship requirements
+- Phase 1: gun→Cowboy backpressure for translated streams (translation adds per-event allocation; slow client + fast upstream is unbounded today).
+- Phase 1: 1.0 must list required capture shapes (pings, interleaved deltas, truncated-args, >64-call) as acceptance criteria.
+- Phase 2: `sequence_number` synthesis rule (counter origin, per-item continuity) belongs in 2.1, not just asserted by eunit.
+- Phase 2/3: client-abort → upstream gun stream cancellation e2e for responses targets.
+- 2.3a/1.9: knob flip semantics for in-flight streams (old mode drains) undocumented.
+
+## 5. Architecture notes
+State machine extension points are right (per-attempt `sse_st`, lazy skeleton, decode-at-close). Error taxonomy is coherent. The four-index-space discipline (C5) is the correct hard call. Consider making `mapped_stop` per-row enum-ish rather than bare counter for dashboard drill-down.
+
+## 6. Top 5 concrete edits
+1. C5: add total-content buffer cap (e.g. 4MiB) for response.completed reconstruction; 2.1 must state full-object echo requirement.
+2. C3/1.4b: specify inject-retry vs failover attempt accounting (one row, which attempt number).
+3. 1.9: extend `prefer_proto` to a permanent same-protocol cost bias when knob on; add e2e proving native route preferred.
+4. 1.0: enumerate mandatory capture shapes (ping, interleave, truncation, >64 calls, usage-bearing) as done-criteria.
+5. 1.9 e2e list: add non-stream n>1 reject + client-abort upstream-cancellation assertions.

@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — the SSE state machine, counters, and deploy wait are close to shippable, but keepalive/disconnect semantics, recorded-status semantics, and Docker dep coherence have real holes, and the Claude Code compatibility claim is oversold.
+
+**2. Critical risks**
+- **No keepalives on Chat faces.** OpenAI upstreams send no pings; long thinking stalls will hit Caddy/SLB idle timeouts. The claim that Cowboy `idle_timeout` is "between-request only" is unverified — it applies per stream; test empirically. Emit periodic `: ping` comments on both faces.
+- **No backpressure story.** Gun→Cowboy drain fold must honor flow control (gun credit, `stream_body` blocking); slow clients otherwise grow unbounded memory.
+- **Goal oversold.** Cursor/Claude Code send `tools`/`tool_use` by default → 400 `translate_unsupported`. Translated streaming effectively serves plain chat only.
+- **Disconnect = `track(502)`** pollutes `requests_failed` with client aborts; post-headers 400/502 tracking makes recorded status diverge from wire 200. Define "recorded status ≠ HTTP status" explicitly and align dashboard SPEC §2.4.
+- **Chat→Anthropic:** `message_start.usage.input_tokens` is unknowable (usage arrives stream-end) → always 0, silently accepted. Thinking blocks omit `signature` — Anthropic multi-turn may reject them next turn.
+- **Docker dep drift:** run mounts host `apps/` but image-baked `rebar.config`/`rebar.lock` and the `_build` volume can go stale across dep or OTP changes.
+
+**3. Contradictions / stale claims**
+- §4.1.4 "Client-origin `translate_unsupported` after 200": tools/vision are rejected pre-upstream; any post-200 occurrence is provider-origin (unexpected `tool_calls`/`tool_use`). Mislabeled.
+- §4.1.3 `message_delta` "No usage on this chunk" vs the next row's usage chunk — reword: usage is a *separate* empty-choices chunk.
+- Success criterion 3 says "without fetching dl-cdn", but the CI `APK_MIRROR` override may use Alpine CDN — scope criterion 3 to laptops.
+
+**4. Missing requirements**
+- Request-leg scrub list for streaming translate: `thinking`, `metadata`, `cache_control`, array-form `system`, client-supplied `stream_options` merge policy.
+- First-byte timeout before 200 headers (504 path).
+- Guarantee janus-auto inner target/judge calls and LB retries don't re-bump counters (`janus_stats_counted` must guard retry re-entry).
+- TF-6.8/6.8b negative assertions: no `event:` lines on Chat face, no bare `[DONE]` on Anthropic face.
+
+**5. Architecture notes**
+- Handler-owned `#sse_st{}` + atomics in persistent_term is right; enforce single `finalize_sse` in both normal and catch paths via `terminal_sent`.
+- Deploy: capture leader generation only after dashboard config writes quiesce, else a follower racing ahead fails equality forever → spurious halt.
+
+**6. Top 5 edits**
+1. Add keepalive comment frames (~15s idle) both faces; verify Cowboy `idle_timeout` mid-SSE.
+2. Specify recorded-status semantics (post-200 400/502; whether disconnect counts failed) vs dashboard SPEC.
+3. Document Chat→Anthropic limits (`input_tokens=0`, no thinking `signature`) + compatibility matrix showing tools→400.
+4. Mount/reconcile `rebar.config`/`rebar.lock` with host source; document `_build` volume invalidation.
+5. Add request-scrub/`stream_options` merge list and face-bleed negative assertions to TF-6.8/6.8b.

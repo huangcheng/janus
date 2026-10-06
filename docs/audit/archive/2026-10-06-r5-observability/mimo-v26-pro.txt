@@ -1,0 +1,24 @@
+1. **Verdict: GO WITH FIXES** — the plan is nearly shippable, but the renderer as written drops `+Inf` buckets outright, contradicting its own byte-exact tests and the gate invariant.
+
+2. **Critical risks**
+   - **Exposition correctness (real bug):** `le_num(<<"+Inf">>)` → `binary_to_float` badarg → `binary_to_integer` badarg → `invalid`. The `lists:partition` in `render_hist_series` therefore files `+Inf` under `Invalid`, logs it as `janus_metrics_bad_bucket`, and drops it. Both exact-output tests (Task 3) fail as written, and `histogram_quantile` + gate step 2 (`+Inf == _count`) break. Special-case `+Inf` before the partition (comparator already does).
+   - **Histogram bump order:** buckets ascend, then `+Inf`, sum, count. A concurrent scrape can see `le=0.05` bumped with `le=0.5`/`+Inf` still 0 — transient non-monotonicity, exactly what gate step 2 asserts. Bump descending (`+Inf` first … smallest last) so lower ≤ higher holds at every interleaving; `count == +Inf` is unachievable atomically — the code comment overclaims (rev 4 vs rev 5 histories also state contradictory orders; purge one).
+   - Hot-path cost, cardinality, auth reuse (constant-time token, socket-peer loopback), migration dual-dialect, and per-node scrape model are sound.
+
+3. **Contradictions / stale claims**
+   - `request_too_large` is listed as counted via `reply_err/6` (2b) *and* as a documented exclusion ("handler-entry 413 bumps nothing"). Pick one.
+   - "labels sorted by key with `le` appended last" vs "labels sorted by key" — `le` breaks key order (harmless to promtool; state the exception once).
+   - "renderer pure/total": `to_bin/1` on invalid unicode returns an `{error,_,_}` tuple → `labels_bin` crash → whole scrape 500.
+
+4. **Missing first-ship requirements**
+   - `Dropped`/`buffered` from `janus_usage:stats/0` feed `integer_to_binary`/`num_bin` unguarded; a non-integer value 500s the entire scrape. Reuse the `is_integer` filter + warn.
+   - Task 3 fixture `0.05→3, 0.1→0` is non-monotonic — violates the repo's production-shaped-fixture rule; make it cumulative.
+
+5. **Architecture notes** — ETS `whereis`-per-bump, idempotent init, registry-driven families, shared classifier, `models_serving` extraction, single `janus_lb:stats/0` call, handler-entry `set_resp_header` on the same Req chain: all correct and well-reasoned. `janus_req_counted` erase placement (handler authoritative, proxy belt-and-braces) is coherent.
+
+6. **Top 5 edits**
+   1. Fix `+Inf` handling in `render_hist_series` partition (and add an explicit +Inf-present assertion).
+   2. Reverse observe bump order to descending bounds; reword the invariant comment to "count ≤ +Inf".
+   3. Resolve the `request_too_large` count-vs-exclude contradiction.
+   4. Guard `Dropped`/`buffered` with `is_integer` + one-time warn.
+   5. Make `to_bin` total (fallback `iolist_to_binary`/`invalid → <<>>`) and fix the non-cumulative test fixture.

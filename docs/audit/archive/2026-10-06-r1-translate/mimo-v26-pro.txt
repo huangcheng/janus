@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — the phase decomposition is sound but the plan underspecifies stream framing skeletons, usage/terminator semantics, and ships code before fixtures.
+
+**2. Critical risks**
+- **Skeleton gaps:** 1.1 lists only tool_use frames; a chat→anthropic stream also needs `message_start` (id/model/usage) before blocks and `message_delta(stop_reason, usage)` before `message_stop`. `tool_calls`→`stop_reason: tool_calls` and `length`→`max_tokens`→responses `incomplete` mappings are nowhere specified. This is where partial streams break clients.
+- **Usage-event semantics:** chat usage arrives only via `stream_options.include_usage` synthetic chunk; anthropic usage in `message_start`/`message_delta`; responses in `response.completed`. Per-attempt usage rows (stream=1, tokens) must stay stable under translation — no task owns this mapping.
+- **Failover × translation:** if translation fails mid-stream (upstream 200 consumed), can the failover loop retry? sse_st lifetime, partial usage rows, leftover cap under retry are unspecified.
+- **Predicate unblocking (1.3) precedes E2E (1.4)** and silently changes route selection: `prefer_proto` no longer fires for tool/vision streams, and previously-400 traffic now consumes quota. Need a preserved diagnostic fallback if translation aborts early.
+- **Fixture realism violated:** 3.3 (real transcripts) comes *after* 3.1/3.2 code. 1.1 cites "real captured SSE lines" with no capture task. This inverts the AGENTS.md eunit-first rule.
+- **Hot path:** per-delta JSON re-encode + accumulating tool args; 3.4 soak lands last. Move at least a translated-stream soak to post-Phase 2.
+
+**3. Contradictions / stale claims**
+- 2.1 adds responses as translate *target*; 3.2 needs responses as *source* (event parsing) — a dependency the phases hide ("bidirectional" overclaims).
+- 1.5 "document: reject n>1" conflicts with the table's non-stream chat↔anthropic "req+stream (text+thinking only)" — is n>1 rejected on non-stream translate too? Undefined.
+- 2.5 needs per-model protocol-capability metadata absent from the ETS catalog schema; no schema/migration task.
+
+**4. Missing first-ship requirements**
+- Phase 1: `message_start`/`message_delta` synthesis, `finish_reason`↔`stop_reason` table, thinking/tool_use block-ordering rules (anthropic requires tool_use after thinking), mid-stream error frames.
+- Phase 2: responses event grammar completeness (`sequence_number`, `output_item.added` snapshots, `response.failed`/`incomplete_response`, reasoning-item mapping from thinking), `function_call_output`/`instructions` in `input`, `tool_choice`/`parallel_tool_calls` mapping.
+- Phase 3: responses-source delta parser task; per-provider quirks (dashscope/volcengine/kimi) in conformance.
+
+**5. Architecture notes**
+- Extend `sse_st` as `{frame_seq, blocks, tool_acc, usage_acc, tgt_proto}`; keep translation a pure fold over frames (eunit-able). Publish an explicit per-pair event mapping table in `docs/`; define error taxonomy: request-reject (400 `*_unsupported`) vs strip-with-`X-Janus-Dropped` vs mid-stream `error` relay, one per protocol.
+
+**6. Top 5 edits**
+1. Rewrite 1.1/2.1 around full message skeletons + a per-pair event mapping table incl. terminators and usage.
+2. Move real-SSE capture (3.3) before any Phase 1/2 code.
+3. Add failover×mid-stream-failure semantics task; move a soak test after Phase 2.
+4. Split 2.1 into responses-target vs responses-source (latter stays Phase 3) and 3.1 accordingly.
+5. Resolve n>1 non-stream policy + add capability metadata task before 2.5.

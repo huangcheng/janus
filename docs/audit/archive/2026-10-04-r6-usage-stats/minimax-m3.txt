@@ -1,0 +1,37 @@
+**Verdict:** NO-GO — duplicate `no_qmark_literals_test/0` blocks compilation; `from_sse` collapses genuine zero-usage to `undefined` (asymmetric with `from_response_body`); `trim_tail` is still O(N²) per stream; `record(Bad)` bypasses round-3 back-pressure.
+
+**Critical risks:**
+- **SSE zero-usage fidelity**: `from_sse` returns `undefined` on `{0,0}` max (line ~145). `from_response_body` keeps `#{0,0}` via `has_known_key`. Round-3 zero-fidelity fix is lost on the streaming path — a provider that legitimately emits `{prompt: 0, completion: 0}` in its terminal chunk gets reclassified as "unreported".
+- **`trim_tail` is O(N²)**: each chunk arrival folds the full chunk list. Memory is bounded (chunk-list, not 16KB binary concat), but per-chunk iteration cost grows with chunk count. Comment overstates the fix.
+- **`record(Bad)` (no status) bypasses mailbox guard**: floods of `#{}` casts skip the queue-length check and saturate the mailbox. Round-3 back-pressure is partial.
+- **`rewrite_pg` is naive**: rewrites `?` inside `'…'` literals. Current SQL has none; any future `LIKE 'a?b'` is silently mangled to `'$N'…'`.
+- **avg vs p95 empty semantics inconsistent**: `totals` returns `avg_latency_ms => 0` (COALESCE) but `p95_latency_ms => null` for the same empty window. Misleads the UI.
+- **`null` atom passed as DB param**: epgsql may not accept Erlang `null` as SQL NULL (typically `undefined` or `{null, type}`). Postgres lane breakage is untested.
+- **Regex fallback one nesting level** misses Anthropic's deeper `*_details` blocks.
+
+**Contradictions / stale claims:**
+- Task 4 Step 4 says "parser (10) + SQL-shape (3)"; parser has 12, SQL-shape has 5 unique (one duplicate name).
+- Task 6 claim "no per-chunk 16KB rebuild on the hot path" is false — `trim_tail` iterates the full list per chunk.
+- "Bounded chunk-list tail" bounds memory only, not iteration.
+
+**Missing first-ship requirements:**
+- No circuit breaker / retry on writer `q/2`; flapping DB silently drops rows.
+- No idempotency / request id; retries double-record. Writer restart mid-request loses mailbox events.
+- No rate limit on `/api/usage/events` beyond `LIMIT 200`.
+- `breakdown(provider_key)` NULL name conflates "never attached" vs "FK SET-NULL'd" — both render `(deleted)`.
+
+**Architecture notes:**
+- Buffered writer + per-request process dict (erase-on-entry) is sound.
+- Dual-DB via `rewrite_pg` + `bucket_expr` is pragmatic; the rewrite is brittle.
+- Parser pure + total + bounded head/tail is correct; `trim_tail` needs size caching; SSE parity with body parser required.
+- Rollup SQL correct; nearest-rank p95 + `erlang:ceil` OK; empty-window markers must be uniform.
+- SPA contract well-bounded; zero-fill lives in the SPA (server returns raw).
+
+**Top 5 concrete edits:**
+1. **Delete the abstract-code `no_qmark_literals_test`** — defined twice, won't compile.
+2. **Make `from_sse` symmetric with `from_response_body`**: drop `{0,0} -> undefined`, use `has_known_key` so genuine streaming zeros survive.
+3. **Rewrite `trim_tail` to track size in the dict**: store `{Chunks, Size}`, only re-trim when total > 16KB — O(1) amortized.
+4. **Apply mailbox guard to `record(Bad)`**: same `whereis`+`message_queue_len` check before `{drop, Bad}` cast.
+5. **Make `avg_latency_ms`/`avg_stream_ms` null on empty**: match `p95_*_ms`; no spurious "0 ms" UI values.
+
+Bonus: `null` → `undefined` for epgsql; circuit-breaker on writer `q/2`; per-request idempotency token.

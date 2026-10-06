@@ -1,0 +1,25 @@
+# Audit — Usage Statistics Plan (rev 2)
+
+**1. Verdict:** GO WITH FIXES — A1–A10 genuinely close the parser/SSE-head/UTC/breakdown findings, but three defects (`'?'` literal vs `rewrite_pg`, a sweep that can't read affected rows, un-normalized atom params on Postgres) ship broken, and the task bodies still contain the code the fixes supersede.
+
+**2. Critical risks**
+- **Dialect SQL:** A5's provider-key `NameExpr` embeds `'?'`. `rewrite_pg/2` rewrites `?` *inside string literals* → `'$N'`, corrupting the query and shifting every later placeholder. Postgres-only; SQLite verification passes.
+- **Types:** proxy passes `protocol` as an atom; epgsql rejects atoms → every flush fails, total loss. `bool_int/1` (A6) is never defined. IDs are unvalidated — one non-integer kills a 50-row chunk.
+- **Sweep:** `janus_db_conn:query` returns `{ok, Rows}` (Task 1 Step 3 expects exactly that). `{ok, N} when is_integer(N)` never matches → one 5000-row batch per day, then silent stop. Retention is broken.
+- **Buffer:** `?MAX_BUF` doesn't bound memory — under a DB stall casts pile in the mailbox, uncounted, then each drop logs a warning (log storm). `q/2` isn't exception-safe: a raising driver crashes the gen_server and dumps ≤10k events. `dropped` is never exposed; no retry, so a 1s blip loses a second of traffic.
+- **SSE fidelity:** Anthropic `cache_creation_input_tokens`/`cache_read_input_tokens` aren't in `input_tokens` → prompt undercount for cached traffic. Injection mutates a client-visible response the client never requested; "spec-compliant" is an assumption (some SDKs choke on the `choices: []` chunk), and the kill switch is an env var no task wires into release config.
+- **Latency/p95:** `stream` is added but unused by `totals`/`series`/`p95`/`recent` — full-drain stream spans and non-stream still share one p95. Relabeled, not fixed. A client disconnect inside the Drain callback kills the request process → no row at all.
+- **Migration/FK:** `foreign_keys=ON` plus a FK to `provider_keys` (existence asserted, never verified) means a key deleted between capture and flush fails the whole chunk. No down-migration; Task 4 Step 2 ends with `DELETE FROM usage_events` on a live node.
+
+**3. Contradictions/stale:** Task 1 SQL (`NOT NULL DEFAULT 0`, no `stream`) vs A1; Task 4 still has `percentile_cont`, local-time `to_char`, `ORDER BY 5`, `LIMIT ?`; Task 6 still first-chunk-only, always-inject, `track(Status,…)`; Task 8 says three cards and `UsageSummary` lacks `by_provider_key`; A3 omits `handle_call/3`, `code_change/3`, macros, `q/2`; A5's `recent/2` appends `AND …` to a query with no `WHERE`; A3 claims "drop-oldest" but drops newest; Self-review still calls flush-error logging a follow-up.
+
+**4. Missing first-ship:** any automated test for writer/SQL; any Postgres execution (scope says both backends, Task 9 is SQLite-only); a `usage_unreported` count making NULL-token rows visible; boundary validation in `record/1` (`record(#{})` inserts a junk row); `janus_usage:stats/0`; UTC-consistent `fmtTs` (charts say UTC, table uses `getHours()`).
+
+**5. Architecture:** one serialized gen_server is the funnel for all data-plane traffic — cheap per cast, unbounded in aggregate; add a mailbox check or ETS ring + single writer. Multi-row insert is right, but emit `$N` directly for Postgres rather than `rewrite_pg` over 550 placeholders (O(n²) binary rebuild per flush). Max-of-usages and head/tail overlap are sound.
+
+**6. Top 5 edits**
+1. Drop the `'?'` literal from `NameExpr` (`COALESCE(CAST(pk.id AS TEXT), 'unknown')`) and add a test asserting no usage SQL literal contains `?` and `rewrite_pg` preserves placeholder count.
+2. In `build_insert`, normalize: `protocol` → `atom_to_binary`, IDs → `int_or_null/1`, `stream` → defined `bool_int/1`; wrap `q/2` in `try…catch` returning `{error, Reason}`.
+3. Make `sweep_batch` loop on the documented `SELECT COUNT(*) WHERE ts < ?` fallback (primary, not fallback) and stop on zero.
+4. Physically replace the superseded code in Tasks 1/4/6/8 with the A-versions, add `WHERE 1=1` to `recent/2`, add `by_provider_key` to `UsageSummary`, and delete the stale Self-review bullet.
+5. Use `stream`: add `stream` filter/group to `totals` and `p95`, surface `usage_unreported`, and add a Postgres run to Task 9.

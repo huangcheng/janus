@@ -1,0 +1,36 @@
+**Verdict:** GO WITH FIXES — five clarifications close it; mid-stream `response.incomplete` is the only real correctness risk.
+
+**Critical risks**
+
+1. **3.4 mid-stream `response.incomplete`** — the plan asserts it's corpus-verified ("mid-stream `response.incomplete` (not just terminal)"), yet 1.0's synthetic-exception list is closed at two splices (>64-calls, truncated). If the OpenAI responses API doesn't actually emit `response.incomplete` mid-stream, 3.4's soak fails. Resolve in 3.3: confirm as a real OpenAI capture, or document as a third synthetic splice. Single load-bearing ambiguity.
+
+2. **Phase 2 2×2 knob matrix** — four cells asserted independent (responses × tools), but `sse_st` is shared state; under {tools=off, responses=on}, responses-client streams must run without Phase-1's tool state. Add a shared-state independence assertion to 2.4 eunit.
+
+3. **`n>1` knob ownership** — 1.8c says tools knob is "the carrier" for n>1 streaming reject, but Phase 2 ships a responses knob. Specify per-pair ownership: tools → chat↔anthropic; responses → responses client with chat/anthropic provider; provider-responses → chat/anthropic client with responses provider.
+
+4. **Synthesized 4-prefix scheme gap** — `jresp_/jmsg_/jfc_/jitem_` enumerated but not mapped to the four id spaces (response id, message id, tool call id, output item id).
+
+**Contradictions / stale**
+
+- 3.2b is a Phase-3 checkbox but described as "folded into 1.5 — no separate policy". Delete or annotate `[verified by 3.5 gate; impl in 1.5]`.
+- C2 type map (overloaded_error→server_error etc.) covers →chat/→anthropic but not →responses. Spell out the type→code map for `response.failed.error`.
+
+**Missing first-ship reqs**
+
+- 1.6a degradation schema specifies placement on →chat/→anthropic terminals but not →responses. Specify where `x-janus-dropped`/`x-janus-mapped-stop` live inside `response.completed`/`response.incomplete`/`response.failed`.
+- 1.8c/2.3 ship operator UI but no changelog or runbook step is named for the flip procedure.
+- 3.3 corpus-extension says "no hand-invented frames" but doesn't bind itself to real-capture for the mid-stream `response.incomplete` claim.
+
+**Architecture / design notes**
+
+- **State machine**: `sse_st` gains tool accumulator (Phase 1), then responses target (Phase 2 forward, Phase 3 reverse). Per-stream state: four id-space maps, six per-pair maps (3 pairs × 2 directions), content accumulators per call id, deferred text buffer, cap counters (256KiB/call, 64 calls, 1MiB total args, 4MiB total content).
+- **Event mapping**: C1/C2/C3 cover three pairs; add four rows for the new pairs.
+- **Error taxonomy**: canonical `{type, code, message}`. Per-target: chat=type/code/message; anthropic=type/message (no code field — needs spec); responses=code/message. Type→code map for →responses needs spelling.
+
+**Top 5 edits**
+
+1. **3.3 task description**: explicit binding — mid-stream `response.incomplete` is either captured from a real responses transcript or added to the synthetic-exception list with splice rules.
+2. **C5 / 2.1**: prefix→space table — `jresp_`=response id, `jmsg_`=anthropic message id, `jfc_`=tool call id, `jitem_`=responses output item id.
+3. **1.8c / 2.3**: spell out per-pair `n>1` streaming-reject knob ownership (risk 3).
+4. **3.2b**: delete the checkbox or annotate `[verified by 3.5 gate; impl in 1.5]`.
+5. **C2**: add a type→code row for →responses — overloaded_error→server_error, api_error→server_error, rate_limit_error→rate_limit, invalid_request_error→invalid_request_error.

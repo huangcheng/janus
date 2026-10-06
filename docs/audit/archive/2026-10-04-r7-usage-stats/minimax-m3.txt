@@ -1,0 +1,32 @@
+**Verdict: NO-GO** — two hard defects (compile error, failing test) plus an avg-on-empty regression that contradicts rev 4.
+
+**Critical risks**
+- **Compile error, Task 3**: `_ = proc_lib:spawn(fun sweep/0)` — `proc_lib` exports `spawn_link/1`/`spawn_opt/2`/etc., never `spawn/1`. Module will not compile. Use `erlang:spawn/1`.
+- **Trim-tail test fails, Task 6**: `maybe_trim/2` over-cap branch ends in `lists:reverse(Kept)`, but the fold accumulates newest-first in iteration order, so reversing yields oldest-first. `trim_keeps_newest_within_byte_cap_test` expects `{[C3,C2],16384}` from `[C3,C2,C1]`; implementation returns `{[C2,C3],16384}`. Drop the reverse.
+- **avg null-on-empty regression, Task 4**: `COALESCE(AVG(CASE WHEN stream=0 THEN latency_ms END),0)` forces 0 on empty/non-matching sets, then `round(num(0))=0`. Plan claims null-on-empty (rev 4) and SPA renders `?? "—"`. Result: empty windows show "0 ms" while `p95_*` shows "—". Drop the COALESCE on the AVGs and route through `num_or_null/1`.
+- **SSE fidelity for openai_responses**: `maybe_inject_stream_usage` only handles `openai_chat`. Native-path Responses streams get no `include_usage` injection; tail-capture is the only fallback and regularly misses `response.completed` even with the regex fallback. Inject for `openai_responses` or document explicitly.
+- **p95 cost**: SQLite p95 issues `SELECT COUNT(*)` then `SELECT ... LIMIT 1 OFFSET N` per call. For 30-day windows with hundreds of thousands of rows this is O(N) twice. Add a covering index hint or cache.
+
+**Contradictions / stale claims**
+- Task 2 Step 4 says "All 12 tests passed" — there are 13 tests in Step 1 (added `responses_oversized_completed_test`).
+- Revision history claims "avg null-on-empty" but totals SQL forces 0.
+- Self-review says "no addendum applies" yet Task 7 Step 2 still requires an out-of-band grep pre-flight for `qs_int`/`now_sec`.
+
+**Missing first-ship requirements**
+- No explicit Postgres parent-FK-type check (parent `id` columns must be `BIGINT`; SQLite→INTEGER mismatch fails migration).
+- `sweep` worker is `proc_lib:spawn` (also broken) and unlinked; a crash is silent.
+- `key_id_of(#{provider_key := #{id := Kid}})` badmatches when `provider_key` lacks `id`; needs a fallback.
+- `injection_*` eunit tests use `application:set_env` with no per-test reset — order-dependent pollution.
+
+**Architecture/design notes**
+- Buffered writer is sound: 50-row multi-row, 1s flush, 10k cap + mailbox guard + atomics drop counter created in `init/1` (no hot-path put). Reads via `persistent_term:get` only — round 4 fix held.
+- Proxy hook via process dictionary with `janus_usage_*` prefix + erase-at-entry is correct for cowboy keep-alive.
+- Parser is dialect-agnostic and total; regex fallback recovers truncated `response.completed`.
+- Dialect split in `bucket_expr`/`p95`/`rewrite_pg` is consistent; only the totals AVG branch needs the null fix.
+
+**Top 5 concrete edits**
+1. Replace `_ = proc_lib:spawn(fun sweep/0)` with `_ = erlang:spawn(fun sweep/0)`; wrap `sweep/0` body in `try/catch` so DB errors don't kill the worker silently.
+2. In `maybe_trim/2` over-cap branch, return `Kept` directly — delete the `lists:reverse(Kept)` line.
+3. In `totals/2`: `COALESCE(AVG(CASE WHEN stream=0 THEN latency_ms END),0)` → `AVG(CASE WHEN stream=0 THEN latency_ms END)` (and the `stream=1` twin); replace `round(num(AvgNs))` with `num_or_null(AvgNs)`; add null defaults in the `{error,_}` clause.
+4. Add `key_id_of(#{provider_key := _}) -> null;` between the existing pattern and the catch-all in `janus_http_proxy`.
+5. Extend `maybe_inject_stream_usage/4` to also inject on `openai_responses` (`stream_options.include_usage` is supported), or add a documented limitation and a regression test asserting non-injection.

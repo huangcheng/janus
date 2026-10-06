@@ -9,7 +9,7 @@
 
 -export([handle/5, model_field/1]).
 %% Exported for eunit (usage capture helpers).
--export([maybe_trim/2, maybe_inject_stream_usage/4]).
+-export([maybe_trim/2, maybe_inject_stream_usage/4, stream_translate_blocked_for/2]).
 
 -define(MAX_BODY, 10 * 1024 * 1024).
 
@@ -111,13 +111,12 @@ extract_model(_Proto, Map) ->
     end.
 
 proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
-    WantStream = janus_protocol_translate:wants_stream(Map),
     %% janus-auto skips cross-protocol tier members ONLY when the
     %% stream translate path is blocked (tools/vision/n>1 or a
     %% responses client). Plain text/thinking streams translate now.
     AutoConstraint = #{
         client_proto => ClientProto,
-        stream => WantStream andalso janus_protocol_translate:stream_translate_blocked(ClientProto, Map)
+        stream => stream_translate_blocked_for(ClientProto, Map)
     },
     case janus_auto:maybe_route(ModelName, Map, AutoConstraint) of
         {ok, Target} ->
@@ -147,11 +146,12 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
 do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
     inc_total_once(),
     put(janus_req_model, ModelName),
+    PickOpts = stream_pick_opts(ClientProto, Map),
     case resolve_model(ModelName) of
         {ok, ModelId} ->
             proxy_picked(
                 ClientProto,
-                janus_lb:pick_route(ModelId, #{}),
+                janus_lb:pick_route(ModelId, PickOpts),
                 Body,
                 Map,
                 Req,
@@ -164,7 +164,7 @@ do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
             %% janus-auto tiers, not a precondition for calling).
             proxy_picked(
                 ClientProto,
-                janus_lb:pick_listing_route(ModelName, #{}),
+                janus_lb:pick_listing_route(ModelName, PickOpts),
                 Body,
                 Map,
                 Req,
@@ -202,6 +202,32 @@ provider_protocol(#{provider_id := Pid}) ->
             janus_protocol_translate:normalize_protocol(maps:get(protocol, Map, undefined));
         error ->
             {error, unknown_protocol}
+    end.
+
+%% True when this request wants streaming AND the streaming translate
+%% path cannot carry it (responses client, or tools/vision/n>1).
+%% Exported for eunit; the single source for the auto-router tier
+%% constraint, the LB pick bias, and dispatch's 400.
+-spec stream_translate_blocked_for(atom(), map()) -> boolean().
+stream_translate_blocked_for(ClientProto, Map) ->
+    janus_protocol_translate:wants_stream(Map)
+    andalso janus_protocol_translate:stream_translate_blocked(ClientProto, Map).
+
+%% A streaming request that cannot ride the translate path (responses
+%% client, or tools/vision/n>1 on a chat/anthropic pair) must run
+%% native: bias the initial pick toward a same-protocol route when the
+%% model has one. Without this, the LB could hand dispatch a
+%% cross-protocol route and 400 immediately even though a usable
+%% same-protocol binding exists (failover's repick already had the
+%% constraint; the initial pick did not). When no route matches, the LB
+%% falls back to all routes and dispatch answers with the
+%% stream_requires_native_protocol 400 that explains what is missing.
+stream_pick_opts(ClientProto, Map) ->
+    case stream_translate_blocked_for(ClientProto, Map) of
+        true ->
+            #{prefer_proto => atom_to_binary(ClientProto, utf8)};
+        false ->
+            #{}
     end.
 
 dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->

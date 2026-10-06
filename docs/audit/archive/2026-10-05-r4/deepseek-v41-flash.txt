@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the spec is unusually complete, but three undecided contract holes remain: SSE error-origin discrimination, janus-auto failed accounting, and provider compatibility synthesis.
+
+## 2. Critical risks
+- **SSE error origin is unrepresentable.** `translate_sse/4` returns one `{error, translate_unsupported}` atom, yet §4.1.4 maps client-origin → 400 and §10 maps provider-origin tools → 502. Nothing in the return type or handler state tells the handler which. Since the request leg already 400s before upstream, the "client-origin after 200" row is unreachable — either drop it or add origin to the tuple.
+- **janus-auto failed semantics.** `janus_stats_counted` guards `inc_total`, but `inc_failed` is only gated by `janus_stats_failed`. If the internal judge call `track(>=400)`s and janus-auto still succeeds via fallback, `requests_failed` increments for a client call that returned 200. §4.2 never says failed counts only the client-visible outcome.
+- **Chat→Anthropic required fields.** Anthropic `max_tokens` is mandatory; a Chat client omitting it yields an upstream 400 on the streaming leg. Request-leg rules (§4.1.1) don't mention defaulting/synthesis. Also `stream_options` rejection retry drops usage, leaving Anthropic `message_delta.output_tokens` undefined — unspecified.
+- **Usage-chunk envelope.** Synthesized Chat usage chunk lists only `choices: []` + tokens; `id/object/created/model` are unspecified, and the undefined-token path after a no-usage provider is undefined.
+- **Docker hex.** The `test` stage runs `./rebar3 compile` at image build, fetching hex.pm — apk mirror doesn't cover it. §4.3 only mentions `HEX_MIRROR` for the run, yet Docker initializes the named volume from image `_build`, so either the image compile is wasted or "first run hits hex" is stale.
+
+## 3. Contradictions / stale claims
+- §4.1.4 row 1 (client-origin unsupported after 200) vs §4.1.1 (rejected pre-upstream) and §10.
+- Slice C "first laptop run may hit hex.pm" vs in-image compile + volume init-from-image.
+
+## 4. Missing requirements
+- Origin-tagged translate error / explicit "all post-200 unsupported = 502".
+- `max_tokens` synthesis; `stream_options`-rejected fallback token source.
+- Usage-chunk envelope fields; behavior when tokens undefined.
+- Counter fixture: janus-auto judge-failure path in TF-6.1.
+
+## 5. Architecture notes
+Handler-owned `#sse_st{}` + single `finalize_sse` is sound; `terminal_sent` makes idempotency correct. Atomics in `janus_http_app` before listeners is right. Dual-repo TEST-FLOWS pairing is correct; keep the paired-PR rule explicit for Slice D too.
+
+## 6. Top 5 edits
+1. Tag the SSE error with origin (or declare all post-200 unsupported = 502) and delete the unreachable row.
+2. Define `requests_failed` as client-visible only; gate judge-path `track` with `janus_stats_failed`.
+3. Specify `max_tokens` default and `stream_options`-rejected fallback.
+4. Specify usage-chunk envelope + undefined-token behavior.
+5. Add `ARG HEX_MIRROR`/prefetch at build and state volume-init semantics.

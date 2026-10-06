@@ -1,0 +1,29 @@
+1. **Verdict: GO WITH FIXES** — implementable, but three unresolved items (anthropic input-token placement, Phase-2 2.3/2.4 ordering, n>1 precedence vs the legacy gate) must be settled before Phase 1 code lands.
+
+2. **Critical risks**
+- **C1/C3 →anthropic usage is wrong.** Anthropic's schema puts `input_tokens` only in `message_start`; `message_delta.usage` is `output_tokens`-only. Deferring real counts to `message_delta` means anthropic clients see `input_tokens=0` forever. This is a semantic impossible — add it to that section and record the degradation, or defer `message_start` (breaks lazy emission/TTFT). "Clients read deltas" is false for input tokens.
+- **Phase-2 ordering is circular.** 2.3 cites "2.4's eunit halves", but 2.4 is E2E-only; 2.4's E2E cannot pass before 2.3 removes the gate. The checklist also lists 2.3 *before* 2.4 while prose says "physically LAST".
+- **n>1 precedence contradiction.** 1.8c puts `n_unsupported` before `translate`, but 1.5 says knob-off leaves the legacy path unchanged. On a knob-off n>1 stream, which error wins? Unasserted.
+- **→chat zero-data-frame failure unverified.** Only →responses/→anthropic have "corpus-verified" skeleton-before-error. Whether an OpenAI SDK parser accepts `data: {"error":…}` + `[DONE]` with no role delta is asserted, not captured.
+- **Memory budget understated.** 50×(4MiB content + 256KiB×64 args + 1MiB) ≫ 200MiB; per-stream accumulators need abort-time eviction, not just caps.
+
+3. **Contradictions / stale**
+- Checklist 2.3 precedes 2.4 vs "physically LAST after 2.4".
+- 3.4 "mid-stream `response.incomplete`" contradicts C2, where `incomplete` is a terminal.
+- Coverage table already shows chat↔anthropic non-stream tools working; no regression guard is stated for the non-stream path Phase 1 touches.
+
+4. **Missing first-ship**
+- `max_tokens`/`max_completion_tokens` request mapping for chat↔anthropic streams (2.1 assigns it only to responses).
+- Anthropic `message_delta.usage` schema-conformance eunit.
+- Client-abort entitlement/usage-row finalization in E2E (1.4b is eunit-only).
+- A →chat failure-frame capture in the 1.0 corpus.
+
+5. **Architecture notes**
+Per-attempt `sse_st` is right. Replace growing `case` arms with explicit (source,target)→emitter tables; keep `sequence_number` in `translate_sse` state; unit-test per-target error serializers on corpus, not hand shapes.
+
+6. **Top 5 edits**
+1. `target.md` C1/C3: move anthropic input-token loss to "Semantically impossible", record degradation; stop claiming `message_delta` carries it.
+2. `target.md` 2.3/2.4: reorder checkboxes, and either define 2.4's eunit task or delete the prerequisite phrase.
+3. `target.md` 1.5/1.8c: pin knob-off n>1 behavior; make the precedence assertion conditional on knob state.
+4. `target.md` 1.0/C2: add →chat failure-frame capture + chat skeleton-before-error legality.
+5. `target.md` 3.4: restate budget as sum-of-all-caps × concurrency; add abort-time eviction assertion.

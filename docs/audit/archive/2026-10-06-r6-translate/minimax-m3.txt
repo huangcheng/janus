@@ -1,0 +1,38 @@
+**Verdict:** GO WITH FIXES — C1-C6 contracts and ship unit 1.9 are sound, but C1/C4 commit semantics, C2 chat-error wording, and 1.8b cache-token sourcing need tightening before Phase 1 deploys.
+
+**Critical risks:**
+
+1. **C1/C4 commit boundary ambiguity.** C1 says skeleton is required; C4 says commit = first DATA frame. OpenAI chat's first chunk is `{"role":"assistant","content":""}` — is THIS the commit point or the first content delta? If the former, the failover window is ~0 and lazy emission is dead. Specify: commit = first non-empty content frame; role-only preamble is a skeleton emission that CAN be retried.
+
+2. **C2 chat-terminator wording is wrong.** "Error frame REPLACES the success terminator" — `[DONE]` is chat's transport terminator and STAYS after the error JSON (the plan's own example shows this). Rewrite as "replaces the success frame SET (role/finish/usage); `[DONE]` always follows."
+
+3. **1.8b cache_read_input_tokens has no source rule.** Anthropic→chat translate sets it to 0 (silent billing loss). Document per-protocol-family source (anthropic prompt-cache header only; chat/responses = 0).
+
+4. **C5 synthesized id uniqueness is mis-stated.** "Non-repeating across attempts" is impossible by design — per-attempt fresh `sse_st` resets the counter, so attempt-2 ids collide with attempt-1. Should be "unique WITHIN an attempt." Add prefix table for responses target (resp_/msg_/fc_/item_).
+
+5. **3.2b error-code duplication.** `n>1` → responses provider is already rejected by 1.5 (cross-protocol). Use one code (`n_unsupported`), not two.
+
+**Contradictions / stale:**
+- R4 summary still says "1.3 unblock"; checklist is 1.9. Drop 1.3.
+- Decision paragraph ("5/7 near-consensus") is internal voting language. Collapse.
+- Phase 2 2.4 e2e covers only chat-upstream→responses-client; missing anthropic-upstream→responses-client e2e.
+
+**Missing first-ship reqs:**
+- 1.9: rollback playbook + knob-flip smoke threshold (e.g., 1k successful translated streams @ 20 concurrent over 24h).
+- 2.4: re-run 1.9's entitlement assertion under responses target (entitlement path differs).
+- 3.4: confirm translated SSE response inherits cowboy's 300s idle_timeout (connection-level, not stream-lifetime).
+- 3.3: conformance must validate synthesized-frame SHAPE, not only real-frame passthrough.
+- 1.5 behavior change (cross-protocol non-stream `n>1` now rejects instead of silently degrades) needs deployment comms.
+- `parallel_tool_calls=false` from chat client cannot be enforced on anthropic provider — document as impossible.
+
+**Architecture notes:**
+- `sse_st` gains third target mode (responses); target fixed per stream, no mid-stream switch.
+- Per-frame encode/decode across 64 calls × 256KiB args is hot-path GC pressure — batch in `translate_sse`.
+- Honor chat client's `stream_options.include_usage=false` by NOT injecting; plan implies but doesn't state it.
+
+**Top 5 edits:**
+1. C4: commit = first non-empty content frame.
+2. C2: "success frame set" (keep `[DONE]`).
+3. C5: "unique within an attempt" + prefix table.
+4. 1.8b: per-protocol cache_read source rule.
+5. 3.2b: unify `n>1` reject as `n_unsupported`.

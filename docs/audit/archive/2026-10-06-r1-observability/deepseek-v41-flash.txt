@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — architecture is sound, but the counter naming, float formatting, and ETS init idempotency defects will fail the very gate this plan defines.
+
+**2. Critical risks**
+- **Naming contradiction (will fail E2E):** Task 3 renderer emits `janus_requests`/`janus_upstream_requests` (no `_total`), but Task 5's table and gate step 3 grep `janus_requests_total`. Renderer never appends `_total`.
+- **Float formatting:** `num_bin/le_bin` use `io_lib:format("~g",...)` (default 6 sig digits) → `0.9` becomes `0.900000`, `0.1` becomes `0.100000`. Task 3's own `histogram_render_test` asserts `..._sum ... 0.9` and will fail. Use `float_to_binary(F,[short])`.
+- **Bucket order:** `lists:sort(maps:keys(...))` sorts binaries lexically; `+Inf` sorts first and `10` before `2.5`. Parses, but `le` order is wrong and `+Inf` must equal count.
+- **ETS init not idempotent:** `ets:new(named_table)` raises `badarg` if the table survives an app/hot-reload restart. Guard with `ets:info/1`, and cache the tid in persistent_term instead of calling `ets:info` on every one of ~14 bumps per `observe`.
+- **Auth bump undercount:** only `unauthorized/2` bumps; any other reject site (missing key/model) is invisible. Single funnel needed.
+- **Scrape config wrong:** one `credentials_file` across three targets contradicts its own "per-node tokens" comment — per-node tokens require one job per node.
+
+**3. Contradictions / stale claims**
+- "echoed via `set_resp_header` at proxy entry" (Architecture) vs Task 6 setting it in each handler.
+- `build_insert` param math: "11→22 per row" then "24 params / 24 placeholders".
+- `usage_writer_dropped_total_note` is a fake filtered gauge appended as a counter outside the pure renderer — inconsistent with "renderer purity."
+- `/v1/models` bumped in the models handler *and* possibly through `track/3` (double count) — verify it isn't proxied.
+- Unverified APIs assumed to exist: `janus_http_stats:snapshot/0`, `janus_config:generation/ready`, `janus_lb:cooling_count/0`, `janus_usage:stats/0` keys, `/stats/logs`, `usage_bool_int/1`. Any missing → 500 on scrape.
+
+**4. Missing first-ship**
+- No `# HELP` lines; no cardinality guard test; no series cap.
+- No test that `/metrics` rejects when `JANUS_STATS_TOKEN` unset but accessed off-loopback.
+- No 3xx/unknown handling in `status_class/1` (defaults to 2xx).
+
+**5. Design notes**
+- Prefer tid in persistent_term; `ets:tab2list` scrape is fine. Ensure `snapshot/0` exists or replace. Handler-before-auth echo is correct (covers 401 + streams).
+
+**6. Top 5 edits**
+1. Rename counters to `requests_total`/`upstream_requests_total` (or append in renderer); align TYPE and gate.
+2. `float_to_binary(F,[short])` for values and `le`; numeric bucket sort with `+Inf` last.
+3. Idempotent `init/0` + persistent_term tid; drop per-bump `ets:info`.
+4. One scrape job per node for per-node tokens.
+5. Single auth-reject funnel for the 4xx counter; verify all gauge APIs and the models double-count before coding.

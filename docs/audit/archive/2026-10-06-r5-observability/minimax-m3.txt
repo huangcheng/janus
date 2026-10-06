@@ -1,0 +1,41 @@
+**Verdict: GO WITH FIXES** — observe bump order inverted (count should be first, not last); plus polish. Otherwise shippable.
+
+**Critical risks**
+
+- **Observe bump order is backwards.** `buckets → +Inf → sum → count last` preserves `count ≤ +Inf` (count lags), not `count == +Inf`. A scraper mid-observation sees `_count < _bucket{le="+Inf"}`. Fix: bump `count` first, then `+Inf`, then buckets, then `sum`.
+- **Hot-path cost.** ~19 `ets:whereis` per request (3 counters + 16 histogram bumps). Stash tid once per request in pdict; `observe/inc` fall back to `ets:whereis` only if missing.
+- **Per-scrape log noise.** `maps:fold` over `LbStats` logs once per non-integer stat per scrape — plan comment says "once per scrape" but code is per-stat. Batch into one warning.
+- **Cardinality / multi-node.** Summable counters (`lb_stats_total`) OK; node-scoped gauges (`uptime_seconds`, `buffered_rows`, `lb_routes_cooling`) must NOT be summed. Documented.
+- **Migration deploy order.** Gateway first, dashboard second. Documented.
+- **Request-id hygiene.** `[A-Za-z0-9-_]{1,128}` validated; non-conforming silently regenerated. Sound.
+- **Auth.** Token + loopback peer-IP, never `X-Forwarded-For`. Sound.
+
+**Contradictions / stale claims**
+
+- Rev 5 commentary "buckets → +Inf → sum → count last; the count == +Inf invariant is the one a concurrent scrape must never see violated" — the order does the opposite.
+- "ets:whereis... ns-scale" — 19 calls per request is measurable.
+- `string:lowercase(binary:encode_hex(...))` — `encode_hex/1` is lowercase by default; redundant.
+- `name_sort` for counter/hist names; gauge label-list sort via `lists:sort` — consistent (both name-based).
+
+**Missing first-ship**
+
+- Concurrent-race eunit (N parallel observes → assert `count ≥ +Inf ≥ max(bucket)` at every snapshot).
+- Keep-alive pdict leak test (1000 reqs on one cowboy process; correct `request_id` on every usage row).
+- Postgres-vs-SQLite parity test for migration 005.
+- `JANUS_STATS_TOKEN` rotation procedure (no plan).
+- Grafana dashboard provisioning path (sibling repo? image bake-in?).
+
+**Architecture / design notes**
+
+- Single ETS table is fine; one `ets:whereis`/bump is the simplest correct code but the most expensive. Cache once per request.
+- Renderer pure/deterministic; byte-exact eunit fixtures match project rigor.
+- Hook placement defensible: `track/3` (terminal), `reply_err/6` (early reject, `janus_req_counted` guarded), `unauthorized/2` (401), models handler. One classifier removes drift.
+- Header echo via `set_resp_header` at handler entry covers 2xx/4xx/stream on the same Req chain — gate verifies.
+
+**Top 5 concrete edits**
+
+1. **Observe order.** In `observe/3`: `bump(count,1)` first, then `+Inf`, then bucket loop, then `sum`. Keeps `count ≥ +Inf` for every concurrent scrape.
+2. **Hot-path tid cache.** Handler erases/re-fetches tid at entry; `observe/inc` accept optional tid, fall back to `ets:whereis`. 1 lookup/req, not 19.
+3. **Race eunit.** 500 parallel `observe/3` to one label set; snapshot mid-flight and at quiescence; assert `count ≥ +Inf ≥ max(bucket)` always.
+4. **Per-scrape log batch.** Replace `maps:fold` with one `logger:warning(#{what => lb_stat_skip, stats => BadList})`.
+5. **Ops docs.** README ops section: rolling `JANUS_STATS_TOKEN` rotation, Grafana provisioning path, scraper reload-on-token-change.

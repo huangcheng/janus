@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** 鈥?the shape is right, but mid-stream retry, translation fidelity, and multi-node secret/key semantics are underspecified enough to break real agent turns.
+
+## 2. Critical risks
+- **Retry after first byte.** "On failure cool and retry next" is only legal before the first SSE byte reaches the client. Define a pre-flush retry window; post-flush must emit an error event and terminate. Otherwise duplicated `tool_use` blocks corrupt agent state.
+- **Streaming fidelity.** Token-level deltas, `tool_call` argument fragments, parallel tool calls, `stream_options.include_usage`, and stop reasons differ across protocols. Translation must be stateful and ordered; naive per-chunk mapping loses `input_schema`鈫擿parameters` and `tool_result` block semantics.
+- **Responses 鈮?passthrough.** `/v1/responses` is stateful (`previous_response_id`, stored items). Plan lists it as passthrough but never specifies a state store or how translated requests handle it.
+- **Secrets across nodes.** `JANUS_SECRETS_KEY` must be identical on every node; otherwise config syncs but decryption fails at request time. Rotation, and hashing agent keys (store hashes, not plaintext), are absent.
+- **Cool-down races.** LB state is per-node; a cooled channel is still hot on peers, and recovery has no jitter/probe 鈫?thundering herd. In-flight counts need explicit increment/decrement on client disconnect.
+- **NOTIFY visibility.** `NOTIFY` must be sent inside the same transaction as the config write, and nodes must reject stale generations, or ETS can regress.
+
+## 3. Contradictions / vague
+- `providers` stores "auth headers/secrets" **and** `provider_keys` stores secrets 鈥?overlapping ownership.
+- JSON library "jsx or thoas" undecided; admin auth "cookie or bearer" undecided; no migration tool named.
+- `api_keys` has rate limits, but limiting is phase 6 and absent from the ETS hot-path design.
+- Success criteria require 3-node Postgres sharing, yet cluster testing is only in hardening.
+
+## 4. Missing first-ship
+Non-streaming responses; per-provider connect/read timeouts and max body size; client-disconnect handling; `/v1/models` auth + ETS path; readiness vs admin health; trace/request IDs; CORS; golden transcript fixtures for translation; key鈫抋llowed-models scoping.
+
+## 5. Architecture notes
+- **OTP:** `janus_core` gen_server owns public ETS; versioned tables with generation pointer in `persistent_term` for torn-read-free reloads. Separate supervised NOTIFY listener with reconnect/backoff and generation dedupe.
+- **Cowboy SSE:** `stream_reply`, heartbeat comments, proxy buffering off; respect `stream_body` backpressure; monitor client process to release in-flight counts.
+- **janus_db:** behaviour with dialect modules; dialect-aware migrations (no `LISTEN`, differing `RETURNING`); never leak backend into callers. Validate before publishing ETS.
+
+## 6. Top 5 edits
+1. Specify pre-flush vs post-flush retry semantics explicitly.
+2. Move cross-protocol translation + streaming fixtures into phase 2, before admin UI.
+3. Define Responses state model (stateless translate vs stored items) or defer it past v1.
+4. Fix secret ownership: one table, hashed agent keys, documented shared `JANUS_SECRETS_KEY` + rotation.
+5. Add jittered cool-down, half-open probe, and per-node LB reconciliation to the plan.

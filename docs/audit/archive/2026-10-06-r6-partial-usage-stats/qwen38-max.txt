@@ -1,0 +1,31 @@
+**1. Verdict**
+GO — no two sentences contradict each other outside §10; the finalize/terminator ordering, counter funnel, and 400-vs-502 split are internally consistent.
+
+**2. Critical risks**
+- Slow SSE client on the translate path: frames are written immediately but nothing is said about gun flow control / send blocking; a stalled client lets provider data pile up in the handler mailbox — the 1 MiB cap bounds only the unparsed leftover, not queued events.
+- Silent upstream during long reasoning: no provider ping/chunks for 300s → Cowboy inactivity kill → recorded 502. Accepted, but forwarding `ping` only helps the Anthropic face; Chat providers' keepalive behavior varies.
+- The `include_usage` 400-retry vs `janus_lb` failover ordering is unspecified; the re-encode must happen on the same route.
+- Atomics zero on app restart; dashboard rate math must key off `started_at` or a restart looks like a rate collapse.
+- Named `_build` volume outlives image OTP bumps; a missed `docker volume rm` yields cryptic beam-load errors, not a clean failure.
+
+**3. Contradictions / stale claims**
+None found. §2's AGENTS.md claim matches the actual instruction and Slice C explicitly rewrites it; the near-collisions (zero-content empty block vs "no block before first delta"; disconnect discarding frames vs single finalize) are already adjudicated in §10.
+
+**4. Missing requirements**
+- Translate-path usage row source: state that `capture_usage_chunk` takes the merged `#sse_st{}` in/out tokens at finalize (both directions) instead of re-parsing emitted frames.
+- Mid-stream error frame JSON keys are only implied (`type` fixed, "≤200 bytes, no URL/auth"); pin the exact shape for both client faces.
+- Whether LB retry applies to translate streams pre-200, and that 4xx never fails over.
+- Slice D: how the script reads `gen0` (which dashboard endpoint/credential) and what it does if the dashboard API is down mid-ship.
+- TF-6.8 "tokens not both null **when upstream reports them**" needs a deterministic upstream choice, or the assert is flaky.
+
+**5. Architecture notes**
+- Handler-local `#sse_st{}` + single-funnel counters are right; keep process-dict keys strictly on the outer handler (inner janus-auto put/erase is correctly scoped).
+- One `?SSE_LEFTOVER_CAP` constant for both checks prevents drift.
+- Dual-repo pairing is correctly gated; the dashboard PR must update SPEC §2.4 to define the counted population and restart-reset semantics.
+
+**6. Top 5 concrete edits**
+1. §4.1.2: add a drain backpressure rule (gun flow control; byte cap on queued events → 502 finalize).
+2. §4.1.2: specify `capture_usage_chunk` input = `#sse_st{}` tokens at finalize, both directions.
+3. §4.1.1 item 5: "retry once on the same route; this 400 never triggers LB failover."
+4. §4.4: define the `gen0` read path (dashboard API + auth) and dashboard-down behavior.
+5. §4.2 / SPEC §2.4: document counters resetting on restart; rates derived from `started_at`.

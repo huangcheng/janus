@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — cross-cutting contracts C1–C6 are sound, but Phase 1.3 ships an over-broad unblock without staged rollout, Phase 2 inverts the capture-first rule, and several cross-protocol seams (cache tokens, refusal blocks, tool_choice) are unspecified.
+
+**2. Critical risks**
+- **Backward-compat blast radius (1.3).** Today every tool/vision stream-translate request gets a clean 400 with same-protocol fallback. After 1.3, all of them silently traverse a translation path that has never carried those features in prod. Ship 1.3 behind a per-route generation knob reusing the existing `stream_translate_blocked` predicate (default OFF), or pick the kill switch now instead of "only if an incident demands it."
+- **Phase 2 ordering.** 2.1 eunit on responses event grammar precedes any capture task; responses fixtures only appear in 3.3. Insert a 2.0 capture task (OpenAI reference transcripts + any captured dashscope/responses) before 2.1, matching 1.0 precedent.
+- **Stop-reason asymmetry (C2).** `content_filter↔refusal` collapses Anthropic's separate `stop_reason:refusal` AND a `refusal` content block into chat `finish_reason`. Specify refusal-block mapping (likely chat→content with `refusal` field, NOT finish_reason) and document safety-block surface loss.
+- **Cache tokens (C3).** Anthropic `cache_creation_input_tokens` / `cache_read_input_tokens` absent. These are billable; silent drop = revenue/audit leak. Surface as separate usage fields across all targets.
+- **Retry & id stability (C4/C5).** "Per-attempt ids" is right but plan never states where synthesized ids land in the chat delta stream or how the LB sees them. Confirm `sse_st.id_map` is per-attempt and retry frames never escape.
+- **Hot-path cost.** C1/C3 require buffering to assemble terminator+usage. The 1MiB leftover cap is on raw leftover bytes, not `sse_st` heap. Measure and bound per-stream heap.
+
+**3. Contradictions / stale**
+- "eunit 123" appears only in the prompt role description; plan never asserts preservation. Add an invariant: "existing 123 eunit must stay green at every commit."
+- `apps/janus_dashboard/` is a stale leftover per AGENTS.md. Fixtures belong in `../janus-dashboard/test/fixtures/sse/` (or document the janus-repo path explicitly).
+- Responses fixtures deferred to 3.3 but needed by 2.1/2.2 — reorder.
+
+**4. Missing first-ship per phase**
+- 1: `tool_choice` (`none|auto|required|<tool>`) matrix; `parallel_tool_calls`; system-prompt split (anthropic `system[]` vs chat `system`/`developer`).
+- 2: refusal-block handling; responses `instructions` vs chat `system`; explicit strip-header table for `previous_response_id`, `truncation`, `verbosity`, `service_tier`, `safety_identifier`.
+- 3: how anthropic→responses surfaces thinking — AGENTS.md mandates `reasoning_content` cross-protocol, but responses target has no reasoning field; confirm emit shape.
+
+**5. Architecture/design**
+- `sse_st` fields: `target`, `block_index↔tool_index`, `id_map`, `arg_buf`, `saw_first_out`, `partial_usage_pending`, `terminated` — all per-attempt (C4).
+- Error taxonomy: `n_unsupported`, `tool_arg_overflow`, `cache_control_dropped`, `previous_response_id_dropped`, `json_schema_dropped`, plus existing translate errors.
+- One event-mapping table per direction (chat→anthropic, chat→responses, anthropic→chat, anthropic→responses, responses→chat, responses→anthropic) covering role, content, tools, reasoning, usage, finish.
+
+**6. Top 5 edits**
+1. 1.3: gate behind per-route `stream_translate_blocked` override, default OFF; decide kill switch now.
+2. Add 2.0 capture task before 2.1; reorder Phase 2.
+3. Add C3 handling for `cache_creation_input_tokens` / `cache_read_input_tokens` (anthropic→all targets).
+4. C2: split `refusal` block from `stop_reason` mapping; document refusal→content policy.
+5. Add "preserve eunit 123" invariant per phase + a single per-direction event-mapping table as the source of truth.

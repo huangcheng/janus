@@ -1,0 +1,16 @@
+1. **Verdict: GO WITH FIXES** — one critical counter (`usage_writer_dropped_total`) is silently dropped, the test file has a syntax error, and the renderer family list is brittle.
+
+2. **Critical risks.** `usage_writer_dropped_total` is appended into the `Rows` snapshot but the renderer hardcodes only `requests_total`/`upstream_requests_total`/`x_total` in `render_family/3` calls — the counter never reaches the wire despite being locked in the naming contract. Hot path `observe/3` issues ~16 `persistent_term:get` + try/catch + `update_counter` per request (~5–6 µs); `ets:whereis(?TABLE)` skips the persistent_term cache entirely. The renderer family list is a hardcoded triple — adding any future counter requires editing the renderer, which is exactly the drift the audit was meant to prevent. HELP map is missing entries for `usage_writer_dropped_total` and `lb_stat` (handler appends its own HELP, so a future in-renderer addition would duplicate). `safe/2` swallows all gauge-source errors silently — a perpetually-failing `janus_lb:stats/0` would zero out gauges with no log signal.
+
+3. **Contradictions/stale claims.** Self-review claims "renderer is pure/total" but `maps:from_list/1` throws on duplicate `{hist_sum_us,_,_}` keys — fine from the registry, fragile if anyone appends a duplicate row. The note "if the renderer's family list grows a `lb_stat` entry later, delete the append" is impossible without restructuring — current list isn't extensible. Self-review cites `route_provider_name` but not `Proto` (the protocol label source in `track/3`) — same verify list.
+
+4. **Missing first-ship.** Migration 005 uses bare `ALTER TABLE ADD COLUMN` (Postgres `IF NOT EXISTS` would be belt-and-braces even with ledger dedup). No HELP entry semantics for cumulative counters in README. `models_serving` uses `ets:tab2list/1` (O(n)) instead of `ets:info(Tid, size)` (O(1)). No alerting example or service-discovery / relabel config in `prometheus.yml`. `escape/1` doesn't handle `\0`.
+
+5. **Architecture/design.** ETS registry with `update_counter/4` default tuple is correct. Renderer purity (no IO in renderer; handler does gen_server reads) is sound. `set_resp_header` at handler entry + same Req chain for `reply`/`stream_reply` is verified. `track/3` placement (terminal guard, no failover double-count) is right. Classifier module eliminates path-mapper drift. Concern: pdict `janus_request_id`/`janus_req_path` must NOT be erased by proxy keep-alive — plan notes this but the discipline is on every future proxy edit.
+
+6. **Top 5 concrete edits.**
+   1. **Render `usage_writer_dropped_total`.** Add `render_family(usage_writer_dropped_total, counter, CounterRows)` in `render/2` (or iterate CounterRows for unique families) and add its HELP to `?HELP`.
+   2. **Delete `render_family(x_total, …)` from the renderer** — pure test leak.
+   3. **Fix `generate_when_absent_test`:** `re:run(Id, <<"^req_[0-9a-f]{16}$">>), {capture, none}` → `re:run(Id, <<"^req_[0-9a-f]{16}$">>, [capture, none])`.
+   4. **Drop the dead `LbGauges` binding** in `janus_http_metrics`; the prose "simplify" note never reached the code. Build `LbStats` once, emit once.
+   5. **Hot-path cache:** replace `persistent_term:get(?PT_TID, undefined)` in `safe_bump` with `ets:whereis(?TABLE)` (named-table lookup, no init map required, faster).

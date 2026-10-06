@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — direction is sound, but Phase 1 ships user-visible tools/vision whose grammar mapping, failure semantics, and fixture sourcing are underspecified, and "structured output" appears in the goal yet in no task.
+
+**2. Critical risks**
+- SSE machine: chat parallel `tool_calls` (multi-index) vs anthropic one-block-per-`tool_use` requires index remapping and block-type tracking on interleaved text↔tool; partial JSON arg deltas need reassembly — "accumulator" states no invariants or bounds.
+- Terminators/usage differ per pair (chat `finish_reason` + optional trailing usage chunk; anthropic `message_delta`+`message_stop`; responses `response.completed`). Translation must emit the target terminator exactly once and normalize usage attached at different events; never specified.
+- Mid-stream upstream failure: no task maps upstream error frames to target-format client error events, nor defines failover-after-first-byte vs per-attempt usage rows for partial streams.
+- Unblocking `stream_translate_blocked` is behavior-changing: stale E2E steps asserting the 400s, and any surface deriving "can stream" from the predicate breaks silently.
+- Hot path: new per-stream state has no frame-size cap until soak (3.4).
+- Fixture realism: 1.1/1.2 demand "real captured SSE" that only exists from 3.3 — setup for the exact hand-invented-frame bug class AGENTS.md forbids.
+
+**3. Contradictions / stale claims**
+- 1.2 says image request-translate "already" works, then hardens it — unverified whether responses/anthropic *clients* with images to chat/anthropic providers are truly covered today; "non-stream versions exist" is asserted, not referenced.
+- No task covers `tool_choice`, structured output (`response_format` ↔ `output_schema` ↔ forced tool), or call-id mapping (`tool_call_id` / `tool_use.id` / `call_id`) — the likeliest subtle breakage.
+- n>1 reject must be enforced *before* LB picks an anthropic route, else failover yields a post-partial 400; 1.5 debates and drops without saying where the check lives.
+
+**4. Missing first-ship per phase**
+- P1: usage normalization per pair; capability-aware route filtering; bounded tool-arg buffer; concrete fixture source.
+- P2: `input` grammar incl. `function_call`/`function_call_output` items + id synthesis; chat-target `include_usage` semantics; capability data source (ETS vs computed) for 2.5.
+- P3: transcript capture/refresh pipeline; responses-provider state-field handling.
+
+**5. Architecture notes**
+Normalize upstream frames to an internal event stream (text/thinking/tool_call{index,id,arg_delta}/image/finish/usage), render per target — kills N² grammar code. Error taxonomy: keep `n_unsupported`; add `translate_unsupported_pair`, `malformed_frame` (reset), `buffer_overflow` (close). Write usage one row per attempt at terminator, upstream of the writer.
+
+**6. Top 5 edits**
+1. Add task 1.0: extract real transcripts into `test/fixtures/sse/` and gate 1.1–1.2 eunit on them.
+2. Add tasks for tool_choice, structured output, and id mapping across all three protocols.
+3. Add P1 task: mid-stream upstream failure → target error events + partial-usage policy + no-failover-after-first-byte rule.
+4. Make bounded buffers + per-frame cap an `sse_st` invariant from 1.1 (eunit), keep 3.4 as load proof only.
+5. Add task to update gate steps asserting old 400s and to define route-capability derivation for LB filtering and 2.5.

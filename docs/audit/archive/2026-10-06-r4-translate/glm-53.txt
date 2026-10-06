@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — substrate is sound and prior findings landed, but Phase-1 sequencing is self-contradictory and two test capabilities the plan depends on don't exist yet.
+
+**2. Critical risks**
+- **Ordering bug:** 1.4's E2E gate asserts translated skeletons, half-open-tool cuts, and id non-reuse, but 1.3 (the unblock) is sequenced *after* 1.4. Until `has_tools`/`has_non_text_content` leave `stream_translate_blocked`, those e2e steps get the legacy 400 — the gate cannot go green. AGENTS rule "nothing done until gate green" makes 1.4-as-written unshippable.
+- **Missing mock fault injection:** C4 tests (1.4, 2.4) need the mock to truncate mid-stream at a frame boundary, kill after first byte, and fail pre-first-byte. 1.0 only captures/replays whole transcripts; no task extends the deterministic mock.
+- **Stream-side dropped-feature reporting:** 1.6 and the impossibles say `X-Janus-Dropped` header; C2 correctly forbids degradation info in committed stream headers. 1.6 never states the stream path (terminal event + usage row).
+- **n>1 for responses provider:** 1.5 scopes rejection to chat↔anthropic; the Responses API has no `n`. Phase 3 needs an explicit policy (reject) or it inherits a silent fan-out/degrade.
+- **Entitlement/LB:** with 1.3 default-on, tool-bearing streams previously 400ing now route cross-protocol; plan never confirms entitlement/binding checks are unaffected by `prefer_proto` fallback order. Low risk, worth one gate assertion.
+
+**3. Contradictions / stale claims**
+- "Terminator emitted exactly once per attempt" vs C4: pre-commit attempts emit nothing client-visible — say "once per committed response".
+- 2.1's grammar omits `response.in_progress` and drops the `response.`/`response.output_item.` prefixes inconsistently; the "strict SDK clients" claim is only provable against the 1.0 corpus — make corpus order normative for the skeleton, C1 table for the contract.
+- Corpus "authoritative" for →chat usage order risks binding to a dashscope quirk; per-family corpus vs Janus contract should be distinguished.
+
+**4. Missing first-ship requirements**
+- P1: mock cut/delay controls; unblock+e2e in one shippable unit.
+- P2: synthesized item-id policy (`item_…`/`fc_…` collision rules beyond tool ids); non-stream responses error shape.
+- P3: request-side translate task for chat/anthropic history → responses `input` items (assistant `tool_calls` ↔ `function_call` with `call_id`, images) — "reverse state machines" covers reply side only.
+
+**5. Architecture notes**
+Drive `translate_sse` from a per-pair event-mapping *table* (upstream event → 0..n target frames + state transition) rather than nested cases; C5's four index spaces then become per-stream map fields, and 3.2's reverse direction is table inversion, not new code. Error taxonomy (C2) should be one shared map: upstream failure × target → terminal frame, so the C4 after-commit path and 2.4/1.4 cut tests share it.
+
+**6. Top 5 edits**
+1. Merge 1.3 and 1.4-e2e into one task/commit (unblock + knob + gate together); keep eunit-only steps in 1.1/1.2 ahead of it.
+2. Add 1.4a: mock fault-injection modes (truncate-at-frame-N, post-first-byte kill, pre-first-byte 5xx) reused by 2.4.
+3. 1.6: specify stream-side degradation recording in terminal event; header non-stream only (align with C2).
+4. Add 3.2a: request-side chat/anthropic → responses input construction, corpus fixtures, call_id mapping.
+5. 2.1/C1: pin exact responses skeleton (incl. `response.in_progress`, full event names) from the 1.0 corpus; add Phase-3 `n>1 → responses` rejection to the impossibles list.

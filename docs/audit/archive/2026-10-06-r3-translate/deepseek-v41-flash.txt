@@ -1,0 +1,28 @@
+## 1. Verdict
+GO WITH FIXES — the phase structure and invariants are sound, but the stream commit/terminator model and the responses event grammar are under-specified enough to ship broken clients.
+
+## 2. Critical risks
+- **Response-head vs commit point.** C4 says commit = first client-visible *frame*, but Cowboy sends the HTTP head (status+headers) before any frame. If the head isn't deferred until the first upstream event, no failover and no error status is possible — the plan never states head deferral, only "pre-commit headers only."
+- **Terminator contradiction.** C1: terminator "exactly once per attempt." C4: a half-open tool block is closed by the error event with *no* `content_block_stop`/finish, "the error IS the terminal signal." For →anthropic that means `event: error` with no `message_stop`; for →chat it means error + `[DONE]`. The invariant and the exception are unreconciled.
+- **Responses grammar incomplete.** C1/2.1 omit `sequence_number`, `output_index`, `item_id`, and use loose names (`reasoning_item`, `summary delta`) instead of `response.reasoning_summary_text.delta`. Strict SDKs reject on missing sequence numbers.
+- **Fixture capture is offline-hostile.** 1.0 needs real dashscope/kimi keys + network; eunit/CI run offline. No sanitized-fixture commit step, no key source.
+- **Unblock backward-compat.** 1.3 removes `has_tools`/`has_non_text_content` with default-on and no canary/metric; existing blocked clients silently change behavior on deploy.
+
+## 3. Contradictions / stale claims
+- C2's "headers already committed on streams" contradicts C1's lazy emission — with lazy skeletons, request-side degradations (`cache_control`, `response_format`) are known *before* the head, so they CAN be header-signalled on streams. As written, degradation reporting is direction-inconsistent.
+- C3 "never invent token counts" vs C1 zeroed `message_start` usage — justified as framing, but undocumented for clients that sum usage.
+- 1.2 "extend STREAM reply side" for vision: assistant replies rarely carry images; this is a request-side path.
+- `include_usage` retry (C3) creates a second upstream call inside one attempt — attempt/usage-row accounting undefined.
+
+## 4. Missing first-ship requirements
+Per phase: **1** — entitlement interaction (tool/vision allowlists bypassed by translate), non-stream HTTP error mapping, id-non-reuse across *retries* not just attempts, n>1 predicate scope test. **2** — response-head deferral, sequence_number contract, error-status mapping. **3** — sanitized-fixture policy, gun SSE backpressure/leftover accounting, per-stream memory bound beyond 1MiB cap.
+
+## 5. Architecture notes
+Model the SSE translator as a per-attempt state machine keyed by (client_proto, provider_proto, phase=pre/post-commit); make the *head emission* an explicit state transition. Add a per-direction terminal-sequence table (normal, degraded, error) that C1 and C4 both reference. Four index spaces need one bidirectional map struct with explicit insertion order.
+
+## 6. Top 5 edits
+1. Add head-deferral rule to C4; state pre-commit = no head, no frame.
+2. Publish per-direction terminal sequences reconciling C1/C4 (anthropic error → `event: error` *then* `message_stop`).
+3. Fix responses grammar in C1/2.1 (sequence_number/output_index/item_id, exact names).
+4. Make 1.0 commit sanitized fixtures; define key source + offline replay.
+5. Gate 1.3 unblock with canary + blocked-count metric + per-route override hook.

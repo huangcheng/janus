@@ -1,0 +1,36 @@
+## 1. Verdict
+**GO WITH FIXES** — the three-slice shape is sound, but the SSE translate contract and counter semantics are underspecified enough to ship bugs.
+
+## 2. Critical risks
+- **No event mapping table.** Neither direction defines how OpenAI chunks synthesize Anthropic's mandatory envelope (`message_start` id/role, `content_block_start`, `content_block_stop`, `message_delta` stop_reason, `message_stop`) or how Anthropic events collapse into `[DONE]`. Without it, "translate" is guesswork.
+- **`translate_sse/3` is declared pure but needs state** (open content-block index, role/chunk opened). Signature has no state arg — contradiction with §4.1.
+- **Streaming tools ≠ non-stream tools.** Anthropic streams `input_json_delta`/`partial_json`; the non-stream translator's `input` object support does not imply streaming support. "Only if non-stream supports the pair" is invalid.
+- **OpenAI usage missing by default.** Usage only appears with `stream_options.include_usage`; the gateway must inject it, or TF-6.8's `stream=1` usage row is empty. Not mentioned.
+- **Mid-stream error contract undefined.** Cannot change status after bytes sent; error frame shape per protocol unspecified; `track(400)` vs 502 mapping fuzzy.
+- **`requests_total` vs `requests_failed` can diverge.** A 404 unknown-model never reaches upstream, yet E2E expects it to bump `requests_failed`. Then failed > total. Semantics broken.
+- **Atomics ownership/race** — "emit 0 if missing" masks a never-created ref. Who creates them, when?
+- **Deploy barrier is weak:** equal `generation` ≠ migration succeeded.
+
+## 3. Contradictions / stale claims
+- §4.3 shows `docker run -v F:/Janus:/app` **without** the `_build` named volume it then mandates. Self-contradiction.
+- Stage named `test` here vs `build` in AGENTS.md/CI ("CI runs the same").
+- §2 says dashboard `/stats` lacks fields; §5.2 later proposes adding LB snapshot to the same endpoint — scope creep risk.
+- "Non-stream translate unchanged" while editing the same module.
+
+## 4. Missing requirements
+- Bidirectional event mapping tables (both directions).
+- Reverse-direction E2E (Anthropic client → OpenAI provider) — TF-6.8 covers only one way.
+- `stream_options.include_usage` injection.
+- Counter window semantics (cumulative vs windowed), client-disconnect classification, restart behavior for dashboard rate math.
+- Atomics lifecycle/owner.
+- Exact stats-token probe endpoint for Slice D.
+
+## 5. Architecture notes
+Keep SSE state in the handler process; model `translate_sse/4` as a fold `(Proto, ProviderProto, Event, State) -> {ok, Events, State} | skip`. Reuse `capture_usage_chunk` on **provider** bytes (correct). Atomics via persistent_term must be created at boot by a supervised owner, read-only in `/stats`. Preserve `map_size/1` emptiness checks and binary JSON keys.
+
+## 6. Top 5 edits
+1. Add explicit bidirectional event mapping tables + `translate_sse/4` fold signature.
+2. Inject `stream_options.include_usage`; specify usage capture per provider.
+3. Redefine `requests_total`/`requests_failed` so total ≥ failed and disconnects are classified.
+4. Fix the `docker run` command to include the `_build` named volume; unify stage name `test`.
+5. Add reverse-direction TF step and specify mid-stream error frame shape per protocol.

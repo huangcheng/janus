@@ -1,0 +1,28 @@
+**1. Verdict: GO WITH FIXES** — the skeleton/terminator contracts and phase ordering are now sound, but the C5 accumulation-bound claim is factually wrong and one header contradiction remains.
+
+**2. Critical risks**
+- **C5's "bounded by the existing 1MiB cap" is incorrect.** The SSE parser's leftover cap bounds a single unterminated *line*, not args accumulated across hundreds of `input_json_delta`/arguments.delta events. A hostile/buggy upstream streams unbounded tool args → per-attempt memory growth the plan claims is impossible. Add an explicit accumulated-args cap (e.g. 1MiB) with the C2 error path on overflow.
+- **Header contradiction:** the impossibles table and 1.6 mandate `X-Janus-Dropped` headers for stripped `cache_control`/`response_format`, but C2 declares stream headers carry no degradation info. Request-time strips are known *before* commit and could lawfully go in stream headers; qualify which degradations are header-eligible (pre-commit-known) vs terminal-event-only (mid-stream-discovered).
+- **Multi-turn reasoning round-trip unaddressed:** anthropic requires thinking blocks echoed back with tool_use turns; chat→anthropic drops them, responses reasoning items are id-keyed server state. Cross-protocol continuation after a tool turn will break or silently lose reasoning. Document as impossible or persist-replay; silence here ships a bug.
+- Failover/entitlement: nothing states translated streams can't double-count usage when a pre-commit retry hits a second upstream — "per-attempt rows" exists but no assertion that exactly one row is billable per client-visible attempt.
+
+**3. Contradictions / stale claims**
+- 3.3 duplicates 1.0's corpus contract (fine) but says "capture REAL transcripts per provider family" as if new — mark it extension-only, which the C6 parenthetical already concedes; delete the redundant task body.
+- 1.5 "non-stream keeps whatever request translate does today (documented)" — no doc artifact is tasked anywhere; undocumented behavior is not "documented."
+- Hot-path cost is never estimated: four index-space maps + accumulators per attempt on every stream; 3.4's 50-stream soak is Phase-3-late for a Phase-1 data-structure decision.
+
+**4. Missing first-ship requirements**
+- Phase 1: browser-test task for the 1.8c knob UI (rules mandate it; only "settings UI" is listed). No gate-step-count update task for the 69→N step suite.
+- Phase 2: no concurrency smoke (Phase 1 got one; 2.x adds a third target grammar with new state).
+- All phases: no rollback drill beyond knob-off; no assertion the knob propagates via generation poll to *all* gateway nodes.
+- Responses item-id synthesis scheme (prefix/attempt/counter) is "noted" but never specified — 3.2's eunit-first can't be written without it.
+
+**5. Design notes**
+- The four-space index map plus per-attempt fresh `sse_st` is the right spine; make the map an explicit record/typed map in `translate_sse`, not ad-hoc keys. Error taxonomy (C2) is complete except accumulation-overflow and invalid-args-at-close both collapse into the same path — good, keep it.
+
+**6. Top 5 edits**
+1. C5: replace "bounded by the existing 1MiB cap" with an explicit accumulated-bytes cap + overflow→C2 error path; eunit it.
+2. C2/1.6: split degradations into pre-commit-known (header-eligible even on streams) vs discovered-mid-stream (terminal event only).
+3. Add task: document/persist cross-protocol reasoning round-trip for tool multi-turn, or reject with a named error.
+4. 1.8c: add browser-test step; add gate-suite step-count update task per phase.
+5. Specify the item-id synthesis format in C5 before 3.2; drop 3.3's body to "extends corpus per C6."

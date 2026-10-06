@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — shippable as written; the remaining items are one-liners, not redesigns. No blocking defects found; round-5/6 fixes all landed correctly.
+
+**2. Critical risks**
+- *Label cardinality:* clean. Closed enums (endpoint/protocol/status_class/stream/stat) + operator provider names; no id/key/model labels; orphan-after-delete documented.
+- *Hot-path cost:* ~18 `update_counter` + `ets:whereis` per request (~µs) — acceptable, but hoist `whereis` once per `inc`/`observe` call; 18 lookups is needless.
+- *Exposition correctness:* sound. Registry-driven families (dropped counter renders), `+Inf` whitelisted before the validity partition — the rev-6 fix is correctly placed and ordered; zero-fill to ladder ∪ ETS bounds; escape order right (backslash first, NUL stripped); byte-exact mixed test locks it.
+- *Auth reuse:* verbatim extraction + gate 2b tokenless-`/stats` 401 regression; 401-before-method asserted; loopback/XFF note retained.
+- *Histogram sanity:* rev-6 order (+Inf → descending ladder → sum → count last) yields monotone buckets and count ≤ +Inf at every interleaving; equality asserted only at quiescence. Correct.
+- *Request-id hygiene:* charset-validated 1..128, never echoed on invalidity; comma-joined duplicates rejected; upstream clobber excluded via `filter_headers` (verify step kept).
+- *Migration + dual dialect:* 005 flat + subdir copies, ledger dedupe, index-lock/CONCURRENTLY + deploy order documented.
+- *Multi-node:* per-node jobs/tokens; counters summable, gauges node-scoped. Good.
+
+**3. Contradictions / stale claims**
+- Gate step 6's "the ONLY async step here" is stale — 4c also polls (added rev 6).
+- `req_[0-9a-f]{16}` is documented and gated, but the crypto-failure fallback (`encode_hex(unique_integer)`) can emit fewer than 16 nibbles — an undocumented shape on the safety path.
+- `janus_metrics:snapshot/0` sits **outside** the handler's render `try`: table death between `whereis` and `tab2list` (or app stop mid-scrape) 500s the scrape — contradicts the plan's own "observability must never crash" posture.
+
+**4. Missing first-ship requirements**
+- No eunit for `janus_http_classify` — the one pure module left untested while the gate locks its exact enums (199/299/300/399 boundaries; unknown path → other/other).
+- `bool01`/`safe`/gauge assembly untested.
+- Unstated verification preconditions: `reply_err/6` arity + Req-in-scope; whether `janus_http_models` calls `require_agent` (Task 6's uniform snippet assumes it — if models is auth-free, that's an undeclared behavior change); `/stats/logs` `limit` param name.
+
+**5. Architecture notes**
+Registry/renderer split is right; renderer calling `janus_metrics:buckets()` is a deterministic dependency, fine. Hook placement (track/3 + reply_err/6 guard + auth + models) is correct; erasing `janus_req_counted` at handler init *and* proxy entry kills the keep-alive leak. Header echo by construction (set at entry, same Req chain to reply/stream_reply) is the strongest part; gate asserts 401 + stream + translate. Never `inc()` `usage_writer_dropped_total`/`lb_stats_total` — they're handler-appended; doing so emits duplicate series.
+
+**6. Top 5 edits**
+1. Move `snapshot()` + gauge assembly inside the handler `try` (or make `snapshot/0` total) — closes the only real race.
+2. Add `janus_http_classify_tests` first: status_class boundary table + all paths.
+3. Pad the unique_integer fallback hex to 16 nibbles (`~16.16.0b` over an 8-byte buffer).
+4. Fix gate step 6's "ONLY async step" claim.
+5. Pre-coding verify: `reply_err/6` signature/Req scope, models-handler auth, `/stats/logs` param; then read `get(janus_req_path)` with `cowboy_req:path` fallback in `reply_err` instead of re-deriving from `Req`.

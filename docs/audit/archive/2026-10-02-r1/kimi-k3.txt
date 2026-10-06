@@ -1,0 +1,41 @@
+## 1. Verdict
+**GO WITH FIXES** 鈥?the ETS-hot-path/DB-as-config-store split is sound, but streaming retry semantics, translation scope, and secret handling are under-specified for a first ship.
+
+## 2. Critical risks
+
+- **Streaming retry is unsound as written.** "On failure, cool channel and retry next" 鈥?once you've streamed any bytes to the client, retrying on another channel produces duplicated/garbled output. Plan must define: retry only before first upstream byte (or before first SSE event forwarded), plus mid-stream failure policy (emit `error` event and close).
+- **Cooldown races across nodes.** Cool-downs are per-node, so a dead provider gets hammered N times (once per node) per failure window, and Caddy round-robins agents into nodes that haven't cooled the channel yet. Acceptable, but the plan claims "native cluster LB" without stating this limitation.
+- **Secrets at rest.** `JANUS_SECRETS_KEY` env on the node means every node holds the decrypt key 鈥?fine, but plan doesn't say what happens when the key is missing/rotated, and "not plaintext in UI responses" needs an explicit "never return key material after write" rule.
+- **Multi-node consistency via NOTIFY is lossy.** `LISTEN/NOTIFY` drops notifications on reconnect. Plan needs NOTIFY + generation/sequence column with catch-up poll, else nodes silently serve stale routes.
+- **Translation is the biggest scope risk.** Tool calls, `thinking` blocks, `stop_reason` mapping, and SSE event-model differences (Anthropic `content_block_delta` vs OpenAI `choices[].delta`) are where passthrough gateways die. "Minimal" is doing heavy lifting in phase 4.
+
+## 3. Contradictions / vague claims
+
+- Todos mark `repo-skeleton` completed, but phase 1 lists "DB migrations, ETS config loader + NOTIFY" as skeleton work 鈥?schema-ets todo is still pending. Which is it?
+- "Key-level RR" and "cooldown_ms" live in DB, but LB state lives in-memory 鈥?the boundary of what's config vs runtime state is never drawn explicitly.
+- `openai_responses` as an *upstream* adapter is listed in the data model from day one, yet phase 5 defers it. Pick one.
+- "Optional on-disk snapshot for cold start" contradicts "Postgres env present = multi-node" 鈥?snapshot staleness at boot is undefined.
+
+## 4. Missing first-ship requirements
+
+- Request/response size limits, body read timeouts, upstream connect/TTFB/stream-idle timeouts (Cowboy defaults will hang streams).
+- Max in-flight per channel (plan mentions in-flight counts but no backpressure rule when all channels are saturated 鈥?503? queue?).
+- Agent key 鈫?model allowlist (any key can hit any model as specified).
+- `/v1/models` filtering by enabled routes.
+- Single-node SQLite path: no NOTIFY, so admin writes must synchronously reload local ETS 鈥?state this explicitly.
+- Observability: at minimum structured request log with channel picked, retries, upstream status. Currently zero.
+
+## 5. Architecture notes
+
+- Supervision tree unstated: provider connection pools (gun/hackney?), per-channel cooldown `gen_server` vs ETS-with-ttl, and who owns the NOTIFY listener reconnect loop. Specify before phase 2.
+- Cowboy SSE: use `cowboy_loop` or `stream_body` with `no_fin` per chunk; ensure `idle_timeout` is disabled/bumped for long generations, and handle client disconnect to cancel the upstream request.
+- `janus_db` adapter: keep it to query-level (`query/3`, `transaction/1`) not ORM-ish; migrations need a runner that works for both epgsql and esqlite (esqlite has no advisory locks 鈥?serialize migrations at boot).
+- ETS reload: two-table swap (build new, atomic rename via generation counter) beats incremental updates; expose the generation in the Health screen as the plan already implies.
+
+## 6. Top 5 concrete plan edits
+
+1. Define retry contract: retry only pre-first-byte; mid-stream failure terminates the SSE with an error event; max 1 retry.
+2. Add a `config_generation` bigint bumped on every admin write; NOTIFY carries it; nodes poll every N s as backstop; Health UI shows per-node applied generation.
+3. Move `openai_responses` upstream adapter out of v1 data model (or commit to it in phase 5 only 鈥?update the matrix).
+4. Specify timeouts and caps: body size, upstream connect/TTFB/idle, max in-flight per provider key, and the 503 behavior when exhausted.
+5. Add per-key model allowlist to `api_keys` and filter `/v1/models` by enabled routes; document `JANUS_SECRETS_KEY` rotation/startup-failure behavior.

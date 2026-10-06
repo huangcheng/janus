@@ -1,0 +1,34 @@
+## 1. Verdict
+GO WITH FIXES — architecture (ETS registry, scrape-time gauges, terminal-path bumps, shared admin auth) is sound, but two shipped code blocks crash as written and several "existing source" assumptions are unverified.
+
+## 2. Critical risks
+- **`le_bin/1` crashes on integer buckets**: `buckets()` is `[0.1, ..., 1, 2.5, 5, 10, ...]` — 1, 5, 10, 30… are integers, `le_bin(Le) when is_float(Le)` will `function_clause` on the first `observe/3` call. Hot-path crash inside `track/3`.
+- **`hist_sum` float bump**: `ets:update_counter/4` with a float increment (`Seconds`) raises `badarg` on OTP ≤ 26 (float increments only landed for atomics/counters in recent OTP; ETS update_counter historically requires integers). Verify against the pinned OTP 27 image, or store microseconds as integers and divide at render.
+- **Bucket ordering**: renderer does `lists:sort(maps:keys(BucketMap))` — lexicographic binary sort gives `"+Inf" < "0.1" < "10" < "2.5"`. Prometheus tolerates unordered buckets but `histogram_quantile` correctness expectations +Inf-last; sort numerically, append `+Inf` last.
+- **Request-id echo threading**: `set_resp_header` on `Req1` only survives if `janus_http_auth:require_agent` and `reply_err/6` reply on that exact Req record. Unverified; a fresh Req anywhere silently drops the header on 401s/streams.
+- **Null convention**: `bin_or_null(_) -> null` — epgsql uses `null`, esqlite uses `undefined`. Check what `janus_usage`'s existing nullable columns do; migration is dual-dialect but the writer isn't.
+- **Unverified dependencies**: `janus_lb:cooling_count/0`, `janus_config:ready/0`, `janus_usage:stats()` keys (`buffered`/`dropped`), the catalog shape `#{catalog := #{models := Tid}}` with rows `{Id, #{id := Id}}` (self-referential pattern — almost certainly wrong). Handler will crash or emit zeros.
+- Label cardinality and hot-path cost (~14 ETS ops/request) are fine; auth reuse is right.
+
+## 3. Contradictions / stale claims
+- Task 2 deliberately ships a nonsense `bump/2` clause with an "unreachable marker" then instructs deleting it — don't write garbage to delete it.
+- "Atomics in persistent_term is the model" vs. the ETS pivot — fine, but the docstring reads as if both apply.
+- Test-fixture math: "param counts change 11→22 per row: update to 24" conflates per-row and 2-row totals (11→12 per row, 22→24 per fixture).
+- `usage_writer_dropped_total_note` zero-placeholder-then-filter gymnastics is a smell; just append the counter series.
+
+## 4. Missing first-ship requirements
+- Models handler: only the 2xx path is bumped; 4xx/5xx from `/v1/models` (post-auth) uncounted.
+- `usage_bool_int/1` is referenced but never defined.
+- Gauge label values aren't `to_bin`-normalized (`norm/1` only sorts) — a non-binary value crashes `escape/1`.
+- Renderer output order is `maps:fold` (nondeterministic) — fine for Prometheus, but forbid exact-equality tests on multi-name output.
+- Multi-node: same-token-across-nodes vs per-node token management undocumented; Grafana panels need `sum by (endpoint, status_class)` across instances, not per-instance only.
+
+## 5. Architecture notes
+ETS table-per-registry with `update_counter/4` default tuple is the right call (no registry race). Renderer purity is good; keep `Body2` concatenation in the handler, not the renderer. Hooking only `track/3` + auth + models keeps janus-auto inner calls invisible — correct. Snapshot-at-scrape for gauges avoids cross-process casts, consistent with the persistent_term invariant.
+
+## 6. Top 5 edits
+1. Fix `le_bin/1` to handle integers (`integer_to_binary`) and sort buckets numerically with `+Inf` last.
+2. Verify `ets:update_counter` float support on the OTP 27 image; else store duration sum as integer microseconds.
+3. Before Task 4, verify existence/shape of `cooling_count`, `ready/0`, `usage:stats()` keys, catalog model ETS, and Req threading through `require_agent`/`reply_err` — amend plan text.
+4. Align `bin_or_null` with `janus_usage`'s existing null convention per driver; count models-handler non-2xx.
+5. Delete the placeholder `bump/2` clause from the plan; hoist `endpoint_of`/`protocol_from` into one shared module to prevent proxy/auth drift.

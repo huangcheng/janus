@@ -1,0 +1,31 @@
+**1. Verdict — GO WITH FIXES:** right architecture (node-local ETS registry, pure renderer, terminal hooks, sanitized ids), but as written it crashes per request (float histogram sums via `ets:update_counter`) and its metric names contradict each other.
+
+**2. Critical risks**
+- Hot path: `ets:update_counter/4` counters are integers only; `observe/3`'s float `hist_sum` bump throws `badarg` inside `track/3`, once per completed request. Use integer microseconds; render ÷1e6.
+- Exposition: bucket sort is lexicographic on binary `Le` (`"10" < "2.5"`, `"+Inf"` first since `0x2B < 0x30`) → invalid bucket order; `~g` truncates at 6 sig digits, losing `_sum` precision; no `# HELP`.
+- Auth reuse: extraction is fine, but no scrape model: no `node` label, no claim :8090 is per-node routable through Caddy; a single shared target makes counters appear to reset. One target per node is mandatory.
+- Request-id: charset + 128 cap + no CR/LF is clean hygiene; but E2E #6 races the async usage writer (row unflushed → null) and stream echo is claimed, never tested.
+- Migration: dual-dialect files consistent; confirm 005 is actually next; index over mostly-NULL column fine (partial better).
+- Cardinality: closed except `provider` (DB-managed; deleted providers orphan series) — document retention.
+
+**3. Contradictions/stale claims**
+- Names: Task 3 emits `janus_requests`, `janus_request_duration_*`; Task 5's table says `janus_requests_total`, `janus_request_duration_seconds`; E2E #2/#3 mix both — unsatisfiable.
+- `Base = janus_http_stats:snapshot()` is dead; existing atomics stats never reach the renderer.
+- `prometheus.yml`: one job, 3 targets, one `credentials_file`, vs its own "one job per node" comment.
+- Unverified: `janus_lb:cooling_count/0`, `janus_config:ready/0`, `janus_usage:stats/0` keys (`buffered`/`dropped`), `/stats/logs` (E2E #9), atom-keyed catalog map in `models_serving/0` (this project's binary-key bug class).
+
+**4. Missing first-ship**
+- Scrape topology/node identity; counter completeness (crashes/disconnects bypass `track/3`); a 4xx-site audit to prevent auth/proxy double bumps; E2E flush-wait, stream echo, exact-order histogram coverage (current `binary:match` assertions pass the sort bug).
+
+**5. Architecture notes**
+- Direct public-ETS writes fit the no-cast rule, but `init/0` isn't idempotent (`ets:new` throws if present); guards only cover a missing table.
+- Renderer is pure; make output deterministic (`maps:fold` order varies per scrape) and tests exact-string.
+- `track/3` is the right single hook; share `endpoint_of`/`protocol_from` in one path→labels module.
+- Echo: `set_resp_header` at handler entry covers only the same Req chain, and `handle/5`'s `erase()` wipes pdict `janus_request_id` — `track/3`'s `get/1` returns `undefined` as written. A Cowboy `onresponse` middleware gives global echo (404s too).
+
+**6. Top 5 edits**
+1. Integer-µs histogram sums; full-precision `num_bin`.
+2. Canonicalize names (`janus_requests_total`, `janus_request_duration_seconds`, `janus_upstream_requests_total`) + `# HELP` aligned across Tasks 3/5/7.
+3. Numeric bucket order (`+Inf` last), pinned by an exact-output test.
+4. Re-assert `janus_request_id` pdict after `handle/5`'s `erase()` (or carry on ctx).
+5. Per-node jobs in `prometheus.yml`; E2E usage-row poll-wait + streamed-response echo assertion.

@@ -1,0 +1,37 @@
+## 1. Verdict
+
+**GO** — no two spec sentences contradict each other without §10 already picking a winner.
+
+## 2. Critical risks
+
+- **include_usage retry state** (§4.1.1.5): retrying once on pre-200 400 requires retaining the already-translated request map and re-sending on the same gun connection. The spec never says where that body is kept; if the handler discards it after `call_adapter`, the retry is unimplementable as written.
+- **Mid-stream 400/502 vs wire 200** (§4.1.4, §4.2): counters record failure on a request the client saw as 200. Spec acknowledges this, but TF-6.8 must assert the `/stats` side, not just frames.
+- **janus-auto inner flag scope** (§4.2): `janus_stats_inner` put/erase only works if inner `do_proxy` runs on the *same* Cowboy handler process. If it ever spawns, flags are invisible and double-counting returns.
+- **Deploy "catalog apply done"** (§4.4.1/3): the script must observe ETS rebuild completion per node, presumably via `/stats` generation; the mechanism is implicit.
+- **Atomics/started_at on hot reload** (§4.2): counters survive, so `uptime_sec` must come from the same PT write, not read-time clock, or the deploy `uptime_sec` window check breaks.
+
+## 3. Contradictions / stale claims
+
+None blocking. Minor: §2's "AGENTS.md already says `--target build -t janus-build:test`" is stale-by-design (Slice C fixes it). §4.1.2 duplicates "Rest is the incomplete tail" — editorial only.
+
+## 4. Missing requirements
+
+- No eunit named for the **include_usage retry path** (inject → provider 400 → retry without `stream_options` → success; second 400 → client 400, zero SSE bytes).
+- TF-6.8 asserts ≥2 `data:` events but not that the recorded `track` status vs wire-200 divergence appears correctly in `/stats` failed count.
+- Nodes table: two distinct "no data" cases — old gateway (fields absent) vs `total < 10` — are conflated into one "—" rule.
+- `leftover_cap` on a single `data:` line: abort is fine, but the client-facing finalize reason (`upstream` vs `invalid_request`) for cap-hit isn't assigned a row in §4.1.4.
+
+## 5. Architecture notes
+
+- `#sse_st{}` sole-owner-by-handler + immediate fold-write is sound; `gun:cancel` handler-only + idempotent is correctly pinned.
+- PT atomics created pre-listener avoids the boot-order trap consistent with the persistent_term invariant in AGENTS.md.
+- Single funnel (`inc_total` at `do_proxy` entry, `track`-gated `inc_failed`) with three pdict flags is minimal and auditable; the counted-population definition matching SPEC §2.4 keeps dashboard honest.
+- Dual-repo pairing for TF-6.8/6.8b and deploy_prod.sh is correctly called out.
+
+## 6. Top 5 concrete edits
+
+1. §4.1.1.5: state the translated request map is retained in handler state until 200 or terminal error, enabling the single retry.
+2. §4.4: specify the observable for "catalog apply done" (e.g., `/stats` generation equals post-apply leader value).
+3. §4.2: `started_at` written once to PT at `janus_http_app` init alongside atomics; `uptime_sec` derived from it.
+4. §4.1.5: add eunit for include_usage retry-once and no-retry-on-401.
+5. §4.1.4: add cap-hit row — `leftover_cap` finalizes as 502 `upstream`.

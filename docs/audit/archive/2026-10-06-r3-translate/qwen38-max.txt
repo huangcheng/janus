@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the skeleton/commit/fixture contracts are sound, but one wire-order bug, an ambiguous commit trigger, and uncosted schema/telemetry promises must be fixed before Phase 1 ships.
+
+**2. Critical risks**
+- **→chat usage placement is backwards.** C1 emits the usage chunk *before* the finish chunk; real OpenAI wire order with `include_usage` is usage chunk **last with empty `choices`**. The plan's own fixture-realism rule would contradict C1.
+- **Commit trigger vs lazy emission.** Anthropic upstream sends `message_start` immediately (before any content), so "skeleton on first real upstream event" commits →anthropic streams almost instantly, largely nullifying the C4 failover window. Define commit as *first byte written to the client*, not first upstream event.
+- **Invalid accumulated JSON.** C5 forbids closing a tool call until args are complete JSON but defines no behavior when they never validate — must be a target error event, never `content_block_stop`.
+- Hot path: 1MiB args accumulation × 50 concurrent streams; accumulate as iolist, decode once.
+- Kill-switch OFF must also restore the `prefer_proto` preference path; 1.3 doesn't say so.
+- 1.5 widening `n>1` rejection to non-stream may regress a previously accepted path (e.g. chat→responses req); verify current behavior first.
+
+**3. Contradictions / stale claims**
+- Lazy-emission claim vs anthropic's immediate `message_start` (above).
+- C2 promises stream degradations recorded "in the usage row," but no phase adds a column/migration — nothing creates it.
+- "Existing include_usage injection+retry" is assumed, not listed among verified mechanisms.
+- 1.0 presumes Kimi's anthropic-compat endpoint accepts vision; unverified — the corpus may be un-capturable as specified.
+
+**4. Missing first-ship requirements**
+- **P1:** translated-attempt/error telemetry; usage-row migration for `translated`/`dropped`; PII scrubbing of captured corpus; **request-payload** capture (1.0 captures SSE only, but 1.6–1.8 need request shapes); `tool_choice:"none"` semantics.
+- **P2:** responses item interleaving rule (reasoning vs message ordering; closed items never reopened); `encrypted_content`/refusal policy.
+- **P3:** capture key management; durable conformance artifacts per AGENTS.md.
+
+**5. Architecture notes**
+Make event mapping data-driven (per-`{src,dst}` upstream-event→action tables) to avoid scattered `case #{}` (known project bug class). Single `commit/1` writes skeleton+first frame atomically. Keep sse_st per-attempt with explicit index-space maps. Error taxonomy: pre-commit retryable / post-commit terminal / `protocol_error` (malformed args JSON).
+
+**6. Top 5 edits**
+1. C1: move →chat usage chunk to **after** the finish chunk (empty `choices`), matching OpenAI.
+2. C4: commit = first client-visible **byte**; exclude ping/comment/initial `message_start` from skeleton triggers; document →anthropic's narrower failover window.
+3. Add 1.0a: corpus PII scrub, request-body capture, verify Kimi vision-over-anthropic (name a fallback provider).
+4. Add 1.9: usage-row `translated`/`dropped` migration + metrics, gated with the 1.3 unblock.
+5. In 1.8/C5: `tool_choice:"none"` → strip tools for anthropic targets; `image_url` https vs data-URL mapping; failed args JSON decode → error event, never a closing signal.

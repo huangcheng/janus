@@ -1,0 +1,33 @@
+## 1. Verdict
+**GO WITH FIXES** — the rev‑3 fixes are real (registry‑driven renderer, `ets:whereis`, whole‑body guards), but the renderer is still not total, gauge ordering is wrong, and counter coverage has an unproven hole.
+
+## 2. Critical risks
+- **Renderer partiality → /metrics 500.** `integer_to_binary(V)` on counter rows, atom‑only `name_bin`, and `escape/1` (binary‑only) all crash on unexpected input; `Dropped = maps:get(dropped, Usage, 0)` feeds an unvalidated value straight in. No top‑level `try` in `render/2` or the handler. One bad row kills the whole scrape.
+- **Gauge series sorted by value:** `lists:sort([{V, L} || ...])` in `render_gauge_family` → output order changes as values change. Non‑deterministic, contradicts the "pure/deterministic" claim. Sort by labels.
+- **Zero‑fill drops unknown `le` rows:** bounds come only from `buckets()`. Any bucket key not in the current ladder (ladder edited between deploys; rows survive until restart) is silently omitted while `_count` still includes it → broken `histogram_quantile`. Union ETS‑present bounds with the ladder.
+- **Silent self‑muting:** `inc/observe` swallow everything with no log and no internal error counter; registry `to_bin/1` has **no float/list clause** (rev‑3's "to_bin total" holds only in the renderer). `route_provider_name(undefined)` or a float label loses the series invisibly.
+- **Coverage hole:** only `track/3`, auth‑401, and models‑2xx bump. Proxy rejects via `reply_err/6` (bad body, unbound model, auto‑adjudication failure) are unproven — if they bypass `track/3`, the Grafana error‑ratio panel under‑reports 4xx. Enumerate every terminal reply site; assert exactly‑once.
+- **pdict across process handoffs:** `get(janus_request_id)` / `janus_req_path` break if any stream/auto path runs in another process → `endpoint="other"` silently, `request_id` NULL. Add a gate assertion that `endpoint="other"` never appears.
+- **Migration:** `CREATE INDEX` (non‑concurrent) locks writes on a large prod `usage_events`; the new binary's 12‑column INSERT hard‑requires the column. State index‑build cost and that no new‑code writer runs pre‑migration.
+- **Scrape reachability/auth:** loopback fallback = unauthenticated `/metrics` if :8090 is ever fronted. Plan never says how external Prometheus reaches three cloud nodes' :8090.
+- **Duplicate‑series landmine:** `usage_writer_dropped_total` appended from `stats` while ETS could hold the same family → Prometheus parse error.
+
+## 3. Contradictions / stale claims
+- Module doc "tid lives in persistent_term" + commit msg "cached tid" vs `ets:whereis` per bump.
+- Task 5: "request_id field lands in Task 6" — Task 6 has no such step (auth‑reject log never gets it).
+- `/readyz` in the exclusion rules but absent from the admin route facts.
+- Gate step 1: auth runs *before* the method check, so unauthenticated POST is 401, not 405 — say "POST **with** token".
+- Docker commands drop `-e HEX_MIRROR/-e HEX_CDN` and `rebar3 fmt --check` (CI runs fmt).
+
+## 4. Missing first‑ship
+`docs/SCHEMA_ETS_CONTRACT.md` update for 005; `/stats` regression assertion + caller grep after the auth extraction; gate steps for a proxy 4xx and for `x-request-id` on 500/crash; rate‑limit on `safe/3` warning logs (15s spam).
+
+## 5. Architecture notes
+`lb_stat` exposes monotonic counters as gauges (label `counter` — rename `stat`); `/stats` and `/metrics` are independent sources that will disagree — document; `models_serving/0` should be `ets:info(Tid, size)` and share one helper with `janus_gateway_stats`; `observe` is non‑atomic across ~16 bumps (acceptable, say so); `upstream_requests_total` HELP admits failover attempts are excluded, so the name overpromises.
+
+## 6. Top 5 edits
+1. Make `render/2` total: `num_bin` for counters, binary‑safe `name_bin`/`escape`, and wrap the handler's render in `try/catch` → 500 + log.
+2. Sort gauge series by labels; make `fam_type` default `gauge` for gauge‑supplied names (or require registry membership).
+3. Zero‑fill from `buckets() ∪ ETS le values`, numerically sorted, `+Inf` last.
+4. Add a terminal‑reply inventory table (every 2xx/4xx/5xx site → which bump fires) plus gate steps for proxy 4xx and 500; add an internal `janus_metrics_errors_total` (or throttled log) so swallowed bumps are visible.
+5. Fix the stale doc/commit wording, add `request_id` to the auth‑reject log in Task 6, correct gate step 1's 405 precondition, and restore the documented docker/`fmt --check` commands.

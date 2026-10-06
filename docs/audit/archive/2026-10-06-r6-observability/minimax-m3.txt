@@ -1,0 +1,26 @@
+**Verdict: GO WITH FIXES** — round-5 fixes correctly landed; a handful of sharp edges remain (hot-path allocation drift, the gate's le-ordering assertion is ambiguous, and SQLite migration size implications are not addressed).
+
+**Critical risks:**
+- **Hot-path allocation**: `observe/3` calls `lists:reverse(buckets())` on every request, allocating a fresh 13-element list per call. Under load this is pure GC pressure with zero behavioral benefit — hoist to a module attribute or `persistent_term`.
+- **Histogram le-ordering assertion**: gate step 2 says buckets are "monotonically non-decreasing in `le` order" without specifying numeric vs lexicographic. The byte-exact eunit covers it, but the gate language lets a reviewer misread a regression as passing.
+- **SQLite `ALTER TABLE ADD COLUMN`**: nullable TEXT without DEFAULT avoids table rewrite on modern SQLite (≥3.35), but no version floor is pinned. Older prod images rewrite `usage_events` at boot — potentially minutes-long lock on existing rows.
+- **Multi-node cardinality**: provider label is unbounded; deleted providers orphan series until restart (documented but worth surfacing in the README cardinality section).
+- **/metrics DoS**: no scrape-rate limit. A misconfigured Prometheus can pin a node on `ets:tab2list` + `janus_lb:stats/0` once per second — fine for sane configs, painful at 1Hz×N nodes if someone wires 100 targets.
+
+**Contradictions / stale claims:**
+- Rev-5 history text says "observe bump order (buckets → +Inf → sum → count)" but the current code is "+Inf → descending ladder → sum → count". Semantically equivalent, but the history and code disagree on word order — fix or remove.
+- T6 Step 5 says proxy `track/3` "add `request_id` to … the `janus_usage:record` map", but `janus_usage:record` is named in janus_core; verify the actual export name during implementation (plan says "verify by reading …" elsewhere — apply the same hedge here).
+
+**Missing first-ship requirements:**
+- No rollback recipe for the migration. Postgres `ADD COLUMN` is safe, but a bad metric regression lacks a defined revert (gauge/logic bugs surface post-deploy).
+- No alert rules (self-review notes "out of scope" — fine, but a one-line "no P0 alerts ship in this PR" doc note would prevent operator confusion).
+- `/metrics` is admin-plane behind Caddy — README should explicitly call out scrape-interval recommendation (15s already in the example; good).
+
+**Architecture/design notes:** ETS registry via `ets:whereis` per bump is correct; renderer purity (no logger inside) keeps scrape deterministic; pre-resolving `x-request-id` at handler entry covers all reply paths on one Req chain — verified by construction.
+
+**Top 5 concrete edits:**
+1. Hoist `lists:reverse(buckets())` to a module attribute (`-define(BUCKETS_DESC, ...)`).
+2. Tighten gate step 2's le-ordering wording to "numerically non-decreasing in `le` (parsed as float, `+Inf` last)".
+3. Pin SQLite version in `janus_db_conn` docs or add a guard step in the migration runner for `ADD COLUMN` rewrite-prone versions.
+4. Unify `norm_labels/1` between `janus_metrics` and `janus_metrics_render` (one private export, or move to a third `janus_metrics_labels` module) — drift risk on label-value coercion.
+5. Add a single `safe/3` batched-warning (mirroring the LB skip pattern) so multi-gauge-failure scrapes don't spam logs.

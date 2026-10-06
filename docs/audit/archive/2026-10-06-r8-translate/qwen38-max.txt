@@ -1,0 +1,30 @@
+**1. Verdict**
+GO WITH FIXES — rev 8 is architecturally sound, but carries stale internal contradictions (id prefixes, single-knob reuse) and C-section behaviors with no numbered task to implement them.
+
+**2. Critical risks**
+- C5 contradicts itself: "Argument FRAGMENTS may stream through incrementally" vs interleaved serialization by "FULL accumulation … emit-at-close." Undefined which inputs trigger buffering; interleaved transcripts silently lose streaming semantics, and 4MiB × 50 concurrent ≈ 200MiB hot-path ceiling — 3.4 asserts "no growth" but states no budget.
+- C2 error frames are invented, not captured: chat `{"error":…}`+`[DONE]`, lone anthropic `event: error` have zero corpus backing (1.0 captures truncation, not real mid-stream errors) and no client-SDK tolerance check — strict chat SDKs may choke on error-only chunks.
+- `prefer_proto` loses its signal once `stream_translate_blocked` shrinks; "lossy-pair native preference" is e2e-asserted in 1.9 but the encoding mechanism is tasked nowhere.
+- `sequence_number` monotonicity eunit (2.1) assumes the field exists in OpenAI captures; verify before mandating.
+
+**3. Contradictions / stale claims**
+- 2.1 synthesizes `resp_/msg_/fc_/item_`; C5 (R7) mandates `jresp_/jmsg_/jfc_/jitem_`. `fc_`/`item_` collide with real OpenAI id spaces — exactly the collision R7 eliminated. 2.1 is stale.
+- "Phase 2 reuses the SAME knob" vs 2.3a "deploy with knob off": after the Phase-1 flip the prod knob is ON, so Phase 2 cannot deploy off without disabling Phase-1 traffic.
+- C3 "composes with 1.8" — the kill switch is 1.9; stale reference.
+- 1.5's evidence rule depends on 1.4b characterizing non-stream `n>1`, but that test is absent from 1.4b's assertion list.
+
+**4. Missing first-ship requirements**
+- P1: numbered tasks for caps implementation, terminal-degradation payload schema (C2 cites "its own pre-1.9 task" that exists nowhere), lossy-pair LB signal, upstream-error-frame fault mode in 1.4a, real mid-stream error captures in 1.0.
+- P2: per-provider reasoning-effort support-detection table.
+- P3: mock upstream extended to serve responses-protocol upstreams (3.1/3.5 depend on it, untasked).
+
+**5. Architecture notes**
+- Split `translate_sse` into shared accumulator + per-target emitters; make pass-through vs accumulate an explicit mode with eunit'd transitions.
+- Keep C2 mapping as a data table eunit'd against captured error frames once 1.0 collects them.
+
+**6. Top 5 edits**
+1. 2.1: replace `resp_/msg_/fc_/item_` with C5's j-prefixed set.
+2. Knob: add per-pair/phase scoping, or rewrite 2.3a to acknowledge the Phase-1 regression window.
+3. C5: specify exactly when full accumulation applies (interleaved input / responses target) vs incremental pass-through; add memory-budget assertions to 1.9/3.4.
+4. Add tasks: terminal-degradation schema eunit, caps implementation, lossy-pair `prefer_proto` signal, error-frame fault injection + captures.
+5. Add the `n>1` non-stream characterization test to 1.4b (1.5's gate evidence).

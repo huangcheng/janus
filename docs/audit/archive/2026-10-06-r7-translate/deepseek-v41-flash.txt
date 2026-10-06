@@ -1,0 +1,33 @@
+1. **Verdict:** GO WITH FIXES — architecture is sound, but three semantic gaps (n>1 knob coupling, prefer_proto regression, interleaved-tool serialization) must be resolved before 1.9 ships.
+
+2. **Critical risks**
+- Interleaved chat tool deltas A→text→B→A cannot map to *sequential* anthropic blocks while streaming `input_json_delta` incrementally. C5 says "buffer into sequential blocks" and "fragments may stream" — contradictory. Specify whole-call accumulation, emit at close, and add the interleaved fixture to 1.1.
+- Removing `has_tools`/`has_non_text_content` also removes `prefer_proto`'s effect: translated tool/vision requests stop preferring native routes and get load-balanced into lossy paths. Silent fidelity regression, untested.
+- `n>1` non-stream rejection is gated by a **stream** knob (`stream_translate_enabled`); unrelated behavior coupled. 1.5(b) responses-provider and janus-auto rejection can't ride Phase 1.
+- `message_start` `input_tokens=0`: documented but unverified against real Anthropic SDK accumulation; client billing views read wrong. Needs a fixture assertion + fallback.
+- Nearly all C4/error-path risk (half-open block, zero-data-frame failure, cap-exceed, abort) concentrates in the single 1.9 commit; only eunit (1.4b) guards it pre-ship.
+
+3. **Contradictions / stale**
+- 1.5(b) rejects responses-provider `n>1` in Phase 1 though that adapter is Phase 3.
+- 3.5 "if any remains after 3.2" is vague; 3.2 already folds reverse streaming.
+- 1.8b migration "shipped BEFORE 1.9" with no down-migration/rollback.
+- C1 "terminator once per committed" vs C2 chat error+`[DONE]`; failure-case `[DONE]` count never stated explicitly.
+- 2.1 event list omits the reasoning-summary events C1 requires from the corpus.
+
+4. **Missing first-ship**
+- Metric/alert on translated-stream volume and cap-exceed rate (columns alone aren't 3am observability).
+- `prefer_proto` retention decision for lossy pairs.
+- Pre-commit client-abort test (only post-commit cleanup mentioned).
+- Corpus re-capture automation / CI freshness check.
+
+5. **Architecture notes**
+- `translate_sse` per-attempt state is correct; add an explicit block-serialization state (OPEN/CLOSED/BUFFERED) and a separate `n>1` policy module.
+- One canonical `{type,code,message}` struct with per-target serializers and a unit-tested type-map incl. unknown-type fallback.
+- Keep the four index spaces as named maps with invariant assertions.
+
+6. **Top 5 edits**
+1. Split `n>1` into its own change (ungated, or `n_unsupported_enabled`); don't ride `stream_translate_enabled`.
+2. Keep `prefer_proto` bias for all lossy translated pairs after unblock; e2e asserts native-route preference.
+3. Specify interleaved tool-call serialization (full-accumulate, emit at close) + add interleaved fixture to 1.1.
+4. Add 1.8b down-migration + a dashboard metric/alert task; list in 1.9 prerequisites.
+5. Add a fixture assertion that `message_start` usage=0 still yields correct totals, verified against the real Anthropic SDK; document fallback.

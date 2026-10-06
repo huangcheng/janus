@@ -1,0 +1,33 @@
+## 1. Verdict
+**GO WITH FIXES** — the v1 fixes genuinely close the flagged SSE/parser/sweep/p95 holes, but A5's provider-key SQL collides with `rewrite_pg`, and the stream/non-stream latency split is recorded yet never read.
+
+## 2. Critical risks
+- **A5 × `rewrite_pg` collision (Postgres breakage):** `breakdown_dim(provider_key)` embeds the literal `'?'` in `COALESCE(CAST(pk.id AS TEXT), '?')`. The Task 3 `rewrite_pg/1` blindly rewrites every `?` → `$N`, corrupting the literal and shifting placeholder numbering → param-count mismatch on Postgres. Highest-severity new bug, introduced by the fix itself.
+- **Latency mixing unresolved on the read path:** A1/A6 add the `stream` column and A9 relabels "p95 end-to-end", but no query (`totals`, `p95`, `series`, `recent` filters) selects or splits on `stream`. The original mixing complaint persists in every displayed number.
+- **SQLite p95 off-by-one:** `Offset = max(0, trunc(Count*0.95) - 1)` diverges from nearest-rank (`ceil(0.95N)-1`); e.g. N=10 → rank 9 instead of 10. Small but contradicts the "same semantics as percentile_disc" claim.
+- **Protocol atom binding:** events carry `protocol => openai_chat` (atom) into a TEXT column; esqlite tolerates atoms, epgsql text encoding of bare atoms is unverified — a silent flush-error source on Postgres.
+- **Retry/failover accounting unspecified:** if the proxy retries another provider after a 5xx, each attempt emits an event, inflating requests/errors per client call. Plan never states attempt-vs-request semantics.
+- **Drop policy mislabeled:** A3 says "drop-oldest" but drops the incoming (newest) event; `dropped` counter is never exposed via any getter or summary field.
+
+## 3. Contradictions / stale claims
+- Task 3 export list says `recent/1`; A5 makes it `recent/2` — export/`-spec` unsynced.
+- Task 8 `UsageSummary` type lacks `by_provider_key` (A8 adds it to the API); `p95_latency_ms: number` vs A5's new `null`-on-empty.
+- Self-review still claims "insert result ignored… log line on flush error is a fine follow-up" — directly contradicted by A3 (logged, counted, capped).
+- Task 4 body still shows `percentile_cont`, `ORDER BY 5`, `LIMIT ?` — all replaced by A5; an executor following tasks linearly will write dead code twice.
+- `bool_int/1` (A6) and `usage_window` filter plumbing are referenced but never defined.
+
+## 4. Missing first-ship requirements
+- No read-side use of `stream` (filter or split in summary).
+- No surfacing of `dropped` (buffer-full is the only silent-degradation mode left).
+- No statement of multi-attempt semantics; no index on `provider_key_id`.
+- No verification that `janus_dashboard_store:rewrite_pg` handles quoted literals (the plan says "pattern lives there" but reimplements it naively).
+
+## 5. Architecture notes
+Buffered-writer shape (cap, chunked multi-row insert, trap_exit, catch-all) is sound; head/tail accumulation and the `message_start` probe are correct; UTC buckets now consistent; injection politeness + kill switch is right. Process-dictionary hygiene via entry-time erase is adequate given Cowboy's per-request process.
+
+## 6. Top 5 concrete edits
+1. Reuse the proven `janus_dashboard_store:rewrite_pg` (or strip `'?'` from the provider-key name expr) + eunit test with a quoted literal.
+2. Add `stream` to `totals`/`p95`/`recent` output (or a `?stream=` filter); keep the "end-to-end" label honest.
+3. Fix SPA types: `p95_latency_ms: number | null`, add `by_provider_key`; update exports to `recent/2`.
+4. Convert `protocol` with `atom_to_binary/2` in `build_insert`; define `bool_int/1`.
+5. Expose `dropped` in `/api/usage/summary` and reconcile Task 3/4/Self-review text with A1–A10.

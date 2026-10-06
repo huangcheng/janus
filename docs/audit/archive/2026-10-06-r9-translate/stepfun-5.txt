@@ -1,0 +1,27 @@
+**Verdict:** GO WITH FIXES — the architecture (C1–C6, split knobs, corpus discipline) is sound; every remaining defect is a spec-level gap that will bite during 1.9/2.3 implementation.
+
+**Critical risks**
+- **Knob enforcement point never specified.** 1.9 "removes" predicates and adds `stream_translate_tools_enabled`, but nothing says *where* the knob is read (dispatch? LB entry? translate module?) or how the 400 is restored when off. Same for the `n>1` reject site and the Phase-2 gate. This is blocking, not cosmetic.
+- **`prefer_proto` loses its source.** The shipped bias derives from the blocked predicate; once 1.9/2.3 remove legs, r7's "permanent lossy-pair preference" has no table or task behind it.
+- **Phase-2 knob composition undefined.** Responses client + tools + chat provider with tools knob ON / responses knob OFF: allowed or 400? No matrix exists.
+- **"Content-bearing" undefined.** A successful empty completion (finish-only) may never trigger lazy emission; a zero-arg tool's args concat `""` fails the single JSON decode → spurious C2 error. Need: finish counts as content-bearing, empty concat ≡ `{}`.
+
+**Contradictions / stale claims**
+- Header claims "terminal-event degradation schema as its own pre-1.9 task" — no such task in the checklist.
+- 3.2a "synthesized `item_`/`fc_` ids" contradicts rev-9's unified j-prefixes (C5 uses bare `item_…` for the *upstream* space only).
+- 1.0 DONE requires a "truncated transcript" in a corpus C6 says is recorded from real providers; truncation can only be the mock's transform (1.4a) of real files.
+- Header still calls the unblock "1.3" (renumbered 1.9 in r6).
+
+**Missing first-ship requirements**
+- No hot-path budget anywhere (latency/throughput); translated streams add per-frame decode plus up to 4MiB accumulation, and 3.4 measures memory only.
+
+**Architecture notes**
+- `sequence_number` (2.1) is effectively a fifth counter space alongside C5's four — say so.
+- Column named `mapped_stop` is asked to also count cache_control drops ("mapped_stop-style accounting") — rename to `degradations` or scope the map explicitly.
+
+**Top 5 edits**
+1. New pre-1.9 task: enforcement spec — knob-aware `stream_translate_blocked`, `n>1` reject site, decouple `prefer_proto` into a lossy-pair table; eunit + e2e both regimes.
+2. Add the r7-promised terminal-event degradation payload schema eunit task; resolve `mapped_stop` vs `degradations` naming.
+3. 1.0/C5: define content-bearing (finish counts) + empty-args ≡ `{}`; add empty-completion/zero-arg fixtures to DONE.
+4. 2.3: add the knob-composition matrix (responses × tools × vision) and its e2e assertions.
+5. 3.2a: `jitem_`/`jfc_` prefixes; add a latency budget to 3.4.

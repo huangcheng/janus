@@ -1,0 +1,34 @@
+**1. Verdict:** GO WITH FIXES 鈥?sound structure and clear fault-tolerance story, but streaming translation, secrets-at-rest, and degraded-boot behavior need hardening before first ship.
+
+**2. Critical risks**
+- **Streaming/proxy fidelity:** No upstream HTTP client chosen (gun/hackney/finn). Plan says nothing about connect/read/idle timeouts, request cancellation when the agent disconnects, or backpressure 鈥?yet streaming is the hard path.
+- **Protocol translation:** Chat鈫擜nthropic tool-call translation in flight is the #1 bug surface. Plan calls it "minimal" without defining what minimal means (parallel tool_calls? tool_choice? structured outputs? image blocks? stop_reason鈫攆inish_reason mapping?).
+- **Auth/secrets:** `JANUS_SECRETS_KEY` symmetric envelope has no rotation, no KMS, no scope; agent bearer-key storage on the hot path (plaintext vs sha256+prefix lookup) is undefined; admin password hashing/argon2/2FA not mentioned.
+- **DB vs ETS:** Boot with DB down has no defined mode. Disk snapshot is "optional" 鈥?a node may serve empty config or 500; "last good ETS" has no TTL/expiry story.
+- **Multi-node consistency:** Reload races (concurrent admin writes, in-flight requests on stale config), no generation/version column on rows, NOTIFY payload strategy undefined.
+- **LB races:** Per-node cool-down state means two nodes will both hammer a bad channel; "retry next" has no bound (pile-up risk); key-level vs channel-level cool-down not specified; ETS counter contention under load.
+
+**3. Contradictions / vague claims**
+- "Native cluster LB" vs "Caddy coarse node spread" 鈥?which layer picks what is not drawn.
+- Phase 6 lists "rate limit" as hardening 鈥?for an internet-exposed gateway this is v1, not hardening.
+- "Coarse node spread" 鈥?round-robin DNS? Caddy load module? Underspecified.
+- DB writes during DB-down: "refuse admin mutations" 鈥?but reload still needs DB, so traffic reload also stalls.
+
+**4. Missing first-ship requirements**
+- Observability: structured per-request logs, `/metrics`, translation-decision logs.
+- `/healthz`, `/readyz`, request-body size caps, CORS, CSRF/SameSite on admin.
+- Graceful shutdown drain of in-flight streams; migration version table; admin auth lockout.
+- Versioned internal IR between agent codecs and upstream codecs.
+
+**5. Architecture notes**
+- Draw supervision tree: `janus_db` 鈫?`janus_core` (ETS owners + reload gen_server) 鈫?`janus_http` (Cowboy) 鈫?`janus_providers` (per-upstream client pools) 鈫?`janus_admin`.
+- Put cool-down cursors/in-flight in ETS; let gen_server only own timers.
+- Define `janus_db` API: `init/query/listen`; on NOTIFY push a generation counter, reload deltas keyed by generation; same on SQLite via a `mtime` poll.
+- Sketch neutral internal event IR so agent-side and upstream-side codecs stay independent.
+
+**6. Top 5 edits**
+1. Pick upstream HTTP client; specify timeouts, cancellation, chunk limits.
+2. Define translation scope: list supported/unsupported features per pair; reject unsupported with 400.
+3. Move per-key rate limit and observability from "Hardening" to v1; add `/metrics` + structured logs.
+4. Make on-disk config snapshot mandatory; define degraded-boot behavior (serve last snapshot vs refuse).
+5. Harden secrets: AES-GCM with rotation; agent keys stored as sha256(prefix+key) for hot-path lookup; argon2id admin passwords; mandatory TLS to Postgres; CSRF + SameSite on admin UI.

@@ -1,0 +1,32 @@
+1. **Verdict: GO WITH FIXES** 鈥?viable, but shipping before fixing streaming fidelity, config synchronization, and secret handling is unsafe.
+
+2. **Critical risks**
+- **Streaming/proxy fidelity**: SSE event boundaries, partial tool-call deltas, usage blocks, mid-stream upstream errors, client disconnects, and Cowboy backpressure can silently corrupt agent sessions.
+- **Protocol translation**: chat鈫攎essages mismatches in system prompts, `tool_choice`, tool IDs, multimodal parts, stop reasons, token accounting, and error shapes. `/v1/responses` is under-scoped.
+- **Auth/secrets**: encryption key handling, rotation, admin sessions, CSRF, audit trail, and accidental key leakage in logs/UI are unspecified.
+- **DB failover vs ETS**: 鈥淒B down, traffic up鈥?works only if ETS is complete and fresh; cold start without DB and stale nodes after missed NOTIFY are unresolved.
+- **Multi-node consistency**: shared Postgres does not by itself make config state consistent; concurrent admin edits and partial reloads can diverge route tables.
+- **LB cool-down races**: per-node cool-downs plus retries can create retry storms, uneven cooldown, and flapping; in-flight counts need bounded semantics.
+
+3. **Contradictions / vague claims**
+- 鈥淣ative cluster LB鈥?but LB state is node-local; that is node-local LB with shared config, not cluster-aware LB.
+- Success criteria require three nodes, yet distributed Erlang is optional and no non-Postgres cluster story exists.
+- Provider 鈥渆nable/cool status (read-only live)鈥?is ambiguous because cool-down is node-local.
+- Weight model is unclear: provider weight vs route weight override vs key RR precedence.
+- JSON library, admin auth mode, encryption algorithm, snapshot format, and reload debounce are undecided.
+
+4. **Missing first-ship requirements**
+- Request IDs, timeouts, max body size, error taxonomy, retry budget, metrics, structured logs, health/readiness, config validation, migration rollback, secret rotation, SSE conformance tests, and admin audit log.
+
+5. **Architecture notes**
+- **OTP**: isolate ETS owner from request processes; supervise DB pool, config loader, upstream clients, and admin API separately.
+- **Cowboy SSE**: explicit chunked streaming, per-request upstream links, disconnect monitors, no buffering; test broken upstreams.
+- **janus_db adapter**: define transactions, migration versioning, LISTEN/NOTIFY vs polling, and SQLite limitations.
+- **ETS reload**: monotonic `config_version`; validate before swap; full resync on missed events; atomic table swap.
+
+6. **Top 5 concrete plan edits**
+1. Add protocol conformance matrix with golden SSE transcripts for chat/messages, including tool calls and errors.
+2. Specify config sync: versioned snapshots, NOTIFY + poll fallback, full resync, fail-closed admin writes.
+3. Define secret envelope: encryption algorithm, `JANUS_SECRETS_KEY` rotation, hashed agent keys, masked UI, audit log.
+4. Define LB policy: node-local cooldown, retry budget, circuit-breaker thresholds, and weight precedence.
+5. Move `/v1/responses` out of initial cross-protocol scope until chat鈫攎essages passes conformance.

@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — mature plan, but two stale claims and one unverified label-representation risk remain before it's "shippable as written."
+
+**2. Critical risks**
+- **Label representation (`protocol`)**: `track/3` labels `requests_total` with `Proto`, but `reply_err/6` labels it via `janus_http_classify:protocol/1` (returns **atoms**). If `Proto` is a binary (likely from translate), the same protocol splits into `openai_chat` vs `<<"openai_chat">>` across paths — breaking the gate's `protocol="openai_chat"` delta. Step 1b verifies the *variable exists*, not its *type/enum*.
+- **`janus_lb:stats/0` semantics**: rev 4 re-typed `lb_stat` counter ("cumulative") without ever verifying it *is* cumulative. Step 1b checks "keys are a closed set, values integers" — not counter-vs-gauge. A wrong TYPE silently corrupts `rate()`/`increase()`.
+- **Hot-path cost**: 18–19 `ets:update_counter` + `whereis` per terminal request is fine (network-bound), but `norm_labels` (maps:to_list + sort + to_bin) per bump is the real cost — negligible, but don't claim "ns-scale" for the whole bump.
+- **Auth 401 double-count**: `janus_req_counted` is set only in `track/3`; `unauthorized/2` bumps but never sets it. Safe *only if* the 401 path never reaches `reply_err/6` — unverified.
+- **Gate fragility**: "NO `endpoint="other"` series" asserts against *any* unclassified path in the whole 47-step gate, not just this feature's traffic.
+
+Clean: cardinality (closed enums), escaping order (NUL→`\`→`"`→`\n` correct), bucket ladder union + numeric sort + `+Inf` last, integer-µs sums, `ets:whereis` per bump, idempotent init, migration dual-dialect, request-id sanitization.
+
+**3. Contradictions / stale claims**
+- Naming contract (locked) still says `janus_lb_stat{counter="..."}` is a **gauge**; rev-4 history + registry say **counter**. Unresolved.
+- Grafana note "never `sum` LB gauges" is now wrong — counters *are* summable.
+- Step 1b promises a `logger:warning` on non-integer LB-value skip; the handler code emits none.
+
+**4. Missing first-ship requirements**
+- Explicit verification that `Proto`/`route_provider_name/1`/`usage_bool_int/1` return the exact enum/repr the classifier and tests assume (atom protocol, integer 0/1 stream).
+- One-line statement that `unauthorized/2` replies directly (never via `reply_err/6`).
+- `lb_stat` counter-vs-gauge decision pinned to a source read.
+
+**5. Architecture notes**
+- Registry-driven renderer (rows → families) is the right fix; renderer dependency on `janus_metrics:buckets/0` slightly weakens "pure" claim but is acceptable (same app).
+- `count`/`+Inf`-first bump ordering is sound; snapshot is still not atomic across keys — fine for Prometheus.
+- Header-echo-by-construction (same Req chain through `stream_reply`) is correct.
+
+**6. Top 5 edits**
+1. Normalize `Proto` to the classifier atom enum (or make classifier return `Proto`'s repr) in `track/3`; assert it in the gate.
+2. Fix the naming-contract `lb_stat` "gauge" → counter, and the Grafana "never sum LB gauges" note.
+3. Add the promised `logger:warning` for non-integer LB values.
+4. Verify `janus_lb:stats/0` is cumulative before committing the counter TYPE.
+5. Scope the `endpoint="other"` absence check to the feature's own requests, or enumerate all gate-hit paths.

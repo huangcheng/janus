@@ -1,0 +1,36 @@
+## 1. Verdict
+**GO WITH FIXES** — the rev-4 remediation is mostly real, but Task 4's test module cannot compile as written, and two rev-4 claims (genuine-zero on SSE, hot-path safety) are not actually delivered.
+
+## 2. Critical risks
+- **SSE fidelity**: `from_sse` still returns `undefined` when `{P,C} =:= {0,0}`, so a genuine-zero stream collapses to *unreported* — the exact round-3 bug. `from_response_body` was fixed; the SSE aggregate was not, and no test covers it. Track "any decoded usage found" as a boolean instead.
+- **Hot path**: `ok = cowboy_req:stream_body(Chunk, nofin, Req2)` (Task 6 Step 2) badmatches on client disconnect — a *common* case. Process crashes, no row recorded, drain aborted. Use `_ =` and record a terminal status.
+- **Hot path 2**: `drop_counter/0` calls `persistent_term:put/2` from a cowboy request process — that is a global lock + all-processes heap scan. Create the atomics ref in `init/1`.
+- **Injection**: `maybe_inject_stream_usage` re-encodes the body but the claim "the adapter sets its own Content-Length" is unverified. If any adapter sends `Body2` with the original header, **every OpenAI stream breaks**. Verify before default-on.
+- **Identity/FK**: `recent/2` and `breakdown_dim/1` assume `api_keys.prefix`, `models.name`, `providers.name`, `provider_keys.provider_id`. Task 1 Step 3 checks table *existence* only. Add `PRAGMA table_info` checks.
+- **Dual-DB**: `totals/2` destructures a 7-tuple outside any `try` — a driver shape difference is a badmatch→500, the round-3 class. `num/1` may silently yield `avg_latency_ms => 0` if epgsql returns numeric as a tuple/decimal. Postgres lane is "optional", so this ships unverified.
+- **Sweep**: 100×5000-row DELETEs compete with flushes for SQLite's single write lock; no `busy_timeout`, no post-sweep `VACUUM`. Flush-error logs are unthrottled (200 chunks/sec if the table is missing).
+
+## 3. Contradictions / stale claims
+- Title says **"(rev 3)"**; history claims rev 4 is this document.
+- `no_qmark_literals_test/0` is **defined twice** in `janus_usage_sql_tests` → compile error; Task 4 Steps 2/4 are unreachable.
+- Task 4 Step 4 expects "parser (10) + SQL-shape (3)"; actual is 12 + 5.
+- Rev 4 promises `ts_from`/`ts_to` in the API — Task 7 sends them, Task 8's `UsageSummary` type omits them, yet Step 2 requires them for zero-fill.
+- Self-review: "mailbox bounded by the guard" — the `message_queue_len` read is racy, and `?MAX_QUEUE 5000` < `?MAX_BUF 10000` makes the buffer cap near-dead code.
+- `stream` is set from `wants_stream(Map)` in `dispatch/7`; on a translate path that mislabels a non-streamed response as `stream=1`.
+
+## 4. Missing first-ship requirements
+- Zero automated tests for Tasks 5–6 (all data-plane capture) — only manual curl. Export `trim_tail/1`, `maybe_inject_stream_usage/4`, `track/3` for eunit.
+- No kill switch for *capture* (only for injection).
+- `qs_int/4` / `now_sec/0` may already exist in `janus_dashboard_api` → duplicate-definition compile error; not checked.
+- Unused `Ev` in the buffer-full cast clause → warning.
+- `track/3`'s `when not is_map(Route)` drop is silent and uncounted.
+
+## 5. Architecture notes
+Buffered writer shape is right (drop-newest, trap_exit, counted losses), but `chunk/2` recomputes `length/1` per recursion — O(n²) at 10k rows, ironically reintroducing what rev 3 fixed in the tail. `rewrite_pg/2` is byte-recursive O(n²) binary building, uncached, per query. A summary poll issues ~8 serialized queries through `janus_db_conn`, contending with flushes; p95-on-SQLite costs 4 of them. Consider computing p95 in the same scan or caching the summary briefly. Tail capture (`trim_tail` newest-first, `iolist_to_binary`) is chronologically correct — good. `from_sse` maxing across events correctly handles Anthropic's split input/output, and the regex fallback for oversized `response.completed` is sound; note it scans up to 20KB per usage-less stream. Stream `latency_ms` measures client drain, so p95-stream reflects client bandwidth more than provider speed — the SPA subtitle should say so.
+
+## 6. Top 5 concrete edits
+1. **Delete the first `no_qmark_literals_test/0`** in Task 4 Step 1 (keep the fragment-scanning one); fix Step 4's expected counts to 12 + 5.
+2. **Fix `from_sse` zero handling**: `case Usages of [] -> regex; _ -> #{prompt => P, completion => C} end` (drop the `{0,0} -> undefined` clause); add `genuine_zero_sse_test`.
+3. **Task 6 Step 2**: replace `ok = cowboy_req:stream_body(...)` with `_ = cowboy_req:stream_body(...)`, stop the drain on failure, and `track(499, ...)`; move `persistent_term:put` for `drop_counter/0` into `init/1`.
+4. **Task 1 Step 3**: add `PRAGMA table_info(api_keys|models|providers|provider_keys)` verification for `prefix`/`name`/`provider_id`, and a pre-flight that `qs_int/4` and `now_sec/0` don't already exist in `janus_dashboard_api`.
+5. **Task 8 Step 1**: add `ts_from: number; ts_to: number` to `UsageSummary` and derive the zero-fill sequence from them; **Task 4**: wrap the `totals/2` tuple destructuring in `try ... catch -> default aggregate`.

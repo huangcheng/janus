@@ -1,0 +1,29 @@
+## 1. Verdict
+GO WITH FIXES — the state-machine and fixture discipline is now solid, but Phase 2's kill-switch story is self-contradictory, Phase 3 has a fixture dependency inversion, and 1.9 unblocks vision without asserting it.
+
+## 2. Critical risks
+- **Global-knob coupling:** 2.3 says "knob-scoped (default off)", but if Phase 1 already flipped `stream_translate_enabled`, the Phase-2 unblock ships **behavior-on at deploy** — the exact rolling-deploy hazard R6's gateway-first discipline exists to prevent. Same question for 3.5's "knob scope extended" (which knob?).
+- **Phase 3 dependency inversion:** 3.2/3.2a eunit "on corpus fixtures" consume provider-side captures and chat/anthropic histories that **3.3 creates later**. Also 3.5 (ship unit) is numbered before 3.4, violating the "ship unit physically last" rule R6 established for Phase 1.
+- **Vision unasserted:** 1.9 removes `has_non_text_content` and unblocks vision streams, but its e2e asserts only tool streams. An untested unblocked path is how the binary-key/SMALLINT bug class ships.
+- **n>1 gating ambiguity:** "the non-stream reject rides in 1.9's commit (before the flip, behavior is unchanged)" — either a *stream* knob silently governs non-stream behavior after flip, or the reject is always-on post-deploy (behavior change before flip). Pick one and state it.
+- **No perf budget:** the gate asserts correctness, never translated-vs-native latency overhead; map-heavy per-event translation could regress until the 3.4 soak.
+
+## 3. Contradictions / stale claims
+- 3.4 contains "no leftover/**内存** growth" — Chinese leftover in an English artifact.
+- 2.1's enumerated grammar omits the reasoning/summary events C1 mandates (corpus-normative is a defense, but the lists disagree).
+- Coverage table's "req only" cells vs. Phase-2 flip procedure is consistent; no other stale refs found — rev 7 cleanup mostly holds.
+
+## 4. Missing first-ship requirements
+- **Phase 1:** no owner task for the terminal-event degradation payload (`x-janus-mapped-stop` field serialization, dropped-feature list incl. `cache_control` on streams) — 1.6/1.9 assert around an unspecified schema.
+- **Phase 2:** responses *image input parts* absent from 2.2's input grammar; entitlement/LB assertions (present in 1.9, mirrored in 3.5) missing from 2.3/2.4.
+- **Phase 3:** the "conformance suite" in the phase title has no task; 3.1 adapter must land before 3.2 wiring is testable.
+
+## 5. Architecture notes
+Per-target `translate_sse` clones sharing one bounded accumulator (C5 caps) is right. Centralize the C2 error-type map and C5 index-space maps in one shared module so three directions can't diverge. `sequence_number` monotonicity eunit (2.1) should assert over *emitted* events only — skipped pings excluded — make that explicit.
+
+## 6. Top 5 concrete edits
+1. `target.md` 2.3: name a separate Phase-2 knob (or an explicit per-pair gate) and rewrite 2.3a's flip procedure against it.
+2. Reorder Phase 3: 3.3 → 3.2/3.2a → 3.1 wiring → 3.5 ship unit → 3.4 soak last.
+3. 1.9: add a vision-stream e2e assertion (image-bearing request, translated stream, non-zero usage).
+4. 3.4: fix "内存" → "memory"; extend 2.1's grammar list with reasoning/summary events.
+5. Add a task (pre-1.9): terminal-event degradation payload schema + eunit, covering `x-janus-mapped-stop`, structured-output, and `cache_control` drops.

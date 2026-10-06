@@ -1,0 +1,35 @@
+**1. Verdict: GO WITH FIXES** — the round-1 list is largely resolved, but three code-level defects in the rev-2 snippets (one of which makes a mandated series silently vanish) must be fixed before implementation.
+
+**2. Critical risks**
+- *Label cardinality*: sound — closed enums + operator provider names; `lb_stat{counter=...}` keys are a bounded map. OK.
+- *Hot-path cost*: ~17 `ets:update_counter` on a cached tid, no formatting; `buckets/0` literal per observe is fine. OK.
+- *Exposition correctness*: bucket comparator pins `+Inf` last, `float_to_binary([short])` used — but see §5 for two real bugs.
+- *Auth reuse*: extraction is verbatim; `authorize/1` returning `ok` (no Req) is safe since only headers are read. OK.
+- *Histogram sanity*: 0.05→600s bounds suit 600s upstreams. OK.
+- *Request-id hygiene*: charset/length allowlist, never echo bad input — good. But the "x-request-id on **every** agent response" claim is false for unrouted paths (cowboy 404/405 have no handler → no header, uncounted).
+- *Migration/dual-dialect*: `ALTER TABLE ADD COLUMN` + `IF NOT EXISTS` index is valid on both; ledger dedupe holds. OK.
+- *Multi-node*: one job per node with per-node token files; instance labels make the "drift" panel work. OK.
+
+**3. Contradictions / stale claims**
+- Key facts demand idempotent init via `case ets:info(...) of`; Task 2's code checks **persistent_term only**. After app restart in a live VM, the cached tid is dead → every bump silently no-ops, `/metrics` empty. The prose and code disagree; the code is wrong.
+- Task 4 says the dropped counter is "rendered as a counter family **by the renderer**" — the renderer hardcodes only `requests_total`, `upstream_requests_total`, `x_total`. `usage_writer_dropped_total` is appended but never emitted (the renderer's family loop is not generic).
+- `families_sorted_once_test`/docstring claim "families sorted by name"; output order is fixed-by-hand and gauges trail. Also "no reset side effect" of `statistics(wall_clock)` is only half-true (the `_since_last_call` element resets; only the total is used).
+- Task 8 step 3 "poll-scrape until flush (≤2s)" — metrics are bumped synchronously; only usage rows have a 1s writer flush.
+
+**4. Missing first-ship requirements**
+- Gate never asserts any gauge (`janus_catalog_generation`) or `janus_usage_writer_dropped_total` — so the §2 renderer bug ships green.
+- No `janus_config:generation/0` / `ready/0` existence check (lb got one).
+- 404-on-agent-plane behavior (id echo + counting) unspecified.
+
+**5. Architecture notes**
+- `x_total` — a test fixture family — is hardcoded in production `render/2`. Delete it; give the renderer a generic counter-family pass keyed off observed names (fixes both it and the dropped counter).
+- Histogram `le` is appended after sorted labels (`{protocol,stream,le}`), not key-sorted; harmless (parsers canonicalize) but contradicts "labels sorted by key".
+- `unauthorized/2` exists in both stats-auth and agent-auth; make the Task 5 bump land only in `janus_http_auth` — extraction must not fork the agent path.
+- ETS keys/`hist_sum_us` integer-µs design is right; `init/0` fix: check `ets:info(?PT tid)`/named table, re-put on rebuild.
+
+**6. Top 5 edits**
+1. Fix `init/0` to detect a dead/stale tid (`ets:info`) and recreate — match the stated requirement.
+2. Generic counter-family rendering; drop `x_total`.
+3. Fix `label_escape_test` literal: `\\n` (backslash-n), not `\n` (newline) — it fails as written.
+4. Gate step 2: assert `janus_catalog_generation` and `janus_usage_writer_dropped_total` present.
+5. State 404 handling for unrouted agent paths (header via middleware or documented exclusion).

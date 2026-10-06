@@ -1,0 +1,32 @@
+1. **Verdict:** GO WITH FIXES — all round‑6 fixes are genuinely resolved and the design is sound, but the document still ships concrete factual errors (stale migration number, wrong test arithmetic, duplicated macro) that will burn an implementer.
+
+2. **Critical risks** — all eight axes check out:
+- *Cardinality:* closed enums + operator provider names only; orphaned-provider series documented.
+- *Hot path:* ~17 integer `update_counter` ops per request, no float formatting, whole-body try/catch.
+- *Exposition:* `text/plain; version=0.0.4`, one HELP/TYPE per family, `untyped` build_info, `[short]` floats, escape order (NUL→`\`→`"`→`\n`) correct.
+- *Auth reuse:* extracted verbatim; authorize before method check; `/stats` regression step present.
+- *Histogram:* zero-filled ladder, numeric ascending, +Inf last, and the +Inf-first/descending/count-last bump order provably keeps `count ≤ +Inf` and buckets monotone at every interleaving.
+- *Request-id:* charset + length validated; comma-joined duplicate headers and NUL rejected → generated; fallback keeps 16-hex shape.
+- *Migration:* identical dual dialect, ledger dedupe, 009 numbering, nullable + indexed.
+- *Multi-node:* per-node tokens, counters summable, gauges node-scoped.
+
+3. **Contradictions / stale claims:**
+- Task 7 Step 1: "gateways with migration **005**" — rev 7 renumbered to 009; stale and misdirects deploy order.
+- Task 6: shape-test "`status` at position 19" is arithmetically wrong — with 16 columns, row-2 `status` = 24 (row-1 = 8). "`request_id` at 32" is right. An implementer will "fix" a passing test.
+- `janus_metrics.erl` listing contains a duplicated `-define(TABLE, janus_metrics).` and two duplicated comment paragraphs — merge cruft from the BUCKETS_DESC edit.
+- Task 6 commit list adds `apps/janus_core/test/janus_usage_sql_tests.erl` while the same step says the shape test lives in `janus_usage.erl -ifdef(TEST)` — pick one.
+- Two independent ladder sources: `?BUCKETS_DESC` macro **and** hardcoded `buckets/0` — silent-drift trap (the rev-7 `buckets()`/`buckets_desc()` comments are duplicated verbatim too).
+
+4. **Missing first-ship requirements:**
+- promtool is *asserted* present in the gate image but never verified — the mandatory step 10 depends on it; add an image check/install.
+- Nothing asserts `_sum`/`_count` consistency at quiescence in the gate (only +Inf ≥ count); byte-exact eunit covers it, acceptable but worth one gate line.
+- Alerting/tracing correctly scoped out.
+
+5. **Architecture notes:** registry-driven renderer stays pure (its only cross-call is the pure `buckets/0`); hook placement (track/3 + reply_err + auth + models) with the `janus_req_counted` flag is the minimal correct coverage; echoing on the same Req chain is the only viable Cowboy mechanism and covers stream replies; named-public ETS + `whereis` per bump is the right lifecycle call; `to_bin` duplicated across the two modules is acceptable (renderer self-containment). Appending `le` last is legal but a future label key sorting after "le" yields cosmetically unsorted label sets.
+
+6. **Top 5 edits:**
+1. Task 7: "migration 005" → **009**.
+2. `janus_metrics.erl`: delete the duplicate `-define(TABLE, …)` and the duplicated comment block.
+3. Single-source the ladder: `buckets_desc() -> lists:reverse(buckets()).` and drop `?BUCKETS_DESC`.
+4. Fix shape-test arithmetic: `status` at 8/24, `request_id` at 16/32 (recompute against the real column list).
+5. Verify promtool in the gate image before step 10 ships; reconcile the `janus_usage_sql_tests.erl` vs `-ifdef(TEST)` commit-list contradiction.

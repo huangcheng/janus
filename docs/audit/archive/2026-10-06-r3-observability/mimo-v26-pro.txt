@@ -1,0 +1,33 @@
+**1. Verdict: GO WITH FIXES** — rev 3 resolves the round-2 class well, but three leftover defects (partial `to_bin` in the registry, docstring/code contradiction on the tid, ambiguous 405 gate step) should be fixed before coding.
+
+**2. Critical risks**
+- *Label cardinality*: sound (closed enums + operator provider names).
+- *Hot-path cost*: fine — ~15 `ets:update_counter` calls, precomputed bucket binaries.
+- *Exposition*: buckets/zero-fill/escaping/`untyped` all correct; `float_to_binary([short])` right.
+- *Auth reuse*: clean extraction, constant-time compare preserved.
+- *Histogram sanity*: bounds monotone, `+Inf` last; test fixture (3,0,…,5,…) is non-cumulative — harmless but teach nothing about the invariant.
+- *Request-id hygiene*: charset whitelist rejects commas — good, since cowboy joins duplicate `x-request-id` headers with `", "`.
+- *Migration/dual-dialect*: identical SQL is valid on both; nullable + ledger dedupe OK.
+- *Multi-node scrape*: per-node jobs/tokens correct.
+
+**3. Contradictions / stale claims**
+- `janus_metrics.erl` header still says "The tid lives in persistent_term (created once at app init)" — the code uses `ets:whereis` per bump, deliberately. Task 2 commit message ("cached tid") and self-review ("on a cached tid") repeat the stale claim.
+- Naming contract says "families sorted by name"; `render/2` emits counters→histograms→gauges groups, not global name order.
+- Gate step 1: "GET without token → 401; a POST → 405" — but the handler authorizes *before* the method check, so an unauthenticated POST gets 401. Specify "POST with token → 405".
+
+**4. Missing first-ship requirements**
+- `janus_metrics:to_bin/1` is binary/atom/integer only. If `route_provider_name/1` returns a list (common for DB rows), `norm_labels` throws `function_clause`, `inc/2`'s catch swallows it, and `janus_upstream_requests_total` silently never bumps — exactly the silent-loss class this audit exists for. Add list/float clauses (rev 3's "to_bin total" fix landed only in the renderer).
+- Unregistered *gauge* families fall to `fam_type → counter`; emit `untyped` instead.
+- 404s on unknown agent paths carry no `x-request-id`; fine if documented as "agent endpoints only" — say so.
+
+**5. Architecture notes**
+- Registry/renderer split is right: renderer pure but calls `janus_metrics:buckets()` — acceptable coupling (single canonical ladder), note it in the doc.
+- Hook placement sound: terminal-only `track/3`, single `janus_lb:stats/0`, dropped counter appended as a row (registry-driven render kills the hardcoded-family bug class).
+- Header echo via `set_resp_header` on the shared Req chain is correct by construction; pdict-erase exclusion is documented twice.
+
+**6. Top 5 edits**
+1. Make `janus_metrics:to_bin/1` total (add `list`/`float` clauses) and add a eunit case with a string provider name.
+2. Delete the persistent_term sentence from `janus_metrics.erl`'s header; fix "cached tid" in the Task 2 commit message.
+3. Gate step 1: "POST **with token** → 405 + `allow: GET`".
+4. `fam_type/1` default → `untyped` for gauges.
+5. Grafana quantile: `sum by (le, protocol, stream)` — current `by (le, stream)` mixes protocols.

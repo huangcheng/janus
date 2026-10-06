@@ -1,0 +1,27 @@
+**Verdict:** GO WITH FIXES — the architecture, exposition format, migration, and gate are sound, but the rev-8 "single-sourced ladder" is still two literals behind a false comment, and one scrape invariant is claimed that no bump order can deliver.
+
+**Critical risks (assessed):**
+- *Cardinality:* clean — closed enums + operator provider names; no request/key/model labels; `lb_stats_total{stat}` closed set; orphaned-provider series documented.
+- *Hot path:* ~17 integer `update_counter`s + one `whereis` per call, whole-body try/catch, no formatting on the hot path. Acceptable.
+- *Exposition format:* HELP/TYPE once per family, ascending buckets, `+Inf` last, `[short]` floats, NUL-strip-then-escape, `build_info` untyped, promtool mandatory. Correct.
+- *Auth reuse:* verbatim extraction + regression 2b; loopback reads peer, never XFF; token checked before method. Sound.
+- *Histogram sanity:* zero-fill = ladder ∪ ETS bounds, numeric dedupe with count merge; equality asserted only at quiescence — but see contradictions.
+- *Request-id hygiene:* strict 1–128B charset, lowercase hex, never echoes invalid; comma-joined duplicates fail charset; upstream header can't clobber (`filter_headers`, retained as verify step).
+- *Migration:* nullable TEXT + `IF NOT EXISTS` index both dialects; `CONCURRENTLY`/runner-wrapping and gateway→dashboard deploy order noted.
+- *Multi-node:* per-node jobs, per-node token files; counters summable, gauges node-scoped, reset semantics documented.
+
+**Contradictions / stale claims:**
+1. `buckets/0`'s docstring says "Derived from BUCKETS_DESC — the two can never drift," yet the body is a second hand-written literal. The safeguard the rev-8 note claims to add does not exist in the code; the two *can* drift.
+2. The rev-6 note ("count ≤ +Inf at every interleaving") is false. `tab2list` is not a snapshot: reading `+Inf` before `count` lets count transiently *exceed* `+Inf` by the in-flight count; the "monotone buckets under concurrent tab2list" claim fails the same way. Only quiescence yields equality.
+3. Gate step 2 asserts bucket monotonicity and `+Inf ≥ _count` without stating a quiescence precondition — flaky under stray in-flight requests (step 10 does state it).
+
+**Missing first-ship:** none blocking. Alerting/tracing/per-key are documented out of scope; 413/404/crash exclusions documented; SPA column + browser artifact present.
+
+**Architecture notes:** registry-driven renderer closes the rev-3 bug class; registry TYPE with gauge default is right; all row assembly inside the render try is correct; `whereis`-per-bump is restart-safe; the `janus_req_counted` three-site guard (handler init, proxy entry, set-then-check) is coherent; echo-by-construction on the Req chain is sound.
+
+**Top 5 edits:**
+1. `buckets() -> lists:reverse(?BUCKETS_DESC).` — delete the literal; the comment then becomes true.
+2. Rewrite the `observe/3` comment: quiescence-only equality; drop "every interleaving"; fix the rev-6 history line.
+3. Gate step 2: add "at quiescence" precondition to the monotonicity/`+Inf`≥count assertions.
+4. Collapse `dedupe_bounds` + `sum_dupes` into one fold-time merge in `render_hist_series` (removes the double `le_num` re-parsing drift surface).
+5. Add a renderer eunit for a stale-spelling bound (`"1.0"` row beside canonical `"1"`) asserting one merged rendered bucket — that path has no direct test.

@@ -1,0 +1,31 @@
+# Janus usage-stats plan — revision 2 audit
+
+**1. Verdict: GO WITH FIXES** — A1–A10 genuinely resolve ~8 of 10 v1 findings, but the latency-mixing fix is cosmetic, SPA types lag the amended API, and the writer's failure semantics are misdocumented.
+
+**2. Critical risks**
+- **SSE fidelity:** head capture now accumulates to 4KB (good), but a client `stream_options` without `include_usage` yields NULL tokens with no counter distinguishing "upstream didn't report" from "parse failed." Per-chunk tail rebuild copies ≤16KB every chunk — measurable hot-path cost on long streams.
+- **Dual-DB SQL:** `percentile_disc` numeric→binary and `LIMIT` inlining are handled; but every read path does `{ok, Rows} = q(...)` — one query error crashes the handler into a 500.
+- **Migration:** PRAGMA `foreign_keys` check is deferred into Task 1; if unset, `SET NULL` is silently inert on SQLite.
+- **Sweep:** recursion assumes integer affected-rows from the driver; esqlite may not return that — the fallback is a parenthetical, not the specified default.
+- **Writer:** docstring says drop-**oldest**; the code rejects the incoming event (drops **newest**). Buffer is capped at 10k but the **mailbox is not** — a stalled DB grows the mailbox while `dropped` stays 0. `dropped` is never exposed anywhere.
+- **Latency/p95:** the `stream` column is recorded but no query filters on it; p95 still mixes full-drain stream spans with non-stream calls. "p95 end-to-end" is a label, not a fix.
+
+**3. Contradictions / stale claims**
+- Self-review notes contradict A3: they claim unbounded buffer growth on DB-down and "log line on flush error is a fine follow-up" — A3 implements both.
+- Task 8 Step 1 `UsageSummary` lacks `by_provider_key` (A8 adds it to the API, A9 adds the card) and types `p95_latency_ms: number` while A5 returns null when empty.
+- Task 9 Step 1 still shows `start_link` though A10 mandates unlinked start; task bodies T3/T4 contain superseded code (percentile_cont, unbatched sweep, 10-column insert) — implementers reading tasks may skip fixes.
+
+**4. Missing first-ship**
+- No eunit for the writer (chunk boundaries, MAX_BUF, flush-failure accounting) — only the parser is tested.
+- A10's "malformed event" `record(#{})` isn't malformed — defaults insert a status-0 junk row; no cleanup step.
+- `pp.name || ' #' || …` null-propagates in Postgres when `pp.name` IS NULL.
+
+**5. Architecture notes**
+Buffered writer + multi-row chunked inserts suit both drivers; process-dictionary scratch with entry-erase is keep-alive-safe; max-over-events parsing correctly handles cumulative Anthropic deltas; `(deleted)`-label FK design is right.
+
+**6. Top 5 edits**
+1. Add `by_provider_key: UsageRow[]` and `p95_latency_ms: number | null` to Task 8 types; null-guard the p95 card.
+2. Fix A3: either implement drop-oldest or correct the docstring; expose `dropped` (log periodicity or `/api/usage/summary` field); consider `process_flag(message_queue_data, off_heap)` + sync_threshold.
+3. Make sweep's non-integer-rows fallback the primary spec; confirm esqlite behavior in Task 1.
+4. Split or filter latency stats by `stream` (column already exists — one `WHERE` per summary query).
+5. Replace `{ok, Rows} = q(...)` with error-returns in the read path; add writer eunit; update self-review notes to match A3.

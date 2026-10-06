@@ -1,0 +1,35 @@
+# Audit: Janus Observability Plan
+
+## 1. Verdict
+**GO WITH FIXES** — architecture (ETS registry, pure renderer, single terminal hook) is sound, but two exposition bugs and one cross-repo omission mean the E2E gate as written cannot pass.
+
+## 2. Critical risks
+- **Naming mismatch (gate-breaking):** renderer emits `janus_requests` / `janus_request_duration_bucket` (Task 3 tests assert exactly this), but Tasks 5/7/8 all use `janus_requests_total` / `janus_request_duration_seconds`. Gate step 2 (`body contains janus_requests_total`) fails on first run.
+- **Histogram bucket ordering (scrape-breaking):** `lists:sort(maps:keys(BucketMap))` on binaries sorts lexicographically: `"+Inf"` first, `120` before `2.5`, `300` before `5`. Prometheus rejects non-monotonic buckets — every scrape errors. The Task 3 fixtures (`0.1, 0.25, +Inf`) accidentally sort correctly, so tests stay green while prod breaks.
+- **Float `update_counter`:** `bump({hist_sum,...}, Seconds)` passes a float incr. Verify `ets:update_counter` float semantics on OTP 27; a badarg here crashes every request (no catch in `bump/2`).
+- **Hot-path cost:** 17 × `ets:info/1` + `update_counter` per request. Tolerable, but hoist the table check.
+- **Migration/dual-dialect:** SQL identical across dialects, both layouts covered — fine; verify 005 is actually next.
+- **Auth reuse:** verbatim extraction preserves constant-time compare; loopback fallback now also covers `/metrics` — acceptable, document it.
+- **Request-id hygiene:** `[A-Za-z0-9-_]{1,128}` allowlist is correct; cowboy 404s (no handler) get no id — minor, note it.
+- **Multi-node:** node-local counters + per-node scrape jobs is correct.
+
+## 3. Contradictions / stale claims
+- Self-review claims "type consistency" yet misses the `_total`/`_seconds` mismatch above.
+- Task 6: "resolve in ok-branch AND error branch" vs. shown unconditional first-line resolution (code is right, wording wrong).
+- Gate step 9 expects log text `request_id=...`; logger maps render `request_id => ...`.
+- Task 6 references `janus_req_path` "verify whether it exists" — unresolved in-plan.
+
+## 4. Missing first-ship requirements
+- **Dashboard repo change absent from file list:** gate step 6 reads `/api/usage/events` `request_id` — the FastAPI SELECT must gain the column; unlisted anywhere.
+- `usage_bool_int/1` never defined; `route_provider_name/1` existence asserted, not verified.
+- No HELP lines (legal, but cheap wins for operators).
+
+## 5. Architecture/design notes
+Registry design (public ETS + `update_counter/4` default tuple) is race-free and correct; renderer purity + eunit-first matches project rules; `track/3` terminal-only bumping correctly excludes janus-auto inner calls; cumulative bucket increments are mathematically right — only ordering/exposition are wrong. `set_resp_header` before `stream_reply` is sound. The `usage_writer_dropped_total_note` placeholder-then-filter gauge is a smell; just build the counter list directly. `Base = janus_http_stats:snapshot()` in the handler is dead code (compiler warning).
+
+## 6. Top 5 edits
+1. Canonicalize names once (`janus_requests_total`, `janus_request_duration_seconds`) across renderer, tests, gate, Grafana.
+2. Numeric bucket sort with `+Inf` forced last; add a fixture with `5/30/120/300`.
+3. Add the dashboard-repo `/api/usage/events` column change as an explicit task.
+4. Define `usage_bool_int/1`; verify `route_provider_name/1`; verify float `update_counter` (else integer µs).
+5. Delete dead `Base` binding and the placeholder-gauge hack; fix the log-format assertion to `=>`.

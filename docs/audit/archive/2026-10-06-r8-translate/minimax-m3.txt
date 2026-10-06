@@ -1,0 +1,40 @@
+**Verdict:** GO WITH FIXES — mature plan (rev 8), but lazy-emission semantics, ID-prefix inconsistency, n>1 transition policy, and missing rollback/observability need resolution.
+
+**Critical risks:**
+
+1. **Lazy emission vs `response.created`**: C1 lists it as the first skeleton event; C4 forbids skeleton emit before first upstream event. Specify: `response.created` is synthesized on first upstream arrival (clients need it early; omitting breaks them; emitting eagerly breaks C4's failover window).
+
+2. **Header-flush pre-commit retry**: C4 case (a) allows retry after headers flushed but before DATA. Client has already received 200 + `Content-Type: text/event-stream`. A retry's different body over those headers can mis-handle on some parsers. Brief note needed.
+
+3. **Synthesized id prefixes inconsistent**: C5 says `jresp_`/`jmsg_`/`jfc_`/`jitem_`; 2.1 says `resp_`/`msg_`/`fc_`/`item_`. Pick one (the `j`-prefix per C5's collision intent).
+
+4. **Interleaved serialization latency**: "Full-accumulate-emit-at-close" buffers all text deltas until each tool closes — real-time text visibility is lost during long tool runs. Document the latency hit or relax to "text-order preserved across tool boundaries only".
+
+5. **C2 wire shape for synthesized errors**: Plan defines internal struct `{type,code,message}` but no wire spec for cross-protocol errors (chat top-level `error`? Anthropic full envelope? Responses `response.failed.error` shape?).
+
+**Contradictions / stale claims:**
+
+- 1.4b lists "10-concurrent smoke" + "client-abort cleanup" as eunit — both are integration (gun cancellation, concurrent inflight). Belong in 1.9 e2e.
+- C5's "FOUR id spaces" maps 8 fields (chat `index`+`id`, anthropic `content_block.index`+`tool_use.id`, responses `output_item.id`+`call_id`). The `id` sub-space collision rules need explicit spec.
+- `x-janus-mapped-stop` is referenced as new but never wire-defined; needs shape parallel to `X-Janus-Dropped`.
+
+**Missing first-ship requirements:**
+
+- No rollback playbook (alert thresholds, flip-back steps, blast-radius checklist) for the knob flip.
+- No latency/cost budget — chat `usage-then-[DONE]` ordering requires upstream usage to arrive before upstream closes, adding tail latency.
+- No translated-error-rate counter per (client_proto, provider_proto) for post-flip dashboards — 1.8b is mentioned but not enumerated.
+- TEST-FLOWS for 1.9/2.3 referenced (1.8c) but dashboard route-matrix warning's authoring rule isn't named.
+
+**Architecture/design notes:**
+
+- Role-delta fabrication: anthropic→chat first chunk must synthesize `{"role":"assistant"}` even if upstream's first event is bare `content_block_start`. Add explicit rule.
+- Cache-token policy (C3, "anthropic upstream only") is asymmetric; cross-protocol cache drops need a dedicated degradation field, not lumped with `mapped_stop`.
+- C2 failure-usage (responses `response.failed.usage`, anthropic pre-error `message_delta.usage`) needs partial-usage wire shape documented.
+
+**Top 5 concrete edits:**
+
+1. **C5 / 2.1 — reconcile ID prefixes**: pick `j`-prefix everywhere, fix 2.1.
+2. **C1 →responses skeleton — add explicit `response.created`-on-first-event rule** (synthesized, not eager, not omitted).
+3. **1.4b → 1.9 — move "10-concurrent smoke" and "client-abort cleanup" to e2e**; keep eunit for pure state-machine invariants only.
+4. **1.9 — n>1 ungated reject needs a one-release deprecation window** (log+warn, then reject). "Bug fix" framing risks production breakage for users relying on silent single-completion degrade.
+5. **Add a "Knob Flip Playbook"** at top of Phase 1: rollback steps, alert thresholds on 1.8b columns (`translated=1` volume, `mapped_stop` rate), flip-back command.

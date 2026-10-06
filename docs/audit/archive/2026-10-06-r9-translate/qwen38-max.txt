@@ -1,0 +1,35 @@
+**1. Verdict**
+
+GO WITH FIXES — rev 9 is structurally sound after 8 audit rounds; five concrete defects need fixing before implementation, none invalidate the phase skeleton.
+
+**2. Critical risks**
+
+- **C5 full-accumulate-emit-at-close kills TTFT.** Interleaved chat streams buffer ALL text until close points; worst case time-to-last-token. Anthropic legally allows multiple sequential text blocks — text arriving before/mid tool deltas can stream until interleaving actually forces deferral. As written, this also imposes responses-target full-object requirements on Phase 1 chat↔anthropic.
+- **C4(b) only covers headers-flushed.** All-attempts-fail *pre-any-byte* (1.4a's mode) should return a proper HTTP 4xx/5xx, not 200+error-frame. Plan never distinguishes; entitlement-row semantics for zero-progress failures underspecified.
+- **Knob→LB wiring has no implementation task.** 1.9 asserts "knob ON prefers native route for lossy pair," but `pick_route` only accepts caller-supplied `prefer_proto`; someone must read the new persistent_term knob. Asserted, never assigned.
+- **1.0 truncation fixture risks hand-invention.** Real providers rarely emit capturable mid-stream truncations; it must derive from 1.4a fault-injection replaying captured transcripts, else it violates the very fixture-realism rule it cites.
+- **1.4b scope creep:** client-abort cleanup (cowboy/gun lifecycle) is not a pure state-machine property; eunit here risks fake coverage of an E2E-only behavior.
+
+**3. Contradictions / stale claims**
+
+- "Decisions (audit round 2)" still presents ONE knob (`stream_translate_tools_enabled`) as *the* translated-stream kill switch — contradicts the r8 two-knob split. Superseded text.
+- C3 "composes with 1.8: knobs translate first, injection last" — 1.8 is request-side knobs; this means the stream-translate knob (1.9).
+- 1.2 eunit of image parts "stream and non-stream" on the *request* path is a category error; requests have no stream distinction. Vision stream-side lives only in 1.9 e2e.
+
+**4. Missing first-ship requirements**
+
+- Phase 1: explicit task for `janus_lb` consuming knob state; explicit rule for pre-headers total failure (HTTP status, not SSE error frame).
+- Phase 2: inherits both gaps; 2.3a flip procedure itself is complete.
+
+**5. Architecture notes**
+
+- Make emission strategy per-target: →anthropic streams incrementally (defer only content arriving while a tool block is incomplete); →responses legitimately full-accumulates. Keep per-attempt `sse_st`, single decode-at-close, four index-space maps — all correct.
+- Reusing `mapped_stop` for cache_control/structured-output drops overloads the column name; rename to a generic degradation counter in the 1.8b migration before it ships.
+
+**6. Top 5 edits**
+
+1. Rewrite C5: stream text until first tool delta; buffer only while a tool block is incomplete; multiple text blocks legal. Scope 4MiB full accumulation to →responses only.
+2. Split C4(b) into no-bytes-flushed (native HTTP error + per-attempt rows) vs headers-flushed (error frame + terminator + terminal row).
+3. Add pre-1.9 task: `janus_lb` reads `stream_translate_*_enabled` persistent_term to bias native when on.
+4. 1.0: truncation fixtures produced by 1.4a replay, not "captured."
+5. Delete/supersede the round-2 Decisions section; fix C3's "1.8" reference; strip "stream and non-stream" from 1.2.

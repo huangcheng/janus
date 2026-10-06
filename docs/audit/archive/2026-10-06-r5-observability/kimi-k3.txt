@@ -1,0 +1,25 @@
+**1. Verdict: GO WITH FIXES** — rev 5 resolves all round-4 items, but the new bad-bound drop logic introduces a self-breaking bug: `+Inf` is parsed by `le_num/1`, classified `invalid`, warned about, and dropped from every histogram.
+
+**2. Critical risks**
+- **Exposition correctness (new, severe):** in `render_hist_series`, `lists:partition(fun(Le) -> le_num(Le) =/= invalid end, All)` runs over `All`, which includes `<<"+Inf">>` from `Canonical`. `binary_to_float(<<"+Inf">>)` and `binary_to_integer(<<"+Inf">>)` both raise → `invalid` → +Inf is partitioned out, logged as `janus_metrics_bad_bucket`, and never emitted. Every histogram loses its mandatory +Inf bucket (invalid per spec) and the plan's own byte-exact eunits (`histogram_zero_filled_order_exact_test`, `mixed_snapshot_exact_test`) fail. The `+Inf` arms in the sort comparator are dead code. Whitelist `<<"+Inf">>` before the parse check.
+- **Histogram invariant (residual):** rev 5's bump order (buckets → +Inf → sum → count) still cannot atomically guarantee `count == +Inf` — ETS has no multi-key transaction; a scrape between the +Inf and count bumps sees `+Inf > count`. Gate step 2's strict equality can flake under concurrent traffic. Either bump count and +Inf in adjacent ops and scope the assertion to a quiesced window, or assert `+Inf >= count` with in-flight tolerance.
+- Handler `to_bin/1` is non-total (no integer/float clauses) — the same defect class round 3 fixed in the registry. An integer `janus_lb:stats/0` key or odd `vsn` crashes the scrape into the 500 path. Reuse one total `to_bin`.
+- Auth reuse, cardinality, dual-dialect migration, per-node scrape model: all sound.
+
+**3. Contradictions/stale claims**
+- Self-review says "buckets numerically ascending with `+Inf` last" — false under the partition bug. Rev-history claims bad bounds are "dropped+warned, never coerced" without noting +Inf is caught in the same net.
+- Task 5 Step 3 note says the auth log "lands in Task 6 (logs `undefined` — harmless)" — fine, but Task 6's commit message doesn't mention the `janus_http_auth.erl` change it includes in `git add apps/janus_http/src/janus_http_*.erl` (it does list the file in Modify; commit body silent).
+
+**4. Missing first-ship requirements**
+- Migration 005: "check `janus_migrate`'s wrapping first" is delegated, not resolved — if the migration runs in a transaction and the index fails after `ADD COLUMN`, ledger state is ambiguous. Split into two migrations or assert wrapping now.
+- No gate assertion that `/metrics` renders `janus_requests_total` for the 401 path's `endpoint`/`protocol` labels (step 5 only checks a status_class delta).
+
+**5. Architecture notes**
+- Registry-driven renderer, `whereis`-per-bump, µs-integer sums, handler-side `models_serving` dedup, and `janus_req_counted` handler+proxy erase are all correct and closed. Header echo via `set_resp_header` before auth is the right placement.
+
+**6. Top 5 edits**
+1. `render_hist_series`: `{Valid, Invalid} = lists:partition(fun(<<"+Inf">>) -> true; (Le) -> le_num(Le) =/= invalid end, All)` (add a regression eunit asserting +Inf survives a garbage bound).
+2. Make the handler's `to_bin/1` total (integer/float clauses) or import the registry's.
+3. Gate step 2: replace strict `+Inf == _count` equality with a quiesced-window check or `+Inf >= _count` tolerance; document why.
+4. Resolve the `janus_migrate` transaction-wrapping question in Task 1 before shipping; split index creation if needed.
+5. Add a gate assertion on the 401 bump's full label set (`endpoint`, `protocol`) to lock the classify wiring.
