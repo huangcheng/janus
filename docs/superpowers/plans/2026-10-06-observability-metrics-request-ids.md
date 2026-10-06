@@ -168,7 +168,14 @@ get(K, Rows) ->
 -module(janus_metrics).
 
 -export([init/0, inc/2, observe/3, snapshot/0]).
--export([buckets/0, to_bin/1]).
+-export([buckets/0, to_bin/1, norm_labels/1]).
+
+-define(TABLE, janus_metrics).
+
+%% Duration buckets (seconds): fast path 0.05 → reasoning upstreams 600s.
+%% Precomputed once — the hot path never formats floats, and the
+%% descending order observe/3 bumps in is computed at parse time.
+-define(BUCKETS_DESC, lists:reverse(buckets())).
 
 -define(TABLE, janus_metrics).
 
@@ -761,7 +768,11 @@ render(Req) ->
             {ok, V} -> to_bin(V);
             _ -> <<"unknown">>
         end,
-    Dropped = maps:get(dropped, Usage, 0),
+    %% Dropped/buffered come from another process's map — validate
+    %% before they reach integer_to_binary (one bad value must not
+    %% 500 the whole scrape).
+    Dropped = int_or_zero(maps:get(dropped, Usage, 0), usage_dropped),
+    Buffered = int_or_zero(maps:get(buffered, Usage, 0), usage_buffered),
     %% Cumulative counters appended as counter rows (registered
     %% families in the renderer): the writer's dropped count, plus the
     %% LB failover counters from janus_lb:stats/0 (one call; a skipped
@@ -785,7 +796,7 @@ render(Req) ->
         {catalog_ready, bool01(safe(fun janus_config:ready/0, false, catalog_ready)), #{}},
         {models_serving, safe(fun janus_http_stats:models_serving/0, 0, models_serving), #{}},
         {lb_routes_cooling, safe(fun janus_lb:cooling_count/0, 0, lb_cooling), #{}},
-        {usage_writer_buffered_rows, maps:get(buffered, Usage, 0), #{}},
+        {usage_writer_buffered_rows, Buffered, #{}},
         {uptime_seconds, WallMs div 1000, #{}},
         {build_info, 1, #{<<"version">> => Version}}
     ],
@@ -822,6 +833,14 @@ safe(Fun, Default, What) ->
 bool01(true) -> 1;
 bool01(1) -> 1;
 bool01(_) -> 0.
+
+%% Scrape values from other processes are untrusted shapes — coerce or
+%% zero + warn, never crash the scrape on one bad value.
+int_or_zero(V, _What) when is_integer(V) ->
+    V;
+int_or_zero(V, What) ->
+    logger:warning(#{what => janus_metrics_gauge_error, source => What, value => V}),
+    0.
 
 %% Reuse the registry's total to_bin (never hand another partial one).
 to_bin(V) ->
