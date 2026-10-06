@@ -121,7 +121,7 @@ curl http://127.0.0.1:8090/metrics
 | Series | Type | Labels | Notes |
 |--------|------|--------|-------|
 | `requests_total` | counter | `endpoint`, `protocol`, `status_class` | Terminal client outcomes; early rejects counted, never timed |
-| `upstream_requests_total` | counter | `provider`, `status_class` | Terminal outcomes by provider; failover inner attempts excluded |
+| `upstream_requests_total` | counter | `provider`, `status_class` | Terminal outcomes by provider once a route is picked (includes pre-upstream translate rejections); failover inner attempts excluded |
 | `request_duration_seconds` | histogram | `protocol`, `stream` (`0`/`1`) | Buckets 0.05–600s; proxied outcomes only |
 | `lb_stats_total` | counter | `stat` | Cumulative `janus_lb:stats/0` counters |
 | `usage_writer_dropped_total` | counter | — | Omitted when the writer is down (never a fabricated 0) |
@@ -144,9 +144,9 @@ max(janus_catalog_generation) != min(janus_catalog_generation)   # catalog drift
 
 **Label cardinality** is bounded by construction: label values come only from closed enums (`endpoint`, `protocol`, `status_class`, `stream`) and operator-defined provider names. Never add request-id, key-id, or model labels.
 
-**Counter semantics** — counters are node-local (one ETS table per node) and reset to zero on restart; `rate()`/`increase()` handle resets, so always wrap counters in `rate()` and `sum` across `instance` for fleet totals. A `uptime_seconds` drop to ~0 marks a restart. `lb_stats_total` counters are cumulative and summable/rateable across nodes; only per-node gauges such as `lb_routes_cooling` are node-scoped. Series for a deleted provider stay in the exposition (orphaned, no longer increasing) until the node restarts. Float values may render in scientific notation (`1.0e7` is legal Prometheus text).
+**Counter semantics** — counters are node-local (one ETS table per node) and reset to zero on restart; `rate()`/`increase()` handle resets, so always wrap counters in `rate()` and `sum` across `instance` for fleet totals. An `uptime_seconds` drop to ~0 marks a restart. `lb_stats_total` counters are cumulative and summable/rateable across nodes; only per-node gauges such as `lb_routes_cooling` are node-scoped. Series for a deleted provider stay in the exposition (orphaned, no longer increasing) until the node restarts. Float values may render in scientific notation (`1.0e7` is legal Prometheus text).
 
-**Duration semantics** — the histogram measures end-to-end request duration; for streams that includes client drain (time until the client finishes reading). It covers proxied terminal outcomes only: early rejects (auth failures, `no_route`, `catalog_not_ready`, translate rejections) bump `requests_total` but never contribute a latency sample.
+**Duration semantics** — the histogram measures end-to-end request duration; for streams that includes client drain (time until the client finishes reading). It covers proxied terminal outcomes only: early rejects (auth failures, `no_route`, `catalog_not_ready`, translate rejections) bump `requests_total` but never contribute a latency sample. The one exclusion from metrics entirely is the handler-entry 413 (oversize body), which replies before any counting.
 
 **Request ids** — inbound `x-request-id` is untrusted client data: it is echoed back and stored on usage rows, but never assume uniqueness or authenticity. Well-formed means 1–128 bytes of `[A-Za-z0-9-_]`; anything else is ignored and replaced with a generated `req_<16 lowercase hex>`. Echo scope is the four agent endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`); router 404s and the admin plane never echo.
 
