@@ -108,6 +108,12 @@ Every proxied request (streaming included) is recorded into `usage_events`: toke
 
 The admin plane exposes Prometheus text exposition at `GET :8090/metrics`.
 
+```bash
+curl -H "Authorization: Bearer $JANUS_STATS_TOKEN" http://127.0.0.1:8090/metrics
+# on the node itself, with no token configured, loopback needs no header:
+curl http://127.0.0.1:8090/metrics
+```
+
 **Auth** — same as `/stats`: `Authorization: Bearer $JANUS_STATS_TOKEN`. With no token configured the fallback is **loopback-only**, decided from the socket peer (`cowboy_req:peer/1`) — `X-Forwarded-For` is never consulted, so a spoofed header cannot unlock it. The admin plane must never be exposed through Caddy (or any proxy) without the token: external Prometheus reaches nodes over the internal network, or through a Caddy host that requires the bearer token. Example scrape config (one job per node — stats tokens are per-node credentials): [`docker/prometheus.yml`](docker/prometheus.yml).
 
 **Series** (all names prefixed `janus_`; rendered by `janus_metrics_render`):

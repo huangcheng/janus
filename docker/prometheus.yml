@@ -1,6 +1,7 @@
 # Example: one scrape job per gateway node (each has its own stats token).
 # Token files: mount each node's JANUS_STATS_TOKEN as a Docker/Prometheus
-# secret (e.g. /etc/prometheus/janus-node-1.token, mode 0600).
+# secret (e.g. /etc/prometheus/janus-node-1.token) readable by the
+# prometheus user — the official image runs as `nobody`.
 scrape_configs:
   - job_name: janus-node-1
     scrape_interval: 15s
