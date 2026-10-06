@@ -54,6 +54,15 @@ concurrent_observe_final_consistency_test() ->
     ?assertEqual(Count, Inf),
     ?assert(Inf >= get({hist, request_duration_seconds, L, <<"0.5">>}, Rows)).
 
+never_crashes_without_table_test() ->
+    janus_metrics:init(),
+    ets:delete(janus_metrics),
+    ?assertEqual(ok, janus_metrics:inc(requests_total, #{endpoint => chat})),
+    ?assertEqual(ok, janus_metrics:observe(request_duration_seconds, #{protocol => openai_chat}, 0.5)),
+    ?assertEqual([], janus_metrics:snapshot()),
+    ?assertEqual(ok, janus_metrics:inc(not_atom_label_test, #{bogus => self()})),
+    janus_metrics:init().
+
 get(K, Rows) ->
     case lists:keyfind(K, 1, Rows) of
         {_, V} -> V;
