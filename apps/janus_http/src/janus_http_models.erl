@@ -4,6 +4,7 @@
 -export([init/2]).
 
 init(Req0, State) ->
+    erase(janus_req_counted),
     case janus_http_auth:require_agent(Req0) of
         {ok, Agent, Req1} ->
             Data =
@@ -23,6 +24,11 @@ init(Req0, State) ->
                 Body,
                 Req1
             ),
+            janus_metrics:inc(requests_total, #{
+                endpoint => models,
+                protocol => none,
+                status_class => <<"2xx">>
+            }),
             {ok, Req, State};
         {error, ReqErr} ->
             {ok, ReqErr, State}

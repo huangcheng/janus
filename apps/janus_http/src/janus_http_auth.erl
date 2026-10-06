@@ -77,6 +77,12 @@ unauthorized(Req, Msg) ->
         method => cowboy_req:method(Req),
         path => cowboy_req:path(Req)
     }),
+    janus_metrics:inc(requests_total, #{
+        endpoint => janus_http_classify:endpoint(cowboy_req:path(Req)),
+        protocol => janus_http_classify:protocol(cowboy_req:path(Req)),
+        status_class => <<"4xx">>
+    }),
+    put(janus_req_counted, true),
     Body = thoas:encode(#{
         error => #{
             message => Msg,

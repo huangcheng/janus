@@ -40,6 +40,8 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_stats_tracked),
     erase(janus_stats_failed),
     erase(janus_stats_inner),
+    erase(janus_req_counted),
+    put(janus_req_path, cowboy_req:path(Req)),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
         agent => Agent,
@@ -1092,6 +1094,17 @@ reply_err(ClientProto, Req, State, Status, Code, Msg, Extra) ->
         method => cowboy_req:method(Req),
         path => cowboy_req:path(Req)
     }),
+    case get(janus_req_counted) of
+        true ->
+            ok;
+        _ ->
+            put(janus_req_counted, true),
+            janus_metrics:inc(requests_total, #{
+                endpoint => janus_http_classify:endpoint(cowboy_req:path(Req)),
+                protocol => janus_http_classify:protocol(cowboy_req:path(Req)),
+                status_class => janus_http_classify:status_class(Status)
+            })
+    end,
     reply_json(Req, State, Status, error_map(ClientProto, Code, Msg), Extra).
 
 error_map(anthropic_messages, Code, Msg) ->
@@ -1258,6 +1271,24 @@ track(Status, Route, Usage) ->
                 stream => usage_bool_int(Stream),
                 latency_ms => LatencyMs
             }),
+            janus_metrics:inc(requests_total, #{
+                endpoint => janus_http_classify:endpoint(get(janus_req_path)),
+                protocol => janus_http_classify:protocol(get(janus_req_path)),
+                status_class => janus_http_classify:status_class(Status)
+            }),
+            janus_metrics:observe(
+                request_duration_seconds,
+                #{
+                    protocol => janus_http_classify:protocol(get(janus_req_path)),
+                    stream => usage_bool_int(Stream)
+                },
+                LatencyMs / 1000
+            ),
+            janus_metrics:inc(upstream_requests_total, #{
+                provider => route_provider_name(Route),
+                status_class => janus_http_classify:status_class(Status)
+            }),
+            put(janus_req_counted, true),
             janus_usage:record(#{
                 ts => erlang:system_time(second),
                 agent_key_id => maps:get(id, Agent, null),

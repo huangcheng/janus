@@ -11,6 +11,7 @@
 -define(MAX_BODY, 10 * 1024 * 1024).
 
 init(Req0, State) ->
+    erase(janus_req_counted),
     case janus_http_auth:require_agent(Req0, #{allow_x_api_key => true}) of
         {ok, Agent, Req1} ->
             case cowboy_req:read_body(Req1, #{length => ?MAX_BODY}) of
