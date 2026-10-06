@@ -87,14 +87,20 @@ handle(_Method, undefined, Req) ->
     handle(_Method, [], Req);
 handle(<<"GET">>, [], Req) ->
     Usage = janus_usage:stats(),
-    Stats = janus_http_stats:snapshot(),
-    Stats#{
+    %% Snapshot merged WITH the update result — a bare `Stats#{...}`
+    %% statement discards the new map (immutability) and /stats would
+    %% ship only the three counter fields.
+    Base = janus_http_stats:snapshot(),
+    Stats = Base#{
         generation => janus_config:generation(),
         ready => janus_config:ready(),
         backend => janus_db:select_backend(),
         uptime_sec => uptime_sec(),
         routes_cooling => janus_lb:cooling_count(),
         models_serving => models_serving(),
+        %% Failover/entitlement counters (requests_retried,
+        %% failovers_exhausted, entitlement_failopen, ...).
+        lb => janus_lb:stats(),
         usage => Usage,
         usage_writer => Usage
     },
