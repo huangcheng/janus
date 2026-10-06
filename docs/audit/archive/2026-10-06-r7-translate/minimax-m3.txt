@@ -1,0 +1,29 @@
+**Verdict: GO WITH FIXES** — sound SSE state-machine design and disciplined cross-protocol contracts, but two self-contradictions and two gaps must be fixed before 1.9 lands.
+
+**Critical risks**
+1. **Synthesized id prefixes collide with upstream.** C5/2.1/3.2a allocate `resp_/msg_/fc_/item_` — OpenAI Responses (`resp_…`, `fc_…`, `item_…`) and Anthropic (`msg_…`) use those exact prefixes. Translation →responses collides on the first real provider stream. Use janus-namespaced (`jresp_`, `jmsg_`, `jfc_`, `jitem_`); collision-eunit against corpus fixtures.
+2. **Cache-token rule is self-contradictory.** C3: `cache_read_input_tokens` "survives only when UPSTREAM is anthropic (recorded on usage row via 1.8b; cross-protocol it is dropped)". Specify a 2×2 upstream×downstream matrix; populate 1.8b column only in the preserve case.
+3. **Unbounded text accumulation.** C5 caps tool-args (256KiB/call, 64 calls, 1MiB total) but plain-text streaming content has no per-stream cap. `sse_st` is gen_server state — long streams accumulate MB-scale. Add per-stream content cap (e.g. 4MiB) + C2 error path; eunit in 1.4b.
+4. **JSON-schema silent strip is a quality regression.** 1.6 strips `response_format.json_schema` when target lacks native support. For anthropic, enforce via `tool_use(input_schema=…)` instead of silent drop.
+5. **Pre-commit error after 200 headers under-specified.** C4 lets a fully-failed-pre-commit stream owe body bytes after headers flushed. Verify Cowboy `stream_reply` permits continuing chunks after `stream_reply(200, _)` and assert the protocol in 1.4b.
+6. **`response.in_progress` mid-stream commit risk.** C4 says unknown events never commit, but `response.in_progress` is a KNOWN OpenAI Responses event with a `response` payload — could be misclassified as "first data" and trigger premature skeleton emission. Add corpus fixture + commit-point assertion in 1.4b.
+
+**Contradictions / stale**
+- Coverage table lists non-stream cross-protocol chat↔anthropic as supported today; 1.5 changes that to `n_unsupported` post-knob-flip — surface as a documented flip-time behavior change.
+- Knob name `stream_translate_enabled` is misleading if it also gates non-stream `n>1` reject (per 1.5's "SAME knob"); rename to `translate_enabled` or split.
+
+**Missing first-ship requirements**
+- 1.9 + 2.3a each need a rollback drill (flip ON → smoke → flip OFF → legacy 400 returns, no stuck `sse_st`, usage rows balanced).
+- 1.0 must ship a corpus manifest (provider+date+feature tag) so eunits load by tag, not filename.
+- 1.4b should assert per-event CPU budget (<50µs/event) — hot-path cost unquantified.
+
+**Architecture notes**
+- `sse_st` per-attempt, no cross-attempt carryover is correct; pin with `?CLEANUP_TIMEOUT` so killed attempts don't pin sockets if upstream doesn't RST.
+- Anthropic usage merge (`message_start.input_tokens` + `message_delta.output_tokens`) into a single →chat usage chunk AFTER finish requires buffering usage across the stream — call this out in C3 explicitly.
+
+**Top 5 edits**
+1. Rename synthesized id prefixes to `jresp_/jmsg_/jfc_/jitem_`; add collision eunit.
+2. Rewrite C3 cache-token rule with explicit upstream×downstream matrix.
+3. Add per-stream text-content cap + C2 error path; eunit in 1.4b.
+4. Replace silent JSON-schema strip with anthropic `tool_use(input_schema=…)` fallback (or document explicit quality loss).
+5. Rename knob to `translate_enabled` or split stream/non-stream gates.

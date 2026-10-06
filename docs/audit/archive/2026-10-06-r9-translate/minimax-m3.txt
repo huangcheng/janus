@@ -1,0 +1,34 @@
+**Verdict:** GO WITH FIXES — r8 fixes (kill-switch split, lazy emission, C4 three-outcome rule, j-prefixed ids) close the major r7 issues, but phase ordering for 3.4 vs 3.5, the lazy-emission boundary, cache-token asymmetry, and the n>1 knob split must be pinned before 1.9 ships.
+
+**Critical risks**
+
+- **Lazy-emission boundary under-specified.** "First CONTENT-bearing upstream event" is ambiguous at exactly the cases that close C4's retry window: empty `text_delta` (chat emits `{"text":""}` between tool_choice re-prompts), `content_block_start` with no following delta, `tool_use` blocks with zero args. Define precisely: "first event that yields ≥1 client-visible byte beyond the skeleton frame." Today a stray empty delta flips the commit point.
+- **3.4 soak happens AFTER 3.5 ships.** Plan says "3.5 (ship unit) → 3.4 (soak LAST)" — so the operator flips the responses-provider knob without the 50-concurrent cap-evidence the soak produces. Soak before flip, or gate the flip on soak green.
+- **`cache_creation_input_tokens` dropped silently.** C3 names `cache_read` only; anthropic also returns `cache_creation`. Asymmetric strip must be explicit; otherwise this is an undocumented billable-token drop.
+- **n>1 knob split is unspecified.** 1.5: streaming reject is always knob-gated; non-stream is gated vs ungated by 1.4b evidence. Sharing `stream_translate_tools_enabled` couples a behavior-change bug fix (ungated non-stream) to a feature knob. Either name a separate `n_unsupported_reject_enabled`, or document the ungated path bypasses the gate.
+
+**Contradictions / stale claims**
+
+- "stream=1 only when upstream is anthropic" contradicts C3 and the existing failover writer that already sets `stream=1` for translated chat streams. Wrong phrase; correct or remove.
+- Substrate note claims prefer_proto is "NEVER removed" for lossy pairs but never enumerates which pairs remain lossy after Phase 3. Provide a residual-lossy table at gate.
+- 2.1 synthesized-id collision eunit asserts against "replayed upstream ids" without enumerating them (anthropic `toolu_*`, chat `call_*`, responses `fc_*`/`item_*`/`resp_*`). List them.
+
+**Missing first-ship requirements per phase**
+
+- **1.9:** no assertion that lazy emission produces NO `message_start` when the upstream is rejected retry-before-content.
+- **2.3:** no assertion that `previous_response_id` strip produces the documented `X-Janus-Dropped` header on streams — C2 says headers don't carry stream degradations. Demote to terminal-event payload or document the inconsistency.
+- **janus-auto cross-protocol streaming** (1.9): judge's protocol decides which route takes the actual completion. State: judge is chat when tier bound to chat upstream; never judge cross-protocol.
+
+**Architecture / design notes**
+
+- `sse_st` is per-attempt; confirm process boundary = cowboy handler process (no per-request gen_t needed; concurrent = N cowboy handlers).
+- Synthesized id counter reset must be per-attempt, not per-process. State explicitly.
+- C2 "Canonical error struct" serialization across three protocols is a drift risk — single helper.
+
+**Top 5 concrete edits**
+
+1. Pin lazy-emission boundary to "first event yielding ≥1 client-visible byte beyond the skeleton frame" in `apps/janus_http/src/janus_protocol_translate.erl` (§C1).
+2. Add `cache_creation_input_tokens` to C3 with the same per-direction rule as `cache_read_input_tokens`.
+3. Reorder Phase 3: 3.3 → 3.2 → 3.2a → 3.1 → **3.4 soak** → **3.5 knob flip after soak**.
+4. Resolve n>1 knob split: either dedicated `n_unsupported_reject_enabled` or explicit "ungated non-stream" bypass.
+5. Enumerate residual-lossy pairs at each phase gate to justify permanent prefer_proto, plus the janus-auto judge-protocol rule.

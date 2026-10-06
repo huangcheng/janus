@@ -1,0 +1,33 @@
+**1. Verdict: GO WITH FIXES** — one internal contradiction: *"Every arm returns St. Bare `skip` is forbidden (lost block_kind / in_tokens)"* vs the declared signature *"`translate_sse(...) -> {ok, [ClientFrame], #sse_st{}} | {error, translate_unsupported}`"*, whose error arm carries no St (§10 bans bare `skip` but never settles the error arm).
+
+**2. Critical risks**
+- Error-arm state loss: a post-200 `{error, translate_unsupported}` 502 finalize needs `usage_sent/finish_sent/terminal_sent` to avoid double terminators; if St is discarded, finalize must run on a fresh St with `terminal_sent=false` semantics re-derived.
+- `include_usage` retry: "re-encode the already-translated body without `stream_options`" must mean re-encode of the *translated map*, not re-run `translate_request` (idempotence of the latter unstated).
+- `sse_events` cap: "leftover > 1 MiB" is ambiguous (strictly `>` vs `>=`); cap occurs mid-drain → headers already 200; confirm `track` records 502 upstream, not 400.
+- Inner-counter gating: `inc_total` sits at `do_proxy` enter; inner `do_proxy` enters too — see §4.
+- Docker ABI: mounted `apps` + named `_build` volume silently keeps stale beams when the image's OTP patch changes; the manual "recreate volume" rule has no trigger.
+
+**3. Contradictions / stale**
+- The quoted `translate_sse` St contradiction (above).
+- Slice C: "`./rebar3 compile` of the default profile" vs "Image `RUN` uses `rebar3 compile` (PATH)" — pick one.
+- §4.1.3 assigns the Chat-face usage chunk to the *handler* ("message_stop | if a usage chunk is still pending, emit it"), while §4.1.2 assigns it to *finalize* ("then at most one empty-choices usage chunk…"). The `usage_sent` flag reconciles behavior, but dual ownership invites double emission.
+
+**4. Missing**
+- Explicit gate: `inc_total` must check `janus_stats_inner` (or inner path bypasses the entry point). Spec only says "inner never inc_total" without a mechanism.
+- Non-framing garbage: is binary junk a `data:`-less stream capped (leftover_cap) or fed to `translate_sse` (bad_json)?
+- Deploy script: how "nodes whose image digest changed" is known (stats field? `docker inspect`? node row?).
+- TF-6.8 token assertion "when upstream reports them" is conditional — specify the skip/branch, or it flakes.
+- `finalize_sse` error/disconnect arms' exact return shape after the St fix.
+
+**5. Architecture notes**
+- Handler-owned `#sse_st` + sole `gun:cancel` caller is right; ensure `try/after` covers pre-finalize parse crashes or gun streams leak.
+- Make finalize the single emitter of finish/usage/terminator; keep mapping-table rows as *descriptions* of what finalize yields.
+- Persistent_term atomics before listeners: fine; `/stats` missing-ref→0 keeps old nodes compatible during rolling deploys.
+- Dual-repo: land TF-6.8/6.8b in `TEST-FLOWS.md` in the paired PR; a Janus-only merge yields untestable code.
+
+**6. Top 5 edits**
+1. Error arm → `{error, translate_unsupported, #sse_st{}}`; fix "Every arm returns St".
+2. State `inc_total` gate on `janus_stats_inner` at the bump site.
+3. Define digest-change detection for Slice D.
+4. Unify `rebar3` wording; add automatic volume-recreate trigger (OTP tag in image digest check).
+5. Cap as strict `byte_size > ?SSE_LEFTOVER_CAP`; state cap → recorded 502 post-headers.

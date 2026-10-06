@@ -1,0 +1,32 @@
+# Audit — Full Protocol Translation Matrix (rev 8)
+
+## 1. Verdict
+**GO WITH FIXES** — the plan is structurally sound after 7 rounds, but rev 8 still carries one self-contradiction (id prefixes), one silent mechanism gap (prefer_proto derives from the predicate being deleted), and one unspecified backward-compat boundary (C4(b) in-band error vs HTTP status).
+
+## 2. Critical risks
+- **C4(b) erases the HTTP-status channel.** "Every attempt fails pre-commit → ONE target-format error event + terminator" forces 200+in-band error even when headers have NOT yet flushed. Clients that only check HTTP status (most SDKs on connect failure) will misread total failover as a stream error. Rule must be: headers unflushed → real non-2xx; headers flushed → in-band error event. State which flush timing the gateway uses and e2e-assert both.
+- **prefer_proto silently dies with the predicate.** The bias is "never removed," but `pick_route(#{prefer_proto})` keys off `stream_translate_blocked`; 1.9 shrinks that predicate, so the native-route preference for still-lossy pairs (stop_sequence, cache_control, reasoning) disappears unless 1.9 splits `blocked` (hard 400) from `lossy` (bias-only). The 1.9 e2e asserts the outcome but no task builds the mechanism.
+- **Cap accounting scope.** 4MiB total / 1MiB args / 256KiB per-call caps must reset per attempt (C4 says sse_st is per-attempt; caps must be stated as living inside it), and worst-case memory is ~5MiB × 50 streams — acceptable, but 3.4 should assert it explicitly.
+- **Existing 123 eunit unmentioned.** The sse_st rewrite must state "existing text+thinking eunit stay green" as a regression invariant in 1.4b.
+- **Knob flip mid-flight.** `stream_translate_enabled` hot-reload needs stated semantics: in-flight streams continue, new dispatches read via persistent_term (per the project's start-order invariant).
+
+## 3. Contradictions / stale claims
+- **C5 vs 2.1 vs 3.2a:** C5 mandates janus-namespaced `jresp_`/`jmsg_`/`jfc_`/`jitem_`; 2.1 specifies `resp_`/`msg_`/`fc_`/`item_`; 3.2a uses `item_`/`fc_`. Pick one (r7 said j-prefixed).
+- **1.8b/1.8c:** the TEST-FLOWS authoring sentence lives inside 1.8b but assigns work to 1.8c, whose own text (dashboard UI) never mentions it.
+- **C2 type map** emits `server_error`/`rate_limit` into chat error JSON — not OpenAI-canonical type strings; pass-through vs canonicalization for chat targets is undecided.
+- Numbering gap 1.3 (renumbered away) will confuse workers against older plan copies; add a tombstone line.
+
+## 4. Missing first-ship requirements
+- C3: no mapping rule for responses `reasoning_tokens`/`cached_tokens` subfields → chat/anthropic usage shapes (cache rule covers only `cache_read_input_tokens`).
+- 2.4/3.5: upstream-mid-stream `response.failed` and adapter non-2xx must route through the same mock fault-injection modes from 1.4a — reuse is implied, not tasked.
+- Phase 2: no assertion that non-stream responses-client paths (already shipped) stay byte-identical after 2.2 hardening.
+
+## 5. Design notes
+Extension points are right (per-attempt sse_st, four index-space maps, decode-at-close). Failure-event taxonomy is complete. The full-accumulation interleave rule trades first-token latency for correctness — bounded by 256KiB/call, acceptable, but note it against the 300s idle_timeout for pathological upstreams.
+
+## 6. Top 5 edits
+1. Unify synthesized-id prefixes to `jresp_`/`jmsg_`/`jfc_`/`jitem_` in C5, 2.1, 3.2a.
+2. Add task in 1.9: split `stream_translate_blocked` vs `stream_translate_lossy`; wire prefer_proto to the latter.
+3. Rewrite C4(b): headers-unflushed → non-2xx HTTP error; flushed → in-band error + terminator; e2e both.
+4. State caps reset per attempt; add 1.4b invariant "all 123 pre-existing translate eunit stay green"; state knob flip affects only new dispatches.
+5. Move TEST-FLOWS authoring fully into 1.8c; add C3 sub-rule for `reasoning_tokens`/`cached_tokens` mapping.

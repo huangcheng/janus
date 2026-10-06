@@ -1,0 +1,36 @@
+# Audit — Janus Phase 1 design spec (round 8)
+
+## 1. Verdict
+
+**GO** — the spec is internally consistent; §10 resolves every tension I could construct (finish/usage ordering, disconnect semantics, counter funnel, retry scope), and no two sentences contradict without a §10 winner.
+
+## 2. Critical risks
+
+- **SSE translate contracts**: `translate_sse` returning `{error, translate_unsupported, St}` *after* 200 must guarantee `St` is still finalize-safe (usage flags intact); the error arm's St is load-bearing and only implied by "Every arm returns St".
+- **Retry state**: the `include_usage` 400-retry is specified for counters and body, but not for **upstream affinity** — re-running `do_proxy` may re-enter LB and rotate/cooldown a second pick. One client call should hit one logical upstream.
+- **Idle/disconnect**: correct that `idle_timeout` is inactivity-based; risk is Cowboy `stream_body` backpressure stalling the gun drain fold — per-fold immediate writes (no frame buffer) is the right call; keep it normative.
+- **Docker ABI**: named `janus-ebin-otp27` volume + `rebar.lock` change is the classic stale-beam trap; the wipe rule exists but nothing *detects* staleness (e.g. compare OTP/lock hash marker file in the volume).
+- **Deploy wait**: "stable on two consecutive polls after that node's catalog apply" — the script cannot observe catalog apply, only `/stats` generation; define stability purely on observed generation.
+
+## 3. Contradictions or stale claims
+
+None disqualifying. Minor: `#sse_st.created` comment says "copied from message_start or first chunk," but Anthropic `message_start` has no `created` and the later rule mandates gateway `system_time` — the comment is misleading, not contradictory (the synthesis rule wins).
+
+## 4. Missing requirements
+
+- No eunit rows for the **stop/finish mapping table** itself (`refusal→content_filter`, `pause_turn→stop`, reverse table, unknown+log).
+- TF-6.8b lacks the usage-row assertion TF-6.8 has.
+- `/stats` JSON: new fields' names/types beside existing payload not pinned (SPEC §2.4 update is promised, shape isn't).
+- Whether the `include_usage` retry reuses the same gun connection or reopens.
+
+## 5. Architecture/design notes
+
+Handler-process-owned `#sse_st` with immediate per-fold writes is correct; `leftover` single-owner is clean. Atomics via `persistent_term` before listeners respects start-order invariants. Process-dict flags scoped to the Cowboy handler with `janus_stats_inner` put/erase around inner `do_proxy` correctly prevents janus-auto double counting. Dual-repo paired-PR rule for Slice A/D is the right enforcement.
+
+## 6. Top 5 concrete edits
+
+1. State explicitly: the `{error, translate_unsupported, St}` arm must return a `St` whose `usage_sent/finish_sent/terminal_sent` are valid for the subsequent 502 `finalize_sse`.
+2. Pin retry affinity: the `include_usage` retry targets the **same upstream pick**, new gun connection, no LB rotation.
+3. Fix the `#sse_st.created` comment to "synthesized `erlang:system_time(second)`".
+4. Add eunit coverage list rows for every mapping-table row (both directions).
+5. Add a lock/OTP hash marker file in `janus-ebin-otp27` checked at `docker run` start; fail fast on mismatch instead of relying on the human wipe rule.

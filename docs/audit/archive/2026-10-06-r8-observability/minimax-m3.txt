@@ -1,0 +1,26 @@
+**Verdict:** GO WITH FIXES — one concrete defect (ladder duplication) and a small auth-extraction ambiguity.
+
+**Critical risks:**
+- **Bucket ladder duplication.** `?BUCKETS_DESC` (descending) and `buckets/0` (ascending) are TWO hand-written literals; the rev-8 "derived from" claim is contradicted by the listing. A bound edit in one without the other silently corrupts counts or order.
+- **`janus_lb:stats/0` cardinality.** Plan relies on closed-set stat keys with no eunit guard; handler filters only on `is_integer/1`. A janus_lb regression (e.g., dynamic per-route keys) explodes `lb_stats_total` cardinality — the renderer's per-scrape "BadStats" log won't catch it.
+- **`fk_salvage/3` carry-through.** Plan says "add to keep-list if absent" but never shows the salvage code or a test asserting `request_id` survives parent-FK race rebuild.
+- Hot-path cost: ~17 `ets:update_counter` calls per proxied request, one `whereis` per inc/observe; ns-scale, fine.
+
+**Contradictions / stale claims:**
+- "buckets/0 derives from `?BUCKETS_DESC`" — listing shows two literals.
+- Task 4 Step 1 lists `unauthorized/2` in the `janus_gateway_stats` extraction set; Task 5 Step 4 puts it in `janus_http_auth`. Two different functions, or a misread — the implementer will trip unless the plan disambiguates.
+
+**Missing first-ship:**
+- Eunit for `janus_lb:stats/0` shape (closed key set, integer values, monotonic across calls).
+- Gate assertion: idle scrape renders no orphan `lb_stats_total` TYPE/HELP when `janus_lb:stats/0` is empty (renderer currently drops the family if `Series =:= []`, which is correct but unasserted).
+- fk_salvage rebuild test for `request_id`.
+- No explicit "wait for node uptime ≥ 1s before first /metrics scrape" in the gate — `uptime_seconds > 0` would false-fail on the first-second boundary.
+
+**Architecture/design notes:** registry (`ets:whereis` + `update_counter/4` default-tuple, atomic create-and-bump, whole-body try-catch) is sound; renderer is pure/total/deterministic with `+Inf` whitelisted before the bad-bound partition, numeric bucket sort, `sum_dupes` merge, and label escape that strips NUL; hook placement covers all four terminal paths via `track/3` + `reply_err/6` (with `janus_req_counted` guard) + `janus_http_auth:unauthorized/2` + `janus_http_models`; header echo verified by `set_resp_header` at handler init carrying through the same Req chain (router 404, cowboy body-limit 413, handler-process hard crash — excluded and documented); migration 009 dual-dialect identical SQL on both `priv/migrations/{postgres,sqlite}/` subdirs.
+
+**Top 5 concrete edits:**
+1. Replace `buckets/0` body with `lists:reverse(?BUCKETS_DESC)` so one literal drives both views — fixes the duplication.
+2. Disambiguate the auth move: only the `/stats`-side machinery (`authorize/1`, `bearer_token/1`, `token_eq/2`, `stats_token/0`, `is_loopback/1`) moves; `janus_http_auth:unauthorized/2` is touched in Tasks 5/6 and stays put.
+3. Add eunit for `janus_lb:stats/0`: freeze the expected key set + integer values; assert monotonicity across calls.
+4. Show `fk_salvage/3` and add a salvage test asserting `request_id` is rebuilt through the salvage keep-list.
+5. Gate: assert no `lb_stats_total` family lines on an idle scrape; explicit `sleep 1100` before the first /metrics scrape so `uptime_seconds > 0` is robust.

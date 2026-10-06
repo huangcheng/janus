@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — the spec is internally consistent except that `#sse_st{}` is defined without the `usage_sent`/`finish_sent` flags that §4.1.2's finalize rules explicitly depend on.
+
+**2. Critical risks**
+- **Double usage/terminator frames:** without `usage_sent`/`finish_sent` in the record, "Do not emit a second usage chunk if tokens were already sent" and "finalize emits only the terminator" are unenforceable; an implementer following the record verbatim ships duplicate frames.
+- **janus-auto inner flag:** `janus_stats_inner` lives in the *same* handler process pdict as the outer flags; if not `put`/`erase`d strictly around the inner `do_proxy`, the outer `track(≥400)` either misses a real failure or double-counts. Ordering is unspecified.
+- **`include_usage` retry:** must fire only before the first status byte; make sure the retry branch is structurally unreachable once drain starts.
+- **Disconnect `track(502)`** writes a usage row with possibly-null tokens — dashboard SPEC §2.4 must explicitly tolerate null tokens on failed rows.
+- **Docker ABI:** the named volume shadows image `_build` (first-mount copies, then diverges); forgetting `docker volume rm` after `rebar.lock`/OTP change yields stale beams passing eunit. CRLF on bind-mounted `.erl` remains a laptop-only failure even with `.gitattributes`.
+- **Deploy wait:** a concurrent dashboard config edit mid-deploy can push a follower *past* the captured leader generation; "> gen0" then passes silently.
+
+**3. Contradictions / stale**
+- Record listing ends `terminal_sent = false :: boolean()` — no usage/finish flags — yet same §4.1.2: *"If a mapping-table row already emitted the finish/usage, finalize emits only the terminator (`usage_sent` / `finish_sent` on St)."* §10 does not pick a winner. Fix by extending the record.
+- No other contradictions; §10 decisions are consistently reflected in §4.
+
+**4. Missing requirements**
+- Add `usage_sent`/`finish_sent` to `#sse_st{}` and an eunit case asserting one usage chunk after a table-emitted one.
+- No E2E covers client-abort (usage row written, recorded 502) or the 400-retry path — eunit only. Add to TEST-FLOWS or explicitly waive.
+- leftover_cap should name its `finalize_sse` Reason (`{error, upstream, Msg}` → recorded 502); §4.1.4 implies but never states it.
+
+**5. Architecture notes**
+- Handler-owned `#sse_st{}`, immediate per-fold writes, single `finalize_sse` in `try/after` — sound; keep all writes in the handler process (gun cancel idempotent).
+- Atomics in `persistent_term` created before Cowboy start with missing-ref→0 reads correctly survives hot reload.
+- Counter population (post-`do_proxy`, disconnect=502, inner excluded) matches SPEC §2.4; note recorded status ≠ wire status post-200 in the SPEC edit.
+- Paired-PR rule is enforced in practice by TF-6.8/6.8b living in the dashboard gate.
+
+**6. Top 5 edits**
+1. Add `usage_sent`/`finish_sent` to the `#sse_st{}` definition; reference them in both usage-suppression rows.
+2. Spell out `put/erase` ordering of `janus_stats_inner` around janus-auto inner calls.
+3. State leftover_cap → `finalize_sse({error, upstream, …})`, recorded 502.
+4. Add (or explicitly waive) E2E for disconnect usage row and `stream_options` retry-once.
+5. Slice D: state follower generation exceeding captured leader generation passes iff `> gen0`.

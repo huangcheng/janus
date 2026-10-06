@@ -1,0 +1,32 @@
+## Audit — Janus Observability Plan (rev 5)
+
+**1. Verdict:** GO WITH FIXES — one isolated renderer defect makes every histogram malformed and fails the plan's own eunit + gate; everything else holds.
+
+**2. Critical risks**
+- **Histogram bucket sanity (the bug):** `le_num(<<"+Inf">>)` → `binary_to_float/1` and `binary_to_integer/1` both throw → `invalid` → `lists:partition` drops `+Inf` into the *warned* `Invalid` list. Every histogram renders with **no `+Inf` bucket**; the gate's `+Inf == _count` assert and the byte-exact eunit fail; `histogram_quantile` sees a truncated ladder. The sort comparator's `+Inf` clauses are dead code, and a spurious `janus_metrics_bad_bucket` warning fires per label set per scrape. Fix: `Le =:= <<"+Inf">> orelse le_num(Le) =/= invalid`.
+- Cardinality: sound (closed enums + operator provider names).
+- Hot-path cost: 3 counters + bucket bumps + sum/count, each `ets:whereis`+`update_counter` — ns-scale. But label `to_bin`+`lists:sort` runs per bump; "no formatting on the hot path" overstates.
+- Auth reuse: same stats token, loopback reads socket peer never XFF — correct and documented.
+- Request-id hygiene: whitelist charset/len, no upstream header copy (`filter_headers`) — sound.
+- Migration + dual-dialect: nullable TEXT + index on both; CONCURRENTLY caveat and deploy order correct.
+- Multi-node: per-node jobs; `_total` summable, gauges node-scoped — correct.
+
+**3. Contradictions / stale claims**
+- Renderer docstring and tests promise `+Inf` last; `le_num` silently removes it (contradiction with the round-4 "count==+Inf" fix).
+- Rev-3/4 claims `to_bin` "total" — `janus_metrics:to_bin/1` still has no catch-all; a tuple/pid label value throws `function_clause`, silently dropping the whole metric (try/catch prevents crash, but it is not total).
+- Handler `maps:fold` non-integer skip returns `true/false` as accumulator — harmless but sloppy.
+
+**4. Missing first-ship**
+- Verify `janus_usage:stats/0`'s `dropped` is cumulative, else `janus_usage_writer_dropped_total` + `rate()` lie. Add to Step 1b.
+- No regression assert for the `janus_admin_auth` verbatim extraction — gate should keep asserting tokenless `/stats` 401.
+- Gate's exact `+Inf == _count` is only valid at quiescence; it runs before traffic, but state that (or assert `>=`).
+
+**5. Architecture notes**
+Named public ETS + `ets:whereis`-per-bump correctly avoids the persistent_term stale-tid trap; idempotent init is right. Registry-driven renderer is pure/deterministic and correctly emits HELP/TYPE once per family with unknown families still rendering. `count`-last bump order is the right direction for the scrape invariant (only transient is `+Inf=N, count=N-1`, never `count > +Inf`). `set_resp_header` at handler entry, before auth, on the same Req chain, correctly covers 401 and stream.
+
+**6. Top 5 edits**
+1. Fix `le_num`/partition so `+Inf` is never dropped.
+2. Add a catch-all `to_bin/1` clause in `janus_metrics`.
+3. Step 1b: confirm `dropped` is cumulative; rename if a gauge.
+4. Replace `maps:fold` skip-logging with `maps:foreach`.
+5. Gate: assert tokenless `/stats` and `/metrics` both 401 (extraction regression).

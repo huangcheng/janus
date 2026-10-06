@@ -1,0 +1,34 @@
+**1. Verdict:** GO — I found no pair of sentences that contradicts each other outside what §10 already settles; the remaining items are omissions and one ambiguity, none blocking.
+
+**2. Critical risks**
+
+- **Cowboy idle vs paused SSE.** 300s inactivity (not wall clock) means one Anthropic extended-thinking pause >300s mid-stream becomes a post-header 502. Closed decision; TF-6.8 fixtures should avoid long-thinking models so the gate doesn't flake.
+- **janus-auto inner flags.** `janus_stats_inner` only holds if inner judge/target `do_proxy` runs *in the Cowboy handler process*. A spawning/parallel adjudicator leaks inner 5xx into outer `failed` and breaks the TF E2E ("inner judge 5xx with successful fallback must not increment failed").
+- **Counter reset vs deploy.** Atomics reset at `janus_http_app` init, so a ship mid-poll zeroes `/stats`. Slice D uses generation/uptime, so it survives, but the dashboard rate display will show a dip after every rollout — SPEC note would help.
+- **Docker ABI/mount drift.** The Windows run bind-mounts host `apps` over the image with a volume-seeded `_build`. CRLF files from pre-`.gitattributes` clones fail `fmt --check`, and a host `rebar.lock` differing from the build context serves stale beams. The volume-wipe rule covers OTP/config, not source drift.
+- **Wire compat.** Chat usage chunk with `choices: []` plus `[DONE]`; Anthropic `message_delta` + `message_stop` with no `message_start` rewrite. Cursor/Claude Code tolerate this, but no `system_fingerprint`/`service_tier` are mapped.
+
+**3. Contradictions / stale claims**
+
+- §3 ("Slice A TEST-FLOWS and Slice D `deploy_prod.sh` live in `../janus-dashboard`. Each is a paired PR") omits Slice B, which §4.2/§7 say edits `nodes.tsx` + SPEC §2.4. Stale enumeration, not a conflict.
+- §4.4 "If the ship has **no config diff**, skip the generation wait (same as `--code-only`)" vs "`--code-only` / empty-diff uses the `uptime_sec` window instead" — "skip" reads as *no check at all*; harmonize wording.
+
+**4. Missing requirements**
+
+- §4.1.1(5) doesn't state the include_usage retry's route behavior (re-`pick_route` pre-200 allowed? same map minus `stream_options`?) — §4.1.2 says "same `do_proxy`, same counters" but not which upstream.
+- TF-6.8b assumes an OpenAI-chat-bound public name exists; spec never says to seed one if absent.
+- §4.3 prescribes `.gitattributes` but no renormalization step for existing Windows checkouts — the documented first run can still fail on CRLF.
+
+**5. Architecture notes**
+
+- Handler-owned `#sse_st{}` + pure `translate_sse` fold with a single leftover owner is the right shape; keep it.
+- Atomics in persistent_term at app init, missing-ref → 0, is sound for `:8090`; keep reads pure.
+- Inner flag handling "erase/restore" must restore the *outer* value, not erase blindly, if adjudication ever nests.
+
+**6. Top 5 concrete edits**
+
+1. §3: add Slice B to the dual-repo paired-PRD list.
+2. §4.4/§8.4: replace "skip the generation wait" with "empty-diff → no generation polls; token-auth `/stats` + `uptime_sec` window still enforced."
+3. §4.3: add `git add --renormalize .` (or CRLF check) before first mount run; put `docker volume rm janus-ebin-otp27` verbatim into AGENTS.md.
+4. §4.1.1(5): pin the retry's LB/route semantics in one place (currently split across §4.1.1/§4.1.2).
+5. §4.2: require inner judge/target `do_proxy` to stay in the handler process, or pass an explicit stats context instead of process-dict keys.

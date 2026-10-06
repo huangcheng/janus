@@ -1,0 +1,29 @@
+**1. Verdict: GO WITH FIXES** — the plan is auditable and its contracts are mostly coherent, but a live contradiction in C5's buffering rule, a failover/headers interaction, and stale Phase-3 ordering must be fixed before implementation starts.
+
+**2. Critical risks**
+- **C5 self-contradiction**: interleaved streams are "FULL accumulation, emitted at close points," yet "argument FRAGMENTS may stream through incrementally." Which applies when? Unresolved, this decides the whole memory/latency profile.
+- **Accumulation silence**: full-buffering interleaved tool calls can mean minutes with zero client-visible bytes; the plan forbids inventing frames (pings skipped, never synthesized). Client/proxy idle timeouts during accumulation are unaddressed — Cowboy's 300s `idle_timeout` protects the handler, not the downstream client.
+- **C4 vs C2 headers**: `X-Janus-Dropped` is attempt-dependent (attempt 1 = lossy translate, retry lands on a native route that keeps `cache_control`), but headers flush once, pre-commit. The header can lie about what the eventual attempt did. Degradation headers must be computed from route class, not attempt.
+- **Terminator semantics**: case (b) "every attempt fails" owes headers too if none flushed — only the flushed case is specified.
+- **Hot path**: 4MiB full-content cap per stream × 50-concurrent soak is fine, but no statement on backpressure when a slow client stalls a buffering translator.
+
+**3. Contradictions / stale claims**
+- Phase-3 checkbox order (3.1 adapter → 3.2) contradicts the prose order (3.2 → 3.1). 3.2's eunit also depends on 3.3's provider-side captures — fine in prose, not in checkbox sequence.
+- 3.5 says "knob scope extended," contradicting the ratified one-knob-per-unblock decision; Phase 3 needs its own named knob or an explicit amendment.
+- C1 purges invented responses event names (corpus-only), but C2/3.4 still hardcode `response.failed` / `response.incomplete` — legal only if 1.0 captures them, which its done-criteria don't require.
+
+**4. Missing first-ship requirements**
+- 2.3 has no enumerated prerequisite list mirroring 1.9 (ordering of 2.4 e2e vs 2.3's gate is ambiguous).
+- 1.0 must capture real `response.failed` and `response.incomplete` transcripts, or Phase-2/3 C2 mappings test invented frames — a C6 violation by the plan's own rule.
+- No assertion that a *non-stream* translated reply under failover doesn't emit a stale `X-Janus-Dropped` (see C4/C2 above).
+
+**5. Architecture notes**
+- Four index/id spaces + per-attempt `sse_st` is the right shape; the degradation-payload schema task (pre-1.9) should also own the terminal-event `x-janus-mapped-stop` JSON contract consumed by the dashboard.
+- Error taxonomy is sound; add mapping for chat-upstream mid-stream 5xx-after-200 (some providers do this) into `{type, code, message}`.
+
+**6. Top 5 edits**
+1. C5: state when fragments stream vs when full-accumulation applies (interleave detected → buffer), and define the no-heartbeat client-timeout risk explicitly.
+2. C2/C4: degradation headers computed from route class at dispatch time, never from attempt outcome; specify case (b) unflushed-headers path.
+3. Unify Phase-3 ordering (prose wins: 3.3→3.2a→3.2→3.1→3.5→3.4) and fix checkbox sequence.
+4. Name a Phase-3 knob or amend the one-knob-per-unblock decision.
+5. 1.0 done-criteria: add captured `response.failed` + `response.incomplete` transcripts; 2.3 gains a 1.9-style prerequisite list.

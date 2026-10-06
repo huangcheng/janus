@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — the architecture is sound and prior findings are genuinely inlined, but the drill-down filters are silently dead code and every read path crashes on DB error.
+
+## 2. Critical risks
+- **Filters never apply (Task 7/4).** `maps:filter/2` takes a *boolean* predicate; returning `{true, {key_id, N}}` is truthy, so it keeps the entry with its **original binary value** and **binary key** (`<<"key_id">> => <<"1">>`). `recent_filters/1` matches atom `{key_id, V}` with `is_integer(V)` → no clause ever fires. The whole drill-down filter is a no-op, contradicting `recent/2`'s own spec `#{key_id => integer()}`.
+- **No error handling on reads.** `totals/series/breakdown/recent/p95` all do `{ok, Rows} = q(...)`. Any DB error raises out of the cowboy handler → 500, not a degraded response.
+- **Scope gap: avg latency not split by stream.** Agreed scope says "latency avg/p95 split by stream"; `totals` exposes one mixed `avg_latency_ms` plus two p95s. Streams (full-drain) skew the avg.
+- **`?`-literal guard is fake.** `no_qmark_literals_test` only asserts a source file exists; it never scans for `?`. The "enforced by eunit" claim is unbacked.
+- **Sweep cap silent.** 100 batches × 5000 = 500k rows/day ceiling; beyond that, old rows persist with no log. Concurrent sweep vs writer on SQLite has no busy-retry → possible `database is locked` (caught, logged, but sweep stalls).
+- **SSE fidelity gap.** Respecting a client-set `stream_options` (even `include_usage:false`) suppresses capture entirely — usage is silently lost, not just "polite."
+- **Injection/body consistency unclear.** `maybe_inject_stream_usage` returns `{Body2, Map2}`, but `call_native` may encode from `Map` while `Body2` is unused (or vice-versa); Content-Length ownership is asserted, not shown.
+- **`norm` treats true 0/0 as unreported** → NULL tokens, inflating `unreported`.
+
+## 3. Contradictions / stale claims
+- Task 4 Step 5 expected-output paragraph is unresolved ("…is wrong… Adjust expectation… note observed behavior") — a "single source of truth" doc should not ship a hedged assertion.
+- `recent/2` spec (`atom => integer`) vs Task 7 caller (`binary => binary`).
+- `unreported` conflates "no usage report" with error rows (UI copy admits this).
+
+## 4. Missing first-ship requirements
+- Stream/non-stream **avg** latency (scope).
+- Per-request summary cost: `totals` = 3 queries (totals + 2 p95) + series + 4 breakdowns ≈ **8 round-trips** per 30s poll; no caching.
+- Sweep-overflow visibility; busy-retry.
+
+## 5. Architecture notes
+Buffered writer, pdict erase-at-entry, dialect-agnostic parser, and 31-day retention are well-reasoned. Remaining structural smells: duplicated `bool_int/1` (T3/T5), `num/1` swallowing bad data to 0, and `breakdown` `id => null` rows relying on SPA `(deleted)`.
+
+## 6. Top 5 edits
+1. Task 7: build `Filters` via explicit fold into `#{key_id => Int}`; make `recent/2` keys/types consistent with the caller.
+2. Wrap every read `q/2` in `case … {error,_} -> log + empty`.
+3. Add `avg_stream_ms`/`avg_nonstream_ms` to `totals`.
+4. Sweep: single-flight guard, log when the 100-batch cap is hit, busy-retry on SQLite.
+5. Replace the fake `?`-scan test with a real source scan; resolve the Task 4 Step 5 expectation.

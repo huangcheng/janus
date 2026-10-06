@@ -1,0 +1,38 @@
+# Audit: Janus multi-protocol gateway plan
+
+## 1. Verdict
+
+**GO WITH FIXES** 鈥?architecture is sound, but the translate spec omits several protocol fields that will cause silent breakage, and streaming ops/error contracts are under-specified.
+
+## 2. Critical risks
+
+- **Tool fidelity:** OpenAI `arguments` is a JSON *string*; Anthropic `input` is an *object*. IDs differ (`tool_call_id`鈫擿tool_use_id`), multiple calls per turn, `tool_choice` shapes differ (`required`鈫擿{type:any}`, `{type:function,name}`鈫擿{type:tool,name}`). None specified.
+- **Missing field mappings:** Anthropic **requires** `max_tokens` (chat clients won't send it); `system` message 鈫?top-level `system`/`instructions`; `stop`鈫擿stop_sequences`; `finish_reason`鈫擿stop_reason` (`tool_calls`鈫擿tool_use`, `length`鈫擿max_tokens`); `usage` keys (`prompt_tokens`鈫擿input_tokens`). Unmapped `response_format`/penalties/`logprobs` risk silent drops 鈥?the 400 policy covers "exotic items" but not these common fields.
+- **Role constraints:** Anthropic requires alternating user/assistant; consecutive OpenAI roles of the same type need merging or 400.
+- **Streaming:** Anthropic SDKs often default `stream:true` 鈫?the 400 will hit real clients. Native passthrough lacks: client-disconnect handling, mid-stream upstream failure (partial frames + cooldown semantics), heartbeats, non-200 SSE error relay.
+- **Model names:** A Messages client sending `claude-*` to an `openai_chat` provider needs alias resolution via catalog 鈥?never mentioned.
+- **Error contracts:** upstream Anthropic error shape must be re-translated to the *client's* protocol shape; plan only says "error shapes" generically.
+- **Auth:** both `Authorization` and `x-api-key` present 鈫?precedence undefined.
+- **Auto-router:** chat-shaped internals implies double translation (messages鈫抍hat鈫抪rovider鈫抍lient), compounding fidelity loss; stream policy via auto undefined.
+
+## 3. Contradictions / stale claims
+
+- "Prefer native protocol" conflicts with LB/cooldown: native route cooled down vs. hot translate route 鈥?tie-break unspecified.
+- "overridable via env if already present elsewhere" is vague/stale.
+- Diagram shows single-pass translate, but messages鈫攔esponses is chat-pivot (two passes).
+
+## 4. Missing first-ship requirements
+
+Field-mapping tables per pair; model alias resolution; per-protocol error bodies; auth precedence; streaming lifecycle (disconnect, abort, heartbeat); usage/stop-reason translation tests; header filtering list (strip client auth, `anthropic-version`, hop-by-hop).
+
+## 5. Architecture notes
+
+Shared `janus_http_proxy` core is right; keep translate pure for eunit. Prefer direct messages鈫攔esponses over double-pivot later. Gun SSE 鈫?Cowboy chunked must preserve `event:` frame ordering; note cooldown only on terminal/aborted status.
+
+## 6. Top 5 edits
+
+1. Add explicit field-mapping tables (incl. max_tokens default, system, tool args string鈫攐bject, usage, stop reasons); unmapped 鈫?400 `translate_unsupported`.
+2. Specify model-name aliasing at the translate boundary.
+3. Define streaming ops contract: disconnect, mid-stream failure, heartbeat, cooldown on abort.
+4. Normalize error bodies to client protocol; define header precedence (Bearer vs `x-api-key`).
+5. Auto-router: pick native-first, translate once; state whether `stream` is allowed via `janus-auto`.

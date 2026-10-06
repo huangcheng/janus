@@ -1,0 +1,27 @@
+1. **Verdict: GO WITH FIXES** — structurally sound and genuinely resolved from rev 4; the residue is small but includes two real code bugs and stale self-claims.
+
+2. **Critical risks**
+- *SSE fidelity*: genuine-zero now symmetric ✓; residual: a tail window that clips the terminal usage event silently under-reports (acknowledged), and `\r\n`-delimited SSE relies on `string:trim` eating trailing `\r` (it does, but untested).
+- *Dual-DB*: Postgres lane is "optional" in Task 9 although `percentile_disc`, `to_char(date_trunc…)`, and `GROUP BY` alias are dialect-specific — one dialect is effectively unverified while "both DBs" is agreed scope. SQLite p95's `is_integer(Count)` guard and sweep's `{ok, [{0}]}` misbehave if the driver returns binary counts (p95 → null despite rows; sweep → 100 empty batches + capped warning).
+- *Hot path*: fine — map prepend, O(1) tail, one `process_info` read, persistent_term read-only.
+- *Writer*: drop-newest cap, atomics for mailbox drops, throttled logs, 15s terminate flush — coherent.
+- *Latency/p95*: stream = client drain time, correctly labeled; p95 sorts the whole window per 30s poll (no latency index) — acceptable at v1 volume.
+
+3. **Contradictions / stale claims**
+- Rev 5 claims "avg null-on-empty", but `totals` COALESCEs AVG to 0 and the error path returns `avg_latency_ms => 0`; SPA types them `number`. Code and claim disagree.
+- Task 2 expects "All 12 tests passed" but 13 tests are listed (Task 4 says 13) — the "test counts corrected" fix is itself stale.
+- Task 6 has two "Step 4" items (compile, commit).
+
+4. **Missing first-ship**
+- Mandatory (not optional) Postgres verification, or a dialect-compiling SQL eunit.
+- `usage_inject_include_usage` kill switch never documented in config/ops notes.
+- `ok = cowboy_req:stream_body(<<>>, fin, Req2)` after a good drain is disconnect-unsafe — the same fix the Drain callback got (`_ =`) was not applied here.
+
+5. **Architecture notes** — buffered writer is the right funnel (bounded mailbox + buffer, counted loss, logged chunk loss); pdict hook is safe given erase-at-entry; parser is pure/total, max-cumulative with the delta caveat documented; breakdown SQL groups by both id and name expr, so no functional-dependency reliance; page zero-fills buckets and distinguishes `(deleted)`.
+
+6. **Top 5 edits**
+1. `totals`: drop AVG COALESCEs, use `num_or_null` → avg null on empty (reconciles code, rev claim, SPA types).
+2. Fix counts/numbering: "All 13 tests passed"; Task 6 second Step 4 → Step 5.
+3. `_ = cowboy_req:stream_body(<<>>, fin, Req2)`.
+4. `maybe_trim` chunk-cap branch: recompute byte size after `sublist` — it currently keeps the stale total, permanently shrinking the tail.
+5. Make Postgres verification required in Task 9 and relax p95's `is_integer` guard via `num/1`.

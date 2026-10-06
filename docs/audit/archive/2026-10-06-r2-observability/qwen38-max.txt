@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the plan is close, but three defects (a series that can never render, an invalid `# TYPE` under the declared content-type, and un-zero-filled histogram buckets) are locked in by the plan's own eunit expectations, and Task 4's shipped code contradicts itself.
+
+## 2. Critical risks
+- **Renderer drops `janus_usage_writer_dropped_total`.** `render/2` hard-codes families `requests_total`, `upstream_requests_total`, `x_total`; the handler appends a `usage_writer_dropped_total` counter row that is silently discarded. Naming contract + Task 9 "dropped rate" panel are broken. `x_total` exists only to satisfy `label_escape_test` — test cruft in production output.
+- **`# TYPE janus_build_info info` is not valid in `text/plain; version=0.0.4`** (0.0.4 allows counter/gauge/summary/histogram/untyped; `info` is OpenMetrics). A parse error fails the *whole scrape*. `build_info_is_info_type_test` locks it in.
+- **Histogram zero-fill still missing.** Only hit buckets are emitted, so `histogram_quantile` interpolates against a false floor. Round 1's "zero-series gap" is *not* fixed; `histogram_bucket_order_exact_test` asserts 4 lines and thus enforces the bug.
+- **Crash vectors outside `try/catch`.** Only `safe_bump` is guarded. `observe/3`'s `Seconds >= 0` guard → `function_clause` on negative `LatencyMs`; `to_bin/1` has no list/float clause → `route_provider_name/1` returning a charlist kills the request. Contradicts "observability must never crash the data plane."
+- **Silently-wrong gauges.** `safe/2` masks unverified exports: `janus_config:ready/0`, `janus_usage:stats/0` keys `dropped`/`buffered`, `janus_catalog:get()` shape (`{Id, #{id := Id}}` is a suspicious double match), `janus_lb:cooling_count/0`. A permanent `catalog_ready 0` looks plausible and will page wrongly.
+- **Migration/lock + deploy order.** Non-`CONCURRENTLY` `CREATE INDEX` on live `usage_events` while 3 nodes write; PG `CONCURRENTLY` cannot run in a transaction — verify `janus_migrate`. Dashboard SELECT of `request_id` deployed before the gateway migration = 500s. No ordering requirement stated.
+- **Hot path.** ~15 `ets:update_counter` + two `norm_labels` allocations per request. "ns-scale" is overstated.
+- **`binary:encode_hex/1` needs OTP 26+** — verify prod OTP, else every request crashes.
+- **pdict is process-local**; `janus_req_path` set only in `handle/5` → other entries label `endpoint="other"`. Protocol has two sources (`Proto` vs `classify:protocol/1`) → drift from the locked enum.
+- **Cardinality**: no runtime bound/gate assertion on series count; `route_provider_name/1` return *domain* is never verified.
+- **Multi-tenant id spoofing**: echoed client ids populate the shared usage UI; gate step 6 (`limit=1` latest row) is race-fragile.
+
+## 3. Contradictions / stale claims
+Task 4 ships an unused `LbGauges`, calls `janus_lb:stats/0` twice, then a prose "Simplify:" tells the implementer to rewrite shipped code. LB cumulative counters are typed `gauge` (un-rateable) yet Task 9 wants rates. "Families sorted by name" is false (hard-coded, non-alphabetical). "Labels sorted by key" is false (`le` appended last). Self-review claims type consistency while missing the dropped counter family.
+
+## 4. Missing first-ship requirements
+`docs/SCHEMA_ETS_CONTRACT.md` update (new public ETS table + column); verify `/stats/logs` passes `request_id` through (Task 8 step 9 depends on it); series-count cardinality guard; deploy-order note (gateway → dashboard); gate must treat absent series as 0 and assert `content-type` by substring.
+
+## 5. Architecture notes
+Prefer a family spec table (`#{name => {type, help}}`) driving `render/2` over hard-coded clauses — that single change fixes the dropped counter, the `x_total` cruft, and the histogram-family extensibility trap. Renderer purity is good; keep it, but pass `buckets()` in so zero-fill is deterministic. Hook placement in `track/3` is right; pass `Path` explicitly instead of pdict. Header echo via `set_resp_header` at handler entry is sound — verify `authorize/1`'s reply path doesn't double-reply after the extract, and that a verbatim move of `unauthorized/2` doesn't strand private helpers.
+
+## 6. Top 5 edits
+1. Drive counter families from a spec map; add `usage_writer_dropped_total`, delete `x_total` (move the escape test to a real family).
+2. Emit `# TYPE janus_build_info untyped` (or switch to OpenMetrics content-type); update its test.
+3. Zero-fill every `buckets()` bound + `+Inf` per label set in `render_hist_series`; rewrite `histogram_bucket_order_exact_test` to expect all 14 lines.
+4. Guard `inc/2`/`observe/3` wholesale with `try/catch`, add list/float clauses to `to_bin/1`, replace `Seconds >= 0` with `max(0.0, Seconds)`.
+5. Replace Task 4 Step 2 with one `LbStats` build, no unused binding, LB series typed counter (`janus_lb_*_total`); make the Postgres index `CONCURRENTLY` or drop it, and add the gateway-before-dashboard deploy-order step.

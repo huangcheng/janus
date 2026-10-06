@@ -1,0 +1,34 @@
+1. **Verdict: GO WITH FIXES** 鈥?architecture is sound, but the plan under-specifies field-level translation, error contracts, and streaming failure semantics enough to ship bugs.
+
+2. **Critical risks**
+- **Protocol match is 1:1 by assumption.** A provider may expose both `/chat/completions` and `/responses`; matching only on `provider.protocol` forces unnecessary translation and blocks native streaming.
+- **SSE passthrough:** status is already 200 when a mid-stream upstream error arrives, so "reuse cooldown rules on terminal status" is unimplementable as written. No backpressure/flow-control, `[DONE]` vs `message_stop`, or disconnect-cancel spec.
+- **Tool fidelity:** plan ignores `tool_choice`, parallel tool calls, `tool_calls[].id` 鈫?`tool_use.id` stability, `finish_reason: tool_calls` 鈫?`stop_reason: tool_use`, `is_error` on `tool_result`, and string-vs-block `content`. Silent corruption risk.
+- **Auth:** `x-api-key` must be stripped before upstream forwarding; Anthropic adapter injects provider key. "Header filtering" is too vague 鈥?a leak sends client key to provider.
+- **Auto-router:** internal chat pivot means messages/responses clients get double translation after tier pick; if the picked provider isn't the client protocol, streaming is refused 鈥?must be surfaced, not silent.
+- **Anthropic required fields** (`max_tokens`, top-level `system`, `stop_sequences`) aren't mapped at all.
+
+3. **Contradictions / stale claims**
+- "always `stream => false`" vs "stop forcing `stream => false`" 鈥?confirm all callers.
+- "no Common Test suite" then eunit under `test/` 鈥?verify rebar3 profile actually runs it.
+- `janus_core` catalog-only vs adding a second protocol source of truth in `janus_providers_anthropic`.
+
+4. **Missing first-ship**
+- Per-protocol **error envelope** (OpenAI `{error:{message,type,code}}` vs Anthropic `{type:error,error:{type,message}}`) and HTTP status mapping (401/404/429/529).
+- `temperature`/`top_p`/`stop`鈫擿stop_sequences` parity; image_url passthrough rules ("if already present" is undefined).
+- Body size limits, upstream timeouts, usage/streaming accounting.
+- Cooldown keyed by provider+protocol, not provider alone.
+- Logging which path (native/translate) was chosen.
+
+5. **Architecture notes**
+- Extract `janus_http_proxy` with explicit `ClientProto` 鈥?good.
+- Make translate **pure**: `{ok, Map} | {error, Code}`; chat-pivot for messages鈫攔esponses is correct but must preserve tool ids.
+- Cowboy: `stream_reply` + `stream_body`, `text/event-stream`, no compression. Gun: `gun:await` loop for non-stream; `gun:await`/data messages for stream.
+- Dispatch table `{ClientProto, ProviderProto} 鈫?adapter+translator`; anything else 鈫?400.
+
+6. **Top 5 edits**
+1. Add explicit error-envelope + status mapping per client protocol.
+2. Add a field-mapping table (system, max_tokens, stop_sequences, tool_choice, finish_reason, tool ids).
+3. Specify SSE terminal-error, cancel, and cooldown semantics.
+4. Clarify multi-API providers and auto-router double-translate + stream interaction.
+5. Mandate auth-header stripping and per-protocol credential sourcing.

@@ -1,0 +1,6 @@
+**1. Verdict:** GO WITH FIXES — A1–A10 are directionally right, but every task body still contains the original defect, so a task-by-task implementer reintroduces them, and two fixes (p95, sweep) are themselves wrong.
+
+**2. Critical risks**
+- **SSE fidelity:** A7 fixes head accumulation and the 502 branch, but Task 6 Steps 1–2 still ship first-chunk-only capture and injection that ignores client `stream_options`/kill switch. Stale code wins if executed.
+- **Parser:** A2's `nested/1` is correct, Task 2 Step 3's is not — its own `anthropic_sse_head_tail_test` cannot pass, and Step 4 expects "8 tests" while A2 adds a 9th.
+- **Dual-DB:** A5's p95 does *not* converge: SQLite `trunc(Count*0.95)-1` vs `percentile_disc` (ceil). N=21 → offsets 18 vs 19. Divergence survives. Task 4 also keeps `percentile_

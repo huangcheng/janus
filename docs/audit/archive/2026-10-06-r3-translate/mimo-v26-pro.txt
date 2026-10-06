@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — the contracts (C1–C6) are sound and the phase order is right, but several semantic holes and one cross-repo gap will bite during implementation.
+
+**2. Critical risks**
+- Headers vs lazy commit: C2 says stream degradations are "in the terminal event" because "headers are already committed," yet 1.6 promises `X-Janus-Dropped` on stripped `response_format` for streams. Cowboy commits headers at response open, *before* the lazy first frame — so request-time drops are header-able but mid-stream drops are not. Define the split explicitly (request-translate-time → header; stream-time → terminal event), else implementers will pick inconsistently.
+- The C5 "closing signal only on complete JSON" invariant is unenforced machinery: it needs an incremental/terminal JSON validity check on accumulated args. Cost is fine, but the *malformed-but-complete* upstream args case (valid stream, invalid JSON) has no error path — invent one (`tool_args_invalid` → C2 failure events) or truncated calls will silently emit `finish_reason=tool_calls` with broken args.
+- Parallel/interleaved tool deltas: chat `tool_calls[i].index` arrives only on a call's first delta and calls interleave. Fixtures (1.0) must include parallel calls with gaps; nothing requires this today.
+- janus-auto + translation is unaddressed: adjudication streams two upstreams; if one is translation-eligible, which skeleton does the winner drive, and what closes the loser? C4's single-commit-point model doesn't cover concurrent attempts.
+- n>1 rejection on non-stream (1.5) is a breaking change for existing non-stream clients; `stream_translate_enabled` only guards streams. Needs its own flag or a deprecation header.
+- Client disconnect mid-translated-stream: "terminator exactly once per attempt" vs. socket closed — cancel propagation to gun undefined.
+
+**3. Contradictions / stale claims**
+- "Terminator = exact final bytes, exactly once" vs C4 "error event IS the terminal signal" (no `message_stop`). Anthropic-strict SDKs may require `message_stop` after `error`; decide, and say the terminator column is overridden on failure.
+- 3.3 "extends the corpus" vs 3.3's own title "capture REAL SSE transcripts per provider family" reads as new capture — reword to "extend."
+- Zeroed `message_start` usage conflicts with C3 "never invent" as literally written; it's defensible only because C3 also carves out framing — make the carve-out a named exception.
+
+**4. Missing first-ship requirements**
+- Cross-repo: the E2E mock upstream (janus-dashboard `scripts/`) must learn corpus replay + mid-stream cut; no task budgets that repo change.
+- Capture harness location, sanitization of captured user content, and re-capture trigger are unspecified (1.0).
+- Remote image URLs (chat `image_url` http) → anthropic URL-source or strip+header: only data URLs are covered (1.2).
+- Entitlement/usage attribution for translated streams (who is billed per-attempt rows) is absent entirely.
+- Responses grammar gaps: `response.output_text.done`, `response.in_progress`, summary-part framing.
+
+**5. Architecture notes**
+`sse_st` per-attempt is right; add explicit sub-state: `blocks` map (4 index spaces), `args_acc` per call id, `committed` flag, `skeleton_emitted`. Map tables (C2) should live as data (proplist per direction pair), not case clauses, so 3.2 reuses them. Error taxonomy: `upstream_failed`, `client_protocol_error`, `tool_args_invalid`, `translate_internal` — each with per-target emission rules.
+
+**6. Top 5 edits**
+1. Split degradation signaling: request-time → header; stream-time → terminal event (C2/1.6).
+2. Add task for janus-auto × translated-stream semantics (winner skeleton, loser termination).
+3. Add `tool_args_invalid` to the C2 taxonomy + eunit.
+4. Add a cross-repo task: mock-upstream replay/cut support in janus-dashboard.
+5. Require parallel-interleaved and multi-turn tool fixtures in 1.0; add non-stream n>1 compat plan (1.5).

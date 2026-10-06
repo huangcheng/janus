@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — the contracts (C1–C6) are sound and the ship-unit restructuring resolved the earlier ordering deadlock, but four concrete gaps below must be closed before 1.9 lands.
+
+**2. Critical risks**
+- **Interleaved tool deltas → anthropic:** OpenAI chat streams interleave `tool_calls[i]` fragments; anthropic content blocks are strictly sequential. C5 maintains index maps but never mandates buffering/serialization — emitting a second `content_block_start` before closing the first is an invalid anthropic stream. This needs an explicit serializer requirement + interleaved-index fixture.
+- **Synthesized responses ids (2.1):** `item_/fc_/msg_` are *exactly* OpenAI's own prefixes. Counter-allocated ids can collide with upstream ids replayed by the mock. Use a distinct namespace (e.g. `janus_…` + attempt nonce).
+- **`include_usage` "injection+retry" (C3) is undefined:** some chat-compatible providers 4xx on `stream_options`. Must specify: on rejection, retry without injection and leave usage null (`unreported`), never hard-fail.
+- **janus-auto never mentioned:** the adjudicator routes cross-protocol pairs; flipping the knob turns its formerly-400 tool streams into translated streams. No task covers this path.
+- Hot-path cost: per-fragment map ops + binary appends on every delta; no overhead budget, only soak counts.
+
+**3. Contradictions / stale claims**
+- Decisions says the knob ships "together with **1.3**/2.3" — 1.3 no longer exists (folded into 1.9). Stale.
+- 1.9 is physically listed *before* its prerequisites 1.4a–1.8c; a checkbox-driven agent executes top-down. Move it to the end of Phase 1.
+- 3.3 re-describes corpus capture despite C6/1.0 (one corpus); `test/fixtures/sse/` doesn't match rebar3 per-app layout (should live under the owning app's test dir).
+- C2 `overloaded_error→server_error/temporarily_unavailable` — pick one target type.
+
+**4. Missing first-ship requirements**
+- P1: client-abort mid-stream (handler dies → sse_st/accumulator cleanup, no stuck inflight); chat-upstream comment-line keepalives (`: ping`) in fixtures; a translated-stream **error-rate** counter (1.8b only gives `mapped_stop`, not failures); rollback drill for the knob.
+- P2: malformed responses `input` must 400 pre-translate, not enter the state machine.
+- P3: responses-provider non-2xx mapped into the C2 error taxonomy.
+
+**5. Architecture notes**
+- Add the sequential-block serializer as a named sse_st component; its buffer counts against the 256KiB/call cap.
+- The `[DONE]`-after-error choice for →chat deviates from native OpenAI (which typically just closes); get corpus evidence or document it as deliberate.
+- `message_start input_tokens=0` deviation: verify SDKs accumulate from `message_delta.usage` only; billing clients reading `message_start` will undercount.
+
+**6. Top 5 edits**
+1. Move 1.9 to the bottom of Phase 1; fix Decisions to "1.9/2.3".
+2. C5: require buffering interleaved chat tool deltas into sequential anthropic blocks + interleaved fixture in 1.1.
+3. 2.1: janus-namespaced synthesized ids + collision eunit against replayed upstream ids.
+4. C3: spell out the no-injection fallback when an upstream rejects `stream_options`.
+5. New task in 1.9: janus-auto cross-protocol stream behavior (knob on/off) + client-abort cleanup assertion in 1.4b.

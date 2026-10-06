@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — C1–C6 contracts are coherent and shippable; the gaps are dependency bookkeeping and three unspecified runtime rules, not design defects.
+
+**2. Critical risks**
+- **Header-flush trigger undefined.** C4(b) branches on whether headers flushed, but nothing ties the flush to the first *content-bearing* event. If headers flush on the first upstream byte (e.g., an anthropic `ping`), a later pre-commit failure is forced down the SSE-error branch instead of a clean 4xx.
+- **Knob hot-reload vs in-flight streams unspecified** — mid-stream semantics flip is undefined for all three knobs.
+- **Hot-path accumulation:** C5 mandates one decode at close but not *iolist* accumulation; naive `<<Bin/binary, Frag/binary>>` concat copies on every fragment at 256KiB scale.
+- Chat text deferral under tool interleaving adds tail latency; 3.4 asserts ordering eunit but should budget deferral latency explicitly.
+- 3.5 lacks the prerequisite enumeration that 1.9/2.3 have.
+
+**3. Contradictions / stale claims**
+- Preamble says image parts "pass through translate on the REQUEST side already"; task 1.2 implies the request path still needs building. Reconcile.
+- 1.9 prerequisites omit **1.6a**, whose degradation schema 1.9's assertions consume.
+- Phase-2 prereq cites "2.0-corpus-readiness" — no task 2.0 exists; the corpus is 1.0.
+- Task 1.3 was merged into 1.9 leaving a numbering hole; R6 claimed stale references were purged.
+
+**4. Missing first-ship requirements**
+- **P1:** knob pinned at dispatch + e2e assertion of in-flight immunity; a log/metric for retry-after-headers-flush events (only the error counter exists).
+- **P2:** `sequence_number` monotonicity appears only in C1 prose — make it an explicit 2.1 checklist assertion.
+- **P3:** 3.1 should inherit 1.4a fault-injection modes (currently "reused by 2.4" only); 3.5 needs an explicit prerequisite list incl. 3.3/3.2a/3.2/3.1 and 1.6a.
+
+**5. Architecture/design notes**
+- Per-attempt `sse_st` with zero carryover is correct; make the header flush an explicit function of the same first-content predicate as lazy skeleton emission.
+- Canonical `{type, code, message}` is sound; add upstream stall/idle-timeout (300s no bytes) to the type map.
+- The four index-space map is the top correctness hotspot — collision eunit against replayed upstream ids is the right guard.
+
+**6. Top 5 edits**
+1. 1.9: add 1.6a to the prerequisite list.
+2. C1/C4: define header-flush trigger = first content-bearing event; add ping-then-pre-commit-fail eunit proving the plain-4xx branch.
+3. Reconcile preamble vs 1.2 on what request-side vision translation exists today.
+4. Add the knob-pinning rule (read at dispatch; hot-reload never affects in-flight streams), asserted in 1.9 and 2.3 e2e.
+5. C5: mandate iolist accumulation, single flatten at close; give 3.5 full prerequisite enumeration mirroring 1.9/2.3.

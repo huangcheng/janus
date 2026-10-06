@@ -1,0 +1,30 @@
+1. **Verdict:** GO WITH FIXES — revision 5's fixes are correctly folded and the surface is coherent; the remaining defects are confined to histogram bump ordering/rendering and UI verification, none architecture-level.
+
+2. **Critical risks**
+- **Cardinality:** bounded (closed enums + operator provider names; README bans request/key/model labels) ✓
+- **Hot-path cost:** ~19 integer `update_counter` bumps/request (3 counters + 13 buckets + 3), each via `whereis`, whole-body try/catch — ns-scale ✓
+- **Exposition:** HELP/TYPE-once, escaping, `[short]` floats, untyped build_info — all match production-shaped eunit ✓
+- **Auth reuse:** extracted verbatim; loopback reads socket peer ✓
+- **Bucket sanity:** 0.05→600 ladder, inclusive `le`, zero-filled + union ✓ (but see 6.2)
+- **Request-id hygiene:** `[A-Za-z0-9-_]`, 1..128, lowercase generated hex, invalid inbound never echoed — injection closed ✓
+- **Migration:** identical dual dialect, ledger dedupe, nullable; CONCURRENTLY caveat correctly deferred ✓
+- **Multi-node:** per-node jobs/tokens, `rate()` docs, summable LB counters ✓
+
+3. **Contradictions / stale claims**
+- (a) Self-review: renderer is "pure, total" — yet `render_hist_series` calls `logger:warning`. Impure.
+- (b) The observe comment ("count == +Inf invariant … never violated") is false as ordered: bumping `+Inf` before count yields count < +Inf in the window, and **ascending bucket bumps put lower-`le` ahead of higher-`le`** — exactly the non-monotonicity the gate asserts cannot occur.
+- (c) Two `unauthorized/2` exist post-extraction (admin planner vs agent plane); Task 5's bump must land in `janus_http_auth`, not the moved copy — not flagged in the plan.
+
+4. **Missing first-ship requirements**
+- No browser verification of the SPA `request_id` column — violates AGENTS.md rule 4 (API-level gate only).
+- "Verify by reading `filter_headers/`" is read-only; nothing prevents a future regression from letting an upstream `x-request-id` clobber ours.
+- Nothing asserts a dispatch catch-all can't shadow `/metrics` (the 404 gate assert covers the agent plane only).
+
+5. **Architecture notes** — Registry design is right: named table owned by the app master, `whereis`-per-bump (no stale tid), `update_counter` with default (atomic create-bump). Hook placement (`track/3` terminal + `reply_err/6` catch-all + `janus_req_counted`) is sound and keep-alive erase discipline is now correct. Echo via `set_resp_header` at handler entry is the right mechanism; gate the filter guarantee rather than trusting the read.
+
+6. **Top 5 edits**
+1. Reorder `observe`: `+Inf`, then buckets **descending** (600→0.05), then count, then sum; fix the comment to state the true invariant (monotone buckets; count ≤ +Inf).
+2. In `render_hist_series`, dedupe union bounds by parsed float (prefer canonical) — stale rows plus ladder edits otherwise emit two equal-numeric `le`s ("1" and "1.0") → OpenMetrics increasing-`le` violation.
+3. Remove `logger:warning` from the renderer (collect/log at handler) or retract "pure".
+4. Add a browser-test step + screenshot artifact for the usage column; add a gate assert that an upstream-injected `x-request-id` never overrides ours.
+5. In Task 5 Step 3, name the target explicitly: `janus_http_auth:unauthorized/2`, not the moved `janus_admin_auth` copy.

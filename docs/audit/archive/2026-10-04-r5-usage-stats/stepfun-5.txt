@@ -1,0 +1,34 @@
+Verified against the repo: `004` is the correct next migration (001–003 present); `provider_keys/api_keys/models/providers` FK parents exist in `001_init.sqlite`; `thoas` is in `janus_core.app.src`; `janus_db_conn:query/2` returns `{ok,Rows}|{error,_}` (no rowcount); the 7 `handle_upstream` terminal clauses + streaming `{ok,stream,…}` at 208 match the plan; and — critically — `janus_providers_openai:chat_completions(Route,_Body,ReqMap,_)` **ignores the raw body**, re-encodes `ReqMap#{model=>…,stream=>…}` and streams it, so injected `stream_options` reaches upstream with a matching Content-Length (plan's claim holds). The dashboard `init/2` wraps `route/1` in a try that returns 500 on crash.
+
+---
+
+**1. Verdict:** GO WITH FIXES — injection/parser/SSE fidelity are sound, but a tautological `?`-guard test, hard-matched read-path DB errors, zero DB-executing dialect tests, and an unbounded writer mailbox under a stalled DB must be fixed first.
+
+**2. Critical risks**
+- SSE fidelity ✅: injection verified (CL recomputed, body re-encoded from `Map`); head/tail seam + cumulative max handled. Only gap documented (per-chunk `message_delta` under-report).
+- gen_server buffer: **`?MAX_BUF` caps `buf` but NOT the mailbox** — under DB stall casts accumulate unbounded → OOM. Top failure mode.
+- Hot path: `from_response_body` full-decodes every non-stream body.
+- Migration/SQLite FK: enforcement off by default → `SET NULL` inert (dangling id still shows `(deleted)` via LEFT JOIN). PG parent ids must be BIGINT.
+- Dual-DB accuracy: `percentile_disc`/`to_char`/`|| CAST(… AS TEXT)` never executed by any automated test.
+- p95: non-stream p95 includes error-row latency; SQLite COUNT-then-OFFSET races live writes.
+
+**3. Contradictions/stale**
+- Self-review "10k cap bounds memory" vs "mailbox unbounded under stalled DB."
+- Task 4 Step 5 rambles/self-contradicts on `unknown #null` (real: null id → `name=null` → `(deleted)`).
+- `No-qmark_literals_test` name promises a scan; body only asserts a source-file path exists.
+
+**4. Missing first-ship**
+- No DB-executing eunit on either backend (dialect bugs caught only by hand).
+- Read path has no `{error,_}` handling; relies on the outer generic 500.
+
+**5. Architecture notes**
+- Buffered writer + cast hot path: cheap and correct; add a queue guard.
+- pdict hook erased at entry, stream flag set in `dispatch`, head/tail erased in `stream_usage` → no keep-alive leak.
+- breakdown deliberately keeps deleted-FK rows (no `WHERE Col IS NOT NULL`) — consistent. 6 queries + 2×p95 per poll is fine at 31-day bounded volume.
+
+**6. Top 5 edits**
+1. Rewrite `no_qmark_literals_test` to actually assert no `?` outside binds across all emitted SQL (scan `totals/series/breakdown/recent/p95` SQL strings).
+2. Wrap read-path `{ok,_}=q(…)`: on `{error,R}` log and return empty map/`[]` + null p95 instead of crashing to 500.
+3. Add eunit that runs each rollup against real SQLite (and PG when present); assert `rewrite_pg` output and provider_key `|| CAST`/`'unknown'` concat on both.
+4. Cap the writer message queue (drop+tally casts past a ceiling, expose in `stats`); log/alarm at threshold.
+5. Make `unreported` successes-only (errors already count in `errors`) and document/exclude errors from non-stream `p95`.

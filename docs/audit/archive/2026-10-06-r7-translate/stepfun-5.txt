@@ -1,0 +1,33 @@
+# Verdict: GO WITH FIXES — phase ordering and dependency completeness sound, but several contract promises read as hand-wavy where prior rounds already shipped real bugs.
+
+## Critical risks
+
+**S1. C4 four index spaces underspecified.** C5 names four id spaces but the map lifecycle (torn-down per attempt? keyed how?) is never stated; C4 says `sse_st` is per-attempt but C5 maps live in `sse_st`. Also missing: resuming a partially-committed stream after `input_json_delta` truncation at the 256KiB cap — is the error emitted after the 256th fragment, leaving an already-open tool block? The terminal-event-owes-error rule covers "skeleton uncommitted" but not "committed stream with an open tool block."
+
+**S2. 2.3/2.3a depend on 2.1/2.2 unstated.** Phase 2 lists no 2.1a corpus capture, yet 2.1's grammar eunit "consumes the 1.0 responses transcripts" and 2.2 needs provider-request fixtures for `previous_response_id`/`store` examples. 2.2 request-grammar gaps: `parallel_tool_calls` mapping to responses, `reasoning.effort` enum, `tool_choice: "file_search"`-type non-function tools.
+
+**S3. No cap on interleaved chat buffering.** "Text between tool fragments buffers into sequential anthropic blocks" is unbounded — chat providers can interleave arbitrarily. The C5 caps bound args, not interleaving duration/count.
+
+**S4. 3.1 adapter stream protocol undecided.** The responses-provider adapter streams gun SSE, but relay granularity (event passthrough vs chunked decode) and failover after first byte are unspecified.
+
+**S5. Non-stream degradation omitted.** C2 limits `X-Janus-Dropped` to non-stream, but 1.6 requires `include_usage` rejection headers too — plan never says the header is also non-stream on stream path.
+
+## Contradictions / stale claims
+
+- "1.9 removes `has_non_text_content` / `has_tools`" — if the predicate was already extended for E.5/E.6 same-protocol preference, verify the two don't deadlock; the plan's claims are consistent but the code isn't described.
+- 3.5 "if any remains after 3.2" — after 1.5 rejects responses providers cross-protocol `n>1`, `stream_translate_blocked` may no longer have a responses-provider leg at all; 3.5 should assert the leg is gone or state why it isn't.
+- C4 "half-open tool closed by error event" contradicts C5 "never content_block_stop until args complete" — the error event may be the only terminal. Fine, but should say so explicitly.
+
+## Missing per phase
+
+- **1:** entitlement cooldown behavior when a translated stream fails pre-commit; `stream=1` usage-row partial-row semantics (tokens null vs zero); concurrency caps on translated streams vs native; SSE heartbeat (ping-pong) while translation is in flight over long first bytes.
+- **2:** sequence_number allocation across retries; a mid-stream `response.in_progress` refresh (C2 says skipped) — but non-initial events from provider may still need forward.
+- **3:** adapter failover state, `previous_response_id` on request side vs provider-side store, retry budget identical to native.
+
+## Top 5 edits
+
+1. Add 1.7a: request-side `tool_result` images eunit absent elsewhere; fix C4/C5 half-open-tool contradiction explicitly.
+2. Add interleaved-buffering cap (e.g. 64 blocks, 1MiB text) to C5 with error path.
+3. Add Phase-2 corpus capture as 2.1a (identical discipline to 1.0) and Phase-3 fixture declaration 3.3 stays; delete "consumes 1.0 transcripts" → 2.1a/3.3.
+4. In 3.1, specify relay granularity + failover-before-first-byte for responses upstream, mirroring C4's chat/anthropic rules.
+5. In 3.5, replace conditional "if any remains" with a concrete leftover predicate list.

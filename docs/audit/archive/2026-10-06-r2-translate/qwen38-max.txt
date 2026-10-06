@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — C1–C6 are largely sound, but stream-time header policy, the first-frame/failover-window interplay, and the responses request grammar have real holes.
+
+**2. Critical risks**
+- **Headers vs streaming:** C2's `X-Janus-MAPPED-Stop` is only knowable at stream end — response headers are already flushed. Impossible as a header on streams; must become a trailing SSE comment/event. (`X-Janus-Dropped` is request-time, fine.)
+- **Failover window self-defeat:** the anthropic-target skeleton requires `message_start` before any block; if emitted eagerly, first byte leaves before any upstream event, so C4's retry window is dead on arrival. Add explicit rule: no downstream bytes until upstream's first event.
+- **C5 ambiguity:** read literally it forbids streaming `input_json_delta`/argument deltas until block close — kills TTFB. Deltas must flow; only *completion* is gated. Also undefined: behavior when the 1MiB cap is hit mid-stream.
+- **Usage shape conflict:** C3 says emit at terminator / never invent, but anthropic `message_start`/`message_delta` *require* usage objects; null counts may break real anthropic SDK clients. Decide present-with-zero vs null and document it.
+- **Responses grammar gap:** 2.2 omits `function_call_output` input items — without them multi-turn tool loops via responses clients break, even though 1.7 cares about multi-turn results.
+- **Structured output:** "when the target supports it" needs a per-provider capability table (dashscope/kimi vary); no owner/location specified.
+- **Back-compat/rollback:** 1.3/2.3 turn 400s into translated streams; no tagging (translated vs native) in usage rows/logs to attribute failures, and the kill switch is deliberately deferred — acceptable only with a documented generation-revert procedure.
+
+**3. Contradictions / stale claims**
+- Context says "69-step gate"; AGENTS.md says 47. One is stale — the plan should cite the current number (it grows with 1.4/2.4 anyway).
+- "eunit 123", "existing include_usage injection+retry", "existing 1MiB cap" are asserted as present; verify before 1.0 builds on them.
+- 1.2 tests images "stream and non-stream" on the request path — request translate is stream-agnostic; images never appear reply-side. Wording noise.
+
+**4. Missing first-ship requirements**
+- P1: in-stream error taxonomy + per-target error frame & terminator; cap-exceeded behavior; translated-attempt tagging.
+- P2: full input grammar incl. `function_call_output`; 2.4's post-first-byte cut test must be a hard gate assertion.
+- P3: 3.1 covers streaming only — non-streaming adapter path must be explicit; E2E mock upstream must replay captured corpus, not invent frames.
+
+**5. Architecture notes**
+- Normalize: source decoder → intermediate event IR → per-target encoder. Six pairwise state machines will rot; capability flags on target encoders unify drop paths.
+- Keep stop-reason/event/usage mapping tables as one data artifact, not scattered clauses.
+- Error taxonomy: upstream/transport/policy/translate × pre-first-byte (HTTP status) vs post-first-byte (in-stream error + terminator).
+
+**6. Top 5 edits**
+1. New task before 1.3: streaming error & header policy (trailing SSE note replaces C2 header).
+2. C4: add "no downstream bytes until upstream's first event".
+3. C5: deltas stream, completion gated; define cap-exceeded handling.
+4. 2.2: add `function_call_output` (+ fixtures) to responses grammar.
+5. Observability task: tag usage rows with source/target protocol; document rollback before unblocking.

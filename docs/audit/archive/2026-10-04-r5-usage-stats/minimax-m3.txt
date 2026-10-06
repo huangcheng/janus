@@ -1,0 +1,37 @@
+```
+# Audit: Janus usage-statistics plan (rev 3)
+
+## Verdict
+**GO WITH FIXES** — structurally sound, resolves prior rounds, but ships with one false-positive test, one real SQL-safety gap, and several polish issues.
+
+## Critical risks
+1. **`no_qmark_literals_test` is a no-op.** It loads the module and asserts a `file` attribute exists; `Src` is bound but never scanned. `rewrite_pg` rewrites every `?` blindly, so any future SQL containing `?` in a string literal or JSON path will silently corrupt Postgres queries. The plan's safety contract is unenforced.
+2. **`record/1` swallows all exceptions via `catch`.** No protocol whitelist — arbitrary atoms/binaries pass to SQL. `proto_bin` falls back to `<<"openai_chat">>` only for non-atom non-binary inputs; valid atoms (e.g. `weird_proto`) write through unchecked. Whitelist `openai_chat | openai_responses | anthropic_messages`.
+3. **Mid-stream status mismatch.** `track(502, ...)` on stream failure records 502, but the client may have received HTTP 200 + partial chunks. Operators see "502" for failures users perceived as truncated streams. Either record the actually-sent status or label distinctly.
+4. **SQLite FK enforcement is off by default.** `PRAGMA foreign_keys` is per-connection; SET NULL is inert (plan acknowledges, doesn't enable). Run `PRAGMA foreign_keys = ON` in connection setup or document the gap explicitly in the migration header.
+5. **`qs_int` silently drops invalid filters.** `?key_id=abc` returns all rows. URL intent lost. Return 400.
+6. **`capture_usage_chunk` is O(N²) on the tail.** Every chunk concatenates the full tail + chunk then substrings. ~9MB of garbage for a 1MB stream at 4KB chunks. Use a ring buffer or `{Accum, LastNKB}` sliding window.
+
+## Contradictions / stale claims
+- `from_sse(Proto, ...)` accepts but ignores `Proto`. Either drop the parameter or document the dialect-agnostic claim in the function header.
+- Self-review says "parser is dialect-agnostic, so provider dialect needs no column" — but the parser never inspects the `protocol` column. Consistent, but worth one sentence in the parser doc.
+- "an agent_key_id = null happens only for contexts where the agent id is missing" — under SQLite-without-FKs, deleted parents leave dangling ids, not nulls. Same UI result, different mechanism.
+
+## Missing first-ship requirements
+- No `ts_from`/`ts_to` echoed in `/api/usage/summary`; SPA cannot label the actual window.
+- No query-duration metric for rollups; operators blind to slow p95s.
+- No telemetry when `usage_inject_include_usage=false` hides data.
+- `unreported` conflates "upstream didn't report" with "capture missed" — no breakdown.
+- No SQLite FK toggle in the migration runner.
+- No rate limit / timeout on rollup queries; a 30-day window scans the whole index.
+
+## Architecture / design notes
+Buffered writer + pdict hook + pure parser + dialect-branched rollup SQL is correct and minimal. Drop-newest on overflow is right (oldest in-flight). 31-day retention vs 30-day window is tight but holds. p95 nearest-rank is consistent across backends. UI is UTC end-to-end. `q/2` exception-safety is sound. Sweep `COUNT(*) + DELETE id IN (SELECT ... LIMIT 5000)` loop is correct and capped at 100 iterations.
+
+## Top 5 concrete edits
+1. Replace `no_qmark_literals_test` with an abstract-code scan that fails on any string literal containing `?` (except documented escapes).
+2. Whitelist `protocol` in `record/1`; drop + count anything else.
+3. Return 400 from `/api/usage/events` on unparseable `key_id`/`model_id`.
+4. Add `ts_from`/`ts_to` to `/api/usage/summary` response.
+5. Enable SQLite FKs in `janus_db_conn` setup (`PRAGMA foreign_keys = ON` per connection).
+```

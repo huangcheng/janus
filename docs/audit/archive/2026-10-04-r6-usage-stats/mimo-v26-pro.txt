@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — the rev‑4 fixes land, but the Task 4 test file is syntactically broken and a genuine‑zero still collapses on the SSE path.
+
+**2. Critical risks**
+- **Task 4 tests won't compile**: `no_qmark_literals_test/0` is defined twice (compile error), and the second version contains `<<"?'",>>` — a trailing-comma binary, a parse error. The whole SQL-shape suite dies on load.
+- **Residual genuine-zero bug**: `norm/1` now honors zero, but `from_sse/3` still maps `{0,0} -> undefined`, so a stream reporting real zero tokens becomes NULL → counted "unreported". The round-3 fix is half-applied.
+- **SSE fidelity**: client-supplied `stream_options` and `openai_responses`/Anthropic streams get no injection; only head+tail is parsed, so any provider emitting usage outside the 4KB/16KB windows silently loses tokens (acknowledged, still the largest silent-data risk).
+- **Postgres lane is untested by default** (Task 9 makes it optional): `percentile_disc`, `to_char(... AT TIME ZONE 'UTC')`, `$N` rewrite, and `AUTOINCREMENT`→`BIGSERIAL` divergence ship unverified.
+- Missing index on `usage_events(provider_key_id)` (and no `(stream, latency)` index for p95): the 30-day provider_key breakdown and two p95 scans are full-window scans.
+- `drop_counter/0` persistent_term creation race can split counts across refs; `record/1`'s `process_info`+cast is TOCTOU (acceptable, document).
+
+**3. Contradictions/stale claims**
+- Header says "rev 3 (this document)" while the revision history and prompt say rev 4.
+- "All 12 tests passed" (Task 2) vs "parser (10) + SQL-shape (3)" (Task 4 Step 4); actual SQL tests are 5–6.
+- Self-review claims genuine-zero is distinguished — false on the SSE path (above).
+
+**4. Missing first-ship requirements**
+- Zero tests for Tasks 5–6 (track, injection, capture/trim_tail, erase-at-entry) — only manual E2E.
+- `usage_inject_include_usage` kill switch is read but never documented/configured.
+- `fmtTs` shows HH:MM:SS only — ambiguous across days in the 30d drill-down.
+
+**5. Architecture notes**
+- Buffered writer: sound funnel; drop-newest + throttled logs + atomic counter is right; `terminate` flush within 15s is plausible (≤200 chunks).
+- Proxy hook: erase-at-entry correctly handles cowboy keep-alive reuse; `track/3` defaults-to-null is correct.
+- Parser: max-of-cumulative is safe for OpenAI/Anthropic proper; regex fallback (last `"usage":{…}`, one nesting level) is adequate but bypasses `has_known_key`'s zero semantics.
+- Rollups: nearest-rank is consistent across dialects; NULL-concat `(deleted)` semantics are coherent.
+- Page: zero-fill + UTC labels + writer badges are the right v1 shape.
+
+**6. Top 5 edits**
+1. Fix the Task 4 test file: delete the first `no_qmark_literals_test`, repair `<<"?'">>`.
+2. In `from_sse/3`, drop the `{0,0} -> undefined` collapse; return `undefined` only when no usage map matched.
+3. Add `usage_events_provider_key_ts_idx` (and optionally `(stream, latency_ms)`) to both migrations.
+4. Run the Postgres lane in Task 9 as required, not optional; eunit for `track/3`, injection, `trim_tail/2`.
+5. Sync doc header to rev 4 and correct test counts; give `fmtTs` a date component.

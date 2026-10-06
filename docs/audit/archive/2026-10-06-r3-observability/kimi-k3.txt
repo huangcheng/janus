@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 3 correctly resolves all round-2 items (registry-driven renderer, zero-filled canonical ladder, whole-body try/catch, `ets:whereis` bumps, untyped build_info), but ships stale internal contradictions and one semantic type error.
+
+## 2. Critical risks
+- **Exposition format**: `lb_stat` is a cumulative counter map rendered as `TYPE gauge`. Works under `rate()`, but lies about reset semantics — a node restart looks like a gauge drop, not a counter reset. Should be `counter` (or documented loudly).
+- **Label sort invariant**: renderer claims "labels sorted by key", but histogram buckets append `le` last (`L ++ [{le,…}]`), which is out of order for `protocol`/`stream`. Prometheus tolerates it; the stated invariant is false. Either sort with `le` merged or drop the claim.
+- **Renderer family ordering**: output is counters→histograms→gauges, not globally name-sorted as `families_sorted_once_test` claims. Harmless to Prometheus, false in docs.
+- **Hot path**: up to 16 `update_counter` calls per request is fine, but `janus_metrics` itself has **no eunit** — `observe/3` cumulative-bucket math, negative clamp, and µs rounding are pure logic exactly matching the "eunit-first" rule, yet only the renderer and request-id got TDD. Gate asserts `_count +1`, never bucket cumulative correctness.
+- **Auth reuse / migration / multi-node**: clean. Extracted `janus_admin_auth` keeps the socket-peer loopback semantics; migration ledger + nullable column + `null`-atom precedent are sound; per-node scrape jobs with cross-instance `sum by` are correct.
+- **Request-id hygiene**: closed-charset sanitize, 128-byte cap, never echoing invalid input — correct. Untrusted-id warning in README is right.
+
+## 3. Contradictions / stale claims
+- `janus_metrics.erl` **@doc still says "The tid lives in persistent_term"** — the exact trap rev 3 removed. Task 2 commit message ("cached tid") and Self-review ("on a cached tid") repeat it.
+- Rev history says "`safe/2` logs gauge failures"; the handler defines `safe/3`.
+- Self-review "families sorted" vs. actual counter/hist/gauge grouping (above).
+
+## 4. Missing first-ship requirements
+- No eunit for `janus_metrics:observe/inc` (see above).
+- Grafana JSON is never validated by any step (no `jsonlint`/import check in gate or CI) — a malformed dashboard ships silently.
+- Nothing asserts the renderer's output against an actual Prometheus parse (e.g., `promtool check metrics` on the captured gate sample — cheap, would catch format regressions the substring asserts miss).
+
+## 5. Architecture notes
+ETS single-table design, renderer purity, terminal-path hook placement, and set_resp_header-at-entry echo mechanics are all sound; the gate's 401/stream echo assertions close the loop properly.
+
+## 6. Top 5 edits
+1. Fix `janus_metrics.erl` @doc + Task 2 commit message + Self-review: `ets:whereis` per bump, not persistent_term/cached tid.
+2. Change `lb_stat` registry type to `counter` (or add explicit gauge-semantics note in README + dashboard).
+3. Add `janus_metrics_tests.erl` (cumulative buckets, `max(0.0,_)`, µs rounding) before Task 2 implementation, per your own eunit-first rule.
+4. Merge `le` into the sorted label list (or delete the "labels sorted by key" claim from renderer docs).
+5. Gate step: pipe the captured `/metrics` sample through `promtool check metrics`; fix "safe/2" → `safe/3` in rev history.

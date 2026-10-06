@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — functionally shippable; every remaining defect is claim-vs-code drift (one false code comment, several wording slips), none runtime-breaking.
+
+**2. Critical risks**
+- Cardinality: closed enums + operator provider names only; no dynamic values at bump sites. Resolved.
+- Hot-path cost: ~18 `ets:update_counter` per request behind one `whereis` per call, whole-body try/catch, precomputed bucket binaries. Resolved.
+- Exposition correctness: HELP/TYPE once per family, `+Inf` whitelisted before the bad-bound partition, numeric ascending buckets, escape order NUL→backslash→quote→newline is correct, `[short]` floats, `untyped` build_info. Resolved.
+- Histogram sanity: +Inf-first/count-last yields count ≤ +Inf at every interleaving; equality asserted only at quiescence — module comment and gate agree. Resolved.
+- Auth reuse: extraction is behavior-identical; 401-before-405 ordering matches the handler; gate 2b guards `/stats`. Resolved.
+- Request-id hygiene: charset whitelist rejects CRLF and comma-joined duplicates; `filter_headers` blocks upstream clobber; gate asserts single header. Resolved.
+- Migration/dual-dialect: SQL valid on both drivers; null-atom binding per precedent; 32-param arithmetic checks out (status 8/24, request_id 32). Resolved.
+- Residual: the `statistics(wall_clock)` element-2 global side-effect grep is still deferred to implementation; promtool presence in the gate image is asserted but no listed file installs it.
+
+**3. Contradictions / stale claims**
+- `buckets/0` is a **second hardcoded literal**, not derived from `?BUCKETS_DESC` — both the module comment ("the two can never drift") and the rev-8 changelog ("single-sourced… derives from") are false as listed. This is the round-7 fix that didn't fully land.
+- Key-facts bullet says "labels sorted by key", but bucket lines append `le` after `protocol`/`stream` (parser-legal in 0.0.4; promtool accepts). The stated contract and code disagree — fix the wording, not the code.
+- Rev-8 changelog: "handler `maps:get`/`to_list` inside the render try" — they sit *before* the try (harmless: both are total over `safe/3`'s map defaults); "quiescent `_sum`/`+Inf` consistency" should read `_count`.
+- Task 2 Step 4's parenthetical promises "including fmt --check"; the shown command is `rebar3 compile` only.
+
+**4. Missing first-ship requirements**
+- Only one: actually verify/install promtool in the e2e gate image (add its Dockerfile to Task 8's file list if absent). Everything else is covered.
+
+**5. Architecture notes**
+Registry/renderer split, whereis-per-call (no stale tid), row assembly inside the handler's render try, the `janus_req_counted` keep-alive erase at handler init, and messages-handler `require_agent/2` preservation are all correctly placed and internally consistent across tasks, gate, and self-review.
+
+**6. Top 5 concrete edits**
+1. `buckets() -> lists:reverse(?BUCKETS_DESC).` — delete the ascending literal; makes the single-source claim true.
+2. Key-facts: "labels sorted by key; `le` appended last on bucket lines (no ordering MUST in 0.0.4)".
+3. Rev-8 changelog: correct `_count`/`+Inf`; soften or move the two pre-try map calls so the claim holds.
+4. Task 2 Step 4: `rebar3 fmt --check && rebar3 compile` (or drop the parenthetical).
+5. Task 8: add an explicit "verify promtool in the gate image; install if missing" step with the file touch.

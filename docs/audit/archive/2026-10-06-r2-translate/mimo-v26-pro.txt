@@ -1,0 +1,29 @@
+**1. Verdict: GO WITH FIXES** — the contract layer (C1–C6) is sound, but three internal contradictions make C1/C3 and the header promises unimplementable as written.
+
+**2. Critical risks**
+- C1 vs C3 contradiction: `→anthropic` `message_start` must carry usage, but chat upstream usage only arrives in the trailing chunk (end of stream). Either `message_start` emits zero/null usage and `message_delta` carries real counts, or we buffer — the plan says neither.
+- `X-Janus-Mapped-Stop` / `X-Janus-Dropped` on streams: headers are committed before first SSE byte. Any mid-stream degradation (mapped stop, stripped tool, truncated args) cannot be signaled by header. Silent divergence from documented semantics.
+- C4×C5 interaction unspecified: tool block started, args not closed, upstream cuts post-first-byte → the client gets an error event but the plan forbids emitting the tool; what the terminal event contains is undefined. Also synthesized call ids across the pre-first-byte retry window must be asserted non-reused.
+- Unblocking `stream_translate_blocked` (1.3/2.3) changes traffic that today gets 400: entitlement/quota and per-attempt usage rows must not double-count under failover; no rollback knob ships with it.
+- 3.1 responses-as-provider: `response.failed`/`incomplete` upstream error frames have no mapping to chat/anthropic client errors; error taxonomy absent.
+
+**3. Contradictions / stale**
+- C2: chat has no `stop_sequence` finish reason (it's `stop` + `stop` param); the map is not injective.
+- 1.0 vs 3.3 duplicate the same conformance corpus; C6 already front-loads it.
+- 1.4 asserts usage rows but not non-zero tokens, while 2.4 does — Phase 1 ships the same accounting with weaker proof.
+- `n>1` non-streaming cross-protocol never addressed; 1.5 covers streaming only.
+
+**4. Missing first-ship**
+- P1: terminal behavior for half-open tool blocks; malformed-mid-stream upstream SSE handling; metric/flag for the unblock rollout.
+- P2: `output_text.annotation`/refusal mapping, `response.id` pass-through, parallel tool ordering guarantee.
+- P3: responses provider non-streaming; kill-switch decision must precede 1.3, not trail it.
+
+**5. Design notes**
+Split `sse_st` into shared accumulators + per-target emitters (chat/anthropic/responses); encode C1/C2 as a data table consumed by emitters and by eunit, not scattered `case` clauses. Error taxonomy: `semantic_impossible` (400 pre-dispatch), `upstream_protocol_violation`, `client_protocol_violation`, `translated_stream_failed` (post-first-byte terminal event).
+
+**6. Top 5 edits**
+1. Rewrite C1/C3: state `message_start` usage rule explicitly (defer to `message_delta`).
+2. Replace stream headers with a pre-first-byte-only policy: headers decide before commit; later degradations only in terminal events + usage row.
+3. Merge 1.0+3.3 into one corpus task with per-file provider+date manifest; E2E mock upstream replays those same fixtures.
+4. Add to 1.4: non-zero tokens, half-open-tool terminal behavior, per-attempt id non-reuse.
+5. Ship a per-route `stream_translate_enabled` hot-reload knob in 1.3, before unblocking.

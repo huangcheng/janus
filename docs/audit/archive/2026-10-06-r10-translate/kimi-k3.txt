@@ -1,0 +1,27 @@
+1. **Verdict: GO WITH FIXES** — rev 10 is implementable, but Phase 1 still ships with two unresolved behavior-change/hot-path hazards and Phase 3 has one real ordering bug.
+
+2. **Critical risks**
+   - **SSE state machine:** lazy emission is correct for failover, but C5’s deferred interleaved text is uncapped; tool args are capped, deferred text/reconstructed non-responses content are not. Add explicit `sse_st` total-memory cap and eunit/e2e abort assertions.
+   - **Commit semantics:** “headers flushed but not committed” is only safe if no handler ever calls `stream_reply` before upstream first byte; make this an invariant in `janus_http` handlers, not a comment.
+   - **Usage/terminator:** chat error-frame-then-`[DONE]` is fine, but assert clients never receive both `finish_reason` and error; responses `response.failed` must not invent usage.
+   - **Failover/LB/entitlement:** `prefer_proto` must remain a bias only after entitlement/health/enabled filtering; otherwise native preference can route around policy.
+   - **Hot path:** Phase 1 unblocks the highest-volume pairs before the 50-stream soak; 1.9 needs a minimal TTFT/allocation regression gate, with 3.4 as full soak.
+
+3. **Contradictions / stale claims**
+   - “Gateway deploys first with zero behavior change” conflicts with 1.5’s possible **ungated** non-stream `n>1` reject. Either gate it or ship it as a separate acknowledged bug-fix release.
+   - Phase 3 order says `3.2 … then wire` before `3.1 provider adapter streaming`; wiring responses-provider streams cannot precede the gun SSE adapter.
+
+4. **Missing first-ship requirements**
+   - Phase 1: degradation channel for `parallel_tool_calls=false` when target cannot express it; image/data-URL size limits; corpus redaction of auth headers; spliced >64/truncated fixtures must renumber `sequence_number` and mark splice provenance.
+   - Phase 2: explicit client-visible behavior when `previous_response_id`/`store` are stripped; error mapping for responses upstream non-2xx before first byte vs after commit.
+   - Phase 3: conformance matrix published per pair: native / translated-lossless / translated-lossy / rejected.
+
+5. **Architecture notes**
+   Keep one internal canonical event IR (`text_delta`, `tool_start/delta/close`, `usage`, `terminal_ok`, `terminal_error`) and per-target serializers; avoid three pairwise machines. Put all index/id translation in one C5 module with per-attempt maps. Error taxonomy is sound; add `upstream_truncated_json` distinct from `upstream_http_error`.
+
+6. **Top 5 edits**
+   1. Move `3.1` before `3.2` wiring; split `3.2` into eunit-only then adapter-backed wire.
+   2. Add global `sse_st` memory cap + Phase-1 TTFT/allocation gate to 1.9.
+   3. Resolve 1.5 zero-behavior-change contradiction; gate or defer non-stream `n>1`.
+   4. Define `parallel_tool_calls`, reasoning, vision-size degradation/reject rules in C2/C5.
+   5. In `janus_lb`, assert `prefer_proto` only ranks already-eligible routes; add e2e for disabled/unhealthy native route.

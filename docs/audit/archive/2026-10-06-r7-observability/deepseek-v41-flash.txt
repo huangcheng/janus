@@ -1,0 +1,34 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 7 resolves prior rounds and the design is sound, but a bad-merge artifact, two stale references, and one false "total" claim remain and should be fixed before implementation.
+
+## 2. Critical risks
+- **Label cardinality**: bounded by construction (closed enums + operator provider names). OK.
+- **Hot-path cost**: ~16 integer ETS bumps with hoisted `whereis`, no float formatting. OK.
+- **Exposition format**: pure renderer, HELP/TYPE once, `+Inf` last, `[short]` floats, correct escaping; promtool is mandatory. OK.
+- **Auth reuse**: extraction + tokenless-`/stats` 401 regression guard. OK.
+- **Histogram sanity**: descending bump order preserves le-monotonicity and `+Inf ≥ count`. OK.
+- **Request-id hygiene**: charset whitelist, 128-byte cap, no CRLF; same-Req-chain echo covers 401/stream. OK.
+- **Migration/dual-dialect**: 009, subdir+flat copies, identical SQL. OK.
+- **Multi-node**: per-node jobs, `_total` counters summable, gauges node-scoped. OK.
+
+## 3. Contradictions / stale claims
+- Task 7 Step 1 still says "migration **005** ship BEFORE this dashboard change" — must be 009 (renumbered in rev 7).
+- Key-facts says the handler puts both `janus_request_id` *and* `janus_req_path`; Task 6 says `janus_req_path` is put in `handle/5`. Contradictory provenance.
+- Commit list references `janus_usage_sql_tests.erl`, but the body says the shape test lives in `janus_usage.erl` under `-ifdef(TEST)`.
+- "total `to_bin`" is false: no catch-all clause (map/tuple/pid → `function_clause`), and `unicode:characters_to_binary/1` can return an error tuple.
+- "status at position 19" is inconsistent with the 16-column flatten (status = column 8 → positions 8/24).
+
+## 4. Missing first-ship requirements
+- **Task 2 Step 2 has a duplicated `-define(TABLE, janus_metrics).` and a duplicated doc-comment block** — a visible bad merge producing a "macro redefined" warning; delete one.
+- Verify `Proto` in `track/3` normalizes identically to `janus_http_classify:protocol/1` — two sources feed the `protocol` label and could split series.
+- Keep Step 1b's monotonic/cumulative verification of `janus_lb:stats/0` mandatory before typing it `_total`.
+
+## 5. Architecture notes
+`ets:whereis`-per-bump (no stale-tid trap), renderer purity (no logging), the `janus_req_counted` guard across `track/3`/`reply_err`/auth, and header echo via `set_resp_header` at handler entry are all correct. Preserve the explicit track-before-reply_err ordering contract.
+
+## 6. Top 5 edits
+1. Delete the duplicate `-define(TABLE, …)` + duplicate comment in Task 2.
+2. Fix "migration 005" → 009 in Task 7 Step 1.
+3. Reconcile the commit list with the in-module shape test (`janus_usage.erl`).
+4. Make `to_bin/1` actually total (catch-all + error-tuple guard) or drop the "total" claim.
+5. Correct/verify "status at position 19" and align the `janus_req_path` provenance wording.

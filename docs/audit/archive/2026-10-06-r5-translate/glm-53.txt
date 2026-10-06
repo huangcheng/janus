@@ -1,0 +1,33 @@
+# Audit — rev 5
+
+## 1. Verdict
+**GO WITH FIXES** — dependency ordering is now sound (1.4a/b before 1.3 resolves the deadlock), but the Phase-1 unblock ships without a load gate, error-path terminator semantics are implied rather than tabulated, and a few coverage gaps remain.
+
+## 2. Critical risks
+- **Early headers (C4):** once `stream_reply` sends 200, every failure — including pre-first-byte total failure — is forced in-band as an SSE error event; no real HTTP status ever surfaces. Plan doesn't state this; some clients score 200+`{"error":...}`+`[DONE]` as success.
+- **Error terminator ambiguity:** C1 says the terminator fires "exactly once per committed response", but C2/C4 make the error event the terminal signal (no `message_stop`). Which frame terminates each direction on error is never tabulated.
+- **Args cap (C5):** 256KiB is per call id, not per stream — many parallel tool calls multiply accumulation with no aggregate bound.
+- **Unblock compat (1.3, default-on):** requests that previously free-400'd now bill and burn entitlement; only one entitlement assertion gates this. No perf budget exists until 3.4 — Phase 1 ships tool-stream translation at production volume with only a 10-process eunit smoke.
+- **3.2b compat break:** chat→responses non-stream today silently degrades n>1→1; rejecting it 400s existing callers, ungated.
+
+## 3. Contradictions / stale claims
+- None material vs the described codebase; substrate references "E.5/E.6 gate steps" undefined in this doc. Prompt says 69-step gate, AGENTS.md says 47 — pick one source of truth.
+- 3.4 mixes Chinese ("内存") into an English artifact — also a repo-rules violation.
+
+## 4. Missing first-ship requirements
+- **Phase 1:** vision-path E2E (1.2 is eunit-only); a translated-stream load/smoke E2E before 1.3 lands; per-stream aggregate args-bound decision.
+- **Phase 2:** anthropic(kimi)→responses-client stream E2E — 2.4 mocks chat SSE only; non-stream responses-client hardening (2.2) is ungated.
+- **Phase 3:** `text.format`/structured-output mapping and `cached_tokens`→1.8b usage translation from responses upstream; provider onboarding (health, dashboard) for the new `openai_responses` provider type.
+
+## 5. Architecture / design notes
+- Add an error-terminator column to the C1 table (error event replaces vs. precedes terminator, per direction).
+- Decide explicitly: lazy headers, or headers-early + "200 is final, all errors in-band" documented for clients.
+- Stop-reason map lacks anthropic `pause_turn`/`refusal` and non-`max_output_tokens` `incomplete_details` reasons.
+- 2.2 should map responses `text.format` ↔ chat `response_format` (parity with 1.6).
+
+## 6. Top 5 concrete edits
+1. **3.4:** replace "内存" with "memory"; move a cut-down 50-stream soak into 1.3's gate.
+2. **C1 table:** add per-direction error-path terminator.
+3. **C5:** add a per-stream aggregate tool-args bound beside the 256KiB per-call cap.
+4. **2.2:** add `text.format`↔`response_format` and `cached_tokens`→1.8b field mapping tasks.
+5. **3.2b:** gate or document the n>1 non-stream 400 as a breaking change (knob-scoped or migration-noted).

@@ -1,0 +1,25 @@
+**1. Verdict:** GO WITH FIXES — the design is sound (single terminal bump site, pure renderer, shared admin auth), but several correctness bugs in naming, bucket ordering, and hex casing would make the gate red on first run.
+
+**2. Critical risks**
+- **Naming:** `inc(requests,…)` renders `janus_requests`, yet the table/E2E assert `janus_requests_total`; duration is `janus_request_duration` while Task 8 PromQL uses `janus_request_duration_seconds`. Prometheus convention (`_total`, `_seconds`) must match in code, tests, and dashboards.
+- **Histogram buckets:** `lists:sort` over `le` *binaries* is lexicographic → `+Inf` first (`+` < digits), `"10"` before `"2"`. Prometheus requires ascending numeric `le`, `+Inf` last. Tests use `binary:match`, so they can't catch this.
+- **ETS ownership:** the table is created in `janus_http_app:start/2`; if that process is transient the table dies with it, and a second `ets:new` (app restart) is `badarg`. Create under a long-lived supervised owner; make `init/0` idempotent. Also delete the stray `bump/2` guard clause — don't ship placeholders.
+- **Hot path:** 11-bucket linear scan + `ets:info` guard per bump per request; cheap but pointless post-init. More important: any crash in `janus_metrics` (`to_bin/1` has no fallback clause) fails live traffic — wrap bumps in try/catch.
+- **Request id:** `binary:encode_hex/1` yields UPPERCASE; the gate regex `^req_[0-9a-f]{16}$` fails. Use `encode_hex(_, lowercase)`. Also verify `handle/5`'s pdict erase doesn't wipe `janus_request_id`/`janus_req_path` before `track/3`.
+- **Hygiene:** good (charset allowlist, never echo bad values). But two duplicated path→endpoint/protocol mappers (`endpoint_of` vs `endpoint_from`) will drift.
+- **Auth:** reuse of bearer + constant-time compare is correct; note 404/400/crash replies are never counted — `requests_total` undercounts; `status_class(_) -> 2xx` misclassifies non-integer outcomes.
+- **Multi-node:** prometheus.yml comment says "one job per node" but shows one job/three targets/one `credentials_file`. Fix; document `sum by` semantics (counters node-local).
+- **Migration/dialect:** both SQL dialects are trivially fine, but SQLite `ALTER` isn't rerunnable — confirm the migration ledger dedupes. Task 6's insert numbers are garbled ("11→22 per row… 24 params").
+
+**3. Contradictions:** series names table-vs-code-vs-E2E (above); `usage_writer_dropped_total_note` placeholder-then-filter is contrived; "no dynamic label values" claim vs duplicated mappers; `/v1/models` labeled `openai_chat` is fiction.
+
+**4. Missing first-ship:** ordered-bucket eunit; try/catch around bumps; scrape-time guards (`janus_usage:stats()` non-map, `janus_lb:cooling_count/0` / `janus_config:ready/0` existence — unverified APIs); E2E step 2 asserts `janus_requests_total` before any call bumps it (series won't exist — assert `janus_build_info` or pre-warm); streaming latency definition (terminal vs first byte).
+
+**5. Architecture notes:** ETS `set` + `update_counter/4` default is the right race-free pattern; renderer purity and snapshot-at-scrape are good. But `render/2` takes two label shapes (sorted binary tuples vs maps) — normalize to one. Header echo before auth correctly covers 401/stream/error replies.
+
+**6. Top 5 edits**
+1. Rename to `janus_requests_total`, `janus_upstream_requests_total`, `janus_request_duration_seconds` everywhere (code, table, E2E, PromQL).
+2. Sort buckets numerically with `+Inf` last; add full-output-order eunit.
+3. `binary:encode_hex(Bytes, lowercase)`.
+4. Long-lived ETS owner + idempotent init; delete stray clause; try/catch every bump.
+5. Fix insert counts (24/24) and prometheus.yml (per-node jobs/tokens); gate step 2 asserts `janus_build_info` only.

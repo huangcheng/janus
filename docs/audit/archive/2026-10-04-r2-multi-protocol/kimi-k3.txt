@@ -1,0 +1,39 @@
+# Janus Multi-Protocol Gateway Plan 鈥?Audit
+
+**1. Verdict: GO WITH FIXES** 鈥?Sound architecture, but the translation contract and streaming/auth edge cases are underspecified enough to ship silent-fidelity-loss bugs.
+
+**2. Critical risks**
+
+- **Anthropic `max_tokens` is required.** Chat clients routinely omit it. Chat鈫扢essages translation without a default/clamp policy will 400 against real Anthropic endpoints. Unaddressed in plan.
+- **Tool round-trip fidelity.** Anthropic `tool_use.input` is a JSON object; OpenAI `function.arguments` is a JSON *string*; `tool_result` content blocks 鈫?`role: tool` + `tool_call_id` mapping; `stop_reason: tool_use` 鈫?`finish_reason: tool_calls`; parallel/multi-call ordering. "Basic tools" is not a spec 鈥?one lossy field breaks agent loops.
+- **System prompt hoisting.** Anthropic takes top-level `system`, not a message. Multiple/system-mid-conversation chat messages need a defined merge rule. Not mentioned.
+- **Mid-stream upstream failure (native SSE).** gun dies after 200 鈫?client gets truncated SSE. Define terminal contract (error event? `[DONE]`? abrupt close?) and whether cooldown fires on mid-stream failure vs only terminal status.
+- **Auth header confusion.** `/v1/messages` accepting both Bearer and `x-api-key`: precedence when both present (and disagree) is undefined. Also decide passthrough/strip of `anthropic-beta` headers.
+- **Responses statefulness.** `store` defaults true upstream; `previous_response_id`, `background` are stateful. Gateway is stateless 鈥?plan says "exotic 鈫?400" but doesn't pin forcing `store: false` or 400ing `previous_response_id`.
+
+**3. Contradictions / stale claims**
+
+- "messages 鈫?responses via chat pivot" 鈥?double translation compounds loss (Responses `instructions` has no chat home; gets dropped or silently merged). Contradicts "not silent drop" ethos.
+- "simple text/image_url passthrough if already present" vs "exotic 鈫?400" 鈥?the boundary is vibes. Enumerate the allowlist.
+- "stop forcing `stream => false`" is fine, but plan never says what happens when `provider.protocol` is **absent** on legacy catalog rows. Default must be stated (`openai_chat`?).
+
+**4. Missing first-ship requirements**
+
+- Usage field normalization across all three (`prompt_tokens`/`completion_tokens` 鈫?`input_tokens`/`output_tokens` 鈥?different names in *both* other protocols).
+- Error-shape translation: upstream errors must be re-emitted in the *client's* protocol error envelope, not proxied raw.
+- `temperature`+`top_p` mutual exclusion on Anthropic; param allowlist per target.
+- Response `id` prefixes (`chatcmpl_`/`msg_`/`resp_`) 鈥?some SDKs validate.
+- Timeouts/size limits for non-stream translate path; cooldown behavior on translate-induced 400s (must not penalize provider).
+
+**5. Architecture notes**
+
+- `janus_http_proxy` extraction is right; keep translate pure and in `janus_http` as planned. Pivot translation is acceptable for v1 but log dropped fields at `warning` with counts.
+- Native SSE: use `cowboy_req:stream_reply/3` + gun `stream` mode; ensure gun connection isn't returned to pool mid-stream and client-disconnect tears down the gun stream.
+
+**6. Top 5 concrete edits**
+
+1. Add a translation contract table: `max_tokens` default, system hoisting, usage mapping, finish_reason matrix, dropped-field logging.
+2. Define auth precedence (Bearer wins; conflicting keys 鈫?401) + test.
+3. Specify mid-stream SSE failure contract and cooldown trigger points.
+4. Enumerate translate allowlist/400 codes explicitly; 400 `previous_response_id`/`background`, force `store: false`.
+5. State default protocol for catalog rows missing `protocol`.

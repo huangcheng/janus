@@ -1,0 +1,28 @@
+## 1. Verdict
+**GO WITH FIXES** — the plan is structurally sound after four rounds, but n>1 semantics are internally contradictory, usage aggregation for anthropic-sourced streams is unspecified, and load proof arrives a phase too late.
+
+## 2. Critical risks
+- **Usage aggregation gap**: C1/C3 specify zeroed `message_start` on →anthropic output, but nowhere define the *input-side* merge: anthropic upstream reports `input_tokens` in `message_start` and `output_tokens` in `message_delta` — →chat/→responses translators must carry both into the single trailing usage event. Unspecified → dropped or zeroed input tokens, corrupting billing rows.
+- **n>1 contradiction**: R2 header says "n>1 rejected on non-stream too"; 1.5 says non-stream "keeps whatever the request translate already does today (not widened, not regressed)". These cannot both be true. Anthropic has no `n`, so "whatever today" is either a silent degrade (billing hazard the plan elsewhere rejects) or an existing reject — must be named.
+- **Soak too late**: the 50-concurrent-stream memory/leftover assertion sits in 3.4, but the production unblock ships in 1.3. Per-call 256KiB × N calls × M streams is exactly the regression class the cap was added for — prove it before the unblock, not two phases later.
+- **1.3 dependency scope ambiguous**: "runs only after 1.4-1.8 exist" — does that include 1.8b (DB migration, two dialects + flat copies) and 1.8c (sibling-repo UI)? Cross-repo ship ordering (dashboard knob UI before/after gateway deploy) is undefined.
+- **Observability gap**: usage rows don't distinguish translated vs native streams; if the knob must be flipped at 3am, there's no metric to drive that decision.
+
+## 3. Contradictions / stale claims
+- E2E gate described as 69 steps in the audit brief; AGENTS.md says 47-step gate. One is stale — fix the doc that's wrong.
+- R2 summary vs 1.5 on n>1 non-stream (above).
+
+## 4. Missing first-ship requirements
+- Phase 1: concurrency/memory proof at ship gate; translated-stream metric + usage-row flag; explicit migration sequencing for 1.8b.
+- Phase 2: request-side `max_output_tokens`↔`max_tokens`, temperature/top_p passthrough rules; `function_call_output` request items (C5 mentions the discipline, no task owns it).
+- Phase 3: `response.incomplete` mid-stream handling (not just terminal).
+
+## 5. Architecture notes
+State-machine extension points are well-chosen (per-attempt `sse_st`, lazy skeleton, four index spaces with terminal-signal invariant). Error taxonomy (C2) is complete except `incomplete` mid-stream. The per-attempt fresh-state rule correctly forecloses the nastiest failover bug class.
+
+## 6. Top 5 edits
+1. 1.5: name the exact non-stream n>1 behavior; align with 3.2b (`n_unsupported` everywhere cross-protocol).
+2. C3: add usage-merge rule (message_start input + message_delta output) + eunit asserting non-zero, non-duplicated counts.
+3. Move 3.4's soak (scaled) into 1.3's ship gate.
+4. 1.3: enumerate exact prerequisites incl. 1.8b/1.8c and cross-repo deploy order.
+5. Add translated-vs-native flag + mapped-stop counter to usage rows/writer in 1.8b; reconcile 47-vs-69 gate step counts.

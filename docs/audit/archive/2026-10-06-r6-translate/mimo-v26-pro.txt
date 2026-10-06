@@ -1,0 +1,28 @@
+**1. Verdict: GO WITH FIXES** — the contracts (C1–C6) are now tight, but stale 1.3 references, a missing Phase-2 ship unit, and unspecified cache-token wire mapping undercut the audit trail.
+
+**2. Critical risks**
+- Terminator discipline is correct in prose (error replaces success terminator, once per COMMITTED response) but 1.4b asserts it only pre-unblock via direct `translate_sse` calls; the e2e proof is deferred to 1.9's list without explicit per-pair cases (→chat error+`[DONE]`, →anthropic error alone, →responses `response.failed` alone).
+- Usage: anthropic input+output merge is mandated, but cache tokens (`cache_read_input_tokens`) are specified only as a DB column (1.8b) — their WIRE placement per direction (zeroed `message_start`? `message_delta.usage`?) is undefined, so e2e "non-zero usage" assertions may pass while cache accounting corrupts.
+- Accumulation caps (256KiB/call, 64 calls, 1MiB) exist as error paths but 1.4a fault injection doesn't cover cap-exceed; 3.4 asserts caps hold under load only.
+- `n>1` unification (1.5) is silent on janus-auto (does the adjudicator fan out N upstream calls?) and on same-protocol non-stream chat→chat (presumably native, but unstated).
+- 1.9 removes `has_non_text_content`/`has_tools` only — the `openai_responses` predicate remains for Phase 2; a route preference that silently narrows per phase is fine, but no task documents predicate state after each gate removal.
+
+**3. Contradictions / stale claims**
+- "1.3" survives in 1.4b ("E2E versions … activate in 1.3's ship unit") and 1.8c ("the moment 1.3 unblocks streaming") after renumbering to 1.9.
+- 1.8b bundles "dashboard display" (sibling repo) inside the gateway ship unit, contradicting 1.8c's cross-repo split and 1.9's "dashboard UI ships after gateway".
+- Header claims R5 "n>1 unified … everywhere cross-protocol", yet 3.2b re-litigates it as a Phase-3 item; harmless but redundant.
+
+**4. Missing first-ship requirements**
+- Phase 2 has no ship unit: 2.3 gate removal lacks knob semantics (does `stream_translate_enabled` cover responses-client streams?), default-off rollout, and e2e smoke ordering.
+- No migration/rollback note for 1.8b columns; no dashboard warning update for the 1.5 non-stream `n>1` behavior change (1.8c covers streams only).
+
+**5. Architecture notes**
+- `translate_sse` gains three target grammars; keep one shared accumulator (C5 caps) with per-target emitters — do not fork per-pair state machines. Error taxonomy (C2) is good: type map + pass-through + skip-unknown; ensure `ping`/`response.in_progress` skipping is asserted in kimi fixtures (stated, keep).
+- Commit-point = first DATA frame with lazy skeleton is coherent; keep `sse_st` per-attempt (asserted).
+
+**6. Top 5 edits**
+1. Replace all "1.3" references with "1.9".
+2. Add cache-token wire mapping to C3 per direction; keep 1.8b = migration + writer only, move dashboard display to 1.8c.
+3. Add a Phase-2 ship unit (2.3 + knob scope + default-off + e2e assertions).
+4. Extend 1.4a/1.4b with cap-exceed fault cases.
+5. State `n>1` behavior for janus-auto and same-protocol native routes in 1.5.

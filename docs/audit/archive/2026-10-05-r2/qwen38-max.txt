@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — sound slicing and error-first posture, but the reverse-direction mapping, track/counter semantics, and persistent-volume ABI must be pinned before eunit-first work starts.
+
+**2. Critical risks**
+- **Chat→Anthropic mapping is underspecified.** Real OpenAI-compatible providers interleave `reasoning_content`/`content`; the table covers text→thinking switch but not thinking→text re-open, nor explicit `content_block_stop` per transition. Also Anthropic clients expect `message.usage.input_tokens` in `message_start`, but OpenAI providers report prompt tokens only at stream end — spec is silent on what to emit at start.
+- **Disconnect claim is unimplementable as written.** While blocked receiving gun messages during upstream silence, no `stream_body` write fails, so “cancel gun (do not wait idle_timeout)” degrades to the 300s idle path anyway. Specify detection (periodic probe write) or retract.
+- **Logical vs wire status:** `track(400)` for a stream whose headers were 200 diverges from observable state; Slice B defines failed via `track ≥ 400`, so this silently counts. State the semantics once.
+- **Unbounded `sse_events` leftover:** an unterminated `data:` line grows memory forever; need max-buffer → 502.
+- **Persistent `_build` volume ABI:** NIF deps (esqlite) survive OTP minor bumps/dep upgrades; rebar3 won’t rebuild “unchanged” deps. Volume needs OTP-minor + lock-hash stamping or documented `docker volume rm` recovery.
+
+**3. Contradictions / stale claims**
+- “There is no `rebar3 get-deps` verb” — it exists; correct/remove.
+- AGENTS.md currently documents `--target build … eunit`; that update must land **with** Slice C or the gate doc stays wrong.
+
+**4. Missing requirements**
+- SSE parser policy: `:` comment lines, multi-line `data:`, `id:`/`retry:` fields, ordering of role/content/finish inside a single OpenAI chunk.
+- Error-frame sanitization rules (no upstream URL/auth leak; length cap).
+- TF-6.8 usage assertion is non-deterministic against real upstreams; needs fixture/mock or explicit conditional skip.
+- Slice D: source of “leader’s generation” (leader `/stats` vs dashboard DB), leader-restart semantics, serial vs parallel per-node waits.
+- hex.pm reachability for deps during `test` stage build (Aliyun mirror covers apk only).
+
+**5. Architecture notes**
+- Handler owning `#sse_st{}` + usage head is right; guarantee exactly-once `finalize_sse` via `try/after` covering post-header EXIT.
+- Atomics-in-persistent_term before listeners matches project invariants; read path defaulting to 0 is good.
+- Verify janus-auto inner calls never re-enter `do_proxy`, else “janus-auto = 1” breaks.
+
+**6. Top 5 edits**
+1. Complete reverse-direction transition table incl. thinking↔text and `message_start` usage policy.
+2. One normative track-status vs HTTP-status section consumed by Slice B counters.
+3. SSE parser limits (max event/leftover size, unknown-field policy).
+4. Volume ABI guard (OTP minor + rebar.lock stamp), `.dockerignore` `_build` check; fix `get-deps` claim.
+5. Slice D generation source + restart semantics; make TF-6.8 usage assertion deterministic.

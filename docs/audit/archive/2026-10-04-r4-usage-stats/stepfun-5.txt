@@ -1,0 +1,27 @@
+**Verdict:** GO WITH FIXES — A1–A10 resolves most v1 findings on paper, but ships one fatal fix-vs-task divergence (migration), a NULL-semantics hole in the proxy, and a Postgres backend that is never once executed.
+
+**Critical risks**
+- **Migration (blocking):** Task 1 still contains the pre-A1 DDL. An implementer following task order builds `usage_events` without `stream`, then A3's 11-column insert fails on every flush. `CREATE TABLE IF NOT EXISTS` silently no-ops if the old DDL was already applied — no `ALTER` path exists. A1 must physically replace Task 1, not sit beside it.
+- **Dual-DB SQL:** never exercised against Postgres. `percentile_disc(0.95)` vs SQLite `OFFSET trunc(Count*0.95)-1` diverge at n=101 (96th vs 95th value); A5's "nearest-rank equivalence" claim is wrong. Task 4's `bucket_expr` omits `AT TIME ZONE 'UTC'` (`to_timestamp` yields timestamptz → session-TZ drift). Unverified: epgsql affected-row shape (A4's own hedge has no scheduled fallback), `||` cast, `numeric`-as-binary decode, `PRAGMA foreign_keys` state.
+- **gen_server:** `q/2` has no try/catch; if `janus_db_conn:query` exits, the writer dies and the whole in-flight buffer + 1s window is lost on restart. `dropped` is write-only — unobservable except logs.
+- **Data plane:** tail reassembly copies ≤16KB per SSE chunk (O(stream size)) — acceptable, but `track/3` defaults tokens to **0**, defeating A1's "NULL = not reported"; every no-usage event becomes a real zero.
+- **Hot path:** total added cost (2 PD reads/writes + one cast + 20KB parse per stream) is fine; the stream-vs-non-stream p95 blend stands — the new `stream` column is not used to segment it.
+
+**Contradictions / stale**
+- Task 4 spec still `recent/1` vs A5 `recent/2`; breakdown dims omit `provider_key`; p95 returns 0 where A5 promises `null`.
+- Task 8 shared types lack `by_provider_key` though A8/A9 require it; the authoring artifact ("a thin Bar? No —") remains; "All 8 tests" is now 9 after A2.
+- Self-review says a failing DB "would grow the buffer… log line is a follow-up" — A3 already caps and logs; stale.
+- "(deleted)" labeling promised for null FKs, but the new `provider_key` breakdown name is NULL when the provider row is gone.
+
+**Missing first-ship**
+Any Postgres run (migration + endpoints + dialect branches); sweep functional test (back-dated row); `PRAGMA foreign_keys` check in Task 1 Step 3; writer/rollup eunit (parser-only coverage); a `stats/0` or metric for drops; kill switch actually documented in config; a runbook note for a mixed "old DDL already applied" dev DB.
+
+**Architecture notes**
+Buffered writer shape is right (cap + chunked multi-row ≤550 params). PD hook erase-at-entry fixes keep-alive leak; `track` non-map guard is safe. Parser needs head-4KB/last-16KB usage or it's lost — document as a provider-compatibility caveat. Sweep inside the writer process blocks flushes; batch cap mitigates.
+
+**Top 5 edits**
+1. Overwrite Task 1's SQL files with A1's DDL verbatim; append idempotent `ALTER TABLE usage_events ADD COLUMN stream` for DBs already on the old DDL.
+2. `track/3`: `maps:get(prompt, Usage, null)` / completion; unit-test an all-null event flush.
+3. unify p95: SQLite `OFFSET max(0, ceil(0.95*Count)-1)`-equivalent logic, return `null` when empty; ship `bucket_expr` with `AT TIME ZONE 'UTC'`.
+4. Wrap `q/2` in do_flush/sweep with try/catch; expose `stats/0 → {buffered, dropped}`.
+5. Add a Postgres lane to Task 9: apply 004 postgres, curl both endpoints (`by_provider_key`, `stream`, `recent` filters), back-date a row and assert the sweep deletes it, verify epgsql affected-row return.

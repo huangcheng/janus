@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — the shape is sound, but the streaming protocol mismatch, per-row "batch" writes, and unbounded buffer make it unsafe to ship as written.
+
+**2. Critical risks**
+- **SSE fidelity:** `maybe_inject_stream_usage` and `from_sse` are gated on `ClientProto`, but the upstream is `ProviderProto`. A client speaking `openai_chat` routed to an Anthropic provider gets `stream_options` injected into an Anthropic request *and* its SSE parsed as OpenAI. Parse/inject on provider protocol; store client proto only for display.
+- **Head capture is first-chunk-only:** `capture_usage_chunk` stores `min(len, 4096)` of chunk #1. Anthropic `message_start` routinely lands in chunk #2+, so `prompt` silently becomes 0. Accumulate head until 4096 bytes.
+- **Hot path:** `length(Buf2)` is O(n) per cast (O(n²)); flush does 100 single `INSERT`s, not a batch; `binary:part` copies 16KB per SSE chunk. One global gen_server is a per-request mailbox bottleneck.
+- **Failure mode:** DB down → flush loops failing inserts synchronously inside `handle_cast`, buffer grows unbounded, then `buf=[]` discards rows anyway. Self-review calling this "bounded by flush cadence" is false.
+- **Dual-DB:** SQLite `p95` uses nearest-rank `OFFSET`, Postgres `percentile_cont` interpolates → different numbers. `ORDER BY 5` sorts by completion tokens, not requests. `AVG` excludes NULL latency while `COUNT(*)` doesn't.
+- **Migration:** `004` FKs `api_keys/models/providers`; if `002` is postgres-only, confirm those tables exist in the SQLite lineage or the FK fails.
+
+**3. Contradictions / stale claims**
+- "batch-inserts" vs per-row `foreach` INSERT.
+- Scope promises "latency avg/p95"; page outline shows p95 only.
+- "provider-key column" is stored but never surfaced.
+- Task 9 starts `janus_usage` manually; supervisor edit only takes effect on redeploy.
+- `rewrite_pg/1` is copy-pasted despite the plan citing `janus_dashboard_store`.
+
+**4. Missing first-ship**
+- No test for rollup SQL on either backend (only the parser is TDD'd).
+- No handling of client-aborted streams, dropped events, or drop counters/logs.
+- `recent/1` has no key/model filter — not a real drill-down.
+- Unbatched 30-day `DELETE` will lock/block.
+- `p95` and breakdowns rescan `usage_events` per request with no latency index.
+
+**5. Design notes**
+Parser `max(prompt)/max(completion)` is a heuristic: correct for cumulative Anthropic, overcounts providers emitting per-chunk deltas. `janus_usage:record/1` `catch` swallows all errors, hiding badargs. Read path runs synchronously in the dashboard request process — fine, but cache 24h totals.
+
+**6. Top 5 edits**
+1. Gate inject + `from_sse` on `ProviderProto`; keep client proto for the column.
+2. Accumulate head to 4096 bytes; add drop-oldest cap + logged drop counter in `janus_usage`.
+3. Multi-row INSERT in one transaction; integer counter instead of `length/1`; flush in a supervised task.
+4. Fix `ORDER BY` to requests; align p95 semantics across backends; render avg latency.
+5. Batch the sweep; add dual-backend SQL tests and verify SQLite FK targets before `004`.

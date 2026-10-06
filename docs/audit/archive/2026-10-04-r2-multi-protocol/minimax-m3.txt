@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES 鈥?sound skeleton, but `x-api-key` semantics, tool-call fidelity, SSE error contracts, and field-drop policy need hardening before merge.
+
+**2. Critical risks**
+- `x-api-key` double duty: inbound = agent key, outbound to Anthropic = upstream key. Risk of leakage if handlers forward na茂vely. Require: accept as agent key only when `Authorization` absent (or matches); never copy client `x-api-key` into the upstream request.
+- Tool translation fidelity: `tool_call_id` namespaces differ (`call_*` vs `toolu_*`) 鈥?request-scoped rewrite needed; malformed `arguments` JSON must 400, not silently coerce; parallel tool-call order must be preserved; Anthropic requires top-level `max_tokens` 鈥?inject from provider metadata, never let it default.
+- SSE streaming: no spec for terminal-status detection or mid-stream upstream failure 鈫?cooldown. Cowboy chunked reply must close cleanly with an SSE error frame when the upstream dies.
+- Auto-router ambiguity: "translate after tier pick" doesn't say whether `maybe_route/2` sees client shape or chat shape. Pin the ordering.
+- Silent feature drops: `response_format`, `tool_choice`, `temperature/top_p/seed/logprobs/n/user/stop`, Responses `store` (must force `false`), `previous_response_id`, computer-use/MCP/web-search/code-interpreter/image-gen items 鈥?none enumerated; each needs an explicit drop-or-400 rule.
+- Cooldown contract: clarify whether gun transport errors after headers are sent count for LB; same for partial-stream success.
+
+**3. Contradictions / stale**
+- "stop forcing `stream => false`" contradicts the live call site 鈥?fine as a refactor TODO but currently a moving target.
+- messages鈫攔esponses "via chat pivot" doubles translate cost and error surface; document latency budget or implement direct.
+
+**4. Missing first-ship requirements**
+- Per-provider config: `anthropic_version` (default `2023-06-01`), optional `anthropic_beta[]`, `default_max_tokens`.
+- Body size limits per endpoint (Anthropic tolerates large embedded `system` blocks).
+- Structured request logs: `client_proto`, `provider_proto`, `translate`, `model`, status, latency, error code.
+- Per-protocol upstream error mapping (Anthropic `{type:"error",...}` 鈮?OpenAI `{error:{message,...}}`).
+- Readiness probes and per-pair README caveats (what 400s, what's lossy).
+
+**5. Architecture**
+- Centralize dispatch in `janus_http_proxy`; handlers only do parse + auth + delegate.
+- Keep `janus_protocol_translate` pure (req鈫抮eq, resp鈫抮esp) so eunit covers it without gun/Cowboy.
+- Catalog row should carry `default_max_tokens` and `anthropic_headers`.
+- Streaming owner: dedicated per-request process awaits gun stream, forwards chunks to Cowboy, applies cooldown on terminal error.
+
+**6. Top 5 concrete edits**
+1. Pin `x-api-key` precedence (no `Authorization` 鈬?accept as agent key; never forward to upstream); document in README.
+2. Enumerate translate-supported fields; reject `previous_response_id`, `store:true`, computer-use/MCP/web-search/code-interpreter/image-gen Responses items with `translate_unsupported`; force `store:false`.
+3. Add SSE streaming spec: Cowboy `text/event-stream` chunked, dedicated owner process, cooldown on gun error post-headers, SSE error frame then close.
+4. Tool translator: rewrite `tool_call_id`, 400 on malformed `arguments`, preserve parallel order, inject `max_tokens` from provider config.
+5. Add per-provider header config (`anthropic_version`, `anthropic_beta[]`, `default_max_tokens`) and the per-request log fields listed above.

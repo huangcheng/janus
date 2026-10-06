@@ -1,0 +1,30 @@
+1. **Verdict:** GO WITH FIXES — solid skeleton and audit-driven guardrails, but phase ordering labels, C5 index-remap policy, corpus freshness, reverse-direction grammar, and a missing usage-row column need tightening before 1.0 lands.
+
+2. **Critical risks:**
+   - C4 "commit = first DATA frame" is aspirational: Cowboy `stream_reply` flushes headers+first chunk together; "retriable until first write" needs an explicit operational rule (e.g., a pre-write `pending` flag inspected before every chunk).
+   - C5 leaves index-remap implicit. Chat upstreams re-use `tool_calls[i].index` for parallel calls; must remap to sequential anthropic `content_block.index` and guarantee synthesized ids never collide with upstream ids (per-attempt disjoint id space).
+   - 1.3/1.4 ordering mislabeled: 1.4 is the *gate that proves* 1.3; calling it "substrate" alongside 1.5–1.8 will confuse task splits. Substrate = 1.1, 1.2, 1.5–1.8; 1.4 = gate.
+   - 1.8b adds cache tokens but omits a `terminal_reason` column; without it "how often does translate cut the stream" is unanswerable from `usage_events`.
+   - C6 has no freshness check; a gate passing against 9-month-old fixtures is a false positive.
+   - 2.2 reasoning-effort → provider thinking is hand-waved: anthropic needs `budget_tokens`+headroom, chat needs effort string — not 1:1.
+   - 3.1/3.2 reverse direction (chat client → responses provider) under-specified: chat deltas don't carry function-call args in responses shape; synthesized skeleton fields (instructions, prompt_cache_key, safety_identifier, parallel_tool_calls) need a real spec.
+   - 1.8c cross-repo coupling: dashboard route-matrix warning gates Phase-1 ops signal; if dashboard lags, operators fly blind.
+
+3. **Contradictions / stale:**
+   - "E.5/E.6 gate steps" reference no in-plan enumeration; pin to `../janus-dashboard/scripts/e2e_local.sh` step numbers.
+   - `test/fixtures/sse/` path not bound to an app (`apps/janus_http/test/...`?).
+   - "Non-stream keeps whatever request translate does today" for n>1 — today it errors on cross-protocol; "documented not widened" should be explicit.
+
+4. **Missing first-ship:**
+   - Translate metrics: pair × {success, cut, error} counters; half-open-tool-block rate. 1.4's "10-concurrent smoke" needs a pass criterion beyond "no stuck inflight".
+   - Request-side pre-validation: chat→anthropic JSON Schema `$ref`/union-types 400 cleanly before upstream.
+   - 2.2 needs canonical ordering of reasoning items vs message items in the responses skeleton.
+
+5. **Architecture notes:** sse_st gains tool accumulator + responses target — well-scoped. Error taxonomy lacks "upstream malformed event" (skip+log vs terminal). Per-attempt usage row needs `terminal_reason ∈ {success, midstream_cut, upstream_error, translated_error}`. Reverse-direction state machine (3.2) is load-bearing; needs an event-mapping table as detailed as C1.
+
+6. **Top 5 edits:**
+   (a) Relabel 1.4 as gate; substrate = 1.1, 1.2, 1.5–1.8 only.
+   (b) Add explicit C5 rule: chat re-used indices → sequential anthropic blocks; synthesized ids disjoint from upstream id space.
+   (c) Corpus manifest with sha256 + mtime; gate asserts ≤90d or `--force-refresh`.
+   (d) Add `terminal_reason` to `usage_events` migration in 1.8b.
+   (e) Expand 3.2 with reverse-direction event-mapping table + missing-fields synthesis (instructions, prompt_cache_key, safety_identifier, parallel_tool_calls).

@@ -1,0 +1,33 @@
+# Audit — Usage Statistics Plan (rev 5)
+
+**1. Verdict: GO WITH FIXES** — rev-4 issues are genuinely resolved and the architecture is sound, but five small, concrete defects remain (none blocking on their own).
+
+**2. Critical risks**
+- **SSE fidelity**: max-normalization + regex fallback is correct for cumulative dialects; residual gap: if *any* data line decodes a usage (e.g. Anthropic `message_start`) while the terminal event is oversized, the regex fallback is skipped and completion under-reports. Pathological only; document it.
+- **Dual-DB SQL**: dialect branches are consistent (`percentile_disc`, `strftime`, `CAST AS TEXT`, `LIMIT`-in-IN both work); Postgres lane is optional, so those branches ship live-verified only if a PG dev node exists.
+- **Hot-path cost**: bounded (≤4KB head copies, tail scans ≤257, one cast/request). Fine.
+- **Migration safety**: idempotent DDL, 004 numbering and parent-table preconditions checked; PRAGMA-FK inertness handled.
+- **Retention/sweep**: COUNT-then-DELETE loop is sound; 100-batch ceiling is logged.
+- **Buffer failure modes**: drop-newest + atomics counting verified; `terminate/2` flushing 10k rows (200 chunks) within 15s requires <75ms/insert — a slow DB loses tail rows silently if killed mid-flush.
+- **Identity/FK**: route-map ids are *assumed* integers; nothing in e2e asserts real rows have non-null `model_id`/`provider_id`/`provider_key_id`. If any is a slug, `int_or_null` silently nulls it and every breakdown degrades to `(deleted)`.
+- **p95**: nearest-rank math is correct (`ceil(0.95N)-1`); unindexed latency sorts per 30s poll over 30d windows — acceptable at gateway scale, note it.
+
+**3. Contradictions / stale claims**
+- Task 2 Step 4 says "All 12 tests passed" but lists 13 tests (Task 4 itself says "parser (13)") — despite rev 5 claiming "test counts corrected".
+- Task 6 has two "Step 4" headings (compile, then commit).
+- Self-review says flush runs "~1/sec" but it also fires at 100 buffered rows (minor).
+
+**4. Missing first-ship requirements**
+- E2E assertion that a live proxied row carries non-null FK ids (catches the slug risk above).
+- Client-abort vs upstream-failure distinction: the drain's `{error,_}` branch records 502 for client disconnects too, inflating `errors`/502 counts — document or tag (e.g. 499).
+- `key_id=0` / negative ids: `qs_int` clamps to `max(Min, N)` = 1, silently showing key 1's data instead of 400.
+
+**5. Architecture/design notes**
+Buffered single-writer funnel with bounded mailbox is the right shape; pdict scratch with entry-erase is keep-alive-safe; parser is pure/total; `breakdown_dim` + ordinal `ORDER BY 3` works on both dialects; SPA zero-fill/bucket contract is complete; `maybe_trim` newest-first invariant verified against its tests.
+
+**6. Top 5 concrete edits**
+1. Task 2 Step 4: "12" → "13"; renumber Task 6's duplicate Step 4.
+2. `usage_filters`: reject ids < 1 with `err(400, bad_filter)` instead of clamping via `max(Min, N)`.
+3. Task 9 Step 2: add assertion that the non-stream and stream rows have non-null `model_id`, `provider_id`, `provider_key_id`, `agent_key_id`.
+4. Task 6 error branch: classify client disconnects distinctly from upstream 502 (or state in the migration comment + SPA note that 502 includes aborted drains).
+5. `maybe_trim` chunk-cap branch: recompute `Size` after `lists:sublist/2` — the stale byte count violates the {chunks,size} invariant and forces spurious refolds.

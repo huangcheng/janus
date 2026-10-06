@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the spec is largely airtight after §10, but four undecided contract holes remain, the largest being the undefined `message_start` guarantee on the Chat→Anthropic face.
+
+**2. Critical risks**
+- **Chat→Anthropic envelope:** `message_start` is pinned to "first chunk with `delta.role`". OpenAI-compatible providers that omit the role chunk (common in aggregators/vLLM frontends), and zero-chunk streams, then emit `content_block_*`/`message_stop` with no envelope → invalid Anthropic stream Claude Code rejects. The zero-content finalize branch has the same hole (block emitted, message never started).
+- **Mid-stream finalize:** drain EOF → `finalize_sse(normal)` is specified, but the default `finish_reason`/`stop_reason` when the provider never sent one is not.
+- **Counters:** "authenticated 404 increments both" holds only if `inc_total` strictly precedes catalog lookup inside `do_proxy`; reversed order breaks `failed ≤ total`. janus-auto safety rests entirely on the `janus_stats_failed` flag — pin it as an invariant.
+- **include_usage retry:** trigger undefined — as written it could retry on 401/5xx, doubling upstream calls.
+
+**3. Contradictions / stale claims**
+- None blocking; §2↔§4.3 (release-stage vs new `test` stage) is consistent. Minor wrinkle: §4.3 stresses `COPY rebar3 /usr/local/bin/rebar3` "so mounts cannot shadow it", yet the documented run command invokes `./rebar3` (safe only because nothing mounts over `/app/rebar3`).
+
+**4. Missing requirements**
+- Lazy `message_start` guarantee + fallback `id`/`model` synthesis when no role chunk arrives.
+- Terminal defaults for `finalize_sse(normal)` with missing finish reason.
+- Exact retry trigger/limit for `stream_options` injection.
+- In-chunk ordering when one Chat chunk carries **both** `delta.content` and `delta.reasoning_content` (block transition must serialize deterministically).
+- TF-6.8b assertions: event order `message_start` → … → `message_stop`, no bare `[DONE]`, and a no-role-chunk fixture.
+
+**5. Architecture/design notes**
+- Handler-owned `#sse_st{}` + single idempotent `finalize_sse` in `try/after` is sound; keep `terminal_sent` as the sole guard.
+- Atomics via `persistent_term`, per-node, reset-on-restart matches the dashboard's per-node table; FastAPI passthrough keeps SPEC §2.4 honest.
+- Slice C: also ensure the `test` stage warms rebar3's **hex cache** (not just `_build`), since the named volume shadows `_build` but the image cache is what prevents first-run hex fetches.
+- Dual-repo pairing of Slice A with TEST-FLOWS is the correct gate.
+
+**6. Top 5 edits**
+1. §4.1.3: emit `message_start` on first chunk with `delta.role` **or first chunk with any delta**; synthesize at finalize if never sent (fallback id/model). Add eunit for a no-role provider.
+2. §4.1.2: define `finalize_sse(normal)` defaults — `stop`/`end_turn` when finish reason absent, log once.
+3. §4.1.1 item 5: retry without `stream_options` only on pre-first-byte **400**, exactly once; never 401/5xx.
+4. §4.1.3: state deterministic processing order for chunks carrying both content and reasoning deltas.
+5. §4.2: spell out `inc_total` before model resolution; add `failed ≤ total` invariant check to TF-6.1.

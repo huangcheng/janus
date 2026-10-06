@@ -1,0 +1,36 @@
+**Verdict: GO WITH FIXES.** §4.1.2's record definition lists only `terminal_sent`; the same section's `finalize_sse` reads "`usage_sent` / `finish_sent` on St" to gate double-emit. The referenced flags do not exist on the record. §10 does not close this.
+
+**Critical risks:**
+
+1. **`#sse_st{}` vs `finalize_sse` (§4.1.2).** Record has `terminal_sent` only; `finalize_sse` references `usage_sent` / `finish_sent` to prevent double-usage/finish emits. As written the gate is absent: a late `message_delta` carrying usage followed by `finalize_sse(normal)` would re-emit.
+
+2. **Counter mechanism (§4.2).** "Atomics: created once in `janus_http_app` before Cowboy listeners (`persistent_term`)" is undefined — values vs refs both fit. Probably `counters:new(1, [])` with the ref under a PT key. `janus_http_stats:inc_total/0` cannot be implemented without the decision.
+
+3. **Empty-diff vs `--code-only` (§4.4 step 0).** "Skip the generation wait (same as `--code-only`)" but §10 says `--code-only` enforces the uptime window. Specify: empty-diff = skip gen wait, no image check; `--code-only` = skip gen wait, enforce uptime window for changed image digests.
+
+4. **Test-profile compile gap (§4.3).** RUN does `rebar3 compile` (default); user runs `rebar3 eunit` (test). First eunit after `docker volume rm` recompiles the test profile (~30s). State explicitly.
+
+5. **`track(400|502)` after SSE 200.** Mid-stream n>1 / provider errors keep wire 200 but bump `requests_failed`. SPEC §2.4 is "counted population", not wire status. Spell out so the SPA does not chart wire status by default.
+
+**Contradictions / stale claims:** None of substance. §10 closes every open one (idle, translate_unsupported, n>1, signature, include_usage retry, janus-auto inner, volume wipe-on-change).
+
+**Missing requirements:**
+
+- 403 from `/stats` probe (§4.4 step 5 lists only 401).
+- `St` mutation ownership: `sse_events/2` writes only `leftover`; `translate_sse/4` writes the rest? Spec implies yes; doesn't say.
+- `delta.tool_calls` arm → `{error, translate_unsupported}` (§4.1.3) → after-200 maps to 502 (§4.1.4), but pre-upstream is 400 (§4.1.1). If it slips through, which wins?
+
+**Architecture/design notes:**
+
+- Handler process owns `#sse_st{}`; drain fold; `try/after` keeps `gun:cancel` idempotent. Correct.
+- `inc_total` before model lookup = correct counted-population entry.
+- Per-node counters via PT-held refs; `/stats` derefs. OK.
+- Dual-repo TEST-FLOWS pairing correctly specified for Slice A.
+
+**Top 5 concrete edits:**
+
+1. Add `usage_sent` / `finish_sent :: boolean()` to `#sse_st{}` (§4.1.2); reference them in `finalize_sse` clauses.
+2. §4.2: counters = `counters:new(1, [])`, ref under `persistent_term`. Drop "atomics + persistent_term" loose wording.
+3. §4.4 step 0: split empty-diff (skip gen only) and `--code-only` (skip gen + uptime window).
+4. §4.3: "First `rebar3 eunit` after `docker volume rm` recompiles the test profile; subsequent runs are incremental."
+5. §4.2: restate SPEC §2.4 counted-population note; counter ≠ wire status after SSE 200.

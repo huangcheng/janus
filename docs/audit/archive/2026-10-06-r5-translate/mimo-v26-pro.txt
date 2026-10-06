@@ -1,0 +1,26 @@
+**1. Verdict: GO WITH FIXES** — the contracts are nearly audit-proof, but the Phase-1 checklist order defeats the stated dependency, and one stream-terminal path is undefined.
+
+**2. Critical risks**
+- **Retry-exhaustion hole (C1×C4).** Commit = first data frame, but headers already went out via `stream_reply`. If all pre-commit attempts fail, the stream has sent headers, zero data frames — C1 says the terminator is emitted "exactly once per COMMITTED response," so this path has no prescribed terminal bytes. Must be defined (error frame + terminator regardless of commit, or a documented bodiless-502 exception).
+- **Checklist order contradicts the dependency.** 1.3 is bullet-listed before 1.4a–1.8, yet "runs only after 1.4-1.8 exist." A checkbox-driven worker ships 1.3 first and instantly activates assertions that can't pass — the exact 1.3/1.4 deadlock R4 claims to have resolved.
+- **Stream-degradation storage gap.** C2 routes stream degradations into "the terminal event + usage row," but 1.8b's migration adds only `cache_read_input_tokens`. `usage_events` has no dropped-features/mapped-stop column; the promised usage-row record has nowhere to live.
+- **Unbounded per-stream maps.** C5 caps args (256KiB/call) but not the number of items/blocks/call ids per stream; a hostile upstream emitting 10⁵ `output_item.added` grows `sse_st` maps unbounded (the 1MiB leftover cap doesn't cover this).
+- **Backward compat of unblocking.** Removing `has_tools`/`has_non_text_content` flips existing eunit (123) and gate (69-step) expectations that encode the 400; default-on also silently changes client-visible behavior. Knob-off must become the new home for those assertions — stated for 1.3 gate steps, not for the existing suite.
+
+**3. Contradictions / stale claims**
+- 1.4b's "eunit ... 10-concurrent ... memory + no stuck inflight" is runtime behavior — E2E territory per AGENTS.md; eunit here contradicts the project's own testing rule.
+- 1.3 gate says "exactly one usage row per attempt," C4 requires a terminal partial row plus rows for failed pre-commit attempts — count wording needs "one terminal row per attempt."
+- 1.1/1.2 eunit and 1.4b eunit overlap (same skeleton assertions, pre-unblock) without a stated split.
+
+**4. Missing first-ship items**
+- Retry-exhaustion terminal semantics (above); degradation column + writer; metric/log for translated-stream failures behind the knob; updates to existing 400-asserting tests.
+
+**5. Architecture notes**
+`translate_sse` extension points (per-attempt `sse_st`, four index maps) are sound; corpus-as-normative for event order is the right call. Error taxonomy is complete for post-commit but should add a row: all-attempts-failed pre-commit → HTTP 502 (headers unsent) vs error-frame+terminator (headers sent).
+
+**6. Top 5 edits**
+1. Renumber Phase 1: 1.4a/1.4b/1.5–1.8 before 1.3, or restate 1.3 as "ship last" in its own heading.
+2. Amend C1/C4: define terminal bytes for header-sent-but-uncommitted streams.
+3. Extend 1.8b migration with a `degradations`/`mapped_stop` column + writer + dashboard display.
+4. Add a per-stream item/block-count cap (C5) alongside the 256KiB args cap.
+5. Move 1.4b's concurrency/memory smoke into 1.3's E2E gate steps; keep 1.4b pure-mapping eunit only.

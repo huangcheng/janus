@@ -1,0 +1,27 @@
+1. **Verdict: GO WITH FIXES** — rev 8 is implementation-ready except for one real internal contradiction (synthesized-id prefixes) and a knob-off behavior-change leak in the 1.9 ship unit.
+
+2. **Critical risks**
+- **ID collision (must fix):** 2.1 specifies synthesized prefixes `resp_`/`msg_`/`fc_`/`item_` — these are *real* OpenAI namespaces; synthesized ids WILL collide with replayed upstream ids. C5 mandates `jresp_`/`jmsg_`/`jfc_`/`jitem_` and cites 2.1 as its home — 2.1 (and 3.2a's `item_`/`fc_` wording) was never updated.
+- **Ship-unit purity:** 1.9 claims "knob DEFAULT OFF = zero behavior change," but 1.5's evidence rule may ship an *ungated* `n_unsupported` reject inside the same commit. Split the ungated reject into its own pre-1.9 bug-fix commit.
+- **Latency regression ambiguity:** R7 header says interleaved serialization = "full-accumulate-emit-at-close"; C5 body says blocks emit "at their close points." If full-stream buffering is read as unconditional, chat clients lose incremental text streaming. Specify: buffer only on detected interleaving; text-only runs stream through; full-object accumulation is only a →responses terminal requirement.
+- **Fixture producibility:** a genuinely captured >64-tool-calls transcript is unlikely from any real provider; C6's "no hand-invented frames" makes the cap proof uncapturable. Allow corpus-derived concatenation, labeled as derived.
+- Minor: latency/memory bounded by stated caps; entitlement/LB/failover interactions well covered in 1.9 assertions.
+
+3. **Contradictions / stale claims**
+- 2.1 vs C5 prefixes (above); 3.2a repeats it.
+- 3.5 "if any [block leg] remains" — the coverage table shows chat/anthropic → responses-provider streaming is blocked today; the hedge is stale.
+- Phase 3's title promises a "conformance suite"; tasks deliver corpus + eunit only — rename or add the suite task.
+
+4. **Missing first-ship requirements**
+- **Phase 2:** `reasoning.effort` → anthropic `budget_tokens` mapping policy is unspecified (a number must be chosen and asserted); `sequence_number` synthesis ownership (translator-assigned counter) stated only implicitly.
+- **Phase 3:** adapter error taxonomy (C2 map) and 300s `idle_timeout` are parked in 3.5/3.4 but are 3.1 adapter acceptance criteria — a wired adapter without error mapping fails C2 on day one.
+- **Phase 2:** 2.4 omits the `translated=1` usage-row assertion that 1.9 requires.
+
+5. **Architecture notes** — C1–C6 are now precise enough to code against; C4's three-outcome rule and C5's four-index-space map with terminal-signal completeness invariant are the load-bearing pieces. Keep the per-attempt `sse_st` reset eunit-asserted — it's the likeliest regression point.
+
+6. **Top 5 edits**
+1. `target.md` 2.1 + 3.2a: replace `resp_`/`msg_`/`fc_`/`item_` with `jresp_`/`jmsg_`/`jfc_`/`jitem_`.
+2. Task 1.5/1.9: move the ungated n>1 reject (if evidence warrants) to a separate pre-1.9 commit; 1.9 reverts to pure knob ship.
+3. C5: one sentence — buffering only on interleaving; which directions require full accumulation.
+4. 1.0 DONE criteria: permit derived (concatenated) transcripts for >64-calls/truncation fixtures.
+5. Phase 3: move C2 error mapping + idle_timeout into 3.1's DONE; add `translated=1` to 2.4.

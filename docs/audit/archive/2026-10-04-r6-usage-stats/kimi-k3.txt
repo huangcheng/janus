@@ -1,0 +1,30 @@
+**1. Verdict: GO WITH FIXES** — rev 4 resolves all round-3 classes, but one test-module compile error and one SSE semantics regression must land before implementation starts.
+
+**2. Critical risks**
+- **Test suite broken:** `janus_usage_sql_tests.erl` defines `no_qmark_literals_test/0` twice (beam-scan + fragment-scan) → duplicate-function compile error; Task 4 Step 2 "verify they fail" actually fails to compile, and Step 4's "3 SQL tests" count is wrong (4 intended). Hard blocker.
+- **Genuine-zero fix is body-only:** the round-3 "genuine zero ≠ unreported" fix uses `has_known_key` in `norm/1`, but `from_sse/3` still collapses a decoded `{0,0}` usage list to `undefined` via the `{0,0} -> undefined` clause. A real zero-valued SSE usage chunk is again misreported as unreported. Mirror the body semantics: if any decoded usage had known keys, return the zeros.
+- **Tail capture is byte-bounded, not count-bounded:** `trim_tail/1` folds the whole chunk list per incoming chunk; with pathologically fragmented delivery (1-byte chunks) that's ~16k elements per fold → O(n²) on the hot path. Add a max-chunk-count cap (e.g. 64) alongside the byte cap.
+- **Postgres lane is shape-tested only:** `percentile_disc ... WITHIN GROUP`, `||` concat, `CAST AS TEXT`, and `date_trunc` bucket exprs are never executed in tests; the "optional" Postgres lane means dialect SQL could ship unverified. `AVG` on Postgres returns numeric — confirm epgsql decodes it into something `num/1` handles (binary float path exists, but verify).
+- **Double-count risk on retries:** Task 5 records 401/429/5xx in "terminal" clauses, but the plan never states these clauses are post-retry-exhaustion. If `janus_http_proxy` retries alternate routes/keys on 401/429, one client request yields N rows. Confirm or record only on the final attempt.
+- **SQLite FK enforcement:** `PRAGMA foreign_keys` is per-connection; the plan checks it but never sets it in `janus_db_conn` — SET NULL may be silently inert (self-review accepts this; make it explicit in operator docs, not just plan notes).
+
+**3. Contradictions / stale claims**
+- Title says "rev 3"; revision history and the audit prompt say rev 4. Retitle.
+- Task 2 expects "All 12 tests passed"; Task 4 Step 4 says "parser (10)".
+- Revision history claims "real SQL scans + insert eunit" — the insert eunit exists (`build_insert_shape_test`) but the SQL scans are placeholder-shape only.
+
+**4. Missing first-ship requirements**
+- No eunit for buffer-cap drop-newest, mailbox back-pressure counter, or `sweep_batch` batching — the three most failure-prone paths are live-probe-only.
+- No down/rollback note for migration 004 (if `janus_migrate` is forward-only, say so).
+- No documented operator runbook for `writer.dropped > 0` / `writer.alive = false` surfaced in the UI.
+- Usage-page error/empty states specified, but no a11y/i18n pass on the new table (status colors only — add text).
+
+**5. Architecture/design notes**
+Buffered writer design is sound: drop-newest cap, throttled logs, 15s terminate budget, unlinked-eval caveat all correct. Process-dictionary hook is safe given entry-time erase; `trim_tail` output is chronological (foldl prepend over newest-first), so `iolist_to_binary` order is fine — but only whole lines survive chunk splits, which the parser tolerates. p95 nearest-rank semantics are consistent across dialects. Storing client protocol (dialect-agnostic parser) is the right call.
+
+**6. Top 5 concrete edits**
+1. Rename one `no_qmark_literals_test` → e.g. `beam_has_debug_info_test`; fix expected counts (12 parser / 4 SQL).
+2. `from_sse/3`: drop the `{0,0} -> undefined` collapse; return zeros when any usage carried known keys.
+3. `trim_tail/1`: enforce both ≤16KB and ≤64 chunks.
+4. Task 5 Step 5: add an explicit precondition — verify 401/429 clauses fire only after route-retry exhaustion, else move `track` to the true terminal point.
+5. Task 4/Task 9: make the Postgres lane non-optional for `p95`, `breakdown(provider_key)`, and `bucket_expr` (run once in CI or a scripted container), plus add eunit for cap-drop and sweep batching.

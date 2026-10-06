@@ -1,0 +1,34 @@
+**Verdict:** GO WITH FIXES — SSE mapping and slice split are sound; the blockers are downstream details (disconnect detection, mounted-volume CRLF, counter-vs-SPEC reconciliation, rebar3 install), not the design.
+
+**1. Critical risks**
+
+- **Peer-close mid-stream.** Spec mandates "cancel gun, do not wait idle_timeout" but never says *how* the handler observes the TCP close. `cowboy_req:stream_body/3` doesn't surface it until the 300 s idle expiry; without an inet `tcp_closed` monitor on `cowboy_req:transport_socket/1` (or `cowboy_req:cast/2` from `onresponse`), gun keeps the upstream connection open 5 min for nothing.
+- **Mid-stream error status.** Spec row "translate_unsupported after 200 → **400**" is correct for *client-side* tools arriving on the wire. But a provider-side `event:error` (Anthropic upstream 5xx surfaced as in-band SSE) must be **502**, not 400. Spec conflates them in §4.1.4.
+- **`requests_total` vs dashboard SPEC §2.4.** Spec excludes `/v1/models`, `/healthz`, 401, pre-`do_proxy` 400. SPA error-rate denominator must agree; otherwise the first `/v1/models` scrape makes the rate look 0 %.
+- **CRLF mounted volume.** `rebar3 fmt --check` over a Windows bind-mount flakes if even one `*.app.src` lacks the `core.autocrlf=false` rule; "spec: environment bug, not product fail" still means the documented command fails locally.
+- **Generation wait racy.** "Two consecutive equal polls" dodges a single stale read but not a *double* dashboard write within the 2 s window — confirm the actual bump sites in `janus-dashboard/app/services/`.
+
+**2. Contradictions / stale claims**
+
+- "300_000 idle_timeout accepted as idle risk" + "no keepalive" = a model that thinks silently >5 min is killed. Spec underplays it; 5 min is *the* common Cursor/Claude Code thinking case.
+- Slice C says "CI green ≠ laptop green" — fine — but doesn't gate the production mirror against GitHub runner reachability; aliyun is fine, but document the override knob.
+
+**4. Missing requirements**
+
+- Rebar3 install in the `test` stage (binary, or COPY from the prod build stage).
+- `map_size/1` (never `case M of #{}`) explicit rule for the new SSE code; the gotcha is in root `AGENTS.md` but not repeated here.
+- OpenAI provider: override-or-honor when client already sent `stream_options.include_usage:false`.
+- Drain backpressure / partial-flush on `cowboy_req:stream_body/3` returning `{error, closed}`.
+- Process-dict flag namespace (`'$janus_stats_counted'`) to avoid `janus_usage`'s existing key collision.
+
+**5. Architecture/design notes** — `#sje_st{}` owned by the handler process is correct; `gun:cancel/3` is the right primitive; persistent_term of the atomics ref (set once in `janus_http_app` pre-listener) matches `janus_usage`'s pattern. janus-auto = 1 outer call is correct.
+
+**6. Top 5 concrete edits**
+
+1. §4.1.2b — add: handler attaches `{tcp_closed, Socket}` monitor via `inet:getstat/2` on `transport_socket`; on close, `gun:cancel/3` then `finalize_sse(disconnect, _)`.
+2. §4.1.4 — split row 4 into "client-side tool_use → 400" vs "provider `event:error` → 502"; both call `finalize_sse/3`.
+4. §4.2 — pin the SPA denominator to the same exclusion set; add minimum-sample-size floor (e.g. `requests_total < 10` → render "—").
+5. §4.3 — add `.gitattributes` lines for `*.erl *.config *.app.src rebar.config` set to `text eol=lf`; COPY rebar3 into the `test` stage.
+6. §4.4 — on follower 401, `docker logs --tail 200` of that gateway into the deploy artifact, then halt.
+
+Word count: ~445.

@@ -1,0 +1,21 @@
+**1. Verdict: GO WITH FIXES** — the architecture and format work are sound after eight rounds, but rev 8 contains one claim-vs-code contradiction and one commit-list gap of exactly the class flagged in prior rounds.
+
+**2. Critical risks** — all adequately addressed: cardinality is closed-enum + operator names only; hot path is `whereis` + integer `update_counter` bumps under try/catch; exposition format is promtool-gated and byte-exact-eunit-pinned; auth is extracted verbatim with a 401 regression step; bucket ladder is cumulative-by-construction with `+Inf`-first bump order satisfying `count ≤ +Inf` at every interleaving; request-id hygiene (128-byte charset whitelist, never echo unsanitized input, `filter_headers` can't clobber) is correct; migration 009 targets the executing subdirs with dual dialects; per-node scrape jobs match node-local counters.
+
+**3. Contradictions / stale claims**
+- **`buckets()` is not derived from `?BUCKETS_DESC`.** Rev 8 history and both docstrings claim single-sourcing ("derived from it — the two can never drift"), but the listing shows `buckets/0` as a second hardcoded literal. Editing one silently forks the bump ladder from the render ladder. Make `buckets() -> lists:reverse(?BUCKETS_DESC).` or drop the claim.
+- Module header still says the table is "looked up by name **per bump**"; `observe/3` hoists one `whereis` per call (its own comment says so). Stale wording.
+- Task 5 Step 3b modifies `janus_http_chat/messages/responses` (the `janus_req_counted` erase) but Step 7's `git add` omits them — the erase lands uncommitted. Same defect class as the rev-6 Task-4 gap.
+
+**4. Missing first-ship requirements** — none blocking. Dashboard read path, gate assertions (401/stream echo, translate-path labels, structured log field, promtool mandatory), README ops notes are all present.
+
+**5. Architecture/design notes** — registry-driven renderer, pure/total render, whole-body try in the handler, handler-entry `set_resp_header` on the shared Req chain, and the counted-flag guard are all coherent. One latent edge: two *non-canonical* same-valued bounds (e.g. `1.0` and `1.00` from a ladder edit) both survive `dedupe_bounds` and each renders the merged `sum_dupes` count — double-counted exposition. Only reachable via hand-edited rows; acceptable as documented defense-in-depth, but worth one comment.
+
+**6. Top 5 concrete edits**
+1. `buckets() -> lists:reverse(?BUCKETS_DESC).` (or fix the docstrings).
+2. Add the three handler files to Task 5 Step 7's `git add`.
+3. Module doc: "per bump" → "per call".
+4. Note the non-canonical-dupe double-render caveat in the renderer docstring.
+5. In `generate/0`, note the fallback crash path is unguarded inside its own catch (negligible, but one-line comment).
+
+Fix items 1–3 and this ships.

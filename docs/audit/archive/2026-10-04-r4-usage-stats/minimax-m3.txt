@@ -1,0 +1,48 @@
+## Verdict
+**NO-GO.** The A1–A10 fix section is materially different from Tasks 1–9, the discrepancies ship by default, and several "fixes" introduce new bugs.
+
+## Critical risks
+- **SSE usage fidelity:** `from_sse`'s `binary:split(..., [global])` plus per-line `data_line_usage` ignores `event:` lines but Anthropic's terminal `message_stop` carries no usage; combining head+tail with "max of each" is correct only when upstreams are strictly cumulative. Some Anthropic-compatible providers emit non-cumulative `message_delta.output_tokens`, in which case max over-counts. No test covers this.
+- **Nullable token semantic is broken:** A1 makes `prompt_tokens/completion_tokens` NULL "when upstream did not report usage", but every non-2xx / mid-stream-error / error clause in `track/3` passes `#{}` and `maps:get(prompt, Usage, 0)` yields `0`. NULL semantic is silently violated for all errors.
+- **Sweep on the writer process:** `handle_info(sweep, ...)` calls `q(...)` inline, blocking every `record/1` cast during the DELETE. Move to a worker.
+- **Sweep affected-rows contract:** A4 assumes integer `N` from the driver but ships no `COUNT(*)` fallback despite saying it should fall back.
+- **Identity/FK:** Postgres FKs reference `api_keys.id` / `models.id` etc. — the plan never confirms those columns are `BIGINT` (some prior migrations are postgres-only, parent type unverified).
+- **`bool_int/1` undefined:** A6 says `stream => bool_int(Stream)` — function not defined anywhere; the module won't compile.
+- **Buffer drain on flush error:** A3 drops the buffer on first failure even if the DB recovered next tick — by design, but no rate-limiting on the resulting warning log either (1×/s × 100 rows = noisy).
+
+## Contradictions / stale claims
+Fix-section vs task-section mismatches that will ship if you take the plan literally:
+1. Migration SQL: A1 nullable tokens, Task 1 `NOT NULL DEFAULT 0`.
+2. Parser `nested/1`: A2 probes `response`+`message`, Task 2 only `response`.
+3. Writer: A3 chunks + counter, Task 3 `length/1` per cast + per-row INSERT.
+4. `breakdown` ORDER BY: A5 says col 3, Task 4 says col 5.
+5. `p95`: A5 `percentile_disc`, Task 4 `percentile_cont`.
+6. `bucket_expr`: A5 adds `AT TIME ZONE 'UTC'`, Task 4 omits.
+7. `recent/1`: A5 inlines the limit literal, Task 4 uses `LIMIT ?` (epgsql rejects typed params).
+8. `capture_usage_chunk`: A7 accumulates head across chunks, Task 6 first-chunk-only.
+9. `maybe_inject_stream_usage`: A7 honors client `stream_options`, Task 6 `maps:update_with` overwrites it.
+10. Page grid: A9 says **4** breakdown cards in `xl:grid-cols-2` (add provider keys), Task 8 Step 2 says **3** cards in `xl:grid-cols-3`.
+11. API summary: A8 adds `by_provider_key`, Task 7 omits; events filters not wired.
+12. Proxy `handle/5`: A6 erases process-dict keys + drops `usage_ctx_route`, Task 5 adds it without erasing.
+
+## Missing first-ship requirements
+- **PRAGMA foreign_keys = ON** at runtime (A1 defers to "document instead" — no documentation step exists).
+- FK type alignment verification between `usage_events` and parent tables in both backends.
+- No integration test exercising `capture_usage_chunk` → `from_sse` → `track` on a real stream.
+- No regression test for non-cumulative Anthropic deltas (max strategy).
+- Log rate-limit / sampling on `janus_usage_flush_error` and `janus_usage_drop`.
+- Hot-verification `start_link` link issue (A10 fixes verification only; the supervised `start_link` is fine — confirm).
+
+## Architecture notes
+- Process-dict keys (`janus_usage_ctx`/`_head`/`_tail`) need a project-unique prefix; one collision with future code = silent corruption.
+- Buffered writer is fine; sweep is not — push to a short-lived `proc_lib:spawn_link` so the gen_server stays responsive.
+- Parser is pure but unbounded: a 16KB tail concatenated to a 4KB head runs through `binary:split + lists:filtermap + thoas:decode` per chunk is fine; keep it pure and add `try` around `thoas` for non-UTF8 bodies.
+- Rollup SQL: dialect branches in `p95`/`bucket_expr` are correct; the bug is only that the task body wasn't updated.
+- Page: pick a grid layout and stick to it.
+
+## Top 5 concrete edits
+1. **Adopt A1–A10 verbatim into Tasks 1–9**, delete stale code in the task bodies (resolve contradictions 1–12 above in one PR).
+2. **Define `bool_int/1`** in `janus_http_proxy` (or replace with explicit `case` for `Stream`).
+3. **Pass NULL on empty usage** in `track/3`: add `maybe_undefined(P)` for `prompt`/`completion` so error rows preserve A1's semantic.
+4. **Move sweep off the gen_server**: spawn worker per tick, and implement the `COUNT(*)` fallback when affected-rows is non-integer.
+5. **Reconcile A9 ↔ Task 8**: pick `xl:grid-cols-2` + 4 breakdown cards (add `provider_key`), and add `by_provider_key` to `/api/usage/summary` plus `key_id`/`model_id` filters on `/api/usage/events`.

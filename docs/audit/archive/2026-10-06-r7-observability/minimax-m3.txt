@@ -1,0 +1,41 @@
+## 1. Verdict
+GO WITH FIXES — shippable after the build_insert position typo, janus_metrics cosmetics, and migration transaction verification.
+
+## 2. Critical risks
+
+- **Cardinality**: closed enums + operator provider names; deleted providers orphan series until restart (README). Bounded.
+- **Hot-path**: ~18 `ets:update_counter` + 1 `ets:whereis`/req; constant-time atomic, sub-µs. Precomputed LeBins. OK.
+- **Format**: registry-driven; HELP/TYPE once/family; caller appends `le` last; buckets numeric-ascending +Inf last; `float_to_binary([short])`. Byte-exact test pins.
+- **Auth**: `janus_admin_auth` extracts /stats auth verbatim; loopback reads socket peer (never X-Forwarded-For); token required behind Caddy.
+- **Histogram**: descending bumps + +Inf first + count last → monotonic + count ≤ +Inf always; equality at quiescence. Gate asserts both.
+- **Request-id**: validator restricts `[A-Za-z0-9-_]{1,128}`. CRLF/space/comma-joined duplicates → generated. `strong_rand_bytes(8)` w/ unique-integer fallback (16-hex padded).
+- **Migration**: 009 in executing subdirs; flat dialect copies convention. Non-transactional runner leaves ADD COLUMN applied + INDEX failed → next boot fails column-exists. Verify.
+- **Multi-node**: per-node jobs + per-node `credentials_file`. Counters reset per restart (`rate()` handles); `lb_routes_cooling` node-scoped (don't sum).
+
+## 3. Contradictions / stale
+
+- **`status` "position 19"** in `janus_usage` shape test: 15-col list puts status at 8 (or 24 in 2-row flat 32-param). Plan typo — read the file first.
+- **Duplicate `-define(TABLE,…)` and comment block** above `buckets/0` in `janus_metrics.erl`.
+- **Two `-export(…)` lines** should merge.
+
+## 4. Missing first-ship
+
+- **`rebar3 fmt --check`** missing from compile/eunit commands.
+- **Token rotation order** unspecified: update scrape token file BEFORE node restart.
+- **Migration transaction wrapping** for `CREATE INDEX` not verified — needed for `CONCURRENTLY` escape on million-row tables.
+- **Smoke artifact path/duration** unspecified for `run_test_flows.py --smoke`.
+
+## 5. Architecture notes
+
+- **ETS registry**: named public `janus_metrics`, write/read concurrency, owned by janus_http app master. `init/0` idempotent; `inc/observe` whole-body try/catch; `ets:whereis` per call avoids persistent_term stale-tid.
+- **Renderer**: total, deterministic, registry-driven. Helpers keep numeric sort, count merge on duplicate spellings, binary name sort. +Inf whitelisted pre-partition.
+- **Hooks**: terminal paths only — `track/3` (janus-auto guard), `reply_err/6` (early rejects, `janus_req_counted` guarded), `unauthorized/2` (401s), models success. `/healthz` `/readyz` `/metrics` `/stats` excluded. Router 404s uncounted.
+- **Echo**: `set_resp_header` at handler init/2 BEFORE auth/proxy; same Req chain reaches `reply`/`stream_reply`. `track/3` reads pdict. Gate asserts 401 + stream + translate.
+
+## 6. Top 5 edits
+
+1. **Fix `janus_usage` shape-test position** — read file, assert status at correct index (8 single-row or 24 2-row). Append `request_id` as 16th col + param.
+2. **De-duplicate `janus_metrics.erl`**: merge `-export` lines, drop duplicate `-define(TABLE,…)`, trim duplicate comment above `buckets/0`.
+3. **Add `crypto` to `janus_http.app.src`** in Task 6. Admin auth's `hash_equals` relies on cowboy's transitive dep today.
+4. **Verify migration runner transaction semantics** for `CREATE INDEX`. Document the deploy escape for million-row tables or accept sub-second lock.
+5. **Lock `janus_req_counted` semantics** with a gate assertion that early rejects do NOT double-bump across `reply_err/6` retries, and all four agent handlers erase the flag at `init/2`.

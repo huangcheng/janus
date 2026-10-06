@@ -1,0 +1,31 @@
+# Audit — Janus Observability Plan, rev 6 (round 6)
+
+## 1. Verdict
+GO WITH FIXES — all round-5 items are genuinely resolved; what remains is mechanical (a commit-list omission, a fallback shape violation, one renderer edge), nothing architectural.
+
+## 2. Critical risks
+- **Cardinality**: bounded by construction (closed enums × operator provider names; `lb_stats_total{stat}` keys closed) — sound.
+- **Hot path**: ~16 `update_counter`s on `whereis` lookups, precomputed bound binaries, whole-body guards — fine.
+- **Exposition**: registry-driven families, `+Inf` whitelisted before the bad-bound partition, zero-fill ladder-union, one HELP/TYPE per family — correct. Residual: `usort` is byte-level, so numerically-equal bounds with different spellings (`"1"` vs `"1.0"` after a hot code upgrade) both emit — distinct label sets, no parse error, but phantom equal bounds for `histogram_quantile`.
+- **Auth reuse**: extraction preserves semantics; gate covers tokenless `/stats` 401 and 401-before-405 ordering.
+- **Histogram sanity**: +Inf → descending ladder → sum → count-last provably preserves monotonicity and count ≤ +Inf at every interleaving; gate assertions match (≥ under traffic, == at quiescence). Correct.
+- **Request-id hygiene**: charset allowlist, same-Req-chain echo, `filter_headers` prevents upstream clobber, comma-joined duplicates regenerate — sound. The crypto fallback violates the shape contract (below).
+- **Migration/dual-dialect**: ledger dedupe, identical dialect pair, `CONCURRENTLY` caveat — fine.
+- **Multi-node**: per-node jobs, summable counters vs node-scoped gauges documented — fine.
+
+## 3. Contradictions or stale claims
+- Task 6 says add `crypto` to `janus_http.app.src`, but its `git add` list omits the file — `janus_http_*.erl` doesn't match `.app.src`. The dep edit ships uncommitted (newly introduced in rev 6).
+- `generate/0`'s fallback (`encode_unsigned(unique_integer)`) emits variable-length hex — contradicting the documented `req_[0-9a-f]{16}` contract, the eunit `byte_size == 20`, and gate step 7's regex; the branch is untested.
+
+## 4. Missing first-ship requirements
+Nothing material. README should state the duration histogram covers only `track/3` (proxied) outcomes — early rejects contribute counts, never latencies; an error-latency blind spot is acceptable only if documented.
+
+## 5. Architecture/design notes
+`whereis`-per-bump + `update_counter/4` default tuple is the right race-free idempotent pattern; renderer purity with silent bad-bound drop is defensible given byte-exact eunit + promtool; pdict threading (`janus_request_id` survives handler→proxy; `janus_req_counted` erased at both layers) is keep-alive-safe; gauge label-sort avoids output churn. All sound.
+
+## 6. Top 5 concrete edits
+1. Task 6 Step 7: add `apps/janus_http/src/janus_http.app.src` to `git add`.
+2. Make the fallback shape-conformant (pad/truncate to 16 hex, e.g. `<<N:128>>`-derived) and add a forced-fallback eunit — or drop the fallback now that `crypto` is a declared dep.
+3. `render_hist_series`: collapse numerically-equal `le` bounds (keep the ladder's spelling) so a hot-upgrade ladder edit can't emit phantom equal bounds.
+4. README: histogram = proxied outcomes only; early-reject requests have no duration observation.
+5. Handler: bind `maps:to_list(LbStats)` once — currently iterated twice (`LbRows` and `BadStats`).

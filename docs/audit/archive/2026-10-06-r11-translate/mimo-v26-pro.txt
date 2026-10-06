@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the contract layer is now unusually precise, but residual terminator contradictions, an unowned 4MiB enforcement point, and knob-carrier ambiguity around `n>1` must be closed before Phase 1 coding starts.
+
+**2. Critical risks**
+- Lazy emission vs. zero-frame failure: C1 forbids skeleton writes pre-content, yet C4(b) "flushes `response.created` first" on all-fail. The exception is real but unstated as an exception — a state machine implemented literally from C1 will emit a bare `response.failed`, breaking SDKs.
+- 4MiB total-content cap is a C5 invariant "for every target", but no checkbox owns implementing it on →chat/→anthropic deferred text (2.4 only covers →responses reconstruction). Ship it and it's never tested; skip it and interleaved deferral is an unbounded-memory DoS.
+- `n>1` reject is carried by `stream_translate_tools_enabled` — but 2.3's 2×2 matrix has responses-knob-on/tools-knob-off cells. Does that cell accept `n>1`? Hidden coupling in the one matrix that claims no hidden coupling.
+- Spliced synthetic fixtures (>64-calls, truncated) can violate `sequence_number` monotonicity and id-space continuity unless the splice step renumbers; 2.1 asserts strict increase — the corpus builder must state renumbering rules.
+- Non-stream `n>1` reject's gating is decided by evidence produced in 1.8, which lands *after* 1.5 — a phase-ordering knot inside Phase 1 itself.
+
+**3. Contradictions / stale**
+- C4(c) still says the error frame "REPLACES the success terminator", while C2 (rev 9 fix) says `[DONE]` remains transport and the error replaces the finish/usage chunks. Two rules in one document.
+- 1.8b carries "1.8c also authors the TEST-FLOWS.md sections" — misplaced sentence; and it names 1.9/2.3 only, omitting 3.5's gate.
+- C3 says cache tokens are "dropped and counted in `mapped_stop`-style accounting" — 1.8b has a distinct `cache_read_input_tokens` column plus `mapped_stop` counter; which one records the drop is undefined.
+
+**4. Missing first-ship requirements**
+- No explicit rollback/flip-back procedure for 1.9 (2.3a covers Phase 2 only).
+- No TEST-FLOWS authoring task for 3.5's gate steps.
+- No e2e asserting knob-off reproduces the *exact* legacy predicate (incl. prefer_proto bias) after the predicate code is rewritten.
+
+**5. Architecture notes**
+- `sse_st` gains accumulators + per-stream maps across four index spaces; caps (256KiB/64/1MiB/4MiB) plus single decode-at-close are correct — keep decode strictly at close.
+- Keep C2's canonical `{type,code,message}` as the only error struct; the per-target serializers must be table-driven eunit, not per-pair code.
+- Predicate removal should be a pure function over `#{knob, proto_pair, features}` so gate cells are unit-checkable and the legacy path is provably identical when off.
+
+**6. Top 5 edits**
+1. Rewrite C4(c) to "error replaces the finish/usage chunks; `[DONE]`/terminator frames still emitted exactly once."
+2. Add a Phase-1 checkbox owning the 4MiB cap for →chat/→anthropic deferral, eunit'd.
+3. Resolve `n>1` carrier per 2.3 cell (state which knob governs each of the four).
+4. Move the TEST-FLOWS sentence into 1.8c and add 3.5.
+5. Add splice-renumbering rules to 1.0 and a 1.9 rollback step.

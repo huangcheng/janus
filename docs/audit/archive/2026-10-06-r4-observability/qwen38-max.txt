@@ -1,0 +1,37 @@
+## 1. Verdict
+**GO WITH FIXES** — the renderer/registry core is now sound, but four defects (atom-order family sort, pdict handoff into `track/3`, the `janus_req_counted` guard, upstream `x-request-id` passthrough) can each silently corrupt output or fail the gate as written.
+
+## 2. Critical risks
+- **Exposition correctness (real bug):** `lists:usort([N || {{counter,N,_},_} <- Rows])` sorts **atoms by creation index, not name**. The "families in name order / deterministic" claim is false; family order varies with module load order across nodes/builds. Sort on `atom_to_binary(N)`.
+- **Hook placement:** `endpoint(get(janus_req_path))` in `track/3` breaks if tracking runs off-process (stream drain, janus-auto inner call) → `undefined` → `endpoint="other"`, which gate step 3 explicitly forbids. Same for `get(janus_request_id)` in `janus_usage:record` → silent NULLs.
+- **Double-count guard:** if any failover/inner attempt reaches `reply_err/6`, it sets `janus_req_counted` first and the *real* terminal outcome is never counted. Unverified assumption.
+- **Header echo:** if the proxy copies upstream response headers, the provider's own `x-request-id` overwrites yours on the main success path. Gate step 6 catches it late; nothing in the plan filters it.
+- **Semantics:** `upstream_requests_total` is bumped once per *terminal client outcome* by the winning provider — the Grafana "upstream error rate by provider" panel understates failover failures. Name/HELP mislead.
+- **Multi-node scrape:** three nodes in three clouds, `:8090` never behind Caddy. No reachability topology (per-node agent + remote_write? federation?). `targets: ["janus-1:8090"]` is fictional.
+- **Migration:** concurrent boot of 3 nodes on one Postgres → duplicate `ALTER TABLE`. Relies on leader/follower ordering; state it.
+- **Duplicate-series trap:** handler appends `usage_writer_dropped_total` as a row; any future `inc/2` of that name yields two identical series → scrape rejected.
+- Hot path is ~19 bumps **and** ~19 `ets:whereis` per request (µs, not "ns-scale"). Hoist `whereis` once per `inc`/`observe`.
+
+## 3. Contradictions / stale claims
+- Naming contract + Grafana note call `janus_lb_stat` a **gauge**; `?FAMILIES` and the handler emit **counter**.
+- Step 1b mandates a `logger:warning` on non-integer LB values; Step 2's comprehension has none.
+- "Key file facts" says the *handler* puts `janus_req_path`; Task 5 says `handle/5` puts it.
+- Task 4 Step 4 cites "Task 2 Step 3"; the compile command is Step 4.
+- Build commands omit `rebar3 fmt --check` and `-e HEX_MIRROR -e HEX_CDN` despite claiming "canonical from AGENTS.md" — CI will fail.
+- Task 5 rules mention `/readyz`; the AdminDispatch route list has no such route.
+- `models_serving/0` swallows all errors to `0` with no log — contradicts the `safe/3` "visible in the log" rationale, and re-duplicates `janus_gateway_stats` logic (the round-1 duplication defect class).
+
+## 4. Missing first-ship requirements
+- No byte-exact test of a **mixed** snapshot (counters+histogram+gauges+`lb_stat`+`build_info`); group nesting/order is untested.
+- `promtool check` is optional — for a hand-rolled format it must be mandatory (vendor it in the gate image).
+- Gate lacks: `bucket{le="+Inf"} == _count` and bucket monotonicity; `GET :8080/metrics → 404` (metrics must not leak onto the agent plane); "exactly one `x-request-id` header".
+- Gate step 1's POST/405 doesn't say whether the token is sent (auth runs before method → 401, not 405).
+- Gate step 3's global "no `endpoint="other"`" is fragile against any earlier unknown-path probe.
+- Handler-crash 500s won't carry `x-request-id` (cowboy replies from its stored `Req0`) — document.
+
+## 5. Top 5 concrete edits
+1. Sort families by `atom_to_binary(Name)` in all three `usort` calls; add a mixed-snapshot byte-exact eunit.
+2. Pass `Path`/`ReqId` explicitly into `track/3` (or read from the Req), never pdict; make `janus_req_path` erase-list policy consistent.
+3. Add a pre-coding verification step proving `reply_err/6` is terminal-only (incl. janus-auto inner paths); otherwise key the guard per-outcome, not per-request.
+4. In the proxy reply path, strip/never-copy upstream `x-request-id`; assert single-valued echo in the gate.
+5. Resolve `lb_stat` type (pick counter, fix the naming contract + Grafana note), add `rebar3 fmt --check`/HEX env to every build command, and either rename `upstream_requests_total` or bump it per attempt.

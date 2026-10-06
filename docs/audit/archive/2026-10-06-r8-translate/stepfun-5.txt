@@ -1,0 +1,36 @@
+# Audit: Full Protocol Translation Matrix (rev 8)
+
+**1. Verdict:** GO WITH FIXES — C1–C6 contracts and failover safety are rigorous, but the kill-switch lifecycle breaks across phases, and a few stale prefixes/gating details survive from earlier rounds.
+
+**2. Critical risks**
+- **Knob lifecycle:** after 1.9 flips `stream_translate_enabled` on, 2.3's "default off, flip after smoke" and 3.5's "scope extended" are vacuous — Phase 2/3 translation activates on deploy with no off-by-default window. One boolean cannot gate Phase 2 against an already-on flag.
+- **Commit boundary:** C4 depends on "first data frame = commit" being enforced in the Cowboy/gun reply path; the plan asserts it but never names handler changes. Any header-flush re-emit on retry breaks outcome (a).
+- **Layered caps:** parser 1MiB / 256KiB per-call / 1MiB args / 4MiB content interact; post-commit exceed = partial content + error. Eunit must target *cross-event* accumulation — the original cap bug recurs by design.
+- **Predicate removal:** `has_non_text_content` removal exposes audio/file/document parts to a translator with no covering eunit — crash path.
+- **Hot path:** up to 4MiB buffered × 20 streams in 1.9 soak; read the knob via persistent_term once per request, not per event.
+
+**3. Contradictions / stale**
+- 2.1 and 3.2a use prefixes `resp_/msg_/fc_/item_`; contradict C5's janus-namespaced `jresp_`/`jmsg_`/`jfc_`/`jitem_` (R7 fix). Real collision risk with OpenAI-issued ids.
+- 1.5 "streaming reject always knob-gated" conflicts with (b)/(c): responses API has no `n`; janus-auto multiplicity is undefined — those are permanent `n_unsupported`, not gated.
+- "Phase 2 reuses the SAME knob… same discipline as 1.9 (default off)" is self-contradictory post-flip (see risk 1).
+- C5 interleave: "text blocks emitted at their close points" — close boundary (next tool fragment? thinking? finish?) unnamed.
+
+**4. Missing first-ship**
+- 1.8b "translated-stream ERROR counter" has no storage home (column vs counter) — needed before the additive-only migration.
+- 1.5's non-stream evidence rule names no owner commit that runs the characterization and gates 1.9's ungated reject.
+- 1.0 lacks capture recipes for the >64-calls and ping-bearing transcripts real providers may not emit; define composition-from-captured-frames with manifest disclosure (C6 forbids invention).
+- Terminator behavior on client-abort: writes to a dead socket must be skipped without crashing the stream process.
+- →responses: state whether the translator emits `response.in_progress` (corpus-dependent) or always suppresses; 2.1's monotonicity counter must include created/added events.
+
+**5. Architecture notes**
+- Make `sse_st` purely per-attempt: four index maps + accumulators + cap counters, fresh per attempt (C4); audit `janus_providers` failover for state reuse.
+- One mapping module for C2 stop-reason and error-type tables (both directions, unknown → server_error) — table-driven, eunit-able.
+- Usage merged at the pair event via a reducer over anthropic start+delta pair; eunit zero/nonzero/duplicate-merge.
+- Knob lives in persistent_term, copied into translate state at construction.
+
+**6. Top 5 edits**
+1. 2.1/3.2a: `resp_/msg_/fc_/item_` → `j`-prefixed everywhere; add collision eunit vs replayed ids.
+2. Rewrite 2.3/3.5: introduce a scope (new default-off knob or knob→scope-map migration) so post-1.9 deploys retain an off-by-default window; update Decisions.
+3. 1.5: ungated permanent `n_unsupported` for responses providers + janus-auto; gate only lossy chat/anthropic cross-protocol.
+4. 1.0: add capture/composition procedure for >64-calls and ping transcripts (allowed: consumer-side concat of real frames, manifest-declared).
+5. Pre-1.9 task: enumerate all request content-part types; non-vision parts → explicit `unsupported_content_part` 400 + eunit; name 1.8b counter storage; define C5 text-close boundary.

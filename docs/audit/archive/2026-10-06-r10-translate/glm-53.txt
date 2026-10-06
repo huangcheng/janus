@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — after nine rounds the architecture is sound; what remains is stale cross-references, operability gaps for knobs 2/3, and one mis-homed evidence task, not design flaws.
+
+**2. Critical risks**
+- **Ship-unit gate staleness:** 1.9's enumerated prerequisites (1.0–1.2, 1.4a/b, 1.5, 1.6, 1.7, 1.8, 1.8b, 1.8c) omit **1.6a**, which 1.9's own assertions consume — the R9 renumber wasn't propagated.
+- **Operability:** 1.8c builds settings UI for `stream_translate_tools_enabled` only; Phase-2/3 knobs have **no dashboard task**, yet 2.3a's flip procedure presumes an operator control exists.
+- **Phase-2 ordering:** 2.3 claims "last task of Phase 2" while listing "2.4-eunit halves" as a prerequisite, and 2.4 physically follows it — the R3 "ship unit physically last" fix wasn't mirrored.
+- **Mis-homed evidence:** 1.5's non-stream n>1 evidence is assigned to 1.4b, an SSE state-machine suite; non-stream `n` lives in dispatch/request translate — that task yields no evidence.
+- **Residual invented name:** C1's usage cell "`response.completed.usage` / `response.incomplete.usage`" reads as an event name; usage is a *field* of the response object inside those events — contradicting the row's own corpus-only-names rule.
+
+**3. Contradictions / stale claims**
+- Coverage table says chat↔anthropic is "req+stream (text+thinking only)", but the blocked list is streams-only. If non-stream tool/vision **reply** translation is incomplete, no Phase-1 task covers it (1.1 is SSE; 1.7/1.8 are request-side). Clarify.
+- Phase-3 execution order still lists 3.2b though it's folded into 1.5.
+- Numbering gaps (no 1.3/1.4, undefined "2.0") — cosmetic.
+
+**4. Missing first-ship requirements**
+- Phase 1: flip/rollback runbook is buried in 1.9 prose; give it 2.3a parity.
+- Phase 2: settings UI for knob 2 (above); e2e the 2×2 knob matrix under failover across mixed-protocol attempts.
+- Phase 3: settings UI for knob 3; TEST-FLOWS authoring for 3.5's gate is unassigned (1.8c covers only 1.9/2.3).
+
+**5. Architecture notes**
+- Factor the j-prefix id allocator (`jresp_/jmsg_/jfc_/jitem_`) into one module shared by all phases — prevents the divergent-scheme defect class R8 fixed.
+- One degradation-ledger struct emitted as `X-Janus-Dropped` (non-stream) or terminal-event payload (stream) enforces C2 parity and gives 1.6a a single schema to eunit.
+- Make `sequence_number` monotonicity a shared eunit helper for every →responses target (2.1, 3.2).
+
+**6. Top 5 edits (target.md)**
+1. 1.9: add **1.6a** to the prerequisite list.
+2. Add sibling-repo task (2.3b/3.5a): settings UI for knobs 2 and 3.
+3. 2.3: reword to "last *code change*; 2.4 e2e + 2.3a flip follow"; physically reorder checkboxes.
+4. 1.5: move non-stream evidence to a dispatch/request-translate eunit/e2e task; 1.4b keeps stream-only assertions.
+5. C1 usage cell → "usage field inside `response.completed`/`response.incomplete`"; delete 3.2b from Phase-3 order; reconcile coverage table vs stream-only block list.

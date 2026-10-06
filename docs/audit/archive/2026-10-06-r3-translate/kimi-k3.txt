@@ -1,0 +1,36 @@
+# Audit — Protocol Translation Matrix rev 3
+
+**1. Verdict: GO WITH FIXES** — the skeleton/terminator/failover contracts are now coherent, but task ordering, two wire-fidelity claims, and several first-ship gaps remain.
+
+**2. Critical risks**
+
+- **Ordering**: 1.3 ships the unblock + knob *before* 1.5–1.8 (n>1 non-stream reject, structured output, tool results, tool_choice/stop/cache accounting). The 1.4 gate can go green while request-grammar holes are still open — the exact "unblock without substrate" failure R2 fixed for the knob, repeated one level down.
+- **C1 →chat usage placement is wrong vs reality**: OpenAI wire order is finish_reason chunk → usage-only chunk (empty choices) → `[DONE]`. Plan mandates usage *before* finish. Your own C6 corpus will contradict C1 on day one — let fixtures win.
+- **C5 undefined failure mode**: upstream emits `content_block_stop` with truncated args JSON (provider bug/cut). Parse-at-close fails — then what? Plan defines no transition; this needs the C2 error path explicitly.
+- **1.5 backward-compat**: rejecting n>1 on *non-stream* translate pairs breaks requests that succeed today (chat→chat translated n>1 non-stream works). That's a regression shipped as a safety fix; needs a documented migration note, not silence.
+- **1.8 cache tokens**: `cache_read_input_tokens` pass-through implies janus_usage schema columns + writer changes + dashboard display. No migration task exists anywhere in the plan.
+- **Hot path**: four index maps per stream plus JSON validation at every tool close is acceptable, but per-attempt fresh `sse_st` (C4) must be asserted against the existing 1MiB leftover accounting — 1.4's 10-concurrency smoke is thin; keep 3.4 non-negotiable.
+
+**3. Contradictions / stale claims**
+
+- C3 says reuse "existing include_usage injection+retry" — that injection mutates the upstream request; confirm it composes with the new request-side knob translation (1.8) rather than running before it.
+- Semantically-impossible table lists `previous_response_id` strip, but 2.2 (the only responses request task) never mentions it.
+- 2.5 dashboard warning is gated on Phase 2, but the operational need exists the moment 1.3 unblocks streaming.
+
+**4. Missing first-ship requirements**
+
+- Phase 1: dashboard settings UI for `stream_translate_enabled` (sibling repo — untasked); usage-schema migration for cache tokens.
+- Phase 2: 2.2 must cover `previous_response_id`/`store` stripping; move 2.5 to Phase 1.
+- Phase 3: **no eunit task for 3.2** (reverse state machine) — only fixtures (3.3) and load (3.4). Violates the plan's own eunit-first rule.
+
+**5. Design notes**
+
+State machine extension via target-parameterized `translate_sse` is right; the four-index-space map (C5) belongs in `sse_st` per attempt. Error taxonomy (C2) is complete except the invalid-args-at-close case above.
+
+**6. Top 5 edits**
+
+1. Reorder Phase 1: 1.5→1.8 *before* 1.3; unblock ships last.
+2. Fix C1 →chat usage order to finish→usage→`[DONE]`, defer to corpus.
+3. C5: define truncated-args-at-close → C2 error event + terminator.
+4. Add tasks: usage schema migration (1.8), dashboard knob UI (1.3), eunit for 3.2.
+5. Move 2.5 into Phase 1; add `previous_response_id` strip to 2.2.

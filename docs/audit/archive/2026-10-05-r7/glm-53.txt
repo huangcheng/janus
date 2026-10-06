@@ -1,0 +1,31 @@
+**1. Verdict: GO** — I can find no two sentences that conflict outside §10's closed decisions; the remaining issues are specification gaps, not contradictions.
+
+**2. Critical risks**
+- **SSE flag machine**: `usage_sent`/`finish_sent`/`terminal_sent` interactions are the likeliest double-emit/lost-usage bugs (usage attached to a delta chunk, finish before usage, EOF without `[DONE]`). The §4.1.5 eunit list covers none of these interleavings.
+- **janus-auto gating** relies on pdict flags living on the Cowboy handler process. If the inner judge/target `do_proxy` ever runs in a spawned process, `janus_stats_inner` is invisible → double counts. Same-process execution must be stated as an invariant.
+- **Slice C ABI**: host-mounted `apps/` over a cached `_build` volume recompiles on mtime drift; lock/OTP drift is caught only by human discipline (`docker volume rm`).
+- **Slice D observability**: the script cannot observe "after that node's catalog apply" — only the follower's generation; `uptime_sec` window needs a clock-skew assumption between dashboard and nodes.
+- **Anthropic client face**: every frame requires an `event:` line; the mapping names only some events.
+
+**3. Contradictions / stale claims**
+None unresolved. Near-misses: `janus_stats_tracked` (§4.2 table) vs `janus_stats_failed` (prose) are two flags, but the setter of the latter is never specified — an omission, not a contradiction. `message_start` usage `In or 0` vs `message_delta` "if known" is intentional per §10 late-input_tokens.
+
+**4. Missing requirements**
+- `track/3` must consult `janus_stats_inner` before any pdict write; inner track sets no flags.
+- Exact client error JSON key set (`code` present? message truncation) for both faces in §4.1.4 — "sanitized, ≤200 bytes" is not a schema.
+- Value of an undefined token field in synthesized usage chunks (null vs omit key), both faces.
+- Empty-delta as the *very first* Chat chunk: does it emit `message_start`? Needs an eunit.
+- Drain EOF with no provider terminator: explicitly a `finalize_sse(normal)` test.
+
+**5. Architecture/design notes**
+- One writer (handler) for `#sse_st.leftover` with immediate per-fold writes is right; keep frame buffering forbidden.
+- Atomics in persistent_term created pre-listener; missing-ref→0 respects the boot-order invariant.
+- The SPEC §2.4 "counted population" redefinition must land in the paired dashboard PR, or the Nodes table will mislabel 401/invalid-JSON traffic.
+- Crash-path `after` must re-check all four gates (counted/inner/tracked/failed) to preserve `failed ≤ total`.
+
+**6. Top 5 concrete edits**
+1. §4.2: "track/3 sets `janus_stats_failed` immediately after `inc_failed`, and performs no pdict writes when `janus_stats_inner` is true."
+2. §4.1.4: pin exact error objects — Chat `{"error":{"message","type"}}`, Anthropic `event: error` with the same sanitizer; no `code` field unless specified.
+3. §4.1.2: "undefined token field → omit the key, not null" (usage chunk and `message_delta.usage`).
+4. §4.4: replace "after that node's catalog apply" with "two consecutive polls ≥ target generation, 2 s apart"; state max tolerated clock skew for `uptime_sec`.
+5. §4.1.5: add eunit — usage attached to a delta chunk; EOF without terminator; empty-delta first chunk.

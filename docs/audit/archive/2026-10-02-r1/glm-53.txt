@@ -1,0 +1,36 @@
+# Janus Plan Audit
+
+## 1. Verdict
+**GO WITH FIXES** 鈥?the architecture (DB as config-of-record, ETS hot path, per-node LB) is sound, but retry semantics, the upstream HTTP client, and cache-refresh correctness are unspecified enough to sink phase 2.
+
+## 2. Critical risks
+- **Mid-stream retry is impossible.** "Stream upstream 鈫?client; on failure, cool channel and retry next" 鈥?once the first SSE byte is flushed you cannot transparently retry. Needs an explicit rule: retry only before first client byte (buffer status line + first event), otherwise emit an in-stream error event.
+- **No upstream HTTP client named.** Gun vs hackney vs req determines streaming ergonomics, pooling, and client-disconnect 鈫?upstream-cancel behavior. Also unaddressed: idle SSE timeouts, body-size caps, client-gone aborts.
+- **Translation undersold.** Anthropic鈫擮penAI streaming with tools means `input_json_delta` vs string-fragment `tool_call` deltas, stop_reason鈫攆inish_reason, `max_tokens` being required on one side, tool_choice mapping. "Minimal" won't survive Claude Code.
+- **NOTIFY can be missed** (reconnect gap) with no poll fallback 鈫?permanently stale ETS on some nodes. "Optional on-disk snapshot for cold start" is undefined: what format, how stale is it, is it trusted?
+- **Secrets**: encryption cipher/rotation unspecified; agent API keys appear stored plaintext (no hashing mentioned); admin auth "cookie or bearer" is undecided.
+- **Cool-down races**: per-node circuit state means N nodes each independently hammering a dead upstream; acceptable only if stated as per-node best-effort.
+
+## 3. Contradictions / vague claims
+- "Passthrough/normalize" 鈥?a byte-passthrough cannot also normalize/re-emit SSE; pick one.
+- `api_keys` table has "rate limits" but limiting is deferred to hardening.
+- "Same schema migrations" across Postgres/SQLite 鈥?two SQL dialects, maintained twice; optimistic.
+
+## 4. Missing first-ship
+- Upstream client + pool sizing; request/idle timeouts; max body.
+- Observability: request IDs, structured logs, basic counters (you can't operate a gateway blind).
+- Graceful drain of in-flight streams on shutdown/upgrade.
+- `/v1/models` construction from routes; Anthropic `count_tokens` (Claude Code calls it).
+- Hashed agent keys, constant-time compare, admin auth decision.
+
+## 5. Architecture notes
+- Own ETS in a `janus_config` gen_server; swap tables atomically (new table + `heir`/rename) with a generation counter 鈥?never mutate in place.
+- Per-request proxy process under a `simple_one_for_one` supervisor, monitored by the Cowboy handler; gun async streams with explicit flow control.
+- `janus_db` as a behaviour; migrations versioned per dialect, applied under a lock at boot.
+
+## 6. Top 5 edits
+1. State retry rule: pre-first-byte only, with defined buffer window; post-stream failures surface as SSE error events.
+2. Commit to gun + pools; specify client-disconnect cancels upstream.
+3. ETS refresh = NOTIFY **plus** periodic full poll + generation read-your-writes for admin UI; define or drop the disk snapshot.
+4. Hash agent keys; decide admin auth (bearer, constant-time); version the secrets envelope for rotation.
+5. Descope v1 translation to messages鈫抍hat only, with a written field-mapping table and golden-stream replay tests.

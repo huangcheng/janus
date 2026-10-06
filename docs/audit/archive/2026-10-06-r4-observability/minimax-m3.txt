@@ -1,0 +1,31 @@
+## Audit (rev 4)
+
+1. **Verdict:** GO WITH FIXES — sound architecture and rev-4 fixes land cleanly, but four concrete defects remain and one rev-4 change introduces a real risk.
+
+2. **Critical risks**
+   - **`lb_stat` typed `counter` while it is conceptually a gauge of cumulative counters.** Plan asserts cumulative; if `janus_lb:stats/0` resets on route removal/re-add (common for LB cooldown counters), `rate()` becomes undefined and rev-4's "cumulative" claim is wrong. Type should be `gauge` unless `janus_lb.erl` is verified monotonic across route lifecycles.
+   - **`bool01/1` does not handle SMALLINT 1/0.** `janus_config:ready/0` plausibly returns `1|0` per the project-wide SMALLINT rule; `bool01(1) → 0` and `bool01(0) → 0`. `catalog_ready` would render 0 forever on a ready gateway.
+   - **`le_num/1` silently maps unparseable bounds to `0.0`.** A ladder-edit regression that writes a stray `<<"abc">>` (or a hand-crafted ETS row) sorts first and emits `le="abc"`, breaking `histogram_quantile` and silently producing invalid exposition. Fallback should drop the bound with a warning, not coerce.
+   - **Pre-coding verification vs handler code divergence.** Step 1b says "add a one-time `logger:warning` on skip" for non-integer `lb_stat` values, but the handler shown filters silently with no warning. Either drop the claim or add the log.
+
+3. **Contradictions / stale claims**
+   - "lb_stat counter (cumulative)" — unverified against `janus_lb.erl`; rounds 1–3 also deferred this.
+   - `models_serving ≥ 1` gate assertion can flake on cold start before the seeded catalog finishes initial load; no warmup wait is defined.
+
+4. **Missing first-ship requirements**
+   - `janus_metrics:init/0` failure mode is silent: if `ets:new/2` throws (owner dead, schema), all counters stay at 0 with no signal. Add an init log + boot-time assert that the table exists before the listener starts serving.
+   - `safe/3` warning will spam logs if a gauge source is permanently down (e.g., `janus_lb` not started). Rate-limit or sample.
+   - The plan never asserts that `janus_http_metrics:init/2` rejects path-traversal / non-UTF-8 paths cleanly (it does — Cowboy normalises — but worth a gate assertion).
+
+5. **Architecture / design notes (positive)**
+   - `ets:whereis/1` per bump is correct: constant-time, immune to persistent_term stale-tid traps.
+   - Renderer is pure, total, deterministic; families derived from rows + registry; `+Inf` last, buckets numerically sorted; `float_to_binary([short])` everywhere.
+   - Hook placement: proxy `track/3` is the single terminal; `reply_err/6` early-reject guard via `janus_req_counted` is race-free within one process.
+   - `set_resp_header` at handler entry + same Req chain = all replies (incl. `stream_reply`, 401) inherit the id by construction.
+
+6. **Top 5 concrete edits**
+   1. Change `lb_stat` registry entry to `gauge` (or paste the `janus_lb:stats/0` reset semantics into the plan).
+   2. Make `bool01/1` total over SMALLINT: `bool01(1)→1; bool01(0)→0; bool01(true)→1; bool01(_)→0`.
+   3. In `le_num/1`, on unparseable bound, `logger:warning` + drop rather than coerce to `0.0`.
+   4. Add the missing `logger:warning(#{what=>janus_metrics_lb_stat_skip, key=>K})` inside the `is_integer` filter in `janus_http_metrics:render/1`.
+   5. In `janus_metrics:init/0`, `try` the `ets:new/2` and `logger:error` on failure; have `janus_http_app:start/2` log a fatal if `init/0` returns non-`ok`.

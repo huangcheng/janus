@@ -1,0 +1,37 @@
+## 1. Verdict
+
+**GO WITH FIXES** — rev 11 is structurally sound and internally consistent; remaining defects are (a) C2/C4 wording ambiguities around the zero-frame flush rule, (b) an unverified n>1 "evidence rule" that can flip a shipped bug fix into a knob after the fact, and (c) missing soak/rollback specifics for Phase 2/3.
+
+## 2. Critical risks
+
+- **SSE state machine**: C5's deferral rule (text between tool fragments) contradicts "fragments stream" elsewhere only by omission — there is no defined behavior when a *second* tool call opens while the first is open (parallel interleaved calls). Per-call accumulators exist, but text ordering across *two* open calls is unspecified; eunit corpus likely can't prove it (kimi/dashscope rarely emit it). Either define a policy or declare it un-encountered-in-corpus.
+- **Terminator semantics**: C4(b) "headers flushed → one error event + terminator" combined with C2 "zero data frames → flush skeleton first" is now coherent, but the *pre-flush* case still says "no SSE at all" while C4(a) says failed-attempt headers "may have flushed" — for a never-started SSE reply the client gets plain HTTP error; for a flushed-but-empty SSE the client gets an SSE error event. Two clients (OpenAI SDK vs raw) handle these differently; the e2e assertion must pin both byte sequences, not just one.
+- **Failover/entitlement interaction**: 1.9 asserts "one usage row per attempt" but never defines who increments the translated-stream *error* counter (1.8b) on post-commit failures — is a post-commit error a failed attempt row, or a completed row with error flag? Dashboard observability depends on it.
+- **Hot-path cost**: no per-event budget. Translating adds map churn + binary concat per fragment; C1 requires sequence_number monotonicity checks (state per event). 3.4 TTFT p95 <10% is asserted but nothing bounds *steady-state* per-delta cost — add a CPU-per-frame assertion or sampling profile step.
+- **Backward compat of unblocking**: prefer_proto bias shrinks silently as knobs flip; E.5/E.6 were written against the fully-blocked predicate. 1.9 asserts "knob ON prefers native route for lossy pair" but E.5/E.6 re-execution under each knob state isn't listed as a gate step.
+
+## 3. Contradictions / stale claims
+
+- C5 states caps "256KiB/call, 64 calls, 1MiB total args, **and a 4MiB total-content cap**" then 1.4b lists "cap-exceed (args/calls/total)" without the 4MiB leg — the eunit task list under-enumerates.
+- C2 "usage rides the usage row ONLY, never the wire" for failures conflicts with the C1 →responses row where the terminal event carries `response.usage`; on `response.failed` (a legal terminal) the plan is silent whether usage appears in the frame too (responses API does carry it there). Pick one.
+- Coverage table dates 2026-10-06 but claims chat↔anthropic streams are "text+thinking only" — 1.1/1.2 eunits are pre-unblock; fine, but the table should note eunit-123 status per prompt context (it doesn't appear anywhere; regression-baseline task missing).
+
+## 4. Missing first-ship requirements
+
+- **Phase 1**: no rollback procedure for 1.9 (flip knob off is implied but the 1.8b migration is irreversible in prod — additive-only asserted, good, but the down-path test for it has no task number).
+- **Phase 2**: 2.2 strips `previous_response_id`/`store` but no task adds the degradation to the 1.6a schema (it's listed only for structured-output/cache_control).
+- **Phase 3**: 3.4 soak asserts "no memory growth in sse_st" but no named tool/method (recon? binary leak check?); also no assertion that the responses *adapter* (3.1) handles upstream `keepalive`/retry headers.
+
+## 5. Architecture/design notes
+
+- Extending `translate_sse` with a responses target makes it a 3-family bidirectional machine (6 edges). Recommend factoring per-target emitter modules behind one callback behaviour before Phase 2, or 2.1's "bidirectional state machine" becomes a 6×N case tangle; the plan doesn't mention this refactor and it should land in 2.1, not implicitly.
+- Error taxonomy (C2 type map) is solid but anthropic mid-stream `overloaded_error` has no corpus capture listed in 1.0's DONE criteria — add "one error-event transcript per family" to 1.0.
+- The 1.5 n>1 evidence rule has a tail risk: if 1.8's eunit shows multi-completion "genuinely works", the reject becomes knob-gated — but the knob isn't named until then; pre-name it now (`translate_n_reject_enabled`) to avoid a schema/settings migration mid-Phase-1.
+
+## 6. Top 5 concrete edits
+
+1. **1.0 DONE criteria**: add error-event transcripts (anthropic `overloaded_error`, chat non-2xx body, responses `response.failed` is listed — add the other two) and one parallel-open-tool-calls transcript (or explicitly document its absence + fallback policy in C5).
+2. **C2**: pin failure-usage placement per family — decide whether →responses `response.failed` frames carry `usage`; sync with "usage rides the usage row ONLY".
+3. **1.5**: pre-name the contingency knob `translate_n_reject_enabled` now; add its dashboard slot to 1.8c's "ALL THREE knobs" (making it four, or folding into the tools knob explicitly).
+4. **2.1**: add an explicit task line to split `translate_sse` into per-target emitter modules (behaviour + callbacks) before implementing the responses grammar; 2.1 eunits run against the refactored shape.
+5. **1.9 gate**: add re-execution of E.5/E.6 under both knob states, plus 1.8b down-migration test as a named task; 3.4 gains a named leak-detection method and a per-delta CPU/alloc budget assertion.

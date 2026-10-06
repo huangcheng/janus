@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — the plan is coherent and mostly faithful to the codebase, but cap-overflow semantics, `prefer_proto` lossiness determination, and the C4(b)/C2 terminator wording are unresolved and must land before 1.9.
+
+**2. Critical risks**
+- **Cap semantics.** The 4MiB total-content cap for →responses has no defined overflow behavior (error vs truncate vs stop). C5 scopes it to →responses only, yet R7's interleaved-deferral rule implies a total-content cap for chat/anthropic too — deferred interleaved text on those targets is uncapped.
+- **`prefer_proto`.** "Permanent lossy-pair native-preference" needs a lossiness predicate in LB/dispatch; today only the caller passes `prefer_proto => P`. As the blocked predicate shrinks, nothing tells dispatch which pairs remain lossy.
+- **C4(b) vs C2.** C4(b) says "error event + terminator"; C2 says anthropic error is ALONE (no `message_stop`) and responses `response.failed` ALONE. Wording contradicts the per-target terminals.
+- **Cache tokens.** C3/1.8b carry only `cache_read_input_tokens`; `cache_creation_input_tokens` (real, billable anthropic field) is dropped with no accounting.
+- **Fixture realism.** 2.1 uses shorthand names (`output_item.added`) while R8 claimed corpus-only names — risk of wiring non-corpus event strings. The capture harness has no credential/refresh ownership and cannot run in the local gate.
+
+**3. Contradictions / stale claims**
+- C5's 4MiB scope vs R7 summary (total-content cap).
+- TTFT p95 <10% vs native in a local mock gate is unmeasurable — contradicts "all testing LOCAL."
+- 2.3's 2×2 matrix omits the Phase-3 provider knob, so "no hidden coupling" isn't provable across all three knobs.
+- 1.5 ships the non-stream n>1 reject *unconditional* inside the otherwise knob-gated 1.9 commit — mixed gating.
+
+**4. Missing first-ship requirements**
+- Phase 1: cap-overflow behavior; `cache_creation_input_tokens` column; entitlement definition for translated streams (asserted in 1.9, never specified).
+- Phase 2: responses `stop`/`max_output_tokens` request mapping; explicit reasoning-effort → provider-thinking config table.
+- Phase 3: provider-responses 429/idle handling beyond `idle_timeout`; soak artifact path.
+
+**5. Architecture notes**
+Extend `translate_sse` as per-target reducer modules; keep the four index spaces (C5) in explicit per-stream maps; centralize error-struct serialization per target; share the 1.6a degradation schema as one JSON contract.
+
+**6. Top 5 concrete edits**
+1. Define 4MiB overflow behavior and unify the interleaved-deferral cap across all targets (C5).
+2. Add `cache_creation_input_tokens` to C3 and the 1.8b migration.
+3. Specify the lossy-pair table feeding `prefer_proto` (or narrow it to a static pair set).
+4. Rewrite C4(b) to reference C2 terminals; make 2.1 event names verbatim corpus strings.
+5. Replace the TTFT soak with a local proxy (or mark it manual) and assign capture-harness ownership.

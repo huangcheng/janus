@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — the shape is sound (pure parser, buffered writer, SET NULL FKs, both dialects), but the streaming injection keys on the wrong protocol variable, the body rewrite forgets Content-Length, and the flush path is one row per query with silent data loss.
+
+## 2. Critical risks
+- **SSE fidelity**: `maybe_inject_stream_usage` matches `openai_chat` on *ClientProto*, not upstream `ProviderProto`. Anthropic→OpenAI translated streams never get `include_usage` → usage silently missing. Worse: on the native path the injected terminal usage chunk is forwarded to clients — fine for OpenAI clients, but if injection is ever fixed to key on upstream, the chunk must be *stripped* from translated client streams.
+- **Body rewrite**: `thoas:encode(Map2)` changes body length; nothing updates `Content-Length` → hung/corrupt upstream requests.
+- **Hot path**: `length/1` per cast is O(n); flush does N individual INSERTs synchronously inside the gen_server (no transaction, no multi-row) — a slow Postgres stalls the single writer and the mailbox grows unboundedly.
+- **Buffer failure mode**: on DB error, `handle_info(flush)` clears `buf` anyway → **silent loss**, contradicting the self-review's "buffer would grow". Neither claim matches the code.
+- **Process dictionary**: assumes the gun drain callback runs in the cowboy request process; unverified. `janus_usage_ctx` is never erased on non-stream paths.
+- **Latency**: measured proxy-entry→terminal; for streams that's full stream duration, not TTFT — p95 conflates generation length with latency. Retries (401→next key) risk double-counting if `track` fires per attempt, not per terminal outcome.
+- **p95**: SQLite nearest-rank vs PG `percentile_cont` disagree; Sweep `DELETE` is unbounded (locks SQLite).
+
+## 3. Contradictions / stale
+- Self-review: "buffer bounded by flush cadence / would grow" vs code that drops the buffer on failure.
+- Task 9 says `janus_usage` isn't supervised in the live node, but Task 3 adds the child — hot-load dance hides whether the sup edit is correct.
+- Hardcoded line refs (~15, ~93, ~266) will rot.
+- `provider_key_id` is captured but never queried — dead column in v1.
+
+## 4. Missing first-ship
+Logger warning on flush error; a test for `janus_usage` (only the parser gets TDD); TTFT vs total-latency definition; batch-bounded sweep; SQLite `PRAGMA foreign_keys` verification; content-length fix test.
+
+## 5. Design notes
+Parser design (max-of-cumulative, head/tail) is right and failure-safe. Dialect branching via `bucket_expr`/p95 is acceptable but duplicative. Process-dict scratch is idiomatic *if* the drain process assumption holds.
+
+## 6. Top 5 edits
+1. Key `include_usage` injection on upstream `ProviderProto`; strip the usage chunk from non-OpenAI client streams; recompute `Content-Length` after re-encode.
+2. Verify the drain callback's process; if it differs, thread capture state explicitly instead of the pdict; erase `janus_usage_ctx` everywhere.
+3. Flush as one transaction with a multi-row INSERT; on error keep a capped buffer + `logger:warning`; track buffer count in state, drop `length/1`.
+4. Define and record TTFT separately from total duration (or rename the column honestly); clarify `track` fires once per terminal outcome across retries.
+5. Batch the sweep DELETE; assert `PRAGMA foreign_keys`; use nearest-rank p95 on both backends for consistency.

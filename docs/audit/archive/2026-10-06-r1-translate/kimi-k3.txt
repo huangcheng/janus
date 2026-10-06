@@ -1,0 +1,35 @@
+**1. Verdict: GO WITH FIXES** — phases are sensibly ordered and the "impossibles" are honestly documented, but the plan under-specifies terminator/usage semantics, ignores failover interaction, and ships a backward-compat hazard (unblocking streams) without a per-route kill switch.
+
+**2. Critical risks**
+
+- **SSE state machine:** the chat↔anthropic machine is text+thinking only; grafting tool-use accumulators onto it mid-stream risks index mismatches (chat `tool_calls[i].index` is positional; anthropic `content_block` indexes count text+tool blocks). No invariant stated. Partial/fragmented `input_json_delta` JSON assembly (chat args arrive as raw string fragments, anthropic as `partial_json`) needs an explicit "never emit a block until args buffer closes" rule, else truncated tool calls hit upstreams.
+- **Terminator/usage semantics (biggest gap):** chat streams carry usage only in a final `usage`-bearing chunk (or `stream_options.include_usage`); anthropic in `message_delta`+`message_stop`; responses in `response.completed`. When upstream omits usage, does translate synthesize `input/output_tokens`? The failover loop writes **per-attempt usage rows** — a translated stream that dies mid-attempt must still emit a well-formed terminator to the client AND a usage row; plan says nothing about either.
+- **Failover interaction:** unblocking `stream_translate_blocked` changes which routes are *eligible*, changing retry behavior and per-attempt row counts. `prefer_proto` fallback-to-all-routes now silently crosses protocols — a client pinned to anthropic SSE may get translated chat frames after a retry. Needs an explicit policy task, not an afterthought.
+- **Backward-compat:** removing the 400s is a behavior change for existing clients relying on the fast-fail diagnostic. Add a config/settings flag (PT-distributed, per AGENTS.md) defaulting to old behavior for one release.
+- **Hot-path cost:** per-event JSON decode/encode per translated frame on the SSE path; 50-stream soak (3.4) is Phase 3 but the hot path lands in Phase 1 — move the benchmark earlier.
+- **Fixture realism:** 3.3 defers real transcripts to the last phase, but 1.1/1.2 eunit is written first — against what? Hand-shaped fixtures violate the project's own rule.
+
+**3. Contradictions / stale claims**
+
+- 1.2 claims image request translate "already passes through" — if true, the task is only a test; mark it as coverage-only or verify the claim.
+- "E2E gate 69 steps" (codebase desc) vs plan's own header implying a different count — keep step numbering additive, don't renumber.
+- 1.5 says "reject n>1 on translate pairs" but the Semantically-impossible section scopes rejection to anthropic providers only; chat↔responses n>1 is unaddressed.
+
+**4. Missing first-ship requirements per phase**
+
+- Phase 1: mid-stream upstream-error → client-facing error frame mapping (chat `error` chunk vs anthropic `error` event); settings flag; usage-synthesis rule; hot-path benchmark.
+- Phase 2: responses `response.completed` synthesis when upstream omits terminal usage; `function_call_arguments.done`↔stop mapping; `reasoning` item handling (chat thinking ↔ responses reasoning blocks).
+- Phase 3: responses provider **request** grammar (`instructions`, `store`, `previous_response_id` strip+header) as provider-side, not just client-side; conformance fixture *capture procedure* (which models, redaction).
+
+**5. Architecture notes**
+
+- Add an explicit per-pair event-mapping table (source event → target event(s) → state transition) checked into `docs/` before 1.1; the state machine should be table-driven, not grown by cases.
+- Error taxonomy: `n_unsupported` exists; add `feature_dropped` (header-only) vs `untranslatable` (400) as a two-tier enum, reused by dispatch and dashboard warning (2.5).
+
+**6. Top 5 concrete edits**
+
+1. Add task 1.0: write the chat↔anthropic tool-use event-mapping table + capture real SSE fixtures (pull 3.3's capture work forward).
+2. New task in Phase 1: terminator/usage synthesis spec — mid-stream failure emits complete client terminator + per-attempt usage row; define `stream_options.include_usage` behavior under translation.
+3. New task: settings flag `translate_streams_enabled` (PT-distributed) gating the `stream_translate_blocked` removals (1.3, 2.3), default off first release.
+4. Reconcile 1.5 with the impossibles section: single table of rejected features per pair; add failover-protocol-pinning policy to Phase 1.
+5. Move load/soak benchmark to Phase 1 (per-frame cost gate); make 2.5 dashboard warning consume the same machine-readable matrix the dispatch predicate uses, not a parallel copy.

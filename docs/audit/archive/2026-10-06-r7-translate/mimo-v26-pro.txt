@@ -1,0 +1,30 @@
+**1. Verdict: GO WITH FIXES** — the corpus discipline and per-stream caps are sound, but the C1/C4 terminator contract self-contradicts and two phase-ordering errors remain.
+
+**2. Critical risks**
+- **C1 vs C4 contradiction (fatal for implementers):** C1 says the terminator is emitted "exactly once per COMMITTED response (pre-commit retries emit nothing client-visible)" and C2 says pings "never commit the stream"; yet C2/C4 also say a failure with zero prior data frames "owes a target-format error event + terminator + usage row (headers already went out)" — i.e. an uncommitted stream emits terminators after all. Pick one rule: pre-commit failure emits error+terminator once attempt exhaustion is final; pre-commit *retry* emits nothing. State it once, in C4.
+- **1.5 knob ambiguity:** "the non-stream reject rides in 1.9's commit (before the flip, behavior is unchanged)" only holds if `n_unsupported` itself is knob-gated. If it fires on deploy, rolling out 1.9 changes default behavior — the exact thing 1.9 forbids. Say explicitly: reject active ⇔ knob on; e2e asserts both regimes (it claims to, but the gating is unstated).
+- **Failure-usage under translation:** C3 merges anthropic input+output into one event, but C2 says a `message_delta` "before an error still counts" — when error *replaces* `message_stop`, where does merged usage ride for →anthropic (no `message_delta` may precede `error` legally)? Specify: on error paths, usage goes to the usage row only, never synthesized into a terminal success event.
+- **request-grammar fidelity:** chat `tool_calls` with `finish_reason` absent/null (mid-stream cut) and anthropic `tool_use` with empty input `{}` (zero-arg tools) are unspecified; zero-arg tools break "accumulate args → decode at close" (empty binary is invalid JSON).
+- **Hot path:** cap checks + per-call maps on every frame are fine; ensure the 1MiB total-args check happens before concat, not after (concat of 1MiB+ fragments is the allocation spike).
+
+**3. Contradictions / stale claims**
+- 3.5 precedes 3.4; 3.2a (request-side) follows 3.2 (streaming) — 3.2 cannot construct `input` items without 3.2a. Reorder: 3.2a → 3.2 → 3.3 → 3.4 → 3.5.
+- 1.4b runs "against the not-yet-unblocked state machine" — the state machine is blocked at *dispatch*; eunit calling `translate_sse` directly is fine, but say so or workers will try to route around the predicate.
+- "123 eunit" in the prompt vs plan's claim of full coverage — 1.1/1.2/1.6/1.7/1.8 have no fixture-count discipline stated.
+
+**4. Missing first-ship requirements**
+- 1.0: capture harness provenance (live keys, provider dates, no production mutation) and a recording script committed as an artifact; multi-turn tool-result captures for 1.7 are not enumerated.
+- Phase 2: no task for chat/anthropic *request* knobs already covered (1.8) regression under responses input; no `X-Janus-Dropped` semantics for responses-client strips (2.2) — non-stream only? streams?
+- Phase 3: no rollback/kill-switch extension for responses-provider leg (3.5).
+
+**5. Architecture notes**
+- Event mapping tables are corpus-anchored — correct. Keep the C2 error-type map as a pure function with eunit per entry (include chat upstream missing `type` → inferred code).
+- `sse_st` per-attempt reset (C4) is the right extension point; make tool accumulators maps keyed by call id with caps stored in the state, checked on insert.
+- Terminators per protocol are constants in one module — single source, eunit-asserted byte-exact.
+
+**6. Top 5 edits**
+1. Rewrite C1/C4 commit-vs-terminator rule as one paragraph in C4 (uncommitted-final-failure emits error+terminator; retry emits nothing).
+2. 1.5: state `n_unsupported` is knob-gated; e2e asserts reject-on and unchanged-behavior-off.
+3. C2: error-path usage rides the usage row only; never a synthesized terminal success event.
+4. Reorder Phase 3: 3.2a before 3.2, 3.4 before 3.5.
+5. 1.0: enumerate capture script, provenance metadata, and 1.7 multi-turn captures; 1.1: add zero-arg-tool and empty-input fixtures to C5.

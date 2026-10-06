@@ -1,0 +1,31 @@
+# Audit: Observability Plan rev 2
+
+**1. Verdict:** GO WITH FIXES — the architecture is right, but the shipped renderer code is functionally broken as written and at least one locked series never reaches the wire.
+
+**2. Critical risks**
+- *Renderer correctness:* `render_hist_series/5`'s body is `Buckets, SumLine, CountLine` — a comma sequence returns only the **last** expression, so every histogram renders as a lone `_count` line. Task 3 Step 4 ("All 6 tests passed") is impossible as written.
+- *Locked contract:* `usage_writer_dropped_total` is appended as a counter row, but `render/2` hardcodes only `requests_total`/`upstream_requests_total`/`x_total` — it is silently dropped, contradicting the naming contract and Task 4 prose; no test covers it.
+- *Stale tid:* `init/0`'s PT guard returns `ok` on a dead tid (app-master restart kills the ETS, PT entry survives); `safe_bump`'s catch then silently discards **all** metrics forever.
+- *`janus_lb_stat`* is outside the locked contract, typed `gauge` though cumulative, hand-rendered by the handler (split HELP/TYPE ownership; duplicate TYPE lines if ever folded into the renderer); non-integer LB values vanish.
+- *Deploy order:* dashboard SELECT of `request_id` before every gateway runs 005 = 500 window; rollout ordering unspecified.
+
+**3. Contradictions / stale claims**
+- Task 4 Step 2 defines unused `LbGauges` and calls `janus_lb:stats/0` twice; the trailing "Simplify" note contradicts its own snippet.
+- `?assertMatch(match, re:run(Id, Re), {capture, none})` in Task 6 is a 3-arity assertMatch — won't compile (options belong inside `re:run`).
+
+**4. Missing first-ship**
+- Gauges are all `safe/2`-wrapped over unverified shapes (`janus_config:generation/0`, `janus_catalog:get()`, `janus_usage:stats/0` keys); the gate asserts only `janus_build_info` *presence*, so silent zeros pass. Assert non-zero on the seeded stack (uptime>0, models≥1, generation≥1, version=vsn).
+- No method check on `/metrics` (POST renders).
+- `x_total` is a test artifact with no HELP → malformed `# HELP janus_x_total` line.
+- Gate step 3 "exactly +1" is flaky vs. concurrent gate traffic; counters need no flush-poll (only usage step 6 does).
+- `janus_upstream_requests_total` counts terminal attempts only — underreports failover; document or count attempts.
+
+**5. Architecture notes**
+Registry design, hook placement (track/3 + auth + models), pdict erase discipline, and same-Req-chain echo are all sound. But the hardcoded family list in `render/2` defeats renderer extensibility — derive families from `lists:usort` of row names via a `{type, help}` registry. Add a liveness check or `heir` to the tid cache.
+
+**6. Top 5 edits**
+1. `render_hist_series`: return `[Buckets, Sum, Count]` (commas → list).
+2. Replace `render/2`'s family list with data-derived families + registry; drop `x_total`; render `usage_writer_dropped_total`; add its eunit.
+3. `init/0`: recreate the table when `ets:info(Tid) =:= undefined`.
+4. Move LB stats into the renderer as a contract-named counter family (or cut from first ship); one `janus_lb:stats/0` call.
+5. Fix the `re:run` options typo in `janus_request_id_tests`; add gauge-value assertions to gate step 2.

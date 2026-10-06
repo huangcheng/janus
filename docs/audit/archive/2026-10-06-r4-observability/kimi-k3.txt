@@ -1,0 +1,33 @@
+## 1. Verdict
+
+**GO WITH FIXES** — rev 4 resolved the round-3 items credibly, but two real defects (histogram bump ordering, stale `janus_req_counted` across keep-alive) plus a spec self-contradiction remain.
+
+## 2. Critical risks
+
+- **Histogram bump ordering is wrong and the comment lies.** `observe` bumps `hist_count` **first**, then `+Inf`, then lower buckets. The stated invariant ("scrape can never see count > a bucket it has read") is backwards: a scrape landing between the count bump and the `+Inf` bump sees `count > +Inf`, violating the one hard histogram invariant (`_count == _bucket{le="+Inf"}`) and breaking `histogram_quantile` edge math. Correct order: buckets + `+Inf` first, `_sum`, `_count` **last**.
+- **`janus_req_counted` leaks across keep-alive requests.** The erase happens in proxy `handle/5`, but early rejects that occur in the *handler* before the proxy runs (invalid JSON, body-too-large) read the pdict before any erase. On a reused connection process, a previous request's `put(janus_req_counted, true)` survives → the early reject is silently **uncounted**. Erase in each handler `init/2`, or have `reply_err/6` only guard paths that actually passed through `track/3` (e.g. set the flag *only* in `track/3` and clear it in `reply_err` after reading).
+- Label cardinality: closed enums + provider names — sound. Hot-path cost: ~16 `update_counter`s per request, fine.
+- Migration 005: nullable ADD COLUMN + `IF NOT EXISTS` index, both dialects, ledger dedupe — sound; CONCURRENTLY caveat correctly documented.
+- Multi-node scrape: per-node jobs + per-node tokens, "never sum LB gauges" — correct.
+
+## 3. Contradictions / stale claims
+
+- Naming contract header says LB failover counters are `janus_lb_stat{counter="..."}` **(gauge)**; the renderer registry types `lb_stat` as **counter** and rows are emitted as `{counter, lb_stat, ...}`. Pick one (counter is semantically right; fix the header).
+- `observe` docstring claims a scrape-safety guarantee it doesn't deliver (above).
+- Gate step 3's "NO series with `endpoint="other"`" assertion can false-fail on any stray non-API hit (health probes on :8080, a mistyped path from interleaved traffic). Scope the assertion to the label set of the call just made.
+
+## 4. Missing first-ship requirements
+
+None blocking. Optionally: a gate assertion that `/metrics` works via the **loopback fallback** when the token is unset (the auth-reuse claim is only tested on the token path).
+
+## 5. Architecture notes
+
+Registry-driven renderer, `ets:whereis` per bump, whole-body try/catch, auth extraction verbatim, `set_resp_header`-at-entry covering streams/401s, `reply_err/6` central counting — all sound. Header echo mechanics verified by construction and by gate steps 4/4b/5.
+
+## 6. Top 5 edits
+
+1. Reorder `observe` bumps: buckets/+Inf → sum → count last; fix the docstring.
+2. Move `erase(janus_req_counted)` into the four handler `init/2`s (or clear in `reply_err/6`) to close the keep-alive undercount.
+3. Reconcile `lb_stat` type: header "(gauge)" vs registry counter.
+4. Narrow gate step 3's no-`other` assertion to the exercised label set.
+5. Add a loopback-fallback `/metrics` gate check (or explicitly defer it).

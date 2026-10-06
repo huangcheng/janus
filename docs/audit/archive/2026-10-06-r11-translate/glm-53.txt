@@ -1,0 +1,31 @@
+# Audit — rev 11
+
+**1. Verdict: GO WITH FIXES** — the contracts (C1–C6) are now near-complete; remaining defects are one Phase-2 ordering self-contradiction, a Phase-1 prerequisite that transitively gates on Phase-2 fixtures, and a specced-feature gap (responses structured output).
+
+**2. Critical risks**
+- **2.3 vs 2.4 ordering contradiction.** 2.3 is "physically LAST, after 2.4" and lists "2.4's eunit halves" as prerequisites — so 2.4's E2E half must run *after* 2.3, meaning 2.3 is not physically last. As written, an agentic worker cannot sequence these checkboxes.
+- **1.0 gates Phase 1 on Phase-2 fixtures.** 1.0's DONE criteria bundle responses `response.failed`/`incomplete` transcripts; 1.9 lists all of 1.0 as prerequisite. If responses capture is delayed/nondeterministic, the chat↔anthropic unblock blocks.
+- **Capture determinism.** `response.incomplete` is inducible (low max_output_tokens) but `response.failed` is not deterministic; the plan permits only two synthetic exceptions and failed transcripts aren't one of them.
+- **No latency budget until 3.4.** Per-delta translate cost and deferred-text buffering ship in 1.9/2.3 with only concurrency soaks; TTFT p95 is asserted only in Phase 3.
+- **janus-auto n>1 (1.5c) gating unspecified** — native chat users of janus-auto lose n>1; unclear if knob-gated or ungated bug-fix.
+
+**3. Contradictions / stale claims**
+- C5's "anthropic has no interleaving" contradicts 1.0's kimi INTERLEAVED captures — true only for intra-block interleaving; wording will mislead.
+- Task 1.3 vanished (folded into 1.9 per R4) with no fold note in the checklist.
+- Goal claims "structured output" as full-coverage, yet only chat `response_format` is specced (1.6); 2.2 omits responses `text.format`.
+
+**4. Missing first-ship requirements**
+- **P1:** no 1.9a flip/rollback procedure (2.3a "mirrors" a doc that was never authored); no TTFT assertion in the 20-stream soak.
+- **P2:** `text.format`/json_schema request mapping; 2.4 split (eunit pre-ship, e2e activation post-ship).
+- **P3:** adequate.
+
+**5. Architecture notes**
+- Four index/id spaces + per-attempt fresh `translate_sse` state and j-prefixed synthesized ids are correct invariants; keep caps enforcement in one shared module, not per-direction copies.
+- The degradation-payload-as-single-schema (1.6a) feeding terminal events + usage row is the right observability spine — assert it in every direction's eunit, not just pre-1.9.
+
+**6. Top 5 edits**
+1. Split 1.0 → 1.0 (chat/anthropic) + 1.0r (responses captures, Phase-2 prerequisite); 1.9 depends only on 1.0.
+2. Reword 2.3/2.4: 2.4a eunit (pre-2.3), 2.4b e2e (post-2.3 activation); delete "physically last".
+3. Add `text.format`↔`response_format`↔anthropic-none mapping to 2.2 with degradation recording per C2.
+4. Add 1.9a flip/rollback doc + TTFT p95<10% assertion in 1.9 and 2.4 soaks.
+5. State capture method per failure fixture (induced incomplete; failed = third documented synthetic or fault-injected capture) and 1.5c's gating; fix C5 parenthetical to "no intra-block interleaving".

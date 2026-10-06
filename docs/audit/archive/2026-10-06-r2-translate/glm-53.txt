@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — rev 2 incorporates the round-1 contracts, but three spec holes (undefined error frames, skeleton emission timing vs the failover window, missing `tool_choice`) will ship as bugs if not fixed first.
+
+**2. Critical risks**
+- C4 × responses target: if `response.created` is emitted eagerly, the failover window closes at byte one. Spec must mandate lazy skeleton emission on first upstream event; no task tests this.
+- C1 responses skeleton is under-specified: no `response.in_progress`, no `content_part.added/done` (required framing around `output_text.delta`), no reasoning-item events. Strict SDK clients may reject.
+- C3: anthropic-target `message_start` must carry usage, but chat upstream reports usage only in the trailing chunk. What message_start carries (0? omit?) is unspecified → client-visible inconsistency.
+- C2 maps stop reasons but not failure events: upstream `response.failed`/`incomplete` → target error frame undefined in all three directions; C4's "target-format error event" references a shape that doesn't exist in the spec.
+- Hot path: C5 forces tool args buffered to completion (≤1MiB/attempt; 50 concurrent ≈ 50MiB worst case) and delays first tool byte; the load test is Phase 3.4, *after* Phase 1 unblocks production traffic.
+- Backward-compat: 1.3 flips 400→translated stream with no runtime kill switch (per-route knob deferred; is the predicate settings-driven at all, or is incident response a redeploy?).
+
+**3. Contradictions / stale claims**
+- prompt.md says "revision 1 of this plan" while the target is rev 2 — stale artifact.
+- C5: "existing 1MiB leftover cap FROM PHASE 1" — existing today, or introduced in Phase 1? If the latter, 3.4's assertion has a cross-phase dependency.
+- 2.4 demands NON-ZERO tokens while C3 forbids inventing counts → the mock upstream must replay usage-bearing fixtures; that mock upgrade is implied, never tasked.
+
+**4. Missing first-ship requirements**
+- Phase 1: `tool_choice` (required↔any, named↔tool, none), `parallel_tool_calls`, `stop`↔`stop_sequences` request mappings — unmentioned while tools are the phase's core.
+- Phase 2: `instructions`→system mapping; how `reasoning_content` maps into responses reasoning items (goal claims reasoning; grammar omits it).
+- Phase 3: `response.failed` handling in the gun adapter; Router/tier validation for responses listings.
+
+**5. Architecture notes**
+- Make C1 a normative per-direction event table: required vs optional events, error frame, usage placement (chat: usage chunk precedes `[DONE]`, not "at terminator").
+- Extend C2 to a full event×target matrix (stop reasons + failure events), not just stop reasons.
+- Enforce C4/C5 by keying sse_st (block↔tool index map, accumulators) by attempt id.
+
+**6. Top 5 edits**
+1. C1: add `response.in_progress`, `content_part.added/done`, and per-direction error frames (chat `data:{"error":…}`+`[DONE]`, anthropic `event: error`, responses `response.failed`).
+2. C4: mandate lazy `response.created`; add eunit — retry succeeds pre-first-upstream-byte, refused after.
+3. C3: spec message_start usage when upstream is trailing-usage-only (0/omit + final counts in message_delta).
+4. Phase 1: new task — tool_choice/parallel_tool_calls/stop_sequences translate, fixtures from 1.0 corpus.
+5. 1.4/2.4: mock must *replay* captured fixtures; explicit TEST-FLOWS.md authoring task; add a settings-level kill switch before 1.3 unblocks.

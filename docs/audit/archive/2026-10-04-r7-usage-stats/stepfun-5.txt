@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — one hot-path data-loss defect, one log-flood defect, and several stale/under-enforced claims must be edited; the core design is sound.
+
+**2. Critical risks**
+- **Disconnect loses the row (worst):** T6's success branch runs `ok = cowboy_req:stream_body(<<>>, fin, Req2)` *before* `track`. A closed client makes that call exit/badmatch → request process dies, tokens burned, no row, no 502 record. Also, "Drain surfaces callback exceptions as `{error,_}`" is asserted, never verified — if `_ = stream_body(..., nofin, ...)` raises inside the callback and Drain doesn't catch it, the same crash occurs. Hoist `note_*`/`track` above the fin call (or try-wrap the block) and grep Drain's actual callback error contract.
+- **Log flood:** the mailbox-full path in `guarded_cast` emits `logger:warning` per dropped event. Throttling was added only to the gen_server paths; a DB stall under traffic becomes a per-request log write. Count silently via atomics, log every Nth.
+- **Writer-down silent loss:** `whereis(?SERVER) =:= undefined` drops with `ok`, uncounted — contradicts the "never silently lost" contract.
+- Dialect SQL checks out: nearest-rank p95 ≡ `percentile_disc`, `LIMIT`-in-subquery delete valid on both, bucket labels byte-identical, `?`→`$N` rewrite sound. Migration/retention consistent (31>30; `ts` index keeps sweep COUNT cheap); the PG parent-id precheck is a genuine step. Sweep cap logs when hit — adequate.
+
+**3. Contradictions / stale**
+- "avg null-on-empty": `totals` COALESCEs AVG to **0**; error branch returns 0. Only p95 is null. Pick one; SPA renders `0 ms` today.
+- "`?` literal — enforced by the Task 4 eunit": only breakdown joins/names are scanned; totals/series/p95/bucket_expr literals are unguarded.
+- `breakdown_orders_by_requests_test` never tests ordering.
+- "dropped cumulative since boot": writer restart re-`put`s atomics → external count resets to 0.
+- `build_insert` uses `maps:get(status, Ev)` with no default (badkey) — total only because `record/1` guards; the exported API isn't.
+
+**4. Missing first-ship**
+- `bucket_expr`/p95 backend branches untested without a PG lane — unit-test both arms (inject backend) or record the risk explicitly.
+- No guard that *every* terminal `handle_upstream` clause calls `track` — a missed clause silently under-counts; add a grep/CI check.
+- `stats()` timeout path loses state-side drops (Base carries only external).
+
+**5. Architecture notes**
+Buffered writer, p-dict hook, and parser are well-designed: max-combine is idempotent under short-stream head∩tail duplication, genuine-zero is symmetric, drop-newest + 15s terminate budget is coherent, page contract complete.
+
+**6. Top 5 edits**
+1. Hoist `track`/`note_*` above `stream_body(fin)`; verify Drain catches callback raises.
+2. Throttle/remove the mailbox-full `logger:warning`.
+3. Count writer-down drops in the atomics counter.
+4. Make avg null-on-empty consistently (or drop the claim); fix `stats()` merge.
+5. COALESCE the provider_key name expr whole — `(none)` for null id vs `(deleted)` — and widen the `?`-literal test to every emitted fragment.

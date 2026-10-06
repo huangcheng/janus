@@ -1,0 +1,27 @@
+1. **Verdict: GO WITH FIXES** — the architecture is sound and the round-1/2 fixes are genuinely inlined, but Task 7's filter code crashes as written, read-path queries badmatch on DB errors, and one claimed invariant is "enforced" by a vacuous test.
+
+2. **Critical risks**
+- **API filter bug (highest):** `handle_usage_events` uses `maps:filter` with a predicate returning `{true, {key_id, …}}` — non-boolean → `badarg` → 500 whenever `key_id`/`model_id` is present. The plan's own Step-3 curl (`?key_id=1`) and the SPA drill-down hit this. Even if it didn't raise, the resulting `{<<"key_id">> => {key_id,V}}` shape never matches `recent_filters`' `{key_id, V}` tuple pattern — filters would be silently ignored.
+- **Read-path badmatch:** `totals/series/breakdown/recent/p95` all do `{ok, Rows} = q(...)`; `q/2` returns `{error,_}` on any dialect/DB failure → caller crash, contradicting the "exception-safe" contract. Postgres branches (`percentile_disc`, `to_char` quoting, `GROUP BY` alias) are only verified on an optional lane — untested-dialect 500s are likely on first Postgres ship.
+- **SSE fidelity:** good — 4KB head covers `message_start`, 16KB tail covers terminal chunks; residual caveats (per-chunk-delta providers, >4KB pre-usage preamble) are documented.
+- **gen_server buffer:** per-drop `logger:warning` at cap is an unbounded log flood; mailbox growth under a stalled DB is accepted and surfaced — fine.
+- **latency/p95:** p95 split is correct; `avg_latency_ms` still mixes stream/non-stream (residual round-1 finding; page doesn't show it, API does).
+- **Migration/retention/FK/hot path:** fine (31d>30d, batched sweep, `IF NOT EXISTS`, SET NULL/LEFT JOIN consistency, negligible per-chunk cost).
+
+3. **Contradictions / stale claims**
+- Migration comment: NULL is "distinguishable from a real zero" — but `norm`/`from_sse` collapse genuine `{0,0}` to `undefined`→NULL, inflating `unreported`.
+- `no_qmark_literals_test` only asserts a source-file attribute exists; it never scans literals — the "enforced by the Task 4 eunit" claim is false.
+- Task 4 Step 5 contains unedited hedge prose ("…is wrong — verify…"), reading as leftover audit commentary.
+
+4. **Missing first-ship**
+- No index supports p95's `ORDER BY latency_ms` (two full scan+sorts per summary at 30d) — acceptable, but state it.
+- `usage_inject_include_usage` kill switch documented only in a code comment; no operator note.
+
+5. **Architecture notes** — buffered writer (capped, drop-counted, 50-row atomic chunks, trap_exit flush, spawned sweep) is right-sized; pdict with erase-at-entry is safe under keep-alive reuse; polite injection (client `stream_options` respected + env switch) is correct; UTC labels are consistent end-to-end; SPA contract is complete (dropped-writer badge, unreported note).
+
+6. **Top 5 edits**
+1. Build filters via comprehension: `maps:from_list([{key_id, qs_int(V,…)} || {<<"key_id">>,V} <- Qs] ++ …)` dropping undefined; verify `?key_id=1` returns 200.
+2. Make read fns total: match `{ok,Rows} | {error,_}`, return empty aggregates/`null` p95 on error.
+3. `norm`: track whether any recognized key existed; persist real zeros, keep `undefined` only for absent usage.
+4. Replace the vacuous test with one extracting string constants from abstract code and failing on stray `?`.
+5. Rate-limit the buffer-full warning (first drop + every Nth).

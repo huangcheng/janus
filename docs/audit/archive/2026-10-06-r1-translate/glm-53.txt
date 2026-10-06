@@ -1,0 +1,33 @@
+# Audit — Full Protocol Translation Matrix (rev 1)
+
+## 1. Verdict
+**GO WITH FIXES** — sound phasing and correct impossible-case taxonomy, but structured output is promised and never planned, multi-turn tool results are unaddressed, and the responses event grammar/terminator synthesis is underspecified.
+
+## 2. Critical risks
+- **Structured output vaporware**: the Goal line lists it; zero tasks in any phase implement `response_format/json_schema` ↔ anthropic tool-based structured output.
+- **Multi-turn tool loop gap**: Phase 1 covers stream *reply* assembly only. Next turn, chat clients send `role:"tool"` messages that must become anthropic `tool_result` blocks (with id ↔ tool_call_id mapping) — not in any task. Tools are useless without it.
+- **Terminator/usage synthesis**: `response.completed` must carry a full synthetic `response` object (ids, assembled output items, usage incl. reasoning tokens). Event grammar in 2.1 omits `response.failed`, `response.incomplete` (`incomplete_details`), reasoning-summary deltas, `function_call_arguments.done`.
+- **Mid-stream failure vs failover**: per-attempt failover only works pre-first-byte. Post-commit upstream failure during translation (accumulator overflow, malformed tool_use delta) needs a per-protocol error frame taxonomy — absent.
+- **Backward compat**: shrinking `stream_translate_blocked` (1.3/2.3) silently shifts traffic onto routes that previously never served translated streams; no rollout verification or revert story.
+- **Thinking+tools**: anthropic requires echoed thinking blocks (with signatures) when tools+interleaved-thinking; chat clients won't echo reasoning. Provider rejections likely.
+
+## 3. Contradictions / stale claims
+- 1.2 claims image parts "pass through on the REQUEST side already," yet the coverage table marks chat↔anthropic "text+thinking only" (ambiguity: stream-only or req too?).
+- Gate described as 69 steps (AGENTS.md says 47); plan cites "E.5/E.6" without syncing `TEST-FLOWS.md` authoring.
+- 3.4 leaks “内存” into an English artifact.
+
+## 4. Missing first-ship requirements
+- **P1**: full finish_reason↔stop_reason map (`stop_sequence`, `length` vs `max_tokens`); tool_result request translate; error frames; E2E authoring per TEST-FLOWS.md.
+- **P2**: synthetic response-object builder; usage token mapping into `response.completed`; `store=false` handling; `previous_response_id` strip header (claimed, unplanned).
+- **P3**: a real responses-API fixture source — dashscope/volcengine/kimi speak chat, not responses; Phase 3 may be untestable as scoped.
+
+## 5. Architecture notes
+- Centralize per-pair **event mapping tables** (reason strings, finish reasons, usage fields) rather than scattering matches; keep `sse_st` accumulators per target protocol with the 1MiB leftover cap enforced uniformly.
+- Define one **error taxonomy** (`n_unsupported`, `dropped_feature:*`) emitted both as status (pre-stream) and as in-stream frames per client protocol.
+
+## 6. Top 5 edits
+1. Add P1 task: request-side `role:"tool"` ↔ `tool_result` translation + id maps (eunit-first with captured fixtures).
+2. Add structured-output tasks to P1/P2 or cut it from the Goal.
+3. Expand 2.1 grammar: failed/incomplete/reasoning/done events + synthetic `response.completed` spec.
+4. Add task: mid-stream failure policy (failover cutoff at first byte; per-protocol error frames; header decision pre-stream).
+5. Fix 3.3 fixture sourcing (name the responses-capable upstream or mark P3 blocked); fix “内存”; sync gate step counts in docs.

@@ -1,0 +1,32 @@
+**1. Verdict: GO WITH FIXES** — the four slices are well-scoped and dual-repo aware, but the SSE terminal/disconnect contract, mid-stream error classification, and pre-200 validation ordering are internally inconsistent and must be reconciled before implementation.
+
+**2. Critical risks**
+- *Terminal vs disconnect:* §4.1.2 mandates "exactly one terminal" (`[DONE]` / `message_stop`), yet §4.1.4 sends "no further frames" on disconnect. A closed socket cannot receive a terminal; define `finalize_sse(disconnect)` as emitting zero frames with `terminal_sent` set, idempotent.
+- *Mid-stream error class:* `delta.tool_calls` → `translate_unsupported` is provider-origin, but §4.1.4 maps "client-origin after 200" to 400. That row is near-unreachable (tools 400 at request leg). Provider tool constructs in-stream should be 502 `upstream`, not 400.
+- *Pre-200 ordering:* "`n>1` choices → error before any 200" is only decodable after the first provider chunk. Either delay the 200 status until first decoded frame or concede it becomes an in-band error event.
+- *Cowboy idle_timeout:* spec asserts it is "between-request only". Verify against the pinned Cowboy version — long silent generations mid-SSE may hit it; consider forwarding `ping` as keepalive plus explicit inactivity settings.
+- *Docker/_build ABI:* named volume `janus-ebin-otp27` caches beams across image rebuilds with no OTP-patch key; stale/stale-ABI builds are likely. Also `.dockerignore` `_build` exclusion is claimed "should" — verify.
+- *include_usage retry:* "one retry without it" must be constrained to pre-header re-send; specify re-encoding of the translated body.
+
+**3. Contradictions / stale claims**
+- §4.1.2 vs §4.1.4 terminal-on-disconnect (above).
+- "Client-origin `translate_unsupported` after 200" vs request-leg guarantee (above).
+- "`n>1` … before any 200" vs post-connect decoding.
+- §4.3 `.dockerignore` "already should exclude `_build`" is unverified; AGENTS.md's `--target build` wording is stale by the spec's own admission.
+
+**4. Missing requirements**
+- Provider stream ending without `message_stop` / `[DONE]` (clean close) — finalize reason and client frames.
+- Late prompt tokens: document Anthropic client sees `input_tokens: 0` while the usage row holds real values.
+- Counter E2E gaps: 401 no-count, janus-auto = 1, retry non-count, `failed <= total` assertion.
+- Slice D "code-only" success via `uptime_sec` is heuristic (restarted VM ≠ shipped code); specify fallback.
+- TF-6.8 upstream choice/cost and "tokens not both null" tolerance.
+
+**5. Architecture notes**
+Handler-process-owned `#sse_st{}` matches the "no name-registered casts" invariant; atomics in `janus_http_app` via `persistent_term` is right. Gate `after`-block `inc_failed()` on `janus_stats_counted`, not just `janus_stats_failed`. Single funnel for counters preserves `janus-auto = 1`. Paired TEST-FLOWS/deploy PRs correctly make a Janus-only merge non-closing.
+
+**6. Top 5 edits**
+1. Rewrite §4.1.4: `disconnect` finalize emits nothing; `terminal_sent` set only on actual write.
+2. Reclassify in-stream tool constructs as 502; delete/define the "client-origin after 200" row.
+3. Specify pre-200 hold-until-first-frame (or in-band fallback) for `n>1` choices.
+4. Verify Cowboy idle timeout on streamed responses; add ping-forwarding keepalive policy.
+5. Key the `_build` volume by OTP patch (or wipe on mismatch), verify `.dockerignore`, and add counter E2E asserts (401, 404, janus-auto).

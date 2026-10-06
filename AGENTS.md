@@ -27,7 +27,7 @@ English. Respond in the user's language (Chinese → Chinese).
    **first list the failure modes to guard against** and the invariants
    to preserve; only then write the code.
 3. **All testing is LOCAL** (`bash ../janus-dashboard/scripts/e2e_local.sh`,
-   47-step real-stack gate: real Postgres + real gateway + real upstream).
+   real-stack gate (step count grows with TEST-FLOWS.md): real Postgres + real gateway + real upstream).
    Production is NEVER mutated by tests — only the read-only smoke
    (`run_test_flows.py --smoke`) runs there.
 4. **Browser-test the UI** (all pages/features via real clicks), not just

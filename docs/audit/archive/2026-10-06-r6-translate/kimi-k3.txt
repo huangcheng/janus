@@ -1,0 +1,36 @@
+## 1. Verdict
+
+**GO WITH FIXES** — the stream contracts (C1–C6) are now coherent and testable, but stale task references, a corpus duplication, and an ungated breaking change in 1.5 need cleanup before implementation starts.
+
+## 2. Critical risks
+
+- **1.5 is an immediate breaking change, not knob-gated.** Rejecting `n>1` on *non-stream* cross-protocol translate lands before 1.9 while `stream_translate_enabled` is still OFF — today's working non-stream n>1 translates start 400ing with no operator opt-in. The rollout discipline applied to 1.9 (default-off → flip after smoke) isn't applied here.
+- **Backward-compat of shrinking `stream_translate_blocked`:** knob OFF preserves the 400, good — but nothing re-verifies the route-preference substrate (prefer_proto) still biases correctly once the predicate is dynamic. A regression there silently reintroduces cross-protocol streaming.
+- **C4 + headers:** `stream_reply` headers go out pre-commit, yet degradation info is banned from them "by design." Request-side strips (cache_control, json_schema) are known *before* any upstream call — pushing them into headers would be free and earlier; the terminal-event-only channel forces clients to read to end-of-stream to learn of drops. Defensible, but it's a real DX cost, not acknowledged.
+- **Usage:** zeroed `message_start` input_tokens is fine for SDKs, but Janus's own `janus_usage` accounting must read the merged delta, not the skeleton — plan asserts this only via eunit, not against the real usage writer path.
+- **Hot path:** per-stream maps across four id spaces + up to 64 close-time JSON decodes are bounded but new allocation on every stream; 3.4's 50-concurrency soak is the only check — no assertion on non-stream translate cost.
+
+## 3. Contradictions / stale claims
+
+- **Stale renumbering:** 1.4b says assertions "activate in **1.3's** ship unit"; 1.8c says "the moment **1.3** unblocks streaming." The ship unit is 1.9.
+- **3.3 duplicates 1.0:** 1.0 already captures dashscope/volcengine/kimi transcripts into `test/fixtures/sse/`; 3.3 re-specifies the same captures. C6 says "3.3 extends the corpus" but the task text re-creates it.
+- **n>1 on native responses routes:** 1.5 says "native same-protocol routes are unaffected," but 3.2b rejects n>1 on a responses *provider* — a responses-client→responses-provider native route has no `n` either and must also reject. The "native unaffected" carve-out is wrong for that pair.
+
+## 4. Missing first-ship requirements
+
+- **Phase 2:** 2.4 E2E covers only mock chat SSE → responses client; no E2E for anthropic-provider → responses-client (only eunit in 2.1). 2.3 doesn't state the knob gates it.
+- **Phase 1:** no assertion that pre-commit retry after headers-sent-but-no-data actually works (stream_reply already fired; can the failover loop still switch upstreams? Cowboy constraint — needs one e2e proof).
+- **Phase 3:** no knob/migration/dashboard work item; 3.1 adapter error-mapping (non-2xx from responses upstream → C2 taxonomy) unspecified.
+
+## 5. Architecture / design notes
+
+- State machine extension points are sound: per-attempt `sse_st`, lazy skeleton, single decode-at-close. The four-index-space mapping table belongs in the module header as the authoritative reference.
+- Error taxonomy is complete except: no mapping for anthropic `invalid_request_error` mid-stream (only non-2xx-body passthrough is covered) and no defined behavior when a *translated* stream's upstream sends a terminal event with zero data frames (commit or not?).
+
+## 6. Top 5 concrete edits
+
+1. Replace stale "1.3" references in 1.4b and 1.8c with 1.9.
+2. Rewrite 3.3 as "extend corpus with Phase-3 provider-side captures" or delete; point to 1.0.
+3. Gate 1.5's non-stream n>1 rejection behind the same rollout as 1.9 (or a dated deprecation window), not an immediate flip.
+4. 2.3: state knob gating; 2.4: add anthropic-mock → responses-client stream E2E.
+5. 3.2b: correct "native unaffected" — reject n>1 on native responses-provider routes too; add a C2 entry for anthropic `invalid_request_error` and zero-data-frame terminal events.

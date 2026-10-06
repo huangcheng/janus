@@ -1,0 +1,30 @@
+## Audit — Janus Observability Plan (rev 6)
+
+### 1. Verdict
+**GO WITH FIXES** — the rev-6 registry/renderer/observe-order fixes are sound and verified, but the plan is stale against the current schema: `usage_events` now has 15 columns and the next migration is **009**, not 005, so Task 1 and Task 6 Step 5 as written break the write path.
+
+### 2. Critical risks
+- **Migration numbering** — "Next is 005" is false. `005_listing_meta`, `006_settings`, `007_api_keys_prefix_unique`, `008_usage_failover_columns` already exist. Next is **009**. Version = filename sans `.sql`, so `005_request_id` would still run, but sorted *between* `005_listing_meta` and `006_settings` — wrong slot. Also the flat-vs-subdir claim is **reversed**: the runner reads `priv/migrations/{postgres,sqlite}/*.sql`, not the flat `*.postgres.sql` files.
+- **`build_insert` shape** — 15 placeholders/row (11 base + `error_code/attempt/request_ref/is_terminal` from migration 008), not 12. Task 6 Step 5's "12th column", 12-col list, "24 placeholders", "position 20/21/24" are all wrong → literal follow produces param/column mismatch and corrupted inserts.
+- **Test module** — `janus_usage_sql_tests.erl` does not exist; `build_insert_shape_test` lives in `janus_usage.erl` under `-ifdef(TEST)`.
+- **Auth-reject logging** — "currently silent in logs" is false: `unauthorized/2` already logs `janus_agent_reject` with `code => unauthorized` (atom). The plan's duplicate warning uses `code => <<"unauthorized">>` (binary) → inconsistent field type.
+
+### 3. Contradictions / stale claims
+- "Next is 005"; "11 base columns" — both predate migrations 007/008.
+- Task 5 Step 3 "add the warning too" — the warning already exists; only the `inc` bump and (Task 6) `request_id` field are new.
+- `suffix(Dialect)` / "flat layout is what executes" — stale; the runner scans the subdirs.
+
+### 4. Missing first-ship
+- Update `SCHEMA_ETS_CONTRACT.md` to the real 15→16 column shape.
+- `build_insert_shape_test` must become 16 cols / 32 params (request_id at positions 16/32).
+- `fk_salvage` `KeepKeys` omits `request_id` → the id is lost on FK-race retry; decide and document.
+
+### 5. Architecture notes
+Verified correct: bump order (+Inf → descending ladder → sum → count) yields monotone buckets and `count ≤ +Inf` at every interleaving; `ets:whereis`-per-bump is sound; Req-chain echo holds (`require_agent` returns `{ok, Agent, Req1}` threading Req0 → read_body → proxy, and 401/413/stream all reply on that chain); `janus_lb:stats/0` is increment-only (justifies `_total`); `usage:stats/0` `dropped` is cumulative. **One trap:** `/v1/messages` uses `require_agent(Req0, #{allow_x_api_key => true})` — the Task 6 snippet's 1-arity call would silently drop x-api-key auth.
+
+### 6. Top 5 edits
+1. Rename migration to `009_request_id` (flat + subdir copies); fix the "what executes" text to the subdirs.
+2. Task 6 Step 5: 16 columns (append `request_id` after `is_terminal`), `bin_or_null` as 16th param, shape test → 32 params, correct module/function (`janus_usage.erl`, `-ifdef(TEST)`).
+3. Task 5 Step 3: remove the "silent / add warning" framing — keep the existing atom `code`, add only the `inc` + `request_id`.
+4. Task 6 integration: preserve `require_agent/2` opts for messages.
+5. Address `fk_salvage` request_id loss (or note it).

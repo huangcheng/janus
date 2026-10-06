@@ -1,0 +1,22 @@
+**1. Verdict: GO WITH FIXES** — the shape is sound, but hot-path capture, writer crash-safety, and latency semantics need correction before implementation.
+
+**2. Critical risks**
+- *SSE fidelity*: `capture_usage_chunk` stores head from **only the first chunk** (`binary:part` once), not "first ~4KB of stream" — a split/late `message_start` silently loses prompt tokens (recorded as 0). Also unverified: whether the `Drain` fun runs in the cowboy request process — if gun delivers in another process, PD capture reads the wrong process and streaming usage vanishes silently. `stream_options` injection can break strict OpenAI-compatible upstreams and changes client-visible output.
+- *Dual-DB*: `q/2` + `rewrite_pg/1` duplicated verbatim from `janus_dashboard_store` (hoist into `janus_db_conn`). Unverified: epgsql row shape (tuple rows assumed) and `numeric`-typed `AVG`/`percentile_cont` values vs `num/1`. SQLite FK `SET NULL` requires `PRAGMA foreign_keys=ON` — confirm `janus_db_conn` sets it.
+- *Writer*: `flush` ignores insert results **and clears the buffer** — DB-down loses data, and the self-review claim ("buffer would grow") is wrong. No transaction/multi-row insert = up to 100 round-trips per flush; sustained load outpaces it. `maps:get(ts|protocol|status, Ev)` without defaults crashes flush → supervisor restart loses the buffer. `handle_cast` lacks a catch-all.
+- *Identity*: `track` does `maps:get(model_id, Route, null)` — any error clause passing a non-map Route badargs in the request process. Guard `is_map/1`. `protocol` records ClientProto but parsing is dialect-agnostic (`_Proto` ignored everywhere) — remove the parameter or record provider dialect.
+- *Migration*: verification runs only `sqlite_master` while both backends are scope; `api_keys/models/providers/provider_keys` names and `prefix`/`name` columns are assumed.
+- *Latency*: comment says "upstream call duration"; measured span is proxy-entry→terminal, i.e. full stream drain incl. client backpressure for SSE — p95 mixes stream durations with call latency. Drain errors record status 200 → errors undercounted.
+
+**3. Contradictions/stale claims**: head "first ~4KB" vs first-chunk-only; DB-down tolerance; T5 `ProviderProto` vs T6 `ClientProto`; migration comment vs implementation; `breakdown` `ORDER BY 5 DESC` sorts by completion tokens while the share bar is requests-based; buckets are UTC but `fmtTs`/`fmtBucket` render local.
+
+**4. Missing first-ship**: transactional batched insert + flush error logging + buffer cap; crash-safe `record/1`; `recent` filtered by key/model (drill-down implies it); tests for writer/proxy capture (only parser is TDD); recharts dependency check; correct status on drain failure.
+
+**5. Notes**: max-of-cumulative-usage strategy is correct and handles Anthropic split events; parser tests cover all three dialects well; rollup SQL is portable (`GROUP BY` alias OK); page outline defers all chart/fetch code to the exec session — tighten that contract.
+
+**6. Top 5 edits**
+1. Fix head capture to accumulate first 4KB across chunks; verify Drain callback process.
+2. Make `flush` transactional multi-row, log failures, cap buffer; validate events in `record/1`.
+3. Guard `track` against non-map Route; record drain errors non-2xx.
+4. Hoist `rewrite_pg`/`q` into `janus_db_conn`; verify epgsql row/numeric types + FK pragma.
+5. Document latency as end-to-end (or measure TTFB separately); fix `ORDER BY` and UTC labeling.

@@ -1,0 +1,33 @@
+**1. Verdict**
+GO WITH FIXES: contracts C1–C6 are unusually rigorous, but the failure-path taxonomy is self-contradictory, interleaved tool deltas are unaddressed, and the unblock breaks existing gate assumptions.
+
+**2. Critical risks**
+- C4's "error event + terminator" contradicts C2: `response.failed` IS the responses terminator, and real Anthropic sends no `message_stop` after `event: error`. The generic rule yields double termination or a fabricated completed-after-failed.
+- Chat streams interleave `tool_calls[i]` deltas across indices; anthropic requires serialized content blocks. C5's "per-stream maps" doesn't mandate per-index buffering + serialization — a classic args-corruption path.
+- Zeroed `message_start.usage` on →anthropic breaks consumers that count prompt tokens there (Anthropic SDK / Claude Code-class clients); "clients must read `message_delta`" is not enforceable and the plan never validates against a real anthropic-format consumer.
+- Commit point must be defined as first DATA frame *written to the socket*, not first upstream event received; flush/buffering policy is unspecified.
+- Knob defaults on: clients relying on the 400 now get translated streams; no task migrates existing gate steps (E.5/E.6 family) asserting the blocked 400.
+- Error-path fixtures (truncated JSON, mid-stream cut) can't be captured on demand from live providers; 1.0/1.4 imply truncation replay but never specify the mock capability.
+- Entitlement/quota interaction with translated tool/vision requests is entirely absent.
+
+**3. Contradictions / stale claims**
+- C1 "terminator emitted exactly once" vs C4 error paths that omit it.
+- `x-janus-mapped-stop` "in the terminal event payload" is undefined for →chat (finish chunk? usage chunk?).
+- Task 2.5 lingers as a stub after its move; gate step counts (repo docs say 47, current harness 69) drift with ~4 new steps — reconcile at 1.3.
+
+**4. Missing first-ship requirements**
+- P1: mock truncation/corrupt replay; migration of legacy 400-asserting steps into knob-off/on pairs; explicit dispatch-time-only knob read (no mid-stream semantics change).
+- P2: reasoning items inside responses `input` (multi-turn) must be stripped (chat) or summary-mapped (anthropic); `text.format` json_schema mapping (1.6 covers only chat/anthropic); n>1 semantics for responses-client translation unspecified.
+- P3: adapter passes `reasoning.encrypted_content` through same-protocol only; capture version pinning.
+
+**5. Architecture notes**
+- Rewrite C4 as a per-target failure table: chat = error chunk + `[DONE]`; anthropic = `event: error` only; responses = `response.failed` only.
+- Add serialization rule to C5: emit blocks in first-seen index order after args complete; 1.0 must capture an interleaved parallel-tool transcript.
+- Treat truncations as derived fixtures (recorded byte offsets) within the single corpus.
+
+**6. Top 5 concrete edits**
+1. Replace C4's generic "error + terminator" rule with the per-target terminal table (resolves C1/C2/C4 conflict).
+2. Extend C5 + task 1.1 with the interleaved-tool-delta serialization rule and fixture.
+3. Add to 1.0: derived error fixtures via deterministic truncation + mock mid-stream cut support.
+4. Add to 1.3: migrate 400-asserting gate steps to knob-off/on pairs; assert dispatch-time knob read.
+5. Add to 2.2: input reasoning-item handling + `text.format` mapping; record in C3 a real anthropic-format client verdict on zeroed `message_start` usage.

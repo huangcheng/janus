@@ -1,0 +1,34 @@
+## 1. Verdict
+
+**NO-GO on the prompt as written** — it audits an entitlement-matrix / key-failover spec that **does not exist in the attached document**. `target.md` is the Phase-1 bundle (streaming translate, `/stats` counters, test image, deploy hygiene). Auditing the matrix would be fabrication. Below: audit of what is actually attached → **GO WITH FIXES**.
+
+## 2. Critical risks (actual doc)
+
+- **No mid-stream failover boundary exists.** Once 200 SSE starts, provider death = client-visible 502/truncation, no retry to another key/provider. Consistent with non-goals, but the spec never says so explicitly.
+- **`sse_events` per-`data:`-line 1 MiB cap is a false-positive DoS.** A single legitimate long delta (code dump, long `reasoning_content`) >1 MiB trips the *line* check → 502 a healthy stream. Cap the leftover buffer, not each line (or raise it 10×).
+- **Failed-counter has 4 gating flags** (`counted`/`tracked`/`inner`/`failed`) across `do_proxy`, `track/3`, and `try…after`. High risk of double-count or miss on the crash-plus-disconnect race — exactly the class of bug this repo keeps shipping.
+
+## 3. Contradictions / stale claims
+
+- **Prompt ↔ document mismatch** (primary).
+- "Hydrated counters keep across hot reload" but reset on VM restart: dashboard `requests_total` can *drop*, breaking derived-rate UX; E2E "TF-6.1 node has `total ≥ 1`" is fragile if the node bounced between steps.
+- `include_usage` "retry 400 once" is stated for *any* 400; several OpenAI-compatible upstreams 400 for bad model/auth, so you'd burn a retry and re-encode needlessly.
+
+## 4. Missing requirements
+
+- Behavior when `stream:true` but upstream returns **non-SSE 200** (`content-type: application/json`).
+- Write-side backpressure / gun flow control at high token rates.
+- No total-response bound (only per-line) — verify memory stays bounded when `Chunk` itself is huge.
+- Nothing on `stream`/`stream_options` body-vs-flag inconsistency.
+
+## 5. Architecture notes
+
+Per-handler `#sse_st{}` (no ETS rebuild races) and process-dict keys on the Cowboy handler only are correct; atomics via `persistent_term` set in `janus_http_app` before listeners is right. `usage row = capture_usage_chunk`, client display from `#sse_st{}` — clean split. The one fragile seam is the counter funnel's multi-site ownership.
+
+## 6. Top 5 edits
+
+1. Confirm which spec is under audit; retire or supply the matrix/failover doc.
+2. Move the 1 MiB cap to the leftover buffer only (per-line cap ≥ 10 MiB).
+3. Collapse the failed-counter to **one** owning call site after `track/3`, gated by `janus_stats_failed`; delete the `after` fallback branch.
+4. Restrict `include_usage` retry to 400 whose body signals `stream_options`/usage is unsupported.
+5. Specify the non-SSE-200-on-`stream:true` path (502 + no frames, or drain then terminate).

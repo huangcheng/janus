@@ -1,0 +1,36 @@
+## 1. Verdict
+GO WITH FIXES — slice decomposition is sound, but the SSE state machine has under-specified exits and the deploy contract references a field Slice B never defines.
+
+## 2. Critical risks
+- `sse_events/2` is typed `{Events, Rest}` yet the 1 MiB leftover cap must return `{error, upstream}`. No owner/type defined. Enforce in the drain callback and say so.
+- Upstream EOF without `message_stop` / `[DONE]` never calls `finalize_sse` → stream ends with no terminal frame. Make drain-complete → `finalize_sse(normal)` explicit.
+- Provider-origin `tool_use`/`tool_calls` (§4.1.3) returns `translate_unsupported`; §4.1.4 only maps provider *in-band* error to 502. Is it 400 or 502? Request leg already 400s tools, so provider hit should be 502 + cancel.
+- janus-auto: bump site "enter `do_proxy`" fires for inner judge+target too; spec asserts =1 with no re-entry guard. Add one.
+- Zero-content Anthropic client face ("empty text block") is a `finalize_sse` behavior, but `next_block==0` is the only signal; state it explicitly.
+- Slice D step 0 uses `uptime_sec`, absent from Slice B's `/stats` fields (only `started_at`). Add it or derive.
+
+## 3. Contradictions / stale
+- §4.1.3 `message_delta` "No usage on this chunk" then immediately emits a usage chunk; reconcile as one rule vs the `message_stop` pending flag.
+- AGENTS.md claim is accurate (it does say `--target build`), not stale.
+- Slice D "No gateway listener change" but `/stats` Bearer `JANUS_STATS_TOKEN` — if not already enforced, that *is* a handler change. Verify.
+- Slice B "401/400-before `do_proxy` must not call `track/3`" vs §4.1.4 mid-stream 400 `track`: fine, but `track` must not be the failed-counter funnel for pre-`do_proxy` rejects.
+
+## 4. Missing
+- Explicit gun receive timeout value (idle_timeout is not a mid-SSE watchdog).
+- OpenAI usage-chunk shape (`choices: []`, `usage.{prompt,completion}_tokens`).
+- Chat-client `message_start` input_tokens path when *provider* is Anthropic.
+- TF-6.1 fixture must be an LLM call, else `requests_total >= 1` fails.
+- `.dockerignore` verification + named-volume OTP ABI note (stale beams if OTP patch changes).
+- `include_usage` retry must be pre-200 only.
+
+## 5. Architecture notes
+- Handler process owns `#sse_st`; usage capture (provider bytes) and translate (same bytes) are two folds — keep both idempotent.
+- Atomics via persistent_term; `failed <= total` requires the flag gate to cover `try/after` and disconnect.
+- Dual-repo pairing is correct for A/B/D; C standalone.
+
+## 6. Top 5 edits
+1. Give `sse_events` an error return; make leftover-cap and EOF terminal explicit.
+2. Pin provider-origin unsupported → 502 + cancel gun.
+3. Guard janus-auto re-entry for counters.
+4. Add `uptime_sec` to `/stats`; confirm token auth.
+5. Specify zero-content finalize + OpenAI usage-chunk shape in the mapping table.

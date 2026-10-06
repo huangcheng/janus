@@ -1,0 +1,26 @@
+**1. Verdict:** GO WITH FIXES — the architecture is sound and all round-6 items landed, but one of the plan's own byte-exact eunit fixtures contradicts its renderer, the request-id fallback is broken, and two stale references remain.
+
+**2. Critical risks**
+- Exposition correctness: `mixed_snapshot_exact_test` gives only `0.05`/`+Inf` bucket rows but expects every ladder bound = 1. The renderer zero-fills absent bounds to 0, so the test fails as written — and the zero-filled shape (0.05=1, 0.1=0) violates the gate's own monotonicity invariant. The fixture isn't production-shaped: one 0.03 s observation bumps all 13 bounds.
+- Request-id hygiene: `binary:encode_unsigned(N, 8)` — `/2` takes endianness (`big|little`), not a pad size — the fallback badargs; `resolve/1` has no enclosing try, so the handler 500s without an id. That's precisely the failure the fallback exists to prevent.
+- Migration/dual-dialect: 009 SQL is valid on both dialects; Task 7 still references "migration 005" (stale renumber leftover).
+- Cardinality, hot-path, auth, multi-node: closed enums only; ns-scale ETS bumps with one hoisted `whereis`; auth extraction is behavior-identical with a gate regression (2b); per-node scrape jobs + summable `janus_lb_stats_total` — all check out.
+
+**3. Contradictions / stale claims**
+- Task 7 "migration 005" vs renumbered 009.
+- `janus_metrics.erl` contains a duplicated `-define(TABLE)` + bucket-comment block; leftover "looked up on every bump" comments contradict the hoisted single `whereis`.
+- Task 3 Step 4 promises "All 9 tests passed" — the mixed test won't.
+- Task 6 shape-test guidance: with the stated column order, row-2 `status` is param 24 (16+8), not 19.
+
+**4. Missing first-ship requirements**
+Nothing blocking. Minor: `render_counter_family` hardcodes TYPE `counter` instead of `fam_type` (harmless today); the pdict keys (`janus_request_id`/`janus_req_path`/`janus_req_counted`) aren't documented in SCHEMA_ETS_CONTRACT while the ETS table is.
+
+**5. Architecture / design notes**
+`whereis` hoisted once per inc/observe with the default-tuple `update_counter` is correct and race-free; renderer purity holds (`dedupe_bounds`/`sum_dupes` is intricate but correct, including the `+Inf` whitelist); bump order (+Inf → descending ladder → sum → count last) preserves count ≤ +Inf at every interleaving; hook placement (terminal `track/3` + `reply_err` guard + counted flag + handler erase) closes double-counting and keep-alive leaks; single `set_resp_header` at handler entry covering `stream_reply` is the right echo mechanic; inbound charset sanitization blocks header injection; `escape/1` ordering (NUL → backslash → quote → newline) is correct.
+
+**6. Top 5 concrete edits**
+1. `mixed_snapshot_exact_test`: add rows for bounds 0.1–600 (each 1) to match a real 0.03 s observation.
+2. `generate/0` fallback: pad manually (e.g. `<<N:64>>` before `encode_hex`) or delete the fallback; add a fallback-path test.
+3. Task 7 deploy-order note: "migration 005" → "migration 009".
+4. Delete the duplicated define/comment block in `janus_metrics.erl`; purge residual "per bump" wording.
+5. Task 6: correct row-2 assertion positions (status → 24, request_id → 32), or instruct verifying against the real `janus_usage` test.

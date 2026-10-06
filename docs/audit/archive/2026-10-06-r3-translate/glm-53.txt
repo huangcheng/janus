@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the state-machine and fixture discipline is sound, but header-vs-frame commit is ambiguous, C5's terminal invariant can deadlock on truncated tool args, and the kill switch ships without ever being tested.
+
+**2. Critical risks**
+- **Header vs frame commit.** C2 asserts stream headers are "already committed"; C1/C4 lazy emission covers only frames. The plan never states when HTTP headers go out. If lazy, `X-Janus-Dropped` can never ride headers; if eager (recommended), in-band error events are the *only* post-header failure surface. Pin it.
+- **C5 deadlock.** "Never emit a closing signal until args are complete JSON" breaks when upstream ends with `length` and truncated fragments — the literal rule hangs the stream. Needs an explicit truncation exception.
+- **1.5 backward-compat.** Rejecting `n>1` on non-stream narrows a path that today's request-only translation may serve (degraded). Flipping silent degradation to 400 is a behavior change with no migration/gate step.
+- **janus-auto interplay.** Unblocking `stream_translate_blocked` changes which listings the adjudicator may pick for streams. No task tests auto-router + translated stream post-unblock.
+- **C2 taxonomy incomplete.** No fallback for unmapped stop reasons (anthropic `pause_turn`, server-tool stops).
+
+**3. Contradictions / stale claims**
+- Semantically-impossible section promises `X-Janus-Dropped` for `cache_control` unconditionally; C2 restricts headers to non-stream replies.
+- 3.3 lists dashscope/volcengine/kimi for Phase 3, but Phase 3's new *input* grammar is responses-provider transcripts (already in the 1.0 corpus per C6) — scope mismatch.
+- 3.4 contains "内存" — violates the English-only artifact rule.
+
+**4. Missing first-ship requirements**
+- **P1:** gate step for `stream_translate_enabled=off` (400 restored, hot-reload without restart); latency A/B translated vs native.
+- **P2:** stream-side `previous_response_id` policy; presence of `response.in_progress`/`output_text.done` must be decided by fixtures, not assumed.
+- **P3:** task wiring provider-side `response.completed.usage` into per-attempt rows; conformance suite exit criteria.
+
+**5. Architecture notes**
+- Structure `translate_sse` as shared accumulator core + per-target emitter modules; index/id maps live in per-attempt state only.
+- Extend the C2 table with a third column: upstream terminal reason → closing-signal policy (close-clean / close-truncated / error-event).
+- `previous_response_id` strip silently breaks conversation continuity — worse than a 400; reject unless full `input` accompanies it.
+
+**6. Top 5 edits**
+1. C4: add "headers committed eagerly (200 chunked, carrying request-side `X-Janus-Dropped`); commit point = first *body* frame."
+2. C5: truncation exception — upstream `length`/`content_filter` closes the tool block with that mapped reason; JSON-complete invariant applies only to clean upstream ends.
+3. Task 1.4: add kill-switch-off and auto-router-translated-stream gate steps.
+4. 1.5: add a gate step + changelog note for the `n>1` non-stream 400 behavior change.
+5. 3.3/3.4: rescope fixtures to responses-provider transcripts; fix "内存"; add an unmapped-stop-reason fallback rule (pass-through + degradation record) to C2.

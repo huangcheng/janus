@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — the plan is implementable and rev-3 defects are genuinely resolved, but three internal contradictions (lb_stat type, 405 gate precondition, observe bump-order comment) will trip the gate or mislead the implementer if left.
+
+## 2. Critical risks
+- **Cardinality**: sound — closed enums + operator provider names; orphan series from deleted providers only (documented).
+- **Hot path**: ~17 `ets:update_counter` on `ets:whereis`, all try/catch'd — fine.
+- **Format**: zero-fill/`+Inf`-last, escaping order (backslash→quote→newline) correct; `le` last is legal (text format has no label-order rule). `float_to_binary([short])` may emit `1.0` for whole sums — accepted by Prometheus.
+- **Auth reuse**: extraction is verbatim; auth runs before method check, so unauthenticated POST → 401 (see §3).
+- **Histogram sanity**: ladder 0.05→600 sane; union-of-ETS-bounds dedupes only on byte equality — an old `<<"1.0">>` bound alongside canonical `<<"1">>` yields two `le` rows at equal rank (`=<` comparator, non-strict) → duplicate-ish buckets. Tolerable but note it.
+- **Request-id hygiene**: `[A-Za-z0-9-_]`, ≤128, lowercase hex generation — sound; cowboy 404s (unmatched routes) get no header (undocumented edge).
+- **Migration**: dual-dialect identical SQL fine; index-lock/CONCURRENTLY caveat present.
+- **Multi-node**: per-node jobs + instance label, sum-in-Grafana — correct.
+
+## 3. Contradictions / stale claims
+1. **`lb_stat` typed gauge in the locked naming contract + Grafana "never sum LB gauges"**, but Task 4 emits `{{counter, lb_stat, ...}}` and the registry types it `counter` (rev 4 explicitly says counter). One of the two is wrong; counter is semantically right for cumulative values.
+2. **Step 1b promises "a one-time `logger:warning` on skip"** for non-integer `janus_lb:stats/0` values; the handler code filters with `is_integer(V)` silently.
+3. **Gate step 1**: "GET without token → 401; a POST → 405" — the handler authenticates first, so a tokenless POST is 401. Must say "POST **with token** → 405".
+4. **`observe` comment claims count/+Inf-first prevents "count > a bucket already read"** — bumping count first *causes* exactly that (count=1, +Inf=0 mid-update). Either bump `+Inf` first or reword.
+
+## 4. Missing first-ship requirements
+- A `rebar3 fmt` pass on pasted code — `fmt --check` runs in the canonical build; hand-written code will likely fail it silently until CI.
+- README orphan-series note is claimed in self-review but absent from Task 9 Step 3's list.
+
+## 5. Design notes
+ETS registry + `ets:whereis` per bump is the right lifecycle answer; renderer purity with registry-driven families (dropped counter renders, unknown families don't vanish) resolves round 2 cleanly; `janus_req_counted` + erase-list additions preserve keep-alive safety; same-Req-chain echo is sound by construction. eunit fixtures are production-shaped.
+
+## 6. Top 5 edits
+1. Set `lb_stat` to `gauge` in `?FAMILIES` **or** amend the naming contract + Grafana note to `counter` (pick one).
+2. Add the skipped-value `logger:warning` in `render/1`'s `LbRows` comprehension.
+3. Gate step 1: "POST **with token** → 405 `allow: GET`; tokenless POST → 401".
+4. Reorder observe bumps (`+Inf` before `count`) or fix the comment.
+5. Add "run `rebar3 fmt`, commit" to Task 2/3 steps.

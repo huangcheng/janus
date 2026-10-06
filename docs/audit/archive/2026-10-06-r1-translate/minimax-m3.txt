@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — phase ordering is sound, but terminator/usage semantics, tool-call ID stability under failover, structured output, and reasoning mapping are all silent, and the conformance-fixture plan will rot without an explicit refresh contract.
+
+**2. Critical risks**
+
+- **Terminator/usage semantics per direction.** When translating chat→anthropic with tools, `finish_reason=tool_calls` plus anthropic `message_delta.usage` must reach the client in correct order, and `data:[DONE]` must be the literal last byte. Plan enumerates none of this for the 6 streaming pairs.
+- **Tool-call ID stability under failover.** Per-attempt `sse_st` restart on retry means the next attempt emits fresh `call_xxx` ids for the same logical call; chat clients see inconsistent state across a retry. Plan silent.
+- **Vision in OUTPUT.** "Extend STREAM reply side" for image parts assumes a standardized vision-OUTPUT shape — it doesn't exist (chat `image_url` in content, anthropic image blocks, responses `output_image`). Either drop the claim or commit a per-pair behavior matrix.
+- **Predicate unblock is a visible behavior change.** Removing `has_tools/has_non_text_content` from `stream_translate_blocked` silently enables previously-400'd requests; E.5/E.6 gate expectations must be updated in the same commit and clients need a migration note.
+- **Structured output and reasoning are in the goal but absent from the phases.** `response_format` ↔ `text.format` ↔ anthropic tool-forcing, plus anthropic `thinking` ↔ responses `reasoning` items ↔ chat drop-with-header are not mapped.
+- **Conformance fixtures rot.** "Real captured SSE" per provider family (dashscope/volcengine/kimi) becomes stale on every upstream SDK release; no refresh mechanism proposed.
+- **Phase 2.2 hidden assumption.** "Non-stream versions exist" for responses→chat/anthropic — verify or expand scope.
+
+**3. Contradictions / stale**
+
+Sibling-repo gate has 69 steps (AGENTS.md); E.5/E.6 implies a smaller subset — either outdated naming or a different gate than the audit column's mental model. Goal lists "structured output"; no phase task covers it.
+
+**4. Missing first-ship requirements**
+
+- **Phase 1**: per-direction terminator/usage-frame tables; tool-ID stability rule under failover; vision-OUTPUT scope decision; error codes beyond `n_unsupported` (`translate_failed`, `malformed_tool_args`, `unsupported_image_format`); per-chunk p99 perf budget.
+- **Phase 2**: structured-output mapping matrix; reasoning-content mapping with `X-Janus-Dropped` rules; mock upstream `responses`-wire format support as a prerequisite of 2.4; capability matrix endpoint contract feeding dashboard 2.5.
+- **Phase 3**: provider adapter `openai_responses` auth/base_url/error-shape spec; encrypted-reasoning forward rules; per-direction event-mapping tables for chat/anthropic→responses stream; fixture-refresh contract (provider SDK version → fixture hash → eunit).
+
+**5. Architecture notes**
+
+`sse_st` gains `pending_tool_calls` (chat↔anthropic) and `pending_output_items` (responses). `translate_sse` dispatch needs a `responses_target` variant decoupled from current direction-pair modules (events are response-object-shaped, not delta-shaped). Error taxonomy: `n_unsupported`, `translate_failed`, `malformed_tool_args`, `unsupported_image_format`, `reasoning_dropped`. Per-direction event-mapping tables (6 streaming pairs) belong in `apps/janus_http/src/janus_protocol_translate.erl` as comments/`@doc` or a sibling `docs/protocols/translation.md`, and are prerequisites for the 1.4 / 2.4 / 3.2 E2E steps.
+
+**6. Top 5 concrete edits**
+
+1. Add Phase-1 task 1.6: per-direction streaming terminator + `finish_reason` + usage-frame tables as a doc deliverable gating 1.4.
+2. Add Phase-1 task 1.7: tool-call ID generation rule that survives failover (deterministic id-from-input, or sse_st state passed across attempts).
+3. Split 2.2 into 2.2a (verify non-stream responses→chat/anthropic already exists; if not, add it) and 2.2b (extend + harden fixtures).
+4. Add Phase-2 task 2.6: structured-output + reasoning mapping matrix with `X-Janus-Dropped` rules before 2.3 unblocks the predicate.
+5. Phase 3: add fixture-refresh contract (SDK version → fixture hash → eunit) and require the deterministic mock upstream to emit `responses`-wire format as a prerequisite of task 2.4.

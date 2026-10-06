@@ -1,0 +1,34 @@
+**1. Verdict:** GO WITH FIXES — all four audit rounds' fixes verify clean (renderer purity, µs histograms, whereis-per-bump, totality, zero-fill) and I found no new correctness defects; what remains is a locked-contract contradiction plus thin coverage on exactly the families edited this round.
+
+**2. Critical risks**
+- **Label cardinality:** contained — closed enums + operator provider names only; provider orphaning after delete documented.
+- **Hot-path cost:** ~16 `update_counter` + `whereis` pairs per request, `write_concurrency`, whole-body try/catch, zero formatting — acceptable.
+- **Exposition format:** golden tests pin HELP/TYPE-once, zero-filled numeric ladder, `+Inf` last, escaping incl. NUL. Caveat: `float_to_binary(F,[short])` can emit `1.0e7` (legal; say so in README).
+- **Auth reuse:** verbatim extraction, identical token/loopback semantics, Caddy warning present.
+- **Histogram sanity:** correct, but the count/+Inf ordering comment overstates — a scrape can still transiently see count > an older bucket. Inherent, harmless, mislabeled.
+- **Request-id hygiene:** `[A-Za-z0-9-_]{1,128}` blocks CRLF injection; lowercase hex; "untrusted, non-unique" documented.
+- **Migration:** dual-dialect identical, ledger dedupe, index-lock + CONCURRENTLY caveat sound.
+- **Multi-node:** per-node jobs with separate token files; sum counters, never LB gauges.
+
+**3. Contradictions / stale claims**
+- Naming contract says `janus_lb_stat{counter=…}` "(gauge)" and Task 4 prose says "lb_stat gauge family", while rev-4 code + `?FAMILIES` type it `counter`. The "never sum LB gauges" note straddles both — the *locked* contract is now the wrong one.
+- Step 1b promises a one-time `logger:warning` on skipped non-integer LB values; the handler code shown has none.
+- Registry/renderer eunit never covers `lb_stat` rows or multi-gauge sorted output — the thinnest coverage sits on this round's edits.
+
+**4. Missing first-ship requirements**
+- No verification that each listed early reject (`request_too_large`, translate errors) actually reaches `reply_err/6`; a handler-side body-read reject would be silently uncounted, and no gate step pins a translate-error 4xx.
+- `x-request-id` is absent on Cowboy-level 404/400 (no handler runs); README should scope the echo to agent endpoints.
+- Grafana JSON is only panel PromQL — schema-fussy JSON itself unspecified.
+
+**5. Architecture notes**
+- Registry design sound: named public `set`, `whereis/1` per bump (no stale tid), atomic create-and-bump, idempotent init in the app master.
+- Renderer pure, registry-driven, deterministic; `tab2list` non-atomicity reads only as transient histogram skew — acceptable.
+- Hooks (`track/3` + `reply_err/6` with `janus_req_counted`) cover proxy paths; models post-auth errors uncounted by design, documented.
+- `set_resp_header` at handler entry on one Req chain is right; the `require_agent(Req1)` chain shift is the top implementation hazard — a missed shift silently drops the 401 header the gate asserts.
+
+**6. Top 5 edits**
+1. Fix `lb_stat` → `counter` in the naming contract and Task 4 prose; align the dashboard note.
+2. Add the promised warning on skipped non-integer LB values.
+3. Add a Task 5 verification that every early-reject reason funnels through `reply_err/6`, plus a gate step for a translate-error 4xx bump.
+4. Add renderer tests for `lb_stat`, multi-gauge label ordering, and scientific-notation `_sum`.
+5. Reword the observe-order comment as best-effort; README-scope the `x-request-id` echo.

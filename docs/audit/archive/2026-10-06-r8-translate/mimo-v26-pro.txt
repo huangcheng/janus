@@ -1,0 +1,27 @@
+**1. Verdict: GO WITH FIXES** — the contracts (C1–C6) are now testable and mostly self-consistent, but one phase-ordering contradiction and one test-category error must be fixed before Phase 3/1.4b work starts.
+
+**2. Critical risks**
+- Phase-3 order bug: 3.2 is scheduled before 3.1, yet 3.2 says "then wire" — you cannot wire reverse translation to a responses provider before the streaming adapter exists. The wire step is unbuildable as ordered.
+- 1.4b is labeled eunit but lists 10-concurrent-stream smoke, client-abort cleanup, and per-attempt id non-reuse across failover attempts — system/stateful behavior, not pure event mapping. This violates the project's eunit-first rule and will produce fixtures that pass while the real failover path breaks.
+- Full-accumulate-emit-at-close lacks a text-block close rule for chat→anthropic (chat text has no explicit close signal). Without "emit text at first tool fragment / next text gap / upstream end", TTFT collapses or ordering silently breaks; text-order eunit won't catch it if fixtures lack gaps.
+- Capture harness (1.0) has no redaction/size rule — vision fixtures carry base64 images into the repo (secret/PII/bloat risk vs the gitleaks hook).
+- 1.5's evidence fork (gated vs ungated non-stream n>1 reject) leaves the ship gate of 1.9 ambiguous until 1.4b reports; acceptable, but 1.9's DONE criteria must name both regimes explicitly (they do) — keep it.
+
+**3. Contradictions / stale claims**
+- 1.8b says 1.8c authors TEST-FLOWS sections for 1.9/2.3 "in the same commits as the gate steps", but 1.9 is mandated as ONE commit landing later — 1.8c cannot commit them. Unresolvable as written.
+- 2.1 claims a "bidirectional" `translate_sse` responses state machine, while 3.2 owns reverse state machines as Phase 3 work. Overlap; scope creep into Phase 1/2 ship units.
+- Task numbering skips 1.3 (removed R4) — harmless but 1.9's "prerequisites 1.0-1.2" reads stale.
+
+**4. Missing first-ship requirements**
+- Phase 2: responses-client `text.format`/structured output and image inputs are absent from 2.2 (3.2a mentions images for the reverse; the forward is unowned).
+- Corpus capture redaction + fixture-size budget; chat-target error `code` values are unspecified in the C2 type map (only `type` mapped).
+
+**5. Architecture notes**
+- Extension points are correctly placed (`sse_st` per-attempt, accumulator maps per C5); degradation channel split (headers non-stream / terminal event + usage row stream) is coherent. Keep the four index spaces as separate maps — do not let 2.1's synthesized-id counters touch upstream id spaces.
+
+**6. Top 5 edits**
+1. Reorder Phase 3: 3.3 → 3.2a → 3.2-eunit → 3.1 → 3.2-wire → 3.5 → 3.4.
+2. Move 1.4b's concurrency/abort/id-reuse items into 1.9's e2e list; 1.4b keeps pure mapping only.
+3. Fold 1.9/2.3 TEST-FLOWS authoring into the ship-unit commits; 1.8c ships only UI + warning.
+4. Add the text-block close/emit rule + TTFT note to C5.
+5. Split 2.1 (responses target only) from 3.2 (responses source); add structured-output/images to 2.2 or declare them non-goals.

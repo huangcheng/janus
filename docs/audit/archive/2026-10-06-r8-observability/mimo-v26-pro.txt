@@ -1,0 +1,25 @@
+**1. Verdict: GO WITH FIXES** — architecture is shippable; rev 8 left three mechanical residue defects (one of them the exact bug class it claims fixed).
+
+**2. Critical risks**
+- Label cardinality, hot-path cost, auth reuse, bucket monotonicity (descending bump = upper-set union, provably monotone under concurrency), multi-node model: all sound.
+- `protocol` label provenance is unverified: gate 4b asserts client dialect on translate paths, but Step 1b only verifies `Proto` *exists* in `track/3` — if it carries the upstream/provider protocol, 4b fails. Pin the semantics in code, not the gate.
+- Histogram scrape can transiently render `_count`/`_sum` as 0 alongside `+Inf` ≥ 1 (mid-observe); documented, promtool-valid, fine.
+
+**3. Contradictions / stale claims**
+- `buckets/0` is a **hardcoded literal**, not derived from `?BUCKETS_DESC`, despite the inline comment ("the two can never drift") and rev 8's own history ("buckets/0 derives from ?BUCKETS_DESC"). Drift is back.
+- "ALL row assembly lives INSIDE the try" is false in the listing: `LbList = maps:to_list(LbStats)`, `BadStats`, `maps:get(dropped, Usage, ...)`, `int_or_zero` all sit outside. `safe/3` only guarantees *no exception*, not a map — a shape-drashed `janus_lb:stats()` return crashes uncaught, unlogged.
+- Task 5 says the four handlers erase `janus_req_counted` "in THIS task"; Task 6's snippet re-emits the same erase line (double-edit ambiguity).
+
+**4. Missing first-ship requirements**
+- No gate assertion that error-path (`reply_err` 5xx/502) replies carry `x-request-id`, though the Goal claims errors echo it.
+- `generate/0`'s catch-clause fallback (`<<I:64/big>>`) is unguarded; an exception there propagates and 500s the request — violating "ids must never 500 a request."
+
+**5. Architecture notes**
+- Registry (named set, `whereis` per bump, `update_counter/4` create-and-bump, integer-µs sums) is correct and race-free; renderer is pure (cross-module calls are pure too) and total. Hook placement (terminal `track/3`, `reply_err/6` with `janus_req_counted`, auth, models) is coherent; header echo via one `set_resp_header` on the shared Req chain is sound, `filter_headers` verified.
+
+**6. Top 5 edits**
+1. `buckets() -> lists:reverse(?BUCKETS_DESC)` (single source, honestly).
+2. Move `Usage`/`LbStats` consumption (`maps:get`, `maps:to_list`, `int_or_zero`) inside the render try, or add `is_map` guards in `safe/3`.
+3. In Step 1b, verify + document `Proto` = client dialect (or derive the label from the request path via `janus_http_classify:protocol/1`).
+4. Wrap `generate/0`'s fallback body in its own try.
+5. Add gate: 5xx `reply_err` response carries `x-request-id`; delete Task 6's duplicate `erase(janus_req_counted)`.

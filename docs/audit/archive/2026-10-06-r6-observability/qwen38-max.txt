@@ -1,0 +1,34 @@
+**1. Verdict:** GO WITH FIXES — rev-5 findings are genuinely resolved (bump order is now provably monotone, `+Inf` whitelisted pre-partition, registry-driven renderer, total `to_bin`, `crypto` dep), but one "key fact" is factually wrong, the handler's try/catch doesn't cover row assembly, and both byte-exact histogram fixtures encode impossible ladders.
+
+**2. Critical risks**
+- **Exposition correctness:** gate step 10 is conditional on `which promtool`; in the CI container it likely never runs, leaving eunit as the only format check. Make it hard.
+- **Hot path:** ~17 `ets:whereis` + 17 `update_counter` per request; `whereis` takes the name-registry read lock. One lookup per `inc`/`observe` suffices.
+- **Auth reuse:** loopback fallback + same-host Caddy = unauthenticated `/metrics` (provider names, LB stats). A README note is not a control.
+- **Histogram sanity:** the two exact fixtures use non-cumulative ladders (0.05→3, 0.1→0, 10→5, 30→0, 600→7). Impossible in production; violates the AGENTS.md fixture-realism rule and weakens the very monotonicity invariant the gate asserts.
+- **Stream double-count:** `janus_req_counted` is process-local. If `track/3` runs in the proxy process and a later stream error replies via `reply_err/6` from a relay process, the guard is unset → double count. Gate covers only happy streams + one 404.
+- **Cardinality:** bounded *if* `janus_lb:stats/0` keys are a closed atom set — `to_bin(K)` there is unguarded.
+- **Migration/dual dialect:** sound; the 24-placeholder arithmetic checks out. Residual: if 005 fails and boot continues, every `build_insert` breaks — only gate step 6 (poll a real row) catches it. Keep it.
+- **Request-id hygiene:** charset + 128 cap correct; ids are untrusted, so the SPA column must stay React-escaped.
+
+**3. Contradictions / stale claims**
+- "`statistics(wall_clock)` is a non-destructive read" — **false**: it returns `{Total, SinceLastCall}` and *resets* `SinceLastCall`. `Total` is safe, but any other Janus caller of element 2 is corrupted by 15s scrapes. Grep first.
+- Self-review: "~13 bucket bumps"; it's up to 14 (+Inf + 13).
+- `render_counter_family` hardcodes `type_line(Name, counter)` while `render_gauge_family` consults the registry — "registry-driven" is half true.
+- Task 5 Step 3 hardcodes `<<"4xx">>` instead of calling the classifier.
+
+**4. Missing first-ship**
+- `SCHEMA_ETS_CONTRACT.md` entry for the new `janus_metrics` table (Task 1 adds only the column).
+- Verify the agent plane has no catch-all route before asserting `:8080/metrics` → 404 (gate 1b).
+- Rate-limit the new 401 warning (scan amplification, `/stats/logs` ring eviction) + explicit "never log Authorization material".
+- `put(janus_req_counted, true)` in the auth-reject bump.
+- janus-auto judge calls stay unobserved — state it in scope.
+
+**5. Architecture notes**
+Name-per-bump over persistent_term is right. Renderer purity is good, but handler row assembly (`to_bin(K)`, `Version`) sits *outside* the try — a function_clause escapes as an uncaught 500 despite "must not wedge the scrape". Header echo via `set_resp_header` at entry is sound; the pdict coupling is the fragile part — prefer passing the id as a proxy argument over `janus_request_id` in pdict.
+
+**6. Top 5 edits**
+1. Delete the `statistics(wall_clock)` claim; grep for other callers of its second element.
+2. Move `LbRows`/`Version` assembly inside the try (or add a catch-all `to_bin`).
+3. Rewrite both histogram fixtures with cumulatively valid ladders (3,5,5,7,7,7…+Inf).
+4. One `ets:whereis` per `inc`/`observe`; pass Tid into a `bump/3`.
+5. Make promtool unconditional (install in the gate image) and fail-loud when `JANUS_STATS_TOKEN` is unset on a non-loopback admin bind.

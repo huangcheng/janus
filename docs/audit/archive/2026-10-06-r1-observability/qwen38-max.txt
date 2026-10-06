@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound (ETS registry, pure renderer, closed label enums, shared admin auth), but the code as written crashes on the hot path, and metric names disagree with the gate and dashboard.
+
+## 2. Critical risks
+- **Hot-path crash:** `le_bin/1` only has an `is_float` clause, but buckets `1,5,10,30,60,120,300` are integers → `function_clause` in `observe/3` → 500 on every request. All bumps must be `try/catch`-wrapped; observability may never break the data plane.
+- **Hot-path cost:** ~15 `ets:update_counter` calls/request, each preceded by `ets:info`, plus 11 `io_lib:format("~g")` and a `norm_labels` sort. Key tuples are static per call site — precompute them, or use `counters`/atomics like `janus_http_stats` (the plan's own cited model).
+- **Exposition:** `string:join/2` on binaries raises badarg with ≥2 labels (every real series). Histograms emit one `# TYPE` per label set → promtool duplicate-TYPE error. `maps:fold` output order is nondeterministic.
+- **Zero-series gap:** nothing is pre-registered, so `janus_requests_total` is absent on a fresh scrape — Task 7 step 2 fails.
+- **`status_class(_) -> <<"2xx">>`** maps 3xx, `undefined`, and exhausted failover to success. Hides outages; worst correctness bug.
+- **Cardinality:** `provider` is operator DB data (self-review's "no dynamic label values" is false) and never evicted; label values need charset sanitizing and a series cap.
+- **Scrape-time work in `init/2`:** unverified `janus_lb:cooling_count/0`, `janus_config:ready/0`, catalog row shape → `undef` → 500 per scrape. `janus_usage:stats()` without timeout can outlast the scrape timeout. `statistics(wall_clock)` is a destructive read that clobbers other modules' timing. `ets:new` raises badarg on re-init (hot upgrade).
+- **Multi-node:** example config claims per-node tokens but ships one job/three targets/one credentials_file. Counters are node-local — document `instance`, never sum LB gauges, drift panel needs `max != min`.
+- **Migrations:** only Postgres verified; if both flat and subdir layouts are discovered, SQLite's non-idempotent `ADD COLUMN` applies twice. `CREATE INDEX` without CONCURRENTLY locks a hot table at boot.
+- **Buckets** top out at 300s (p95 saturates); stream `LatencyMs` conflates TTFB with client consumption.
+
+## 3. Contradictions / stale claims
+Code emits `janus_requests` / `janus_request_duration_*`; Task 5 table, Task 7 greps, Task 8 PromQL want `_total` / `_seconds` — gate cannot pass. Task 6 test expects lowercase hex; `binary:encode_hex` is uppercase. "`track/3` fires once per terminal outcome" vs bumps inside the `is_map(Agent)` branch. Task 5 enum omits `messages`; path→endpoint mapping duplicated in proxy and auth. `usage_writer_dropped_total_note` and unused `Base` are dead code. "11→22 per row … 24 params" is incoherent.
+
+## 4. Missing first-ship
+Dashboard task exposing `request_id` on `/api/usage/events` (Task 7 step 6 depends on it) + SPEC/SCHEMA_ETS_CONTRACT updates; SQLite migration verification; eunit-first for bucketing; E2E asserts the header on **401** and **streaming**; step 9's log source is guessed; `metrics_enabled` toggle (settings→persistent_term); 405 for non-GET; `# HELP`; failover metrics (attempts/exhaustions/cooldowns) and in-flight gauge — an LB gateway without them; token secret provisioning; docs that inbound ids are untrusted/non-unique.
+
+## 5. Architecture notes
+Cache the tid; keep ETS only for provider-labeled series. Renderer must be total over unexpected rows and derive `_count` from `+Inf`. Centralize label derivation; verify Caddy path prefixes or everything becomes `other`. `set_resp_header` only works if every reply uses the returned Req — check `reply_err/6` and stream paths, and that upstream pass-through can't clobber it; pass the id explicitly to `janus_usage:record` rather than reading pdict deep in failover, and add the key to `handle/5`'s erase list (keep-alive reuses the process). Don't label `/v1/models` as `openai_chat` — false protocol corrupts error ratios.
+
+## 6. Top 5 edits
+1. Rename call-site metrics to `requests_total`, `upstream_requests_total`, `request_duration_seconds`.
+2. Float the buckets / add an integer clause, precompute `[{Le,LeBin}]`, wrap bumps in `try…catch`.
+3. `lists:join(<<",">>,…)`; one `# TYPE` per family; deterministic sort; seed zero series at init.
+4. Explicit `status_class` with `unknown` fallback; add 600/1800 buckets; document stream duration semantics.
+5. Lowercase generated ids, erase-list the pdict key, try/catch each gauge with boot-timestamp uptime, `ADD COLUMN IF NOT EXISTS` + single-layout discovery check, plus the dashboard `request_id` task.

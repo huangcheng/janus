@@ -1,0 +1,27 @@
+**1. Verdict: GO WITH FIXES** — the design is sound and the round-5 killers are genuinely resolved; five small residual edits (one of which ships a dependency change uncommitted).
+
+**2. Critical risks**
+- Histogram invariants now hold mathematically: +Inf-first then descending ladder ⇒ at any interleaving, count ≤ +Inf and bucket counts monotone in `le` (each obs bumps high→low, so an obs that bumped `le1<le2` already bumped `le2`). Sound.
+- Scrape robustness: LB rows filter `is_integer(V)`, but `Dropped = maps:get(dropped, Usage, 0)` and gauges are unvalidated — one non-integer `dropped` makes `integer_to_binary/1` throw and 500s the *entire* scrape (the try/catch converts crash→500, not crash→partial body).
+- Cardinality, auth reuse (extracted verbatim + 401 regression step), request-id hygiene (charset-locked echo), dual-dialect SQL: clean.
+
+**3. Contradictions / stale claims**
+- "Key file fact": *"`statistics(wall_clock)` is a non-destructive read"* — wrong as stated. It returns `{Total, SinceLastCall}` and every call advances the VM-global since-last-call delta. The gauge uses element 1 (fine), but any *other* consumer of the delta is corrupted by scrapes. Grep the codebase and restate the fact.
+- `generate/0`'s `unique_integer` fallback produces `req_<arbitrary hex>` (encode_unsigned length varies), contradicting the locked `req_[0-9a-f]{16}` contract and gate step 7.
+- "models post-auth errors are not counted" holds only if the models handler never routes through `reply_err/6` — say so explicitly.
+
+**4. Missing first-ship requirements**
+- `crypto` is to be added to `apps/janus_http/src/janus_http.app.src`, but Task 6's `git add ... janus_http_*.erl` **cannot match `janus_http.app.src`** — the dep ships uncommitted (the same class of bug round 5 caught for `janus_http_stats.erl`).
+- `janus_req_counted` keep-alive erase lands only in Task 6, while the counting bump lands in Task 5 — the Task-5 commit alone leaks the flag across keep-alive reuse. Move the erase into Task 5.
+
+**5. Architecture/design notes**
+- Renderer purity: `janus_metrics_render` calls `janus_metrics:buckets()` — behavior-pure but module-coupled; passing the ladder into `render/2` (or a copy in the render module) makes the byte-exact tests self-contained.
+- `ets:whereis` per bump, registry-driven families, whole-body try/catch, precomputed bucket binaries: right shapes; `bump/2`'s `is_integer(Incr)` guard is consistent with µs sums.
+- Header echo via `set_resp_header` at handler entry on the same Req chain is correct-by-construction (stream/401 covered; `filter_headers` blocks upstream clobbering) — the gate asserts close the residual risk.
+
+**6. Top 5 concrete edits**
+1. Add `apps/janus_http/src/janus_http.app.src` to Task 6's `git add` list.
+2. Correct the `statistics(wall_clock)` fact; verify no other delta consumer.
+3. In the handler, integer-coerce `Dropped`/gauges (same `is_integer` filter as LB rows) so one bad value can't 500 the scrape.
+4. Make the fallback id 16 hex chars (pad/truncate) or relax step 7's regex; document which.
+5. Move the `janus_req_counted` erase (handler + proxy) into the Task 5 commit.

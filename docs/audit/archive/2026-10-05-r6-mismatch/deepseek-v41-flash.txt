@@ -1,0 +1,37 @@
+**Note first:** `prompt.md` audits a *different* spec — an entitlement matrix / probe runner / key-failover design. `target.md` is the Phase-1 streaming + counters + test-image + deploy-hygiene spec. I audit `target.md`; the prompt is stale.
+
+**1. Verdict**
+GO WITH FIXES — Phase 1 is coherent, but the audit prompt targets the wrong document and Slice A/B carry unresolved classification and counting ambiguities.
+
+**2. Critical risks**
+- `include_usage` retry fires on *any* pre-200 400 (bad model, quota, unrelated), doubling latency and possibly landing on a different LB key.
+- Disconnect → `track(502)` inflates `requests_failed`; benign navigation makes the node "error rate" meaningless.
+- The 1 MiB `sse_events` cap can 502 a single large thinking/text delta.
+- Forwarding provider `ping` as `: ping` keeps Cowboy idle alive; a wedged upstream holds a handler ~300s with no client progress.
+- Anthropic `message_delta.usage.input_tokens` is non-standard; strict SDKs may reject it.
+
+**3. Contradictions / stale claims**
+- `prompt.md` describes A/B/C/D as entitlement/failover — not this spec.
+- §4.1.4 tracks response `n>1` as 400 (client-attributable), contradicting "after-200 provider-origin → 502" and §10's own rule.
+- Slice B names `janus_stats_tracked` in the table but gates on `janus_stats_failed` later — two keys, undefined relation.
+- §3 says "three independent PRs" while §4 defines four slices, two dual-repo paired.
+
+**4. Missing requirements**
+- How `sse_events` preserves an `event:` type whose `data:` arrives in the next chunk.
+- Save/restore of `janus_stats_inner` across nested janus-auto `do_proxy`.
+- `/stats` auth model (Bearer) beyond deploy probes.
+- Provider that never sends `[DONE]` and no finish — EOF-only reliance unstated.
+
+**5. Architecture / design notes**
+- Process-dict counters are handler-scoped (safe), but janus-auto recursion must save/restore `janus_stats_inner` or it leaks outward.
+- `started_at`/`uptime_sec` must be set in `janus_http_app` init to match "hot reload keeps counters".
+- `message_start` must precede any block in the *same* chunk; spec only implies ordering.
+- Slice C: hex cache lives in `~/.cache/rebar3`, not `_build`; an empty named `_build` volume recompiles and must still resolve deps offline — confirm, and add `priv/` mounts if compile needs them.
+- Slice D: pin leader generation once post-apply; a concurrent ship mid-wait breaks the `> gen0` comparison.
+
+**6. Top 5 edits**
+1. Rewrite `prompt.md` for round 6 — audits currently measure the wrong artifact.
+2. Make `n>1` provider-origin 502, or justify 400 in §10.
+3. Collapse to one failed-gate key; define inner save/restore.
+4. Spec `event:`/`data:` split handling + eunit; declare `#sse_st` sole leftover owner.
+5. Clarify Slice C cache/volume and `priv/` mounts; pin Slice D leader generation.

@@ -1,0 +1,33 @@
+# Audit verdict: GO WITH FIXES
+
+## 1. Critical risks
+- **Knob naming undercounts scope.** `stream_translate_tools_enabled` unblocks tools+vision+n>1-stream. Rename to `stream_translate_phase1_enabled`; enumerate gates.
+- **Backward-compat under unblock unspecified.** 1.9 "removes `has_non_text_content`/`has_tools` from `stream_translate_blocked`" — if deleted, knob-OFF 400 must move into the knob check. Path not identified.
+- **Phase-2 2×2 matrix not enumerated.** `responses=on, tools=off` is ambiguous: 400 tool-bearing responses streams, or translate via responses-knob? Specify all four cells.
+- **Anthropic SDK wire break.** Translated `message_start` zeros `input_tokens`; Anthropic TS SDK accumulates from `message_start`. Documented as deviation but no SDK migration guide.
+- **3.4 memory budget undercounts.** 50×4MiB for →responses; per-stream worst case is 4MiB reconstruction + 16MiB tool args + 1MiB text args ≈ 21MiB/stream → ~1GB at 50 concurrent.
+- **`mapped_stop` "counter" misleading.** Response has 0 or 1 mapped-stops; column should be SMALLINT flag/enum.
+- **Phase 3.2b stale** (folded into 1.5 but still in execution order).
+- **1.5 evidence rule has no decision owner.** 1.4b characterizes today's n>1 behavior; "silently degrades" vs "multi-completion works" branches UNGATED vs knob-gated. Who decides, where is the finding recorded?
+- **1.0 "per family" overstates corpus scope** — thinking/pings/responses-failures are family-specific but listed unconditionally.
+
+## 2. Contradictions / stale
+- 1.9 cross-repo order ("dashboard UI ships, then operator flips") contradicts 1.8c being a prerequisite of 1.9 — dashboard UI must ship before 1.9's gateway commit.
+- C3: `cache_read_input_tokens` column is anthropic-only; prefer JSONB over a NULL-heavy column.
+- C5: synthesized-call-id allocation scheme (per-process counter? per-VM atomic?) and `jresp_` collision-with-upstream fixture not specified.
+
+## 3. Missing first-ship requirements
+- **Phase 1:** LB cost rank for translated routes; entitlement vs `stream_translate_blocked` ordering; regression of the existing 123 eunit; corpus re-capture owner.
+- **Phase 2:** `previous_response_id` strip+record location on streams (plan says "impossible" but doesn't say where recorded).
+- **Phase 3:** Mid-stream `response.incomplete` handling is a 3.4 assertion but has no source eunit task.
+
+## 4. Architecture/design notes
+- sse_st must hold: 4 id maps, per-tool arg buffers (≤64), per-stream text accumulators, 1MiB total args cap, 4MiB response reconstruction cap (→responses only). Use binary refs to avoid copy.
+- Error taxonomy: canonical `{type, code, message, degradations}`; `degradations` carries `x-janus-mapped-stop`+`x-janus-dropped` items, surfaced in terminal event payload and usage row.
+
+## 5. Top 5 concrete edits
+1. **1.9:** Rename knob to `stream_translate_phase1_enabled`; turn `stream_translate_blocked` removal into a guarded function (knob on → predicate removed; knob off → legacy 400).
+2. **2.3:** Add a 4-cell table enumerating (tools×responses) on/off semantics, especially `responses=on, tools=off`.
+3. **1.6a/1.8b:** Define `mapped_stop` as SMALLINT 0/1; add `degradations JSONB` column.
+4. **1.9 + 1.8c:** Explicit commit topology: gateway + dashboard commits are separate; dashboard ships FIRST.
+5. **3.4:** Update memory budget to 21MiB/stream worst case (~1GB at 50 concurrent); add per-process binary-ref ceiling.

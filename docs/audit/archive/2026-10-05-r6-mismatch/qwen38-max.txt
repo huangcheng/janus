@@ -1,0 +1,32 @@
+**1. Verdict**
+GO WITH FIXES — the spec is mature and internally consistent for its actual scope (streaming translate, counters, test image, deploy hygiene), but four gaps need pinning before Slice A/B implementation, and the audit prompt itself is stale.
+
+**2. Critical risks** *(prompt.md's risk list targets a different spec; adapted to target.md)*
+- **Forward-compat hard-fail:** unknown Anthropic `event:` or delta subtype falls into "other → `translate_unsupported`" → 502 mid-stream. Provider-side additions (`citations_delta`, future events) would break *all* mixed streams. Unknown *stop reasons* degrade gracefully; event types must too.
+- **1 MiB per-line cap:** one legitimate large `data:` line → stream killed with 502. Needs logging before finalize and ideally a knob.
+- **`include_usage` 400-retry:** unspecified whether the retry stays inside one `do_proxy` call — if it re-enters, Slice B double-counts `requests_total` and may double-write usage rows.
+- **Chat→Anthropic usage edge:** when `out_tokens` is undefined but `in_tokens` known at `[DONE]`, the `message_delta.usage` wire shape is unspecified; strict Claude clients may reject it.
+- **Process-dict flag ordering:** janus-auto inner `do_proxy` runs in the *same* Cowboy handler process. If inner sets `janus_stats_inner=true` and never erases it, the later outer `track` is suppressed → failed under-count. Set/erase ordering must be specified.
+- Client disconnect recorded 502 (closed decision) will inflate `requests_failed` for abort-heavy clients (Cursor); SPEC §2.4 rewrite must state the counted-population semantics explicitly.
+
+**3. Contradictions / stale claims**
+- **`prompt.md` describes a different spec** — entitlement matrix, key failover, probe runner — none of which exist in target.md. It is leftover from an earlier phase; retire or rewrite it.
+- No internal contradictions found in target.md; §10 closed decisions are consistent with §4.1–4.4.
+
+**4. Missing requirements**
+- Behavior for unknown SSE event/delta types (pick skip+log, not 502).
+- No test coverage for the `include_usage` retry path (impure, lives in proxy — needs at least a TF or explicit waiver).
+- TF-6.8 "tokens not both null *when upstream reports them*" — how E2E knows upstream reported is undefined; pin the fixture upstream.
+- SPEC §2.4 replacement text not drafted.
+
+**5. Architecture/design notes**
+- Per-fold immediate writes avoid buffering but make write errors mid-drain a 502 case — fold that into the drain-failure row.
+- `#sse_st{}` single-owner leftover discipline is sound.
+- Atomics reset on app restart + `started_at` is coherent.
+
+**6. Top 5 concrete edits**
+1. Retire/rewrite `prompt.md` (wrong spec).
+2. §4.1.3: unknown `event:`/delta type → `{ok,[],St}` + log; reserve `translate_unsupported` for `tool_use`/`tool_calls` only.
+3. §4.1.1/§4.2: pin the 400-retry inside a single `do_proxy` (no second `inc_total`, no second usage row, log the retry).
+4. §4.1.3: if `out_tokens` undefined at finish, omit `message_delta.usage` entirely (same rule as `finalize_sse`).
+5. §4.2: specify `janus_stats_inner` set-then-erase ordering around janus-auto inner calls, plus an eunit/E2E asserting outer `failed` still counts.

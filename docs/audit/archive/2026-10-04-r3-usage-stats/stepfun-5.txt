@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — the shape is sound, but a Postgres label bug, per-row autocommit inserts, and stream wall-time "latency" corrupt data or stall the hot path on day one.
+
+**2. Critical risks**
+- **SSE fidelity:** head locks to the *first chunk* and never grows to 4KB — a `: PING` preamble or split frame before Anthropic `message_start` silently zeroes prompt tokens.
+- **Dialect SQL:** Postgres passes `"T"` through `to_char` literally, so shipped labels break the SPA slice; `ORDER BY 5` ranks by completion tokens, not requests (col 3); SQLite p95 `OFFSET (SELECT ...)` is unverified.
+- **Hot path:** per-chunk `<<Tail/binary, Chunk/binary>>` reallocates ~16KB per SSE frame; flush inserts row-by-row, so SQLite autocommits an fsync per event.
+- **Migration:** FK to `provider_keys` while 002 is Postgres-only — confirm the table exists in the SQLite schema or every insert fails (CREATE succeeds regardless).
+- **Sweep:** DELETE inside the gen_server stalls flushes.
+- **Buffer failure:** self-review's "buffer grows" is wrong — flush clears on failure, so a dead DB silently drops ≤100 events/flush; `catch gen_server:cast` hides a dead `janus_usage`; no counter, no log.
+- **Identity:** synthetic 500/502/503 in a column documented "upstream HTTP status" conflates gateway with upstream failure rates.
+- **Latency/p95:** streams measure to `stream_body(fin)` — a 60s stream logs as 60s latency; if Drain/`track` run in a gun callback process, the ctx lookup silently yields `undefined`.
+
+**3. Contradictions / stale claims**
+- The buffer-growth and "tolerates DB down" claims (above) describe silent data loss.
+- "Usage cumulative in both dialects" — several OpenAI-compatible gateways emit non-cumulative or no usage; `max()` under-counts with no signal.
+- "Record at every terminal clause" vs. Task 6's added streaming track; stale line numbers in Task 5.
+
+**4. Missing first-ship**
+- Transactional batch insert plus flush-error log and dropped-event counter.
+- eunit for all rollups on *both* dialects (dialect branches untested).
+- Migration preconditions per backend; documented stream-latency semantics; UTC-vs-local label alignment.
+
+**5. Architecture notes**
+A single gen_server is fine for v1 given transactional flush and a counted drop policy. The process-dictionary hook is idiomatic for Cowboy but only safe if all terminal paths run in the request process — assert once. Parser purity and max-per-field normalization are right; share one bucket-SQL helper per backend, and settle UTC vs local before writing `fmtBucket`.
+
+**6. Top 5 edits**
+1. Postgres buckets: `to_char(...,'YYYY-MM-DD') || 'T' || to_char(...,'HH24:00')`, plus a dialect-label eunit.
+2. Wrap `flush/1` in a transaction; log and count failures; keep `buf_size` in state instead of `length/1`.
+3. Accumulate head across chunks to 4KB; align tail to the last blank line before parsing.
+4. Stream latency = upstream span or TTFT (document in API); add one proxy test asserting a row per streamed and non-streamed request.
+5. Gate injection on ClientProto == ProviderProto == openai_chat, honor explicit client `include_usage: false`; fix `ORDER BY 5` → `ORDER BY 3`.

@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound and stable, but two rev-8 changelog claims are contradicted by the listings themselves, and one label-vocabulary hazard can break the gate's exact assertions.
+
+## 2. Critical risks
+- **Protocol label split (highest).** Task 5 Step 3 passes raw `Proto` from `track/3`, but the classifier's enum is `openai_chat|openai_responses|anthropic_messages|none|other`. If `Proto` is the DB/upstream protocol (`openai`), you emit two vocabularies for one label — and gate 4b explicitly pins protocol to the **client** dialect on translate paths, which a raw `Proto` cannot guarantee. Step 1b verifies only variable *names*, never `Proto`'s value domain.
+- **Auth reuse / loopback fallback.** With `JANUS_STATS_TOKEN` unset, the socket-peer loopback check passes for *anything Caddy proxies from the same host*. Mitigation is README prose only — no runtime guard, no boot warning, no gate assertion that prod sets the token.
+- **Hot path:** ~11–15 `update_counter` + 3 `norm_labels` allocations per request. Acceptable; no formatting on the path.
+- **Exposition format:** escaping order, `[short]` floats, `untyped` build_info, numeric-dedupe with count merge are all correct. promtool install source is unspecified — the build image is Aliyun-mirrored and may not reach GitHub for a Go binary.
+- **Cardinality/multi-node:** bounded by construction; `sum by (stat)(rate(...))` needed for `lb_stats_total` (dashboard snippet omits the `sum`).
+
+## 3. Contradictions / stale claims
+- rev 8: "handler `maps:get`/`to_list` inside the render try" — **false**. `Dropped`, `Buffered`, `LbList`, `BadStats` are all computed before `try`. A non-map `janus_usage:stats/0` escapes as an uncaught 500.
+- rev 8: "`buckets/0` derives from `?BUCKETS_DESC`" — **false**; both ladders are hardcoded literals that can drift.
+- Task 5 Step 3b edits four handlers; the commit list names only `janus_http_models.erl`.
+
+## 4. Missing first-ship requirements
+- Step 1b does not verify `/stats/logs` passes arbitrary structured fields through (gate 9 asserts `request_id` appears).
+- No assertion that `/healthz`, `/readyz`, `/metrics` 401s never mint `endpoint="other"`.
+- `usage_writer_dropped_total` renders `0` when its source fails — a counter that lies; omit the series instead.
+- No boot warning when the stats token is unset.
+
+## 5. Architecture notes
+Registry design (named public ETS, `whereis` per call, integer µs, whole-body try/catch) is right. Renderer purity holds except one vanishing-series path: `HistNames` derives **only** from `{hist,...}` rows, so a `hist_sum_us`/`hist_count`-only family silently disappears — the exact bug class the plan claims to have closed. Header echo via `set_resp_header` at handler entry is the correct mechanic; keep `janus_req_counted` out of the proxy erase list as written.
+
+## 6. Top 5 edits
+1. `track/3`: `protocol => janus_http_classify:protocol(get(janus_req_path))` (both series); add a value-domain check to Step 1b.
+2. Move `Dropped`/`Buffered`/`LbList`/`BadStats` inside the `try` in `janus_http_metrics:render/1`.
+3. `buckets() -> lists:reverse(?BUCKETS_DESC).`
+4. `HistNames` from `hist` ∪ `hist_sum_us` ∪ `hist_count` rows; emit sum/count even with no buckets.
+5. Task 5 commit list += `janus_http_chat.erl`, `janus_http_messages.erl`, `janus_http_responses.erl`; Task 8 names the promtool image + download source.

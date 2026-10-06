@@ -1,0 +1,31 @@
+## 1. Verdict
+GO WITH FIXES — rev 7 resolves the round-6 items correctly, but one byte-exact eunit fixture contradicts `float_to_binary/2 [short]` semantics, two stale claims survived the renumber, and the plan's own `janus_metrics.erl` listing contains a duplicated macro/comment block.
+
+## 2. Critical risks
+- **Exposition format correctness:** `mixed_snapshot_exact_test` expects `_sum ... 0.03` for 30000 µs. Erlang's `float_to_binary(0.03, [short])` emits `3.0e-2` (scientific below 0.1 — same reason the plan's own README warns about `1.0e7`). As written, Task 3 Step 4's "All 9 tests passed" fails. Fix the fixture to `3.0e-2` (Prometheus-legal; README already disclaims it).
+- **Hot-path cost:** ~17 `update_counter` calls/request on a whereis lookup — ns-scale, try/catch'd; fine.
+- **Histogram sanity:** +Inf-first-then-descending bump order genuinely preserves monotone-bucket and `count =< +Inf` at every interleaving; gate asserts equality only at quiescence. Sound.
+- **Request-id hygiene:** charset allowlist, 128-byte cap, comma-joined duplicate rejection, echo-before-auth — all correct; upstream `x-request-id` clobbering ruled out via `filter_headers` (verify at implementation, as noted).
+- **Migration/dual-dialect:** 009 targets the executing subdirs + flat copies, nullable + indexed; the ledger dedupes. Confirm the runner globs *only* the subdir, else the same version appears twice (subdir + flat) and may error on duplicate version.
+- **Multi-node:** per-node jobs, counter-reset semantics, node-scoped vs summable split — all documented correctly.
+
+## 3. Contradictions / stale claims
+- Task 7 Step 1: "gateways with migration **005** ship BEFORE this dashboard change" — missed the 005→009 renumber.
+- Task 6 Step 5: "status at position 19 (unchanged)" — with 15 pre-009 columns, row-2 `status` is param **23**, `request_id` param 32. "19" is a pre-008 artifact (or the in-module shape test itself is stale — check the tree).
+- `janus_metrics.erl` listing: `-define(TABLE, janus_metrics).` appears twice and the "buckets/0 documents..." comment block is duplicated — copy-paste debris; identical macro redefinition is at best a warning.
+- Task 6 commit list adds `janus_usage_sql_tests.erl` while the text insists the shape test lives in `janus_usage.erl -ifdef(TEST)` — unexplained (fine if fixtures there also gain request_id; say so).
+
+## 4. Missing first-ship requirements
+- Task 2 Step 4's container command drops `-e HEX_MIRROR -e HEX_CDN` from the canonical AGENTS.md command — breaks on cold hex cache.
+- `maps:to_list(LbStats)` / `maps:get(dropped, Usage, ...)` run *outside* the render try: `safe/3` catches crashes but not wrong shapes (non-map return → uncaught 500, contradicting the handler's own "all bad shapes contained" claim).
+
+## 5. Architecture/design notes
+- Renderer purity restored; registry-driven families; zero-fill ∪ ETS-bounds with numeric dedupe + count merge — solid. Renderer duplicates `to_bin`/`norm_labels` instead of reusing the registry's exported total ones — drift risk, minor.
+- `janus_req_counted` guard assumes `track/3` and `reply_err/6` share a process on the upstream-error stream path; the plan marks it verified-at-implementation — keep it a hard gate check.
+
+## 6. Top 5 concrete edits
+1. Fix `_sum` fixture: `0.03` → `3.0e-2` (or assert via binary:match, not byte-exact).
+2. Task 7: 005 → 009 in the deploy-order note.
+3. Task 6: correct param positions (status=23, request_id=32) and reconcile the `janus_usage_sql_tests.erl` commit entry.
+4. Deduplicate `-define(TABLE, ...)` and the doubled comment block in the `janus_metrics.erl` listing.
+5. Move `maps:to_list(LbStats)`/`maps:get` shape handling inside the try (or shape-check in `safe/3`); restore `HEX_MIRROR/HEX_CDN` in the compile command.

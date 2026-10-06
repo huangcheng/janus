@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — architecture and rev‑1 resolutions are sound, but the plan's own renderer code fails its own eunit and silently drops a locked series.
+
+**2. Critical risks**
+- **Exposition correctness:** `render_hist_series` has misplaced brackets — the bucket comprehension and `_sum` line are discarded (clause returns only the `_count` line) or won't compile at all. Task 3 Step 4 fails as written.
+- **ETS init:** `init/0` checks `persistent_term`, not `ets:info(?TABLE)` — contradicting the plan's own key-fact. After an app restart the table dies but the PT tid survives: every bump silently no-ops forever, and `snapshot/0` throws badarg → `/metrics` 500s (not wrapped in `safe`).
+- **Missing series:** the handler appends `{{counter, usage_writer_dropped_total, []}, Dropped}`, but the renderer hardcodes only `requests_total`/`upstream_requests_total`/`x_total` — the dropped counter never renders. The Grafana dropped-rate panel is dead while the gate stays green (the gate never asserts it).
+- **Otherwise OK:** cardinality closed-enum bounded; hot path ~20 cached-tid `update_counter` (ns-scale); auth extraction verbatim, peer-IP loopback, admin 401s don't feed agent counters; integer-µs histograms, numeric sort, +Inf pinned; request-id charset whitelist blocks header injection, same-Req-chain echo; migration uses ledger dedupe + `IF NOT EXISTS` + explicit column INSERT; per-node scrape jobs, no gauge summing.
+
+**3. Contradictions / stale claims**
+- Key-fact prescribes `ets:info` idempotency; code uses PT (above).
+- `x_total` family hardcoded in production renderer purely for the escape test — test leakage.
+- Docstring "families sorted by name" — actually fixed order with gauges appended.
+- Self-review claims the renderer is correct; it fails its own tests. "No formatting on hot path" — `norm_labels` does `atom_to_binary` per bump (harmless).
+- Task 5's auth-reject log reads `get(janus_request_id)`, but the `put` arrives in Task 6 — undefined at that intermediate commit.
+
+**4. Missing first-ship requirements**
+- Gate step asserting `janus_usage_writer_dropped_total` exists (would have caught the missing family).
+- `models_serving/0` assumes `janus_catalog:get()` shape unverified — every other external name got a "verify by reading" note.
+- Handler calls `janus_lb:stats/0` twice (non-atomic) and ships dead `LbGauges` code with an inline "simplify" instruction.
+
+**5. Architecture/design notes**
+Registry key design, PT-cached tid, terminal-only `track/3`, erase-list exclusion, HELP/TYPE grouping, and per-node scrape model are all right. The structural flaw is the hardcoded family list — derive counter families generically (`lists:usort` of names from `Rows`) and the `x_total` leak plus the `dropped_total` omission vanish as a bug class.
+
+**6. Top 5 concrete edits**
+1. `init/0`: gate on `ets:info(?TABLE)`, refresh the PT tid on recreate, and guard `snapshot/0`'s `tab2list`.
+2. Rewrite `render_hist_series` as one concatenated iolist emitting buckets, `_sum`, `_count`.
+3. Replace the three hardcoded `render_family` calls with generic family derivation from `Rows`.
+4. Handler: build `LbStats` once, delete `LbGauges`, give `lb_stat` a HELP entry.
+5. Swap Task 5/6 order (or defer the auth-log `request_id` field); add the `dropped_total` gate assert; document that `upstream_requests_total` counts terminal attempts only (failover retries invisible).
+il flush" as latency tolerance only; no metrics flush exists (contrast with the 1s usage-writer flush in step 6).
+5. Make the "families sorted by name" doc claim true (sort all family output) or delete the claim.

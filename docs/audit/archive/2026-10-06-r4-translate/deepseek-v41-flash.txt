@@ -1,0 +1,30 @@
+## 1. Verdict
+GO WITH FIXES — substrate and phase split are sound, but the unblock ordering contradicts its own E2E task, route-preference goes stale after unblock, and the →anthropic usage scheme is unfaithful to the real schema.
+
+## 2. Critical risks
+- **R1 →anthropic usage is invented.** Real wire: `message_start.usage` carries `input_tokens`; `message_delta.usage` carries only `output_tokens`. Zeroing `message_start` and declaring "totals in message_delta" fabricates a non-standard schema — strict SDKs total input from `message_start` and report 0. C1/C3 must not zero `input_tokens`.
+- **R2 Route preference is keyed to translate-BLOCKED requests.** After 1.3/2.3 unblock, there is no block → no `prefer_proto` → translatable traffic with a native route gets translated. The "same-protocol route preference" claim is stale post-unblock; `prefer_proto` must be attached to *translatable* requests explicitly.
+- **R3 Ordering contradiction.** 1.4 asserts translated-stream skeletons, but 1.3 (predicate removal) ships LAST — the gate 400s the very requests 1.4 tests. 1.3 must precede 1.4 (or split predicate-removal from the knob).
+- **R4 Responses skeleton incomplete.** Real order is `response.created` → `response.in_progress` → item events; the plan omits `response.in_progress`. Strict clients reject.
+- **R5 Thinking fidelity unaddressed.** Anthropic thinking blocks carry `signature`/`redacted_thinking`; mapping to chat `reasoning_content` is lossy and signatures cannot round-trip. No task covers it.
+- **R6 Default-on kill switch** flips behavior at deploy with per-route granularity deferred; Phase-1 load signal is only 10-concurrent while 3.4 is 50.
+
+## 3. Contradictions / stale claims
+- "Commit = first DATA frame" vs lazy skeleton: first upstream event may be a non-skeleton delta, forcing mid-stream `message_start` synthesis — assert it.
+- Coverage table implies `prefer_proto` persists post-unblock; it does not.
+- `n>1` streaming reject must fire at dispatch *before* route pick, or native routes fan out.
+
+## 4. Missing first-ship requirements
+- **P1:** secret redaction in 1.0 captures; refresh CI hook; prefer_proto-on-translatable; explicit usage-schema decision; thinking-signature handling.
+- **P2:** `response.in_progress`; reasoning-effort ↔ anthropic `thinking.budget_tokens` validity (mutually exclusive with some params); `previous_response_id`/`store` strip parity across directions.
+- **P3:** responses-provider server-state (`store`) behavior; corpus refresh trigger.
+
+## 5. Architecture notes
+Keep the four index spaces in ONE mapping module with a terminal-signal invariant. Define a shared error-taxonomy enum (`upstream_error | truncated_args | mapped_stop | n_unsupported`) consumed by all three directions. Per-attempt id counter must be monotonic across retries (C4).
+
+## 6. Top 5 concrete edits
+1. `target.md` C1/C3: drop `message_start` usage zeroing; emit `input_tokens` there.
+2. Reorder: 1.3 before 1.4; state `prefer_proto` applies to translatable, not just blocked.
+3. C1 →responses: add `response.in_progress`.
+4. Add thinking-signature/`redacted_thinking` handling to C2/C5 + 1.1.
+5. 1.0: add secret-redaction + refresh CI; raise Phase-1 concurrency smoke to 50.

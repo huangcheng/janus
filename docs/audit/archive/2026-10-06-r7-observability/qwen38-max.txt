@@ -1,0 +1,33 @@
+## 1. Verdict
+**GO WITH FIXES** — the exposition math, bump ordering, and gate design are sound; the remaining defects are totality/coercion holes that can blank an entire scrape, plus three stale claims and one unbuildable gate step.
+
+## 2. Critical risks
+- **Whole-scrape fragility.** `render/2` is inside one `try`, so any single `function_clause` (bad gauge shape, non-pair label, non-binary label value) 500s *all* series. Only usage stats get `int_or_zero`; `catalog_generation`, `models_serving`, `cooling_count`, `WallMs div 1000` go raw into `num_bin`.
+- **`to_bin/1` is still not total** (rev-4/6 claim). `unicode:characters_to_binary/1` returns `{error,_,_}`/`{incomplete,_,_}` for invalid lists, and there is no catch-all clause for tuples/maps/pids — a tuple reaches `escape/1` → `binary:replace` badarg → dead scrape.
+- **Label cardinality via `lb_stats_total{stat=...}`.** The plan *assumes* `janus_lb:stats/0` keys are a closed set. If any key embeds a provider/route/model, this becomes the unbounded series. Needs an explicit allowlist in the handler, not a "verify by reading" note.
+- **Hot path** is fine (~18 `update_counter`, ns-scale, precomputed binaries). Note `{write_concurrency,true}+{read_concurrency,true}` on a named `set` enables decentralized counters — `ets:info(T,size)` becomes unavailable; don't use it.
+- **`statistics(wall_clock)`** resets the VM-global `SinceLastCall`; use `erlang:system_info(uptime)` instead (no side effect, same value).
+- Request-id hygiene, auth reuse (socket-peer loopback, `hash_equals`, explicit `crypto` dep), migration dual-dialect, and per-node scrape model are correct.
+
+## 3. Contradictions / stale claims
+- Task 7 Step 1: "gateways with **migration 005** ship BEFORE…" — renumbered to 009 everywhere else.
+- Task 6 Step 5: "row-2 `status` at position **19**". With 16 columns row 2 starts at 17 → `status` is 24 (`request_id` at 32 is right).
+- Key-file bullet "tid looked up **per bump**" vs. `bump/3` taking a hoisted `Tid`.
+- Task 5: models handler "erases `janus_req_counted`" yet "its errors post-auth are not counted" — if it uses `reply_err/6`, they *are*.
+- Task 5 prose promises the gate asserts **exactly one** `x-request-id`; no numbered step does.
+- Duplicated `-define(TABLE, …)` and triplicated bucket comments in the Task 2 source → redefining-macro warning (error under `warnings_as_errors`); `rebar3 fmt --check` appears in only one command.
+
+## 4. Missing first-ship requirements
+- **Nothing installs `promtool`** — step 10 makes it mandatory with no task to add it to the gate image (or a Python text-format fallback).
+- `janus_admin_auth` extraction deletes `is_loopback/1`, `stats_token/0` etc. — export them (or keep delegates) or `janus_gateway_stats` won't compile.
+- No Caddy/deploy note that `/metrics` stays off the public vhost.
+
+## 5. Architecture notes
+Registry-driven renderer, `ets:whereis` per call, whole-body `try/catch`, and `set_resp_header` at handler entry are the right shapes. Two problems: the renderer keeps private `to_bin`/`norm_labels` copies despite the handler's "never hand another partial one" comment; and per-family rendering should each be guarded so one bad family degrades instead of killing the scrape.
+
+## 6. Top 5 edits
+1. Make `janus_metrics:to_bin/1` total (catch-all → `<<>>` or `io_lib:format("~tp",…)`); delete the renderer's private `to_bin`/`norm_labels` and call the registry's; run every label value through `to_bin` before `escape`.
+2. Add a task step installing `promtool` in the gate image (or a deterministic Python exposition validator) — otherwise step 10 is unrunnable.
+3. Coerce **all** gauge values (`int_or_zero`/`num_or_zero`) and wrap each family render in its own try so a bad family emits a warning comment, not a 500.
+4. Whitelist `janus_lb:stats/0` keys explicitly in the handler (`?LB_STAT_KEYS`), logging skips; drop the "closed set by inspection" assumption.
+5. Fix stale text: 005→009 in Task 7, `status` position 24 in Task 6, "per bump"→"per call", remove the duplicate `-define`/comments, add `rebar3 fmt --check` to every container command, and add gate steps for "exactly one `x-request-id`" and the models-error counting decision.

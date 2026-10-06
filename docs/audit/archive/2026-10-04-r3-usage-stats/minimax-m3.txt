@@ -1,0 +1,30 @@
+**Verdict: GO WITH FIXES** — shape is right but ships an Anthropic-SSE correctness bug, an unbounded-buffer DoS surface, and a sweep that will lock Postgres at scale.
+
+**Critical risks**
+
+1. **Anthropic SSE parser broken.** `usage_in_map` falls through to `nested`, which probes only `<<"response">>`. `message_start` nests usage under `<<"message">>`, so `anthropic_sse_head_tail_test` fails: input_tokens lost, result `#{prompt=>0, completion=>42}`. Probe both keys, or locate `<<"usage">>` recursively.
+2. **SSE head stores only chunk #1** (`undefined -> put; _ -> ok`). If `message_start` lands on chunk 2+ or chunk 1 > 4 KB (long thinking traces), `prompt_tokens` is lost permanently. Capture a rolling window over the first N chunks.
+3. **Unbounded buffer + mailbox.** No cap on `Buf`; DB outage → OOM. Async casts also back up cowboy request processes. Cap the buffer (drop-oldest + counter), wrap `query` in try/catch with logging.
+4. **Sweep is one giant DELETE** → minutes-long Postgres lock + WAL blow-up. Batch with `WHERE id IN (SELECT id … LIMIT 1000)`; `EXPLAIN` the ts index.
+5. **p95 diverges across dialects** — `percentile_cont` interpolates, SQLite OFFSET does not. Pick one and document.
+6. **`rewrite_pg` reimplemented** instead of reused from `janus_dashboard_store`; migration comment lies (`latency_ms` is end-to-end through cowboy, not upstream).
+7. **No gen_server tests** — flush cadence, sweep bounds, crash-recovery buffer loss uncovered.
+
+**Contradictions / stale claims**
+- "agent_key_id = null never happens" — silent skips on test/internal flows need documenting, not hand-waving.
+- `p95` returns `0` on empty windows, masking missing data — return `null`.
+
+**Missing first-ship requirements**
+- Denormalized snapshots (`key_prefix`, `model_name`, `provider_name`); `ON DELETE SET NULL` erases attribution on key/model/provider removal.
+- Reads off the writer process; pagination on `breakdown`; no `by_provider_key` despite the column existing.
+- Timezone: `bucket_expr` is UTC, SPA renders local without conversion.
+- Buffer-depth metric + flush-error log line.
+
+**Architecture / design notes** Buffered writer + pure parser + dual-DB rewrite is the right shape. Process-dict ctx is fine for cowboy; move flush/sweep to a dedicated process so heavy read queries don't block writes.
+
+**Top 5 concrete edits**
+1. Fix `usage_in_map`/`nested` to probe `<<"message">>` so Anthropic `message_start` parses.
+2. Replace "first chunk only" head capture with a rolling 4 KB window over the first N chunks.
+3. Bound the buffer (drop-oldest + counter + log on flush error); run reads in a separate process.
+4. Batch `sweep()` in 1 k-row chunks; `EXPLAIN` the ts index.
+5. Delete the inline `rewrite_pg`; reuse the existing helper. Add gen_server tests for flush cadence, sweep bounds, and restart-time buffer loss.

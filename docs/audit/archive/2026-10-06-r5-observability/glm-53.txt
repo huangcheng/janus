@@ -1,0 +1,23 @@
+**1. Verdict: GO WITH FIXES** — rev 5 resolves round 4 credibly, but the flagship histogram-order fix is reasoned backwards and one 413 contradiction survives.
+
+**2. Critical risks**
+- **Histogram scrape races (the big one):** `observe/3` bumps the ladder **ascending**, so a concurrent `tab2list` can see `le="1"` bumped while `le="2.5"` is not → non-monotonic exposition, which corrupts `histogram_quantile` for that scrape. Descending order (suffix incremented) preserves monotonicity under *all* interleavings. And "count last" does **not** protect the count==+Inf invariant — a scrape between the +Inf and count bumps sees +Inf=N+1, count=N; it only guarantees count ≤ +Inf. Exact equality is unattainable without a consistent snapshot; the gate is sequential so its asserts hold, but the code comment's claim is false — document the ±1 skew instead of asserting an invariant the order can't deliver.
+- **413 contradiction (below).**
+- **Compile risk:** Step 2 uses `route_provider_name(Route)` and `LatencyMs` in `track/3`, but Step 1b only verifies `Proto`/`Status`/`Stream` — if `Route` isn't in scope there, Task 5 doesn't compile.
+- Auth reuse, cardinality, migration dual-dialect, deploy order, multi-node scrape model: all sound.
+
+**3. Contradictions / stale claims**
+- Rules say handler-entry 413 "bumps nothing (documented exclusion)"; Step 2b's reply_err list includes `request_too_large` → it *would* be counted. Pick one.
+- Doc says "labels sorted by key"; code appends `le` last regardless (`L ++ [{le,…}]` — "le" < "stream" alphabetically). Prometheus-tolerant, but make doc and code agree.
+- "@doc pure, total, deterministic" vs `logger:warning` inside `render_hist_series` (side effect; test runs can emit noise).
+
+**4. Missing first-ship requirements** — none material. Minor: README/gate don't note the transient count<+Inf skew under concurrent scrapes; `janus_request_duration_seconds` has no early-reject coverage (acceptable, undocumented).
+
+**5. Architecture notes** — Registry-driven renderer with row-derived families, whereis-per-bump, whole-body try/catch, µs-integer sums, `janus_req_counted` handler-authoritative erase, and Req-chain header echo are all correctly designed and well-tested (byte-exact eunit, 9/9 counted). Zero-fill union and bad-bound drop are right. Hook placement (track/3 terminal guard + reply_err catch-all + unauthorized) covers the surface with no double-count path I can construct.
+
+**6. Top 5 edits**
+1. In `observe/3`: bump `+Inf` **first**, then iterate `buckets()` **reversed**, then sum, count last; fix the comment to claim only monotonicity + count ≤ +Inf.
+2. Resolve 413: keep it counted via reply_err and delete the "bumps nothing" sentence (or exclude it from the bump explicitly).
+3. Add `Route` and `LatencyMs` to the Step 1b verification list.
+4. Reword renderer doc: "labels key-sorted, `le` appended last by Prometheus convention."
+5. Move bad-bound warnings out of `render/2` (return `{Binary, Warnings}` the handler logs) — or drop the "pure" claim; add a README line on transient histogram skew.

@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the contracts are coherent and dispositions are testable, but three internal contradictions (1.5 gating, C4(b) vs C1 lazy emission, 3.4 scope) and one unbounded-buffer gap must be resolved before task 1.0 starts.
+
+**2. Critical risks**
+- **C4(b) vs C1 lazy emission:** "a terminal event with ZERO prior data frames is legal" means a bare `response.failed` / `event: error` could be the *first* frame. Real responses/anthropic clients expect `response.created`/`message_start` first (response id, model). Verify against the 1.0 corpus; likely `response.created` must flush before `response.failed`.
+- **Unbounded deferred text:** C5 caps tool ARGS (256KiB/64/1MiB) and scopes the 4MiB content cap to →responses only. Deferred text (open tool call interleaves, →chat/→anthropic) is capped by nothing — an unclosing call = unbounded heap growth. Total-content cap must apply to all targets.
+- Terminator/usage semantics under failover are otherwise sound (per-attempt `sse_st`, no carryover).
+
+**3. Contradictions / stale claims**
+- 1.5: "reject ships UNGATED in 1.9" directly contradicts 1.9's "knob OFF = zero behavior change" and the Transition line "off = legacy path unchanged, asserted". Cannot be both.
+- 3.4 parks *functional* behavior (mid-stream `response.incomplete` mapping) inside the soak task — ordering error; mapping belongs in 3.2 with eunit, soak only verifies under load.
+- 2.4 "no retry" after "cut after first byte": pre-first-DATA-frame cuts DO retry (C4(a)). Reword to "after commit".
+- 1.2 "extend STREAM reply side" for images: providers never stream images upstream — scope creep, drop.
+- Numbering skips 1.3 (cosmetic only).
+
+**4. Missing first-ship requirements**
+- Settings-schema registration for all three new knobs (settings-table default row + dashboard API), not just UI in 1.8c; hot-reload must flow `janus_config:distribute_settings` → persistent_term.
+- Mid-flight rule: in-flight translated streams keep the knob value captured at request start — state once, applies to all knobs.
+- 1.4b needs the deferred-text cap eunit (per risk above) before 1.9 ships.
+
+**5. Architecture notes**
+- Keep one `translate_sse` state per attempt; already correct.
+- Event mapping should be data-driven tables per direction so corpus eunit can enumerate full pairs; the C2 error-type map is one eunit-tested table.
+- Four index spaces (C5) + per-attempt id counters: keep allocation inside `sse_st`, never a global.
+
+**6. Top 5 concrete edits**
+1. **1.5:** delete the UNGATED branch — knob-gate the non-stream n>1 reject too (or explicitly ship knob-ON and flag the behavior change in the changelog); rewrite the Transition sentence to match.
+2. **C5:** change "PLUS a 4MiB total-reconstructed-content cap that applies ONLY to →responses" to a total-content cap for ALL targets (→responses additionally reconstructs full objects at close); add 1.4b eunit.
+3. **Plan reorder:** move "mid-stream `response.incomplete` maps per C2" from 3.4 into 3.2 (eunit); 3.4 becomes load-only.
+4. **C4(b)/C1:** specify whether a bare error frame may precede `response.created`; if not, `response.created` is the one skeleton event legal pre-content.
+5. **2.4:** replace "no retry" with the C4(a)/(c) split; **1.8c:** add settings-default registration for all three knobs as a hard prerequisite of 1.9/2.3/3.5.

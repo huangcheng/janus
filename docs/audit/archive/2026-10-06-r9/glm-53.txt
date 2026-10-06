@@ -1,0 +1,34 @@
+## 1. Verdict
+
+**GO** — no two sentences contradict each other without §10 already picking a winner.
+
+## 2. Critical risks
+
+- **Process-dict flag lifetime.** Cowboy HTTP/1.1 keep-alive serves sequential requests on one connection process; `janus_stats_tracked/failed/counted/inner` left over from request 1 will corrupt request 2's counts (e.g. stale `tracked=true` suppresses the crash-fallback failed bump). The spec pins flag semantics but never mandates per-request erase.
+- **Usage wiring on the translate path.** §7 hedges `janus_usage_parse.erl` with "confirm … extend if". If `capture_usage_chunk` today only sees native-drain data, TF-6.8's "tokens not both null" fails; that the outer `track` feeds it from `#sse_st` is never stated normatively.
+- **400-retry vs LB.** The pre-200 `stream_options` retry pins `track`/counters but not LB cooldown or failure accounting; a 400 entering failure tracking poisons the retry decision.
+- **Slice D `stats_url`.** Halts on empty token, but missing/unreachable `stats_url` in a node row is not classified (halt vs transient retry).
+
+## 3. Contradictions or stale claims
+
+None disqualifying. Minor: §7 names `janus_gateway_stats.erl` though §4.2 never introduces that module (the `/stats` reader is unnamed in the body). §2's stale AGENTS.md command is acknowledged and fixed by Slice C.
+
+## 4. Missing requirements
+
+- Per-request init/erase of the four `janus_stats_*` keys at `do_proxy` entry.
+- Chat-face zero-event finalize: drain EOF before any provider frame leaves `msg_id`/`model`/`created` undefined — the Anthropic zero-content face is specified, Chat-face synthesis is not.
+- `event:`-line-only frames (no `data:`) through `sse_events` — ping forwarding implies they parse, but the emitted shape is unstated.
+
+## 5. Architecture/design notes
+
+- Handler-owned `#sse_st` with immediate per-fold writes, single `finalize_sse` exit, and handler-only `gun:cancel` is sound; preserve it in review.
+- persistent_term atomics created in `janus_http_app` before listeners matches the boot-order invariant; counters surviving hot reload is consistent with emitting `started_at`/`uptime_sec`.
+- Dual-repo pairing (§3) is the right enforcement: TF-6.8/6.8b must land in the dashboard PR or Slice A cannot close.
+
+## 6. Top 5 concrete edits
+
+1. §4.2: "erase all `janus_stats_*` keys at `do_proxy` entry, before `inc_total`" — protects keep-alive process reuse.
+2. §4.1.2/§7: normative sentence — outer `track` on a translating stream passes `#sse_st` in/out tokens to `capture_usage_chunk`; add an eunit asserting the row.
+3. §4.1.2 `finalize_sse`: Chat face with zero provider events synthesizes id, `model = <<"unknown">>`, gateway-clock `created` for the finish/usage chunk.
+4. §4.4 step 6: missing or empty `stats_url` halts immediately, not retried as transient.
+5. §4.1.1 rule 5: the discarded pre-200 400 attempt bypasses LB failure/cooldown accounting, as it bypasses `track`.
