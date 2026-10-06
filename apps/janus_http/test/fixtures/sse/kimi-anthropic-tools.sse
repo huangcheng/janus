@@ -1,0 +1,123 @@
+event:message_start
+data:{"type":"message_start","message":{"id":"msg_Kmr4m0IVPU7VYTa7N9Bsh9MT","type":"message","role":"assistant","content":[],"model":"kimi-for-coding","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":173,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
+
+event:content_block_start
+data:{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" asking"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" for"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" weather"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" in"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" Beijing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" explicitly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" says"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" use"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" tool"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" I"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" need"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" call"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" get"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"_we"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ather"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" with"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" city"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" Beijing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"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"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":0}
+
+event:content_block_start
+data:{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_L7y4rpzMo4Jn563MuZNGqCHJ","name":"get_weather","input":{}}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"Be"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ijing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"}"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":1}
+
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":173,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":82,"output_tokens_details":{"thinking_tokens":29}}}
+
+event:message_stop
+data:{"type":"message_stop"}
+

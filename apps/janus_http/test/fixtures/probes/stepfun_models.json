@@ -1,0 +1,15 @@
+{
+ "status": 200,
+ "models": [
+  "step-3.7-flash",
+  "step-router-v1",
+  "stepaudio-2.5-chat",
+  "stepaudio-2.5-tts",
+  "stepaudio-2.5-asr",
+  "stepaudio-2.5-realtime",
+  "step-image-edit-2",
+  "step-3.5-flash-2603",
+  "step-3.5-flash",
+  "step-5-preview"
+ ]
+}

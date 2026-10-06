@@ -32,6 +32,7 @@
     publish/2,
     routes_for_model/1,
     listings_for/1,
+    model_modality/1,
     listing_names/0,
     listings_summary/0,
     lookup_model/1,
@@ -514,7 +515,12 @@ insert_listings(Tid, Rows) ->
                 Enabled = E =:= 1 orelse E =:= true,
                 %% meta is JSONB/TEXT — decode defensively (bad JSON or
                 %% a driver-encoded value must never break a reload).
-                Entry = #{provider_id => P, enabled => Enabled, meta => decode_meta(maps:get(meta, Row, null))},
+                Entry = #{
+                    provider_id => P,
+                    enabled => Enabled,
+                    meta => decode_meta(maps:get(meta, Row, null)),
+                    modality => modality_bin(maps:get(modality, Row, <<"chat">>))
+                },
                 maps:update_with(N, fun(Entries) -> [Entry | Entries] end, [Entry], Acc)
         end,
         #{},
@@ -526,6 +532,27 @@ insert_listings(Tid, Rows) ->
         end,
         Grouped
     ).
+
+%% Modality tag from the DB — anything unexpected (incl. the
+%% undefined atom from a missing key) reads as chat.
+modality_bin(M) when M =:= <<"image">>; M =:= <<"tts">>; M =:= <<"asr">>; M =:= <<"video">>; M =:= <<"computer">> ->
+    M;
+modality_bin(_) ->
+    <<"chat">>.
+
+%% The modality of a listing name (first enabled entry wins). <<"chat">>
+%% when unknown — the wrong_modality guard is advisory, not load-bearing.
+-spec model_modality(binary()) -> binary().
+model_modality(Name) when is_binary(Name) ->
+    case ets_lookup(table(listings_by_name), Name) of
+        [{_, Entries}] when is_list(Entries) ->
+            case [M || #{modality := M, enabled := true} <- Entries] of
+                [M | _] -> M;
+                [] -> modality_bin(undefined)
+            end;
+        _ ->
+            modality_bin(undefined)
+    end.
 
 %% Carrier rows: #{provider_key_id, model_name, status, provider_id}.
 %% Stored as {{ProviderId, ListingName}, #{KeyId => Status}} — keyed

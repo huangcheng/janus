@@ -32,3 +32,4 @@ apps/janus_dashboard/priv/www/
 !docs/SCHEMA_ETS_CONTRACT.md
 docs/audit*/
 !docs/audit*/SYNTHESIS.md
+fixtures

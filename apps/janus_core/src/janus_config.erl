@@ -316,6 +316,30 @@ distribute_settings(Rows) ->
                             what => janus_settings_bad_value, key => failover
                         })
                 end;
+            %% Translation unblock knobs (translation spec 1.9): map
+            %% {"tools": boolean} — default OFF preserves the legacy
+            %% translate-blocked 400 until the operator flips it.
+            (#{key := <<"translate">>, value := V}) ->
+                case decode_json(V) of
+                    {ok, Map} when is_map(Map) ->
+                        persistent_term:put({janus, translate_cfg}, Map);
+                    _ ->
+                        logger:warning(#{
+                            what => janus_settings_bad_value, key => translate
+                        })
+                end;
+            %% Modality enable knobs (spec M1.0c): map of modality
+            %% name -> boolean. Missing key/all-false = all OFF (the
+            %% shipped default); plugins read persistent_term.
+            (#{key := <<"modality">>, value := V}) ->
+                case decode_json(V) of
+                    {ok, Map} when is_map(Map) ->
+                        persistent_term:put({janus, modality_cfg}, Map);
+                    _ ->
+                        logger:warning(#{
+                            what => janus_settings_bad_value, key => modality
+                        })
+                end;
             (#{key := <<"auto_router">>, value := V}) ->
                 case decode_json(V) of
                     {ok, Map} when is_map(Map) ->

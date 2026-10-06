@@ -1,0 +1,11 @@
+{
+ "url": "https://api.stepfun.com/step_plan/v1/images/generations",
+ "status": 400,
+ "response": {
+  "error": {
+   "message": "model step-5-preview not supported",
+   "type": "request_params_invalid",
+   "description": "请求参数错误"
+  }
+ }
+}

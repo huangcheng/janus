@@ -1,0 +1,20 @@
+{
+ "url": "https://api.minimax.cn/v1/image_generation",
+ "status": 200,
+ "response": {
+  "id": "07146ae844b4ba05586517fc0ec07305",
+  "data": {
+   "image_urls": [
+    "https://hailuo-image-algeng-data.oss-cn-wulanchabu.aliyuncs.com/image_inference_output%2Ftalkie%2Fprod%2Fimg%2F2026-10-07%2F699e4e79-ca55-4210-8a42-81d59e870a50_aigc.jpeg?Expires=1791396215&OSSAccessKeyId=LTAI5tB2SwrRwAtD23etQUbC&Signature=6jMgmt3bSG%2F%2BgNirhjPSzOhf56U%3D"
+   ]
+  },
+  "metadata": {
+   "failed_count": "0",
+   "success_count": "1"
+  },
+  "base_resp": {
+   "status_code": 0,
+   "status_msg": "success"
+  }
+ }
+}

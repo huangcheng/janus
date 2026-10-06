@@ -1,0 +1,36 @@
+{
+ "url": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+ "status": 200,
+ "response": {
+  "id": "d634c7dad7004069a5a9a3f7c27cee20",
+  "choices": [
+   {
+    "finish_reason": "stop",
+    "index": 0,
+    "message": {
+     "content": "嗯。",
+     "role": "assistant",
+     "audio": null,
+     "tool_calls": null,
+     "audio_tokens": []
+    }
+   }
+  ],
+  "created": 1791309831,
+  "model": "mimo-v2.5-asr",
+  "object": "chat.completion",
+  "usage": {
+   "completion_tokens": 9,
+   "prompt_tokens": 28,
+   "total_tokens": 37,
+   "completion_tokens_details": {
+    "reasoning_tokens": 0
+   },
+   "prompt_tokens_details": {
+    "audio_tokens": 7,
+    "cached_tokens": 4
+   },
+   "seconds": 2
+  }
+ }
+}

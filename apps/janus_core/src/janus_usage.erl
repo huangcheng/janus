@@ -206,7 +206,8 @@ do_flush(#state{buf = Buf} = State) ->
     Cols =
         <<"(ts, agent_key_id, model_id, provider_id, provider_key_id, "
           " protocol, stream, status, prompt_tokens, completion_tokens, latency_ms, "
-          " error_code, attempt, request_ref, is_terminal, request_id)">>,
+          " error_code, attempt, request_ref, is_terminal, request_id, "
+          " modality, units, outcome)">>,
     Failed =
         lists:foldl(
             fun(Rows, Acc) ->
@@ -282,7 +283,7 @@ build_insert(Cols, Rows) ->
     {ValuesSql, Params} =
         lists:foldl(
             fun(Ev, {SqlAcc, PAcc}) ->
-                Ph = string:join(lists:duplicate(16, "?"), ", "),
+                Ph = string:join(lists:duplicate(19, "?"), ", "),
                 Params = [
                     maps:get(ts, Ev, erlang:system_time(second)),
                     int_or_null(maps:get(agent_key_id, Ev, null)),
@@ -299,7 +300,10 @@ build_insert(Cols, Rows) ->
                     int_or_null(maps:get(attempt, Ev, 1)),
                     ref_bin(maps:get(request_ref, Ev, null)),
                     bool_val(maps:get(is_terminal, Ev, true)),
-                    bin_or_null(maps:get(request_id, Ev, null))
+                    bin_or_null(maps:get(request_id, Ev, null)),
+                    modality_bin(maps:get(modality, Ev, <<"chat">>)),
+                    num_or_null(maps:get(units, Ev, null)),
+                    outcome_bin(maps:get(outcome, Ev, null))
                 ],
                 {SqlAcc ++ ["(" ++ Ph ++ ")"], PAcc ++ Params}
             end,
@@ -420,23 +424,26 @@ build_insert_shape_test() ->
         <<"(a, b)">>,
         [#{status => 200, prompt => 1, stream => true}, #{status => 502}]
     ),
-    %% 16 placeholders per row (11 base + failover evidence + request_id),
+    %% 19 placeholders per row (16 legacy + modality/units/outcome),
     %% one VALUES group per row.
-    ?assertEqual(32, length(Params)),
+    ?assertEqual(38, length(Params)),
     ?assertMatch(
         <<"INSERT INTO usage_events (a, b) VALUES "
-          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), "
-          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
+          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), "
+          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
         Sql
     ),
     %% row 2: status 502 present, prompt defaults to null (not 0);
-    %% attempt defaults to 1, is_terminal to true, request_id to null
-    %% (legacy shape).
-    ?assertEqual(502, lists:nth(24, Params)),
-    ?assertEqual(null, lists:nth(25, Params)),
-    ?assertEqual(1, lists:nth(29, Params)),
-    ?assertEqual(true, lists:nth(31, Params)),
-    ?assertEqual(null, lists:nth(32, Params)).
+    %% attempt defaults to 1, is_terminal to true, request_id to null;
+    %% modality defaults to chat, units and outcome to null.
+    ?assertEqual(502, lists:nth(27, Params)),
+    ?assertEqual(null, lists:nth(28, Params)),
+    ?assertEqual(1, lists:nth(32, Params)),
+    ?assertEqual(true, lists:nth(34, Params)),
+    ?assertEqual(null, lists:nth(35, Params)),
+    ?assertEqual(<<"chat">>, lists:nth(36, Params)),
+    ?assertEqual(null, lists:nth(37, Params)),
+    ?assertEqual(null, lists:nth(38, Params)).
 
 chunk_test() ->
     ?assertEqual([[1, 2], [3]], janus_usage:chunk([1, 2, 3], 2)),
@@ -444,3 +451,20 @@ chunk_test() ->
     ?assertEqual([[1]], janus_usage:chunk([1], 3)).
 
 -endif.
+
+%% Modality tag from the event; anything unexpected reads as chat.
+modality_bin(M) when is_binary(M) -> M;
+modality_bin(_) -> <<"chat">>.
+
+%% units is NUMERIC — integers or floats pass, everything else NULL.
+num_or_null(N) when is_integer(N) -> N;
+num_or_null(N) when is_float(N) -> N;
+num_or_null(_) -> null.
+
+%% Terminal outcome tag (completed/failed/cancelled/truncated); NULL
+%% for chat rows and non-terminal attempts.
+outcome_bin(<<"completed">>) -> <<"completed">>;
+outcome_bin(<<"failed">>) -> <<"failed">>;
+outcome_bin(<<"cancelled">>) -> <<"cancelled">>;
+outcome_bin(<<"truncated">>) -> <<"truncated">>;
+outcome_bin(_) -> null.

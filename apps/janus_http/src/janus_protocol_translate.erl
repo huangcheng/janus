@@ -4,6 +4,14 @@
 %%% Streaming (SSE) translate: sse_events/2 parser, translate_sse/4
 %%% event mapper, finalize_sse/3 terminator — also pure; the handler
 %%% (janus_http_proxy) owns gun/cowboy side effects.
+%%%
+%%% Phase 1 adds streaming tool-call translation both ways between
+%%% chat and anthropic (C5: four index/id spaces kept apart, argument
+%%% fragments streamed, content_block_stop / finish only after the ONE
+%%% decode-at-close completeness check, deferred interleaved text,
+%%% per-stream accumulator caps) and request-side vision translation
+%%% on the chat<->anthropic pair. The dispatch unblock (1.9 ship unit)
+%%% is NOT part of this: stream_translate_blocked/2 is unchanged.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_protocol_translate).
@@ -81,7 +89,7 @@ chat_max_tokens(Map) ->
 translate_request(P, P, Map) ->
     {ok, Map};
 translate_request(Client, Provider, Map) ->
-    case reject_unsupported_request(Client, Map) of
+    case reject_unsupported_request(Client, Provider, Map) of
         ok ->
             case do_translate_request(Client, Provider, Map) of
                 {ok, _} = Ok -> Ok;
@@ -112,7 +120,7 @@ do_translate_request(openai_responses, anthropic_messages, Map) ->
 do_translate_request(_, _, _) ->
     {error, {translate_unsupported, <<"unsupported protocol pair">>}}.
 
-reject_unsupported_request(openai_responses, Map) ->
+reject_unsupported_request(openai_responses, _Provider, Map) ->
     Prev = maps:get(<<"previous_response_id">>, Map, undefined),
     case Prev =/= undefined andalso Prev =/= null of
         true ->
@@ -125,13 +133,27 @@ reject_unsupported_request(openai_responses, Map) ->
                     reject_vision(Map)
             end
     end;
-reject_unsupported_request(_, Map) ->
+reject_unsupported_request(Client, Provider, Map) ->
     case maps:get(<<"n">>, Map, 1) of
-        1 -> reject_vision(Map);
-        undefined -> reject_vision(Map);
-        null -> reject_vision(Map);
-        _ -> {error, {translate_unsupported, <<"n>1 not supported">>}}
+        N when N =:= 1; N =:= undefined; N =:= null ->
+            maybe_reject_vision(Client, Provider, Map);
+        _ ->
+            {error, {translate_unsupported, <<"n>1 not supported">>}}
     end.
+
+%% Images translate on the chat<->anthropic pair (Phase 1, request
+%% side); every other pair keeps the vision reject (Phases 2-3 own
+%% them). STREAMING stays dispatch-blocked either way — the unblock is
+%% the separate 1.9 ship unit (stream_translate_blocked is unchanged).
+maybe_reject_vision(Client, Provider, Map) ->
+    case vision_translatable(Client, Provider) of
+        true -> ok;
+        false -> reject_vision(Map)
+    end.
+
+vision_translatable(openai_chat, anthropic_messages) -> true;
+vision_translatable(anthropic_messages, openai_chat) -> true;
+vision_translatable(_, _) -> false.
 
 reject_vision(Map) ->
     case has_non_text_content(Map) of
@@ -330,12 +352,81 @@ convert_chat_messages([_ | _], _) ->
 user_to_anthropic(#{<<"content">> := C}) when is_binary(C) ->
     {ok, #{<<"role">> => <<"user">>, <<"content">> => C}};
 user_to_anthropic(#{<<"content">> := List}) when is_list(List) ->
-    case flatten_text_parts(List) of
-        {ok, T} -> {ok, #{<<"role">> => <<"user">>, <<"content">> => T}};
-        error -> {error, {translate_unsupported, <<"user content must be text">>}}
+    case user_parts_to_blocks(List) of
+        {ok, Blocks} ->
+            %% Text-only lists keep the flattened-binary shape; images
+            %% force the block-list form (anthropic native).
+            Content = case blocks_text_only(Blocks) of
+                {ok, Bin} -> Bin;
+                mixed -> Blocks
+            end,
+            {ok, #{<<"role">> => <<"user">>, <<"content">> => Content}};
+        error ->
+            {error, {translate_unsupported, <<"invalid user content part">>}}
     end;
 user_to_anthropic(_) ->
     {error, {translate_unsupported, <<"invalid user message">>}}.
+
+user_parts_to_blocks(List) ->
+    user_parts_to_blocks(List, []).
+
+user_parts_to_blocks([], Acc) ->
+    {ok, lists:reverse(Acc)};
+user_parts_to_blocks([#{<<"type">> := <<"text">>, <<"text">> := T} | Rest], Acc) when
+    is_binary(T)
+->
+    user_parts_to_blocks(Rest, [#{<<"type">> => <<"text">>, <<"text">> => T} | Acc]);
+user_parts_to_blocks([B | Rest], Acc) when is_binary(B) ->
+    user_parts_to_blocks(Rest, [#{<<"type">> => <<"text">>, <<"text">> => B} | Acc]);
+user_parts_to_blocks([#{<<"type">> := <<"image_url">>} = P | Rest], Acc) ->
+    case image_url_part_to_block(P) of
+        {ok, Block} -> user_parts_to_blocks(Rest, [Block | Acc]);
+        error -> error
+    end;
+user_parts_to_blocks(_, _) ->
+    error.
+
+blocks_text_only(Blocks) ->
+    Texts = [T || #{<<"type">> := <<"text">>, <<"text">> := T} <- Blocks],
+    case length(Texts) =:= length(Blocks) of
+        true -> {ok, iolist_to_binary(Texts)};
+        false -> mixed
+    end.
+
+%% chat image_url part -> anthropic image block. The URL must be a
+%% base64 data URL (-> base64 media source) or a plain URL (-> url
+%% source); both round-trip. Anything else fails closed.
+image_url_part_to_block(#{<<"image_url">> := IU}) ->
+    Url =
+        case IU of
+            #{<<"url">> := U} when is_binary(U) -> U;
+            U when is_binary(U) -> U;
+            _ -> error
+        end,
+    case Url of
+        <<"data:", Rest/binary>> ->
+            case binary:split(Rest, <<";base64,">>) of
+                [MT, Data] when MT =/= <<>>, Data =/= <<>> ->
+                    {ok, #{
+                        <<"type">> => <<"image">>,
+                        <<"source">> => #{
+                            <<"type">> => <<"base64">>,
+                            <<"media_type">> => MT,
+                            <<"data">> => Data
+                        }
+                    }};
+                _ ->
+                    error
+            end;
+        Plain when is_binary(Plain), Plain =/= <<>> ->
+            {ok, #{<<"type">> => <<"image">>, <<"source">> => #{<<"type">> => <<"url">>, <<"url">> => Plain}}};
+        _ ->
+            %% Covers the Url = error atom (malformed image_url) —
+            %% fail closed instead of serializing "error" upstream.
+            error
+    end;
+image_url_part_to_block(_) ->
+    error.
 
 assistant_to_anthropic(M) ->
     Content0 =
@@ -558,30 +649,26 @@ expand_user_content(List, Acc) when is_list(List) ->
 expand_user_content(_, _) ->
     {error, {translate_unsupported, <<"invalid user content">>}}.
 
-expand_user_parts([], Acc, TextAcc) ->
-    case TextAcc of
-        [] ->
-            {ok, Acc};
-        _ ->
-            Text = iolist_to_binary(lists:reverse(TextAcc)),
-            {ok, [#{<<"role">> => <<"user">>, <<"content">> => Text} | Acc]}
-    end;
-expand_user_parts([#{<<"type">> := <<"text">>, <<"text">> := T} | Rest], Acc, TextAcc) when
+%% Pending non-tool parts between tool_results: reversed [{Kind, Bin}],
+%% flushed as one user message — flattened binary when text-only
+%% (unchanged shape), an ordered parts list once images appear.
+expand_user_parts([], Acc, Pending) ->
+    {ok, flush_pending_user(Pending, Acc)};
+expand_user_parts([#{<<"type">> := <<"text">>, <<"text">> := T} | Rest], Acc, Pending) when
     is_binary(T)
 ->
-    expand_user_parts(Rest, Acc, [T | TextAcc]);
+    expand_user_parts(Rest, Acc, [{text, T} | Pending]);
+expand_user_parts([#{<<"type">> := <<"image">>} = B | Rest], Acc, Pending) ->
+    case image_block_to_chat_part(B) of
+        {ok, Part} -> expand_user_parts(Rest, Acc, [{image, Part} | Pending]);
+        error -> {error, {translate_unsupported, <<"invalid image block">>}}
+    end;
 expand_user_parts(
     [#{<<"type">> := <<"tool_result">>, <<"tool_use_id">> := Id, <<"content">> := C} | Rest],
     Acc,
-    TextAcc
+    Pending
 ) ->
-    Acc1 =
-        case TextAcc of
-            [] -> Acc;
-            _ ->
-                Text = iolist_to_binary(lists:reverse(TextAcc)),
-                [#{<<"role">> => <<"user">>, <<"content">> => Text} | Acc]
-        end,
+    Acc1 = flush_pending_user(Pending, Acc),
     Content =
         case C of
             B when is_binary(B) -> B;
@@ -603,6 +690,46 @@ expand_user_parts([#{<<"type">> := _} | _], _, _) ->
     {error, {translate_unsupported, <<"vision/multimodal content not supported">>}};
 expand_user_parts(_, _, _) ->
     {error, {translate_unsupported, <<"invalid content part">>}}.
+
+flush_pending_user([], Acc) ->
+    Acc;
+flush_pending_user(Pending, Acc) ->
+    Rev = lists:reverse(Pending),
+    HasImage = lists:any(fun({image, _}) -> true; (_) -> false end, Rev),
+    Content =
+        case HasImage of
+            false ->
+                iolist_to_binary([T || {text, T} <- Rev]);
+            true ->
+                [
+                    case P of
+                        {text, T} -> #{<<"type">> => <<"text">>, <<"text">> => T};
+                        {image, ImagePart} -> ImagePart
+                    end
+                 || P <- Rev
+                ]
+        end,
+    [#{<<"role">> => <<"user">>, <<"content">> => Content} | Acc].
+
+%% anthropic image block -> chat image_url part; base64 sources become
+%% data URLs again so the pair round-trips (Phase 1 request side).
+image_block_to_chat_part(#{
+    <<"source">> := #{
+        <<"type">> := <<"base64">>,
+        <<"media_type">> := MT,
+        <<"data">> := Data
+    }
+}) when is_binary(MT), MT =/= <<>>, is_binary(Data), Data =/= <<>> ->
+    {ok, #{
+        <<"type">> => <<"image_url">>,
+        <<"image_url">> => #{<<"url">> => <<"data:", MT/binary, ";base64,", Data/binary>>}
+    }};
+image_block_to_chat_part(#{<<"source">> := #{<<"type">> := <<"url">>, <<"url">> := U}}) when
+    is_binary(U), U =/= <<>>
+->
+    {ok, #{<<"type">> => <<"image_url">>, <<"image_url">> => #{<<"url">> => U}}};
+image_block_to_chat_part(_) ->
+    error.
 
 assistant_from_anthropic(C) when is_binary(C) ->
     {ok, #{<<"role">> => <<"assistant">>, <<"content">> => C}};
@@ -1385,8 +1512,18 @@ created_now(_) ->
 %%% translate_sse/4 — provider Anthropic -> client Chat
 %%%-------------------------------------------------------------------
 
+%% Error tuples of translate_sse/4:
+%%  - translate_unsupported: an upstream construct the mapper cannot
+%%    carry (incl. tool arguments that fail the ONE decode-at-close
+%%    completeness check — truncated by an upstream cut or bug).
+%%  - tool_args_cap: a C5 accumulator cap tripped (256KiB args per call
+%%    id, 64 calls, 1MiB total args). Phase-1 contract: the caller
+%%    terminates the stream on this tuple; the 1.9 ship unit wires the
+%%    full C2 target-format error event.
 -spec translate_sse(atom(), atom(), map(), #sse_st{}) ->
-    {ok, [iodata()], #sse_st{}} | {error, translate_unsupported, #sse_st{}}.
+    {ok, [iodata()], #sse_st{}}
+    | {error, translate_unsupported, #sse_st{}}
+    | {error, tool_args_cap, #sse_st{}}.
 translate_sse(openai_chat, anthropic_messages, Event, St) ->
     anthro_to_chat(Event, St);
 translate_sse(anthropic_messages, openai_chat, Event, St) ->
@@ -1428,6 +1565,8 @@ anthro_to_chat(#{type := <<"content_block_start">>, data := D}, St) when
             emit_chat_first_delta(
                 <<"reasoning_content">>, maps:get(<<"thinking">>, B, undefined), St#sse_st{block_kind = thinking}
             );
+        <<"tool_use">> ->
+            anthro_tool_start(D, St);
         _ ->
             {error, translate_unsupported, St}
     end;
@@ -1445,21 +1584,33 @@ anthro_to_chat(#{type := <<"content_block_delta">>, data := D}, St) when
         <<"signature_delta">> ->
             {ok, [], St};
         <<"input_json_delta">> ->
-            {error, translate_unsupported, St};
+            anthro_tool_fragment(D, St);
         _ ->
             {ok, [], St}
     end;
 anthro_to_chat(#{type := <<"content_block_delta">>}, St) ->
     {ok, [], St};
+anthro_to_chat(#{type := <<"content_block_stop">>, data := D}, St) when
+    is_map(D)
+->
+    case maps:get(<<"index">>, D, undefined) of
+        Idx when is_map_key(Idx, St#sse_st.tools) ->
+            anthro_tool_stop(Idx, St);
+        _ ->
+            %% text/thinking block stop: no chat-face equivalent.
+            {ok, [], St}
+    end;
 anthro_to_chat(#{type := <<"message_delta">>, data := D}, St) when
     is_map(D)
 ->
     StopIn = maps:get(<<"stop_reason">>, maps:get(<<"delta">>, D, #{}), undefined),
-    case StopIn of
-        <<"tool_use">> ->
-            {error, translate_unsupported, St};
+    case St#sse_st.open_tool of
+        undefined ->
+            anthro_message_delta_finish(D, StopIn, St);
         _ ->
-            anthro_message_delta_finish(D, StopIn, St)
+            %% A stop while a tool block is still open: upstream skipped
+            %% content_block_stop; never make the call look finished (C5).
+            {error, translate_unsupported, St}
     end;
 anthro_to_chat(#{type := <<"message_delta">>}, St) ->
     {ok, [], St};
@@ -1469,7 +1620,7 @@ anthro_to_chat(#{type := <<"message_stop">>}, St) ->
 anthro_to_chat(#{type := <<"error">>}, St) ->
     {error, translate_unsupported, St};
 anthro_to_chat(#{type := _}, St) ->
-    %% content_block_stop / unknown events: no-op.
+    %% Unknown events: no-op.
     {ok, [], St}.
 
 anthro_message_delta_finish(D, StopIn, St) ->
@@ -1486,12 +1637,173 @@ anthro_message_delta_finish(D, StopIn, St) ->
     %% Usage is NEVER on the finish chunk — message_stop emits it.
     {ok, [chat_frame(Chunk)], St#sse_st{finish_sent = true, finish_reason = FR, out_tokens = OutTok}}.
 
+%%%-------------------------------------------------------------------
+%%% Tool-call streaming (Phase 1) — anthropic upstream -> chat face.
+%%% tool_use blocks render as chat tool_calls chunks; the chat index is
+%%% the per-stream tool ORDINAL (tool_seq), never the anthropic block
+%%% index (C5: separate index/id spaces). Fragments stream through;
+%%% content_block_stop runs the ONE decode-at-close check; the zero-arg
+%%% call closes with "{}" (C5).
+%%%-------------------------------------------------------------------
+
+anthro_tool_start(D, St) ->
+    case maps:get(<<"index">>, D, undefined) of
+        Idx when is_integer(Idx), Idx >= 0 ->
+            case St#sse_st.tools of
+                #{Idx := _} ->
+                    %% Duplicate block index: upstream bug, fail closed.
+                    {error, translate_unsupported, St};
+                _ ->
+                    case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+                        true ->
+                            {error, tool_args_cap, St};
+                        false ->
+                            anthro_tool_start_validated(Idx, D, St)
+                    end
+            end;
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+anthro_tool_start_validated(Idx, D, St) ->
+    B = maps:get(<<"content_block">>, D, #{}),
+    case maps:get(<<"name">>, B, undefined) of
+        Name when is_binary(Name), Name =/= <<>> ->
+            Id =
+                case maps:get(<<"id">>, B, undefined) of
+                    I when is_binary(I), I =/= <<>> -> I;
+                    _ -> tool_synthetic_id()
+                end,
+            ChatIdx = St#sse_st.tool_seq,
+            TA = #tool_acc{id = Id, name = Name, chat_index = ChatIdx, block = Idx},
+            %% No frame yet: the chat chunk waits for the first argument
+            %% fragment (or the close, which carries "{}").
+            {ok, [], St#sse_st{
+                tools = (St#sse_st.tools)#{Idx => TA},
+                open_tool = Idx,
+                tool_seq = ChatIdx + 1,
+                block_kind = tool_use,
+                block = Idx
+            }};
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+anthro_tool_fragment(D, St) ->
+    case maps:get(<<"partial_json">>, maps:get(<<"delta">>, D, #{}), undefined) of
+        P when is_binary(P), P =/= <<>> ->
+            anthro_tool_fragment_bytes(maps:get(<<"index">>, D, undefined), P, St);
+        _ ->
+            %% Empty fragment: no bytes, no frame.
+            {ok, [], St}
+    end.
+
+anthro_tool_fragment_bytes(Idx, P, St) ->
+    case St#sse_st.tools of
+        #{Idx := #tool_acc{closed = false} = TA0} when St#sse_st.open_tool =:= Idx ->
+            PerCall = TA0#tool_acc.args_bytes + byte_size(P),
+            Total = St#sse_st.total_args + byte_size(P),
+            case
+                PerCall > ?TOOL_ARGS_PER_CALL_CAP orelse
+                    Total > ?TOOL_ARGS_TOTAL_CAP
+            of
+                true ->
+                    {error, tool_args_cap, St};
+                false ->
+                    %% The id/type/name ride the FIRST chunk of the call;
+                    %% fragments carry index + arguments only.
+                    Entry =
+                        case TA0#tool_acc.header_sent of
+                            false ->
+                                #{
+                                    <<"index">> => TA0#tool_acc.chat_index,
+                                    <<"id">> => TA0#tool_acc.id,
+                                    <<"type">> => <<"function">>,
+                                    <<"function">> => #{
+                                        <<"name">> => TA0#tool_acc.name,
+                                        <<"arguments">> => P
+                                    }
+                                };
+                            true ->
+                                #{
+                                    <<"index">> => TA0#tool_acc.chat_index,
+                                    <<"type">> => <<"function">>,
+                                    <<"function">> => #{<<"arguments">> => P}
+                                }
+                        end,
+                    TA1 = TA0#tool_acc{
+                        args = [P | TA0#tool_acc.args],
+                        args_bytes = PerCall,
+                        header_sent = true
+                    },
+                    {ok, [chat_tool_call_frame(Entry, St)], St#sse_st{
+                        tools = (St#sse_st.tools)#{Idx := TA1},
+                        total_args = Total
+                    }}
+            end;
+        #{Idx := _} ->
+            %% Fragment after the block closed (or before it opened):
+            %% upstream bug, fail closed.
+            {error, translate_unsupported, St};
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+anthro_tool_stop(Idx, St) ->
+    TA0 = maps:get(Idx, St#sse_st.tools),
+    case tool_args_complete(tool_args_of(TA0)) of
+        ok ->
+            %% Zero-argument call: the whole call rides one chunk whose
+            %% arguments are "{}" — complete on arrival (C5).
+            {Frames, TA1} =
+                case TA0#tool_acc.header_sent of
+                    true ->
+                        {[], TA0};
+                    false ->
+                        Entry = #{
+                            <<"index">> => TA0#tool_acc.chat_index,
+                            <<"id">> => TA0#tool_acc.id,
+                            <<"type">> => <<"function">>,
+                            <<"function">> => #{
+                                <<"name">> => TA0#tool_acc.name,
+                                <<"arguments">> => <<"{}">>
+                            }
+                        },
+                        {[chat_tool_call_frame(Entry, St)], TA0#tool_acc{header_sent = true}}
+                end,
+            St1 = St#sse_st{
+                tools = (St#sse_st.tools)#{Idx := TA1#tool_acc{args = [], args_bytes = 0, closed = true}},
+                open_tool = case St#sse_st.open_tool of Idx -> undefined; Other -> Other end
+            },
+            {ok, Frames, St1};
+        {error, incomplete_json} ->
+            %% Truncated arguments at close time: never emit the finish
+            %% as tool_calls — C2 error path via the caller.
+            {error, translate_unsupported, St}
+    end.
+
+chat_tool_call_frame(Entry, St) ->
+    Chunk = #{
+        <<"id">> => bin_or(St#sse_st.msg_id, chat_synthetic_id()),
+        <<"object">> => <<"chat.completion.chunk">>,
+        <<"created">> => created_now(St),
+        <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+        <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{<<"tool_calls">> => [Entry]}}]
+    },
+    chat_frame(Chunk).
+
 chat_to_anthropic(#{type := <<"done">>}, St) ->
-    {CloseFrames, St1} = close_open_block(St),
-    {DeltaFrames, St2} = anthropic_pending_stop(St1),
-    {ok,
-        CloseFrames ++ DeltaFrames ++ [anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>})],
-        St2#sse_st{terminal_sent = true}};
+    case chat_close_open_tool(St) of
+        {error, _, _} = Err ->
+            Err;
+        {ToolFrames, St1} ->
+            {CloseFrames, St2} = close_open_block(St1),
+            {DeltaFrames, St3} = anthropic_pending_stop(St2),
+            {ok,
+                ToolFrames ++ CloseFrames ++ DeltaFrames ++
+                    [anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>})],
+                St3#sse_st{terminal_sent = true}}
+    end;
 chat_to_anthropic(#{type := <<"chunk">>, data := D}, St) when
     is_map(D)
 ->
@@ -1528,6 +1840,7 @@ chat_delta_frame(Field, Text, St) when is_binary(Text) ->
 chat_finish_reason(<<"end_turn">>) -> <<"stop">>;
 chat_finish_reason(<<"stop_sequence">>) -> <<"stop">>;
 chat_finish_reason(<<"max_tokens">>) -> <<"length">>;
+chat_finish_reason(<<"tool_use">>) -> <<"tool_calls">>;
 chat_finish_reason(<<"refusal">>) -> <<"content_filter">>;
 chat_finish_reason(<<"pause_turn">>) -> <<"stop">>;
 chat_finish_reason(undefined) -> <<"stop">>;
@@ -1597,15 +1910,24 @@ anthropic_ensure_start(D, St) ->
 chat_chunk_body(D, St, Acc) ->
     Choice = first_choice(D),
     Delta = maps:get(<<"delta">>, Choice, #{}),
-    case {maps:get(<<"tool_calls">>, Delta, undefined), maps:get(<<"finish_reason">>, Choice, undefined)} of
-        {TC, _} when TC =/= undefined ->
-            {error, translate_unsupported, St};
-        {_, <<"tool_calls">>} ->
-            {error, translate_unsupported, St};
-        {_, <<"function_call">>} ->
-            {error, translate_unsupported, St};
-        {_, _} ->
-            chat_chunk_usage(D, Choice, Delta, St, Acc)
+    case maps:get(<<"tool_calls">>, Delta, undefined) of
+        Entries when is_list(Entries), Entries =/= [] ->
+            case chat_tool_entries(Entries, St, Acc) of
+                {error, _, _} = Err ->
+                    Err;
+                {Frames, St1} ->
+                    %% Text on a tool-bearing chunk defers while the call
+                    %% stays open (C5); the wire normally carries "".
+                    chat_chunk_usage(D, Choice, Delta, St1, Frames)
+            end;
+        _ ->
+            case maps:get(<<"function_call">>, Delta, undefined) of
+                FC when FC =/= undefined, FC =/= null ->
+                    %% Legacy function_call deltas do not translate.
+                    {error, translate_unsupported, St};
+                _ ->
+                    chat_chunk_usage(D, Choice, Delta, St, Acc)
+            end
     end.
 
 chat_chunk_usage(D, Choice, Delta, St, Acc) ->
@@ -1618,19 +1940,206 @@ chat_chunk_usage(D, Choice, Delta, St, Acc) ->
             _ ->
                 St
         end,
-    case {maps:get(<<"finish_reason">>, Choice, undefined), St1#sse_st.finish_sent} of
-        {FR, false} when is_binary(FR), FR =/= <<>> ->
-            {StopFrames, St2} = close_open_block(St1),
-            St3 = St2#sse_st{
-                finish_sent = true,
-                stop_reason = anthropic_stop_reason(FR),
-                finish_reason = FR
-            },
-            %% message_delta is delayed until the usage chunk or [DONE].
-            chat_flush_or_delta(Delta, St3, Acc ++ StopFrames);
+    case maps:get(<<"finish_reason">>, Choice, undefined) of
+        <<"function_call">> ->
+            {error, translate_unsupported, St1};
+        FR when is_binary(FR), FR =/= <<>>, not St1#sse_st.finish_sent ->
+            case chat_close_open_tool(St1) of
+                {error, _, _} = Err ->
+                    Err;
+                {ToolFrames, St2} ->
+                    {StopFrames, St3} = close_open_block(St2),
+                    St4 = St3#sse_st{
+                        finish_sent = true,
+                        stop_reason = anthropic_stop_reason(FR),
+                        finish_reason = FR
+                    },
+                    %% message_delta is delayed until the usage chunk or [DONE].
+                    chat_flush_or_delta(Delta, St4, Acc ++ ToolFrames ++ StopFrames)
+            end;
         _ ->
             chat_flush_or_delta(Delta, St1, Acc)
     end.
+
+%%%-------------------------------------------------------------------
+%%% Tool-call streaming (Phase 1) — chat upstream -> anthropic face.
+%%% Fragments stream through as input_json_delta; the ONLY close point
+%%% (content_block_stop) is chat_close_open_tool/1, guarded by the ONE
+%%% decode-at-close completeness check; text interleaving defers to the
+%%% close point (C5). All pure folds over #sse_st{}.
+%%%-------------------------------------------------------------------
+
+chat_tool_entries([], St, Acc) ->
+    {Acc, St};
+chat_tool_entries([E | Rest], St, Acc) ->
+    case chat_tool_entry(E, St, Acc) of
+        {error, _, _} = Err ->
+            Err;
+        {Frames, St1} ->
+            chat_tool_entries(Rest, St1, Acc ++ Frames)
+    end.
+
+%% Returns only its OWN frames (the chat_tool_entries fold threads Acc).
+chat_tool_entry(#{<<"index">> := Idx} = E, St, _Acc) when is_integer(Idx), Idx >= 0 ->
+    Fragment = maps:get(<<"arguments">>, maps:get(<<"function">>, E, #{}), undefined),
+    case St#sse_st.open_tool of
+        Idx ->
+            chat_tool_fragment(Idx, Fragment, St);
+        _ ->
+            %% Different call (or none open): close the current one,
+            %% then open for Idx — anthropic blocks are sequential.
+            case chat_close_open_tool(St) of
+                {error, _, _} = Err ->
+                    Err;
+                {CloseFrames, St1} ->
+                    case chat_tool_open(Idx, E, St1) of
+                        {error, _, _} = Err ->
+                            Err;
+                        {OpenFrames, St2} ->
+                            case chat_tool_fragment(Idx, Fragment, St2) of
+                                {error, _, _} = Err ->
+                                    Err;
+                                {FragFrames, St3} ->
+                                    {CloseFrames ++ OpenFrames ++ FragFrames, St3}
+                            end
+                    end
+            end
+    end;
+chat_tool_entry(_, St, _Acc) ->
+    %% Entries always carry an integer index on the wire.
+    {error, translate_unsupported, St}.
+
+chat_tool_open(Idx, E, St) ->
+    case St#sse_st.tools of
+        #{Idx := _} ->
+            %% Index re-opened after its call closed: the wire cannot
+            %% splice a call in half; fail closed.
+            {error, translate_unsupported, St};
+        _ ->
+            case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+                true ->
+                    {error, tool_args_cap, St};
+                false ->
+                    chat_tool_open_validated(Idx, E, St)
+            end
+    end.
+
+chat_tool_open_validated(Idx, E, St) ->
+    case maps:get(<<"name">>, maps:get(<<"function">>, E, #{}), undefined) of
+        Name when is_binary(Name), Name =/= <<>> ->
+            Id =
+                case maps:get(<<"id">>, E, undefined) of
+                    I when is_binary(I), I =/= <<>> -> I;
+                    _ -> tool_synthetic_id()
+                end,
+            {StopFrames, St1} = close_open_block(St),
+            BlockIdx = St1#sse_st.next_block,
+            Start = anthropic_frame(
+                <<"content_block_start">>,
+                #{
+                    <<"index">> => BlockIdx,
+                    <<"content_block">> => #{
+                        <<"type">> => <<"tool_use">>,
+                        <<"id">> => Id,
+                        <<"name">> => Name,
+                        <<"input">> => #{}
+                    }
+                }
+            ),
+            TA = #tool_acc{id = Id, name = Name, block = BlockIdx},
+            {StopFrames ++ [Start], St1#sse_st{
+                tools = (St1#sse_st.tools)#{Idx => TA},
+                open_tool = Idx,
+                next_block = BlockIdx + 1
+            }};
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+chat_tool_fragment(Idx, Fragment, St) ->
+    TA = maps:get(Idx, St#sse_st.tools),
+    case Fragment of
+        F when is_binary(F), F =/= <<>> ->
+            PerCall = TA#tool_acc.args_bytes + byte_size(F),
+            Total = St#sse_st.total_args + byte_size(F),
+            case
+                PerCall > ?TOOL_ARGS_PER_CALL_CAP orelse
+                    Total > ?TOOL_ARGS_TOTAL_CAP
+            of
+                true ->
+                    {error, tool_args_cap, St};
+                false ->
+                    Frame = anthropic_frame(
+                        <<"content_block_delta">>,
+                        #{
+                            <<"index">> => TA#tool_acc.block,
+                            <<"delta">> => #{
+                                <<"type">> => <<"input_json_delta">>,
+                                <<"partial_json">> => F
+                            }
+                        }
+                    ),
+                    TA1 = TA#tool_acc{
+                        args = [F | TA#tool_acc.args],
+                        args_bytes = PerCall
+                    },
+                    {[Frame], St#sse_st{
+                        tools = (St#sse_st.tools)#{Idx := TA1},
+                        total_args = Total
+                    }}
+            end;
+        _ ->
+            %% "" / null / absent: no bytes, no frame.
+            {[], St}
+    end.
+
+%% The ONLY emitter of a tool block's content_block_stop — and only
+%% after the ONE decode-at-close completeness check. Deferred text
+%% flushes after the stop as sequential blocks (C5).
+chat_close_open_tool(#sse_st{open_tool = undefined} = St) ->
+    {[], St};
+chat_close_open_tool(St) ->
+    Key = St#sse_st.open_tool,
+    TA = maps:get(Key, St#sse_st.tools),
+    case tool_args_complete(tool_args_of(TA)) of
+        ok ->
+            Stop = anthropic_frame(
+                <<"content_block_stop">>, #{<<"index">> => TA#tool_acc.block}
+            ),
+            St1 = St#sse_st{
+                tools = (St#sse_st.tools)#{Key := TA#tool_acc{args = [], args_bytes = 0, closed = true}},
+                open_tool = undefined
+            },
+            {FlushFrames, St2} = flush_deferred(St1),
+            {[Stop] ++ FlushFrames, St2};
+        {error, incomplete_json} ->
+            %% Truncated arguments at close time: never make the call
+            %% look finished — C2 error path via the caller.
+            {error, translate_unsupported, St}
+    end.
+
+%%%-------------------------------------------------------------------
+%%% Shared tool-call helpers (both directions)
+%%%-------------------------------------------------------------------
+
+tool_synthetic_id() ->
+    <<"jfc_", (integer_to_binary(erlang:unique_integer([positive]), 16))/binary>>.
+
+%% C5 completeness: ONE decode of the FULL concat at close time (never
+%% per fragment — a UTF-8 sequence split across fragments would fake
+%% truncation); zero accumulated bytes are complete as "{}".
+tool_args_complete(<<>>) ->
+    ok;
+tool_args_complete(Bin) when is_binary(Bin) ->
+    case thoas:decode(Bin) of
+        {ok, Map} when is_map(Map) -> ok;
+        _ -> {error, incomplete_json}
+    end.
+
+tool_args_of(#tool_acc{args = []}) ->
+    <<>>;
+tool_args_of(#tool_acc{args = Frags}) ->
+    iolist_to_binary(lists:reverse(Frags)).
 
 %% A usage chunk arriving after finish flushes message_delta now.
 chat_flush_or_delta(Delta, St, Acc) ->
@@ -1646,6 +2155,16 @@ has_usage_evidence(#sse_st{in_tokens = In, out_tokens = Out}) ->
     In =/= undefined orelse Out =/= undefined.
 
 chat_text_reasoning(Delta, St, Acc) ->
+    case St#sse_st.open_tool of
+        undefined ->
+            chat_text_reasoning_emit(Delta, St, Acc);
+        _ ->
+            %% A tool call is open: text fragments defer to its close
+            %% point and flush there as sequential blocks (C5).
+            {ok, Acc, defer_delta_text(Delta, St)}
+    end.
+
+chat_text_reasoning_emit(Delta, St, Acc) ->
     %% Content first, then reasoning — one transition per chunk.
     {Frames1, St1} =
         case maps:get(<<"content">>, Delta, undefined) of
@@ -1662,6 +2181,46 @@ chat_text_reasoning(Delta, St, Acc) ->
                 {Frames1, St1}
         end,
     {ok, Frames2, St2}.
+
+%% Defer non-empty content/reasoning while a tool call is open; kept
+%% reversed, flushed in wire order with text before reasoning (the
+%% chat_text_reasoning_emit order).
+defer_delta_text(Delta, St) ->
+    St1 = defer_field(<<"content">>, text, Delta, St),
+    defer_field(<<"reasoning_content">>, thinking, Delta, St1).
+
+defer_field(Field, Kind, Delta, St) ->
+    case maps:get(Field, Delta, undefined) of
+        B when is_binary(B), B =/= <<>> ->
+            St#sse_st{deferred = [{Kind, B} | St#sse_st.deferred]};
+        _ ->
+            St
+    end.
+
+%% Flush deferred text at the tool close point as sequential blocks:
+%% consecutive same-kind runs coalesce, order is preserved, and the
+%% last block stays open so following deltas stream on.
+flush_deferred(#sse_st{deferred = []} = St) ->
+    {[], St};
+flush_deferred(St) ->
+    Runs = merge_runs(lists:reverse(St#sse_st.deferred), []),
+    lists:foldl(
+        fun({Kind, Bin}, {FAcc, SAcc}) ->
+            open_block_and_delta(Kind, block_text_field(Kind), Bin, SAcc, FAcc)
+        end,
+        {[], St#sse_st{deferred = []}},
+        Runs
+    ).
+
+merge_runs([], Acc) ->
+    lists:reverse(Acc);
+merge_runs([{Kind, Bin} | Rest], [{Kind, AccBin} | RAcc]) ->
+    merge_runs(Rest, [{Kind, <<AccBin/binary, Bin/binary>>} | RAcc]);
+merge_runs([{Kind, Bin} | Rest], Acc) ->
+    merge_runs(Rest, [{Kind, Bin} | Acc]).
+
+block_text_field(text) -> <<"text">>;
+block_text_field(thinking) -> <<"thinking">>.
 
 %% Transition into the requested block kind if needed, then the delta.
 open_block_and_delta(Kind, TextField, Text, St, Acc) ->
@@ -1769,6 +2328,11 @@ finalize_sse(_ClientProto, _Reason, #sse_st{terminal_sent = true} = St) ->
 finalize_sse(_ClientProto, disconnect, St) ->
     %% Frames are discarded — the socket cannot receive them.
     {ok, [], St#sse_st{terminal_sent = true}};
+finalize_sse(openai_chat, normal, #sse_st{open_tool = Open} = St) when Open =/= undefined ->
+    %% EOF inside a tool call (upstream cut): fragments may already be
+    %% out; the finish chunk must NOT follow a truncated call (C5) —
+    %% the C2 error event replaces the terminator instead.
+    finalize_sse(openai_chat, {error, upstream, <<"stream ended inside a tool call">>}, St);
 finalize_sse(openai_chat, normal, St) ->
     {FinishFrames, St1} =
         case St#sse_st.finish_sent of
@@ -1788,7 +2352,41 @@ finalize_sse(openai_chat, normal, St) ->
         end,
     {UsageFrames, St2} = chat_pending_usage(St1),
     {ok, FinishFrames ++ UsageFrames ++ [<<"data: [DONE]\n\n">>], St2#sse_st{terminal_sent = true}};
+finalize_sse(anthropic_messages, normal, #sse_st{open_tool = Open} = St) when Open =/= undefined ->
+    %% EOF inside a tool call: the ONE decode at close decides —
+    %% complete args close normally, truncated args take the C2 error
+    %% path (a half-open block is closed by the error event itself).
+    case chat_close_open_tool(St) of
+        {error, _, _} ->
+            finalize_sse(
+                anthropic_messages, {error, upstream, <<"truncated tool arguments">>}, St
+            );
+        {ToolFrames, St1} ->
+            {Frames, St2} = finalize_anthropic_normal(St1),
+            {ok, ToolFrames ++ Frames, St2#sse_st{terminal_sent = true}}
+    end;
 finalize_sse(anthropic_messages, normal, St) ->
+    {Frames, St1} = finalize_anthropic_normal(St),
+    {ok, Frames, St1#sse_st{terminal_sent = true}};
+finalize_sse(openai_chat, {error, Kind, Msg}, St) ->
+    Err = chat_frame(#{
+        <<"error">> => #{<<"message">> => trunc_200(Msg), <<"type">> => error_type(Kind)}
+    }),
+    {ok, [Err, <<"data: [DONE]\n\n">>], St#sse_st{terminal_sent = true}};
+finalize_sse(anthropic_messages, {error, Kind, Msg}, St) ->
+    Err = anthropic_frame(
+        <<"error">>,
+        #{
+            <<"type">> => <<"error">>,
+            <<"error">> => #{<<"type">> => error_type(Kind), <<"message">> => trunc_200(Msg)}
+        }
+    ),
+    StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
+    {ok, [Err, StopFrame], St#sse_st{terminal_sent = true}}.
+
+%% The anthropic normal-EOF tail: start (if never sent), a zero-content
+%% block for an empty face, close, delayed message_delta, message_stop.
+finalize_anthropic_normal(St) ->
     {StartIfMissing, St0} = anthropic_ensure_start(#{}, St),
     {ZeroFrames, St1} =
         case St0#sse_st.next_block of
@@ -1805,23 +2403,7 @@ finalize_sse(anthropic_messages, normal, St) ->
     {CloseFrames, St2} = close_open_block(St1),
     {DeltaFrames, St3} = anthropic_pending_stop(St2),
     StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
-    {ok, StartIfMissing ++ ZeroFrames ++ CloseFrames ++ DeltaFrames ++ [StopFrame],
-        St3#sse_st{terminal_sent = true}};
-finalize_sse(openai_chat, {error, Kind, Msg}, St) ->
-    Err = chat_frame(#{
-        <<"error">> => #{<<"message">> => trunc_200(Msg), <<"type">> => error_type(Kind)}
-    }),
-    {ok, [Err, <<"data: [DONE]\n\n">>], St#sse_st{terminal_sent = true}};
-finalize_sse(anthropic_messages, {error, Kind, Msg}, St) ->
-    Err = anthropic_frame(
-        <<"error">>,
-        #{
-            <<"type">> => <<"error">>,
-            <<"error">> => #{<<"type">> => error_type(Kind), <<"message">> => trunc_200(Msg)}
-        }
-    ),
-    StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
-    {ok, [Err, StopFrame], St#sse_st{terminal_sent = true}}.
+    {StartIfMissing ++ ZeroFrames ++ CloseFrames ++ DeltaFrames ++ [StopFrame], St3}.
 
 error_type(invalid_request) -> <<"invalid_request_error">>;
 error_type(_) -> <<"api_error">>.

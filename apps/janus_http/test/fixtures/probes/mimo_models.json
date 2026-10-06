@@ -1,0 +1,49 @@
+{
+ "url": "https://token-plan-cn.xiaomimimo.com/v1/models",
+ "status": 200,
+ "response": {
+  "object": "list",
+  "data": [
+   {
+    "id": "mimo-v2.5",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.5-asr",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.5-pro",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.5-tts",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.5-tts-voiceclone",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.5-tts-voicedesign",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.6-flash",
+    "object": "model",
+    "owned_by": "xiaomi"
+   },
+   {
+    "id": "mimo-v2.6-pro",
+    "object": "model",
+    "owned_by": "xiaomi"
+   }
+  ]
+ }
+}

@@ -1,0 +1,12 @@
+{
+ "url": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+ "status": 400,
+ "response": {
+  "error": {
+   "code": "400",
+   "message": "Param Incorrect",
+   "param": "messages must contain an assistant role for TTS model",
+   "type": ""
+  }
+ }
+}

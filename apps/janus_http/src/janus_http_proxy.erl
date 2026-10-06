@@ -146,6 +146,22 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
 do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
     inc_total_once(),
     put(janus_req_model, ModelName),
+    %% wrong_modality guard (modality spec Contracts): a chat-family
+    %% call naming a non-chat-listed model is rejected LOCALLY — the
+    %% upstream would only 400 with a worse message.
+    case janus_catalog:model_modality(ModelName) of
+        <<"chat">> ->
+            proxy_after_modality(ClientProto, ModelName, Body, Map, Req, State);
+        Other ->
+            Msg = iolist_to_binary([
+                <<"model is of modality '">>, Other, <<"'; call ">>,
+                janus_modality:endpoint_for(Other), <<" instead">>
+            ]),
+            _ = track(400, #{}, #{}),
+            reply_err(ClientProto, Req, State, 400, <<"wrong_modality">>, Msg)
+    end.
+
+proxy_after_modality(ClientProto, ModelName, Body, Map, Req, State) ->
     PickOpts = stream_pick_opts(ClientProto, Map),
     case resolve_model(ModelName) of
         {ok, ModelId} ->
@@ -222,6 +238,14 @@ stream_translate_blocked_for(ClientProto, Map) ->
 %% constraint; the initial pick did not). When no route matches, the LB
 %% falls back to all routes and dispatch answers with the
 %% stream_requires_native_protocol 400 that explains what is missing.
+%% Translation spec 1.9 ship knob: settings key `translate` =
+%% {"tools": boolean} via persistent_term; absent = OFF.
+tools_stream_translate_enabled() ->
+    case persistent_term:get({janus, translate_cfg}, undefined) of
+        #{<<"tools">> := true} -> true;
+        _ -> false
+    end.
+
 stream_pick_opts(ClientProto, Map) ->
     case stream_translate_blocked_for(ClientProto, Map) of
         true ->
@@ -243,29 +267,34 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
                 false ->
                     call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
                 true ->
-                    _ = release_route_inflight(Route),
-                    _ = track(400, Route, #{}),
-                    case translatable_stream_pair(ClientProto, ProviderProto) of
+                    %% Decide BEFORE any bookkeeping: with the tools
+                    %% knob ON the request proceeds on the translate
+                    %% path (its own terminal accounting fires there);
+                    %% recording a 400 here would double-count every
+                    %% knob-on request as a failure.
+                    KnobOn =
+                        translatable_stream_pair(ClientProto, ProviderProto) =:= true andalso
+                            ClientProto =/= openai_responses andalso
+                            tools_stream_translate_enabled(),
+                    case KnobOn of
                         true ->
-                            %% Tools/vision/n>1 on a translate pair: the
-                            %% stream translate is text+thinking only.
-                            reply_err(
-                                ClientProto,
-                                Req,
-                                State,
-                                400,
-                                <<"translate_unsupported">>,
-                                <<"streaming translate supports text and thinking only">>
-                            );
+                            call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
                         false ->
-                            reply_err(
-                                ClientProto,
-                                Req,
-                                State,
-                                400,
-                                <<"stream_requires_native_protocol">>,
-                                <<"streaming requires a same-protocol provider route">>
-                            )
+                            _ = release_route_inflight(Route),
+                            _ = track(400, Route, #{}),
+                            Err =
+                                case translatable_stream_pair(ClientProto, ProviderProto) of
+                                    true ->
+                                        %% Tools/vision/n>1 on a chat<->anthropic
+                                        %% pair with the knob off: legacy 400.
+                                        {400, <<"translate_unsupported">>,
+                                            <<"streaming translate supports text and thinking only (tools knob off)">>};
+                                    false ->
+                                        {400, <<"stream_requires_native_protocol">>,
+                                            <<"streaming requires a same-protocol provider route">>}
+                                end,
+                            {St, Code, Msg} = Err,
+                            reply_err(ClientProto, Req, State, St, Code, Msg)
                     end
             end;
         {true, _} ->

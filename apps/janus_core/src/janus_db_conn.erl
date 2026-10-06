@@ -229,10 +229,10 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
             ]},
         {provider_models,
             <<
-                "SELECT pm.id, pm.provider_id, pm.name, pm.enabled, pm.meta "
+                "SELECT pm.id, pm.provider_id, pm.name, pm.enabled, pm.meta, pm.modality "
                 "FROM provider_models pm ORDER BY pm.provider_id, pm.name"
             >>,
-            [id, provider_id, name, enabled, meta]},
+            [id, provider_id, name, enabled, meta, modality]},
         {settings, <<"SELECT key, value FROM settings">>, [key, value]},
         %% Entitlement carrier (dashboard-owned tables). POSTGRES-ONLY
         %% by design: on SQLite (or a dashboard that never ran) these

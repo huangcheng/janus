@@ -7,6 +7,19 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+malformed_image_url_fails_closed_test() ->
+    %% ocr find: the error atom leaked through as <<"url">> => error.
+    Bad = #{
+        <<"model">> => <<"m">>,
+        <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => [
+            #{<<"type">> => <<"image_url">>, <<"image_url">> => #{<<"url">> => 123}}
+        ]}]
+    },
+    ?assertMatch(
+        {error, {translate_unsupported, _}},
+        janus_protocol_translate:translate_request(openai_chat, anthropic_messages, Bad)
+    ).
+
 normalize_test() ->
     ?assertEqual({ok, openai_chat}, janus_protocol_translate:normalize_protocol(<<"openai_chat">>)),
     ?assertEqual({ok, openai_chat}, janus_protocol_translate:normalize_protocol(undefined)),
@@ -141,6 +154,8 @@ responses_to_chat_test() ->
     ?assertEqual(<<"user">>, maps:get(<<"role">>, lists:last(Msgs))).
 
 vision_rejected_test() ->
+    %% Vision translates on the chat<->anthropic pair (Phase 1, see
+    %% janus_translate_tools_tests); the responses pairs still reject.
     In = #{
         <<"model">> => <<"m">>,
         <<"messages">> => [
@@ -154,7 +169,7 @@ vision_rejected_test() ->
     },
     ?assertMatch(
         {error, {translate_unsupported, _}},
-        janus_protocol_translate:translate_request(openai_chat, anthropic_messages, In)
+        janus_protocol_translate:translate_request(openai_chat, openai_responses, In)
     ).
 
 previous_response_id_rejected_test() ->

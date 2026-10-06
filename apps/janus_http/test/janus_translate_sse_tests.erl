@@ -149,7 +149,9 @@ anthro_block_start_empty_test() ->
         janus_protocol_translate:translate_sse(openai_chat, anthropic_messages, Ev, #sse_st{role_sent = true}),
     ?assertEqual(text, St#sse_st.block_kind).
 
-anthro_tool_use_block_error_test() ->
+%% Tool_use blocks translate now (Phase 1); a malformed block (no
+%% id/name) still fails closed.
+anthro_tool_use_block_malformed_error_test() ->
     Ev = #{
         type => <<"content_block_start">>,
         data => #{<<"index">> => 0, <<"content_block">> => #{<<"type">> => <<"tool_use">>}}
@@ -382,18 +384,19 @@ chat_finish_reason_closes_block_test() ->
     %% Only the block stop; message_delta is delayed until usage/[DONE].
     ?assertEqual([<<"event: content_block_stop\ndata: {\"index\":0}\n\n">>], Frames).
 
-chat_tool_calls_error_test() ->
+%% An empty tool_calls array carries no entries: a keepalive no-op.
+chat_tool_calls_empty_list_noop_test() ->
     Ev = #{
         type => <<"chunk">>,
         data => #{<<"id">> => <<"c">>, <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{<<"tool_calls">> => []}}]}
     },
-    ?assertMatch(
-        {error, translate_unsupported, #sse_st{}},
-        janus_protocol_translate:translate_sse(anthropic_messages, openai_chat, Ev, #sse_st{})
-    ).
+    {ok, [], St} =
+        janus_protocol_translate:translate_sse(anthropic_messages, openai_chat, Ev, #sse_st{role_sent = true}),
+    ?assertEqual(undefined, St#sse_st.open_tool).
 
-%% finish_reason=tool_calls with an empty delta is a tool round, not text.
-chat_finish_reason_tool_calls_error_test() ->
+%% finish_reason=tool_calls with an empty delta maps to stop tool_use;
+%% the message_delta stays delayed until usage/[DONE].
+chat_finish_reason_tool_calls_maps_stop_test() ->
     Ev = #{
         type => <<"chunk">>,
         data => #{
@@ -401,20 +404,28 @@ chat_finish_reason_tool_calls_error_test() ->
             <<"choices">> => [#{<<"index">> => 0, <<"delta">> => #{}, <<"finish_reason">> => <<"tool_calls">>}]
         }
     },
-    ?assertMatch(
-        {error, translate_unsupported, #sse_st{}},
-        janus_protocol_translate:translate_sse(anthropic_messages, openai_chat, Ev, #sse_st{})
-    ).
+    {ok, [], St} =
+        janus_protocol_translate:translate_sse(anthropic_messages, openai_chat, Ev, #sse_st{role_sent = true}),
+    ?assertEqual(true, St#sse_st.finish_sent),
+    ?assertEqual(<<"tool_use">>, St#sse_st.stop_reason).
 
-anthro_stop_reason_tool_use_error_test() ->
+anthro_stop_reason_tool_use_maps_to_tool_calls_test() ->
+    %% tool_use -> finish_reason=tool_calls (C2 map), usage stashed.
     Ev = #{
         type => <<"message_delta">>,
-        data => #{<<"delta">> => #{<<"stop_reason">> => <<"tool_use">>}, <<"usage">> => #{}}
+        data => #{<<"delta">> => #{<<"stop_reason">> => <<"tool_use">>}, <<"usage">> => #{<<"output_tokens">> => 4}}
     },
-    ?assertMatch(
-        {error, translate_unsupported, #sse_st{}},
-        janus_protocol_translate:translate_sse(openai_chat, anthropic_messages, Ev, #sse_st{role_sent = true})
-    ).
+    {ok, Frames, St} =
+        janus_protocol_translate:translate_sse(
+            openai_chat, anthropic_messages, Ev, #sse_st{role_sent = true}
+        ),
+    ?assertEqual(true, St#sse_st.finish_sent),
+    ?assertEqual(4, St#sse_st.out_tokens),
+    [<<"data: ", Json/binary>>] = Frames,
+    {ok, Map} = thoas:decode(Json),
+    [Choice] = maps:get(<<"choices">>, Map),
+    ?assertEqual(<<"tool_calls">>, maps:get(<<"finish_reason">>, Choice)),
+    ?assertNot(maps:is_key(<<"usage">>, Map)).
 
 chat_instream_error_object_test() ->
     Ev = #{type => <<"chunk">>, data => #{<<"error">> => #{<<"message">> => <<"quota">>}}},

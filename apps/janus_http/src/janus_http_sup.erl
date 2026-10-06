@@ -17,7 +17,12 @@ init([]) ->
             {"/v1/models", janus_http_models, []},
             {"/v1/chat/completions", janus_http_chat, []},
             {"/v1/responses", janus_http_responses, []},
-            {"/v1/messages", janus_http_messages, []}
+            {"/v1/messages", janus_http_messages, []},
+            %% Modality plugins (spec 2026-10-07): static dispatch,
+            %% each route fronts one plugin module.
+            {"/v1/images/generations", janus_http_modality, [janus_m_images]},
+            {"/v1/audio/speech", janus_http_modality, [janus_m_audio_speech]},
+            {"/v1/audio/transcriptions", janus_http_modality, [janus_m_audio_asr]}
         ]}
     ]),
     %% Admin plane: read-only stats for the standalone dashboard to poll.
