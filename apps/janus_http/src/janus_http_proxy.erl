@@ -1284,10 +1284,15 @@ track(Status, Route, Usage) ->
                 },
                 LatencyMs / 1000
             ),
-            janus_metrics:inc(upstream_requests_total, #{
-                provider => route_provider_name(Route),
-                status_class => janus_http_classify:status_class(Status)
-            }),
+            case maps:get(provider_id, Route, undefined) of
+                undefined ->
+                    ok;
+                _ ->
+                    janus_metrics:inc(upstream_requests_total, #{
+                        provider => route_provider_name(Route),
+                        status_class => janus_http_classify:status_class(Status)
+                    })
+            end,
             put(janus_req_counted, true),
             janus_usage:record(#{
                 ts => erlang:system_time(second),
