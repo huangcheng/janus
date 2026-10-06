@@ -915,7 +915,8 @@ record_failover_row(Route, Status, ErrCode) ->
                 error_code => ErrCode,
                 attempt => pd(janus_failover_attempt, 1),
                 request_ref => pd(janus_failover_ref, null),
-                is_terminal => false
+                is_terminal => false,
+                request_id => get(janus_request_id)
             });
         _ ->
             ok
