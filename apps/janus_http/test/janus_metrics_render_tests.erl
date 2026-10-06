@@ -157,6 +157,44 @@ mixed_snapshot_exact_test() ->
     >>,
     ?assertEqual(Expected, Out).
 
+stale_bound_spelling_merges_test() ->
+    %% A ladder spelling change ("1" vs "1.0") can leave both spellings
+    %% in ETS (hand-crafted rows / cross-deploy drift — not producible
+    %% by observe/3 alone). Two le series with the same numeric value
+    %% break histogram_quantile, so the renderer must emit ONE line:
+    %% the canonical spelling, carrying the merged count.
+    L = [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"0">>}],
+    Rows = [
+        {{hist, request_duration_seconds, L, <<"1">>}, 2},
+        {{hist, request_duration_seconds, L, <<"1.0">>}, 3},
+        {{hist, request_duration_seconds, L, <<"+Inf">>}, 5},
+        {{hist_sum_us, request_duration_seconds, L}, 1500000},
+        {{hist_count, request_duration_seconds, L}, 5}
+    ],
+    Out = janus_metrics_render:render(Rows, []),
+    ?assertMatch({_, _}, binary:match(Out, <<"le=\"1\"} 5\n">>)),
+    ?assertEqual(1, count_occ(Out, <<"le=\"1\"}">>)),
+    ?assertEqual(nomatch, binary:match(Out, <<"1.0\"">>)),
+    ?assertMatch({_, _}, binary:match(Out, <<"_sum{protocol=\"openai_chat\",stream=\"0\"} 1.5\n">>)),
+    ?assertMatch({_, _}, binary:match(Out, <<"_count{protocol=\"openai_chat\",stream=\"0\"} 5\n">>)).
+
+bucketless_hist_family_renders_test() ->
+    %% A family with ONLY sum/count rows in ETS (no bucket rows) must
+    %% still render: _sum/_count exist as series, and the ladder
+    %% zero-fills. Never silently drop a family.
+    L = [{<<"protocol">>, <<"openai_chat">>}, {<<"stream">>, <<"1">>}],
+    Rows = [
+        {{hist_sum_us, request_duration_seconds, L}, 7000000},
+        {{hist_count, request_duration_seconds, L}, 2}
+    ],
+    Out = janus_metrics_render:render(Rows, []),
+    ?assertMatch({_, _}, binary:match(Out, <<"# TYPE janus_request_duration_seconds histogram\n">>)),
+    ?assertMatch({_, _}, binary:match(Out, <<"_bucket{protocol=\"openai_chat\",stream=\"1\",le=\"0.05\"} 0\n">>)),
+    ?assertMatch({_, _}, binary:match(Out, <<"_bucket{protocol=\"openai_chat\",stream=\"1\",le=\"+Inf\"} 0\n">>)),
+    ?assertEqual(14, count_occ(Out, <<"_bucket{">>)),
+    ?assertMatch({_, _}, binary:match(Out, <<"_sum{protocol=\"openai_chat\",stream=\"1\"} 7.0\n">>)),
+    ?assertMatch({_, _}, binary:match(Out, <<"_count{protocol=\"openai_chat\",stream=\"1\"} 2\n">>)).
+
 count_occ(Bin, Pat) ->
     count_occ(Bin, Pat, 0).
 count_occ(Bin, Pat, N) ->

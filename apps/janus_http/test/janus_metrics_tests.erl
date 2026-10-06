@@ -63,6 +63,15 @@ never_crashes_without_table_test() ->
     ?assertEqual(ok, janus_metrics:inc(not_atom_label_test, #{bogus => self()})),
     janus_metrics:init().
 
+norm_labels_list_clause_test() ->
+    %% Registry rows already carry [{KBin, VBin}] — the list clause
+    %% (re)sorts without re-coercing. janus_metrics_render relies on
+    %% this single coercion point for pre-normalized label lists.
+    ?assertEqual(
+        [{<<"a">>, <<"1">>}, {<<"b">>, <<"2">>}],
+        janus_metrics:norm_labels([{<<"b">>, <<"2">>}, {<<"a">>, <<"1">>}])
+    ).
+
 get(K, Rows) ->
     case lists:keyfind(K, 1, Rows) of
         {_, V} -> V;

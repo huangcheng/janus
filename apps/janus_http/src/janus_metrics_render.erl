@@ -68,6 +68,12 @@ render_hist_family(Name, Rows, Sums, Counts) ->
         fun
             ({{hist, N, L, Le}, V}, Acc) when N =:= Name ->
                 maps:update_with(L, fun(M) -> M#{Le => V} end, #{Le => V}, Acc);
+            ({{hist_sum_us, N, L}, _}, Acc) when N =:= Name ->
+                %% sum/count-only label sets still render (zero-filled
+                %% ladder + _sum/_count) — never silently drop a series.
+                ensure_labels(L, Acc);
+            ({{hist_count, N, L}, _}, Acc) when N =:= Name ->
+                ensure_labels(L, Acc);
             (_, Acc) ->
                 Acc
         end,
@@ -85,6 +91,13 @@ render_hist_family(Name, Rows, Sums, Counts) ->
                  || {L, BucketMap} <- lists:sort(maps:to_list(ByLabels))
                 ]
             ]
+    end.
+
+%% maps:put_new/3 is OTP 28+; the build image is OTP 27.
+ensure_labels(L, Acc) ->
+    case maps:is_key(L, Acc) of
+        true -> Acc;
+        false -> Acc#{L => #{}}
     end.
 
 render_hist_series(Name, L, BucketMap, Sums, Counts) ->
@@ -208,9 +221,6 @@ name_bin(Name) ->
 
 norm_labels(L) ->
     janus_metrics:norm_labels(L).
-
-to_bin(V) ->
-    janus_metrics:to_bin(V).
 
 labels_bin([]) ->
     <<>>;
