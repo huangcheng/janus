@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the architecture is sound and the row-model/wire decisions are now coherent, but rev 7 still ships one outright self-contradiction (TTS commit point), one unpriced timeout interaction, and stale vocabulary in the usage status column.
+
+## 2. Critical risks
+- **TTS commit contradiction (blocker-grade stale text):** A6 prose says "TTS = first audio byte"; the TTS contract and `commit_point/1` table say `upstream_accept`. These imply different failover windows (post-headers vs post-first-byte) and different double-billing exposure. `commit_point/1` is declared the single source — the A6 sentence must die.
+- **Timeout budget collision:** R6 pins pre-accept = idle−30s = 270s, yet the provider table defaults video gun budget to 600s. For SYNC video holds, an upstream that accepts at 400s is killed by the listener at 300s regardless of the gun budget — the plan never says the 600s figure is async/post-accept-only, nor that sync providers slower than ~270s-to-accept are unsupported. Silent fail mode.
+- **Usage status vocabulary vs row model:** R5 finalized "attempts keep is_terminal only; lifecycle in video_jobs," but M1.1's usage_events.status enum still lists `pending|abandoned`, and M3.3b's sweep says "marks pending rows abandoned" without naming the table. Either video_jobs owns pending/abandoned (say so) or the enum is vestigial (trim it). Fixture authors will encode whichever they read first.
+- **Retry taxonomy gap:** images retry on "pre-2xx transport/5xx/auth" — upstream **429** is unlisted. A rate-limited first route should failover; as written it 429s the client.
+
+## 3. Contradictions / stale claims
+- Header R4 summary still asserts "pre-accept failover may cross modes," directly contradicting the R6 same-mode pin and A5's body text. Historical summaries are fine, but this one states a live-looking rule.
+- M1.1c says video_jobs is "swept at exp"; M3.3b says leader-only nightly. Pick one owner/schedule.
+- Post-terminal "polls prefer the PROVIDER" costs an upstream call per poll forever after completion; the local terminal row should be checked first.
+
+## 4. Missing first-ship requirements
+- M1: no eunit named for `wrong_modality` gating off `listings.modality` (only wrong_modality *via chat* is implied in M1.2).
+- M4.1: beta-header allow-list storage location (settings knob? dispatch constant?) unstated.
+- M3: no dashboard/read-surface for video_jobs (debugging stuck `pending` rows requires SQL).
+- M3.1b: follower-blocks-on-missing-secret has no stated boot timeout/escalation if the leader dies mid-mint.
+
+## 5. Design notes
+Commit-point parameterization via `commit_point/1` is the right extension point; the HMAC jvid with keyid rotation and right-anchored base64url parse is solid. Error taxonomy is nearly clean except the 429 hole above. The monitor-held ASR slots + writer-owned terminal finalization correctly close the idle_timeout-kill leak class.
+
+## 6. Top 5 concrete edits
+1. **A6:** delete "TTS = first audio byte"; TTS = `upstream_accept` everywhere.
+2. **A5/provider table:** annotate video 600s budget as async/post-accept only; state sync-accept ≤270s explicitly, unsupported beyond.
+3. **M1.1 + M3.3b:** move `pending|abandoned` out of usage_events.status into video_jobs; name the swept table.
+4. **A6 retry taxonomy:** add upstream 429 (with Retry-After honored) as a retryable pre-commit failure.
+5. **Header R4 summary + M4.1:** fix the cross-modes leftover; pin the beta allow-list to a settings knob.

@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — R7 decisions are internally sound; remaining issues are a finalization durability gap, one stale gate contradiction, and three unhandled edges.
+
+**2. Critical risks**
+- **Terminal-finalization durability:** M1.1/M3.3 CAS is a single-statement `UPDATE video_jobs ... WHERE status='pending'`, but the one usage_events INSERT is a separate step. Winner crash between CAS-commit and insert = permanent usage loss (row no longer pending, nothing retries). Must be one transaction on both dialects.
+- **Budget arithmetic:** per-attempt gun budget (270s) vs the total pre-accept wall-clock knob is never reconciled — the shared loop must use `min(attempt_budget, remaining_total)` or the knob is decorative and two slow attempts exceed 300s idle.
+- **ASR admission** keys on `content-length` at header time; chunked transfer-encoding uploads bypass it. Decide: reject chunked, or hold slot + stream-cap.
+- **Buffered-reply memory:** 64MiB image/video JSON cap × unbounded concurrency has no admission control (only ASR has slots). Slow-accept fan-out can OOM a node.
+- Sync holds send **zero bytes for up to 270s**; any client proxy with 60s read-timeout aborts. Sound given lazy emission, but needs explicit client-guidance doc, not silence.
+
+**3. Contradictions / stale claims**
+- M3.2b says the *gate* asserts a >310s mock video; M3.4 declares >310s a manual soak, CI uses 30s-idle/31s-job. M3.2b is stale R6 text — fix it.
+- M2.2 still reads "multipart streaming parser (eunit FIRST…)" as if vendoring; A5 settled on cowboy 2.12 `read_part` with the vendored branch deleted. Reword M2.2.
+- A5 typo "else resets.   resets."; M1.0 export list "render_reply|stream handlers" is placeholder syntax.
+
+**4. Missing first-ship requirements**
+- M4 has no numbered E2E gate task (M1.3/M2.3/M3.4 pattern): beta-strip channel check, `computer_use_requires_native` 400, native passthrough.
+- No `:8090 /stats` counters for modalities.
+- `wrong_modality` 400 names an endpoint that is 503/knob-off until flip — decide the message pre-flip.
+
+**5. Architecture/design notes**
+- `commit_point/1` enum is the right single seam; keep A6 rules only in behaviour docs as planned.
+- Add a fixture-backed provider→canonical progress mapping table in M3.2 (percent vs stage).
+- Keep error-taxonomy splits explicit in eunit: 400 tamper vs 404 owner-mismatch vs `failed(job_*)` semantic.
+
+**6. Top 5 concrete edits**
+1. M1.1/M3.3: single transaction for video_jobs CAS + usage INSERT; crash-window eunit.
+2. M3.2b: swap >310s gate for the 31s/30s proof; attach >310s to the soak-runner task.
+3. M2.2: rewrite around `read_part/read_part_body`; add chunked-upload admission decision + fixture.
+4. Add M4.4 gate task (beta allow-list channels, reject path, native passthrough).
+5. Shared-loop task: remaining-budget gun await; buffered-reply concurrency cap for image/video JSON.

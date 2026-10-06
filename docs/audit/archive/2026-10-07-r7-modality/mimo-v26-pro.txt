@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the wire/lifecycle decisions are coherent after R6, but three internal contradictions and one missing primitive must be closed before M1 coding.
+
+**2. Critical risks**
+- Commit-point contradiction (§3) feeds M1.0c's shared-loop parameterization; implementing the wrong line makes TTS retry after accept (double-charge) or failover after first byte.
+- Lazy emission invariant must be stated absolutely: ZERO bytes pre-accept, including synthesized heartbeats. If heartbeats fire pre-accept to keep proxies alive, pre-accept failover double-submits upstream jobs.
+- "ONE terminal usage row, idempotent without a UNIQUE jvid index" is only safe if the `video_jobs` status-transition guard is a single atomic dialect `UPDATE … WHERE status<>terminal` with rowcount check (concurrent writer-notify + late poll + sweep). Not specified per dialect.
+- jvid `exp` (24h) vs persisted-result fallback: if expiry is checked before the `video_jobs` lookup, a completed job polled at 25h returns `job_expired` and persistence is dead code.
+- M3.4's `idle_timeout=30s` test listener makes the derived pre-accept budget (idle−30s) 0s — the formula must be parameterized, not derived.
+
+**3. Contradictions / stale claims**
+- A6 says both "TTS = first audio byte" and `commit_point/1 … TTS: upstream_accept` (Contracts agree with the latter). First line is R1 residue despite the R6 sweep.
+- M1.1: "`status` never appears" on per-attempt rows vs sync-hold abort = writer-owned per-attempt `truncated` row (same for TTS truncation).
+- A5: duplicated stray "resets." fragment in the ASR paragraph.
+
+**4. Missing first-ship**
+- The atomic `finalize_video_job` primitive itself (above) has no task.
+- Sync-video usage: no jvid row exists — where do `video_seconds`/`truncated` land? Unspecified.
+- Image b64 request-body cap is named in A5/A8 but never tasked in M1.2.
+- ASR `units=NULL` documented loss: no note on dashboard grouping of NULL units.
+
+**5. Design notes**
+- `pre_2xx` is a misleading commit-point atom ("commit at 2xx"); rename `at_2xx`.
+- Error taxonomy lacks `modality_disabled` — M1.0c's default-off knobs need a canonical reject code alongside `wrong_modality` / `computer_use_requires_native` / `job_*`.
+
+**6. Top 5 edits**
+1. Delete "TTS = first audio byte" in A6; state accept-only everywhere.
+2. Scope M1.1's "status never appears" to failover rows; permit status on writer-owned terminal/abort rows.
+3. Add M1.1 task: `finalize_video_job/1` atomic per-dialect transition + UNIQUE(jvid) or documented guard.
+4. Pre-accept budget → `min(knob, listener_idle−30s)` with explicit test-listener value in M3.4.
+5. Poll ordering: HMAC verify → owner 404 → local-row fallback → exp check on provider path only; add `modality_disabled` code.

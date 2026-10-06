@@ -1,0 +1,32 @@
+# Audit — Modality Gateway plan (rev 4)
+
+## 1. Verdict
+**GO WITH FIXES** — rev 4 still ships two coexisting video wire decisions and a response-413 clause that contradicts its own contracts; both are cheap textual fixes but will fork implementation if left.
+
+## 2. Critical risks
+- **Video wire self-contradiction (blocking):** rev-4 header + A1 say async POST replies JSON `{jvid,"submitted"}`; A5 and the SSE grammar say the wire is "ALWAYS SSE" with async POST streaming `queued(jvid)`. Implementers will build both; the E2E gate cannot assert both.
+- **M1.2 "response size cap enforced 413"** contradicts Contracts/A8 ("responses pass through, warn-log; size unknown pre-upstream"). A 413 after upstream 2xx bills the user, discards the image, and violates the plan's own commit-point rule (no action after 2xx).
+- **Sync-hold orphaning:** sync-mode replies carry no jvid, so a client/proxy drop during a multi-minute hold leaves an unrecoverable job (no poll path; usage → abandoned). Neither a sync-hold jvid nor documented loss is specified — yet Contracts define 409-on-sync-cancel, which is unreachable without a sync jvid.
+- **Hot-reload × jvid:** jobs are provider/listing-bound, but a generation bump can disable a listing mid-job; poll behavior then (honor jvid? reject?) is unspecified.
+- **M2.2 parser scope drift:** task mandates a vendored multipart parser unconditionally; A5 gates it on the pinned cowboy in rebar.lock. Fixtures must target whichever parser ships. Retry-After value computation for the ASR 429 is unspecified.
+
+## 3. Contradictions / stale claims
+- The framing "per-route timeout overrides" is stale — the plan correctly establishes cowboy idle_timeout is listener-level; keep A5's note so no task reintroduces overrides.
+- M1.1 "one row per jvid, upsert at terminal" vs M3.3 pending-row-at-submit — reconcile wording.
+- Cancel-409-on-sync-ids vs "sync replies carry no jvid" (above).
+
+## 4. Missing first-ship requirements
+- **M1:** no gate step for `wrong_modality` local reject (M1.3 lists failover/auth/entitlement only); image `n`×size cost-multiple cap unstated in gate.
+- **M2:** TTS format/voice whitelist 400 step; ASR 413 connection drain/reset asserted.
+- **M3:** poll-after-listing-disabled; deleted agent-key owner check (404 vs `job_unknown`); GET SSE Accept-upgrade step.
+- **M4:** beta allow-list initial contents ("when relevant" is not a spec); strip-and-record e2e.
+
+## 5. Architecture notes
+Replace prose with one normative **wire table** (rows: mode × {POST, GET, DELETE}; cells: content-type + terminal events). Make `commit_point/1` the single enforcement point that also forbids post-2xx response-side rejection. Add listing-disabled to the jvid error taxonomy (`job_listing_gone`).
+
+## 6. Top 5 edits
+1. **A5 + grammar:** rewrite to match A1's final decision (async POST = JSON submitted; SSE holds sync; GET JSON-default/SSE-upgrade); delete "ALWAYS SSE".
+2. **M1.2:** replace "response size cap enforced 413" with warn-log passthrough.
+3. **M3.1/Contracts:** issue jvid for sync holds (or document orphaning) and make/删 the 409 reachable.
+4. **M3.1/M3.3:** define poll semantics when listing/provider is disabled mid-job.
+5. **M2.2/M2.3:** inline the rebar.lock gate, specify Retry-After; add wrong_modality + TTS param-400 gate steps.

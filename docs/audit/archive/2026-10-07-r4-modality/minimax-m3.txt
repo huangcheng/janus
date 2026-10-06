@@ -1,0 +1,37 @@
+**Verdict:** GO WITH FIXES — solid foundation; video sync-mode SSE mechanics are unbuildable as written, the image response-cap rule contradicts itself, and several family/list enums are unspecified.
+
+**Critical risks**
+
+1. **Video sync-mode SSE loop unstated** (M3.2b). SYNC one-shots need the SSE writer to heartbeat while `gun:await` blocks; only "per-request gun await budgets" is specified. Add an explicit `progress_loop` task that owns a worker ref and emits `event: progress` via `receive after 10_000`.
+2. **Image response-cap contradiction** (A8 vs M1.2). A8 says "RESPONSES pass through with warn-log"; M1.2 says "response size cap enforced 413". A size cap cannot 413 a body the gateway has already streamed. Define `image_max_response_bytes` as a `gun:await` byte cap; over → `failed` after-image, never 413 mid-stream.
+3. **Family-aware backfill list missing** (M1.1). "Model-name families" defers to unnamed regex. A misclassified historical row silently corrupts billing. Need an enumerated list (qwen-image, qwen-tts, qwen-audio, seedance, wan, paraformer, cosyvoice, kling, cogvideox, …) before M1.1 ships.
+4. **Cross-node HMAC during generation lag** (M3.1). New nodes lag, lack the rotated secret, fail-closed → all video polls 500. Plan must cache last-known secret per node (persistent_term at first sight, kept across rotation), or polls must retry until secret arrives.
+5. **TTS cancel mid-stream** (M2.1). Client disconnect during TTS: gun continues, characters billed past the disconnect. Need peer-down monitor + `gun:cancel` on the in-flight TTS request.
+6. **Computer-use prefix match over-matches** (M4.2). "`computer_*` prefix match" admits `computer_anything`. Require exact match against the hardcoded list + knob.
+7. **janus-auto doesn't reject image-listed resolutions** (A3). Auto stays chat-only, but the adjudicator must reject (or fall back) when the resolved listing is non-chat.
+8. **wrong_modality is one-directional** (Contracts). Chat-call-on-image is named; image-call-on-chat isn't.
+9. **ASR slot tracker crashes lose count** (A8). gen_server crash + restart loses the in-flight counter. Need per-request monitor-token, not a bare gen_server counter.
+
+**Contradictions / stale claims**
+- A8 vs M1.2 on response caps — see risk #2.
+- "Canonical wire = OpenAI shapes" for `/v1/videos`: OpenAI's endpoint isn't generally public; reword as "OpenAI-shape when published; else gateway-defined".
+- M3.2c references a "provider table" (mode / request_caps / gun_await / entitlement) at least three times without schema. Add a column schema to M1.0c.
+
+**Missing first-ship requirements**
+- M1.0c: explicit per-modality knob names (`modality_image_enabled`, `tts_max_input_chars`, `image_max_response_bytes`, `secret_grace_period`) with dashboard toggle surface.
+- M2.2: ASR eunit must cover malformed boundary, header order, binary-straddles-chunk, oversize-part returning 413 mid-stream without OOM.
+- M3.1b: `secret_grace_period ≥ max exp` made explicit.
+- M4.2: enumerate exact anthropic computer versions (`computer_20241022`, `computer_20250124`, …) and OpenAI's distinct `computer_use_preview`.
+- TTS commit rule must state: no usage row on pre-first-byte failure.
+
+**Architecture/design notes**
+- Provider table columns: `endpoint, mode(sync|async), gun_await_budget_ms, request_caps_jsonb, allowed_formats, entitlement_secret_ref`. TTS-only `tts_max_input_chars`.
+- TTS input-cap count unit: codepoints, not bytes (default 5000 chars). Specify.
+- Cancel hooks per plugin (TTS, video): peer-down monitor + `gun:cancel` + usage row `status=truncated|cancelled`.
+
+**Top 5 concrete edits**
+1. M3.2b: add explicit `progress_loop` task — spawn worker, hold ref, heartbeat via `receive after 10_000`, abort upstream on peer-down.
+2. M1.2 + A8: replace 413-on-response with `image_max_response_bytes` gun byte cap; over → `failed`, never truncate.
+3. M1.1: enumerate modality-family regexes + eunit cases (qwen-image, qwen-tts, qwen-audio, seedance, wan, paraformer, cosyvoice, kling, cogvideox).
+4. M4.2: change "prefix match" to "exact match against allow-list" for `computer_<version>`.
+5. M2.2: ASR eunit must include malformed-boundary, header-order, binary-straddles-chunk, and oversize-part (mid-stream 413 without OOM) fixtures.

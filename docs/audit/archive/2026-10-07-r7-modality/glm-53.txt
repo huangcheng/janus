@@ -1,0 +1,32 @@
+# Audit — rev 7
+
+**1. Verdict: GO WITH FIXES** — converged on wire/usage/video lifecycle, but TTS commit point is stated two contradictory ways and the sync-hold "accept" signal is undefined — both on the spend-discipline critical path.
+
+**2. Critical risks**
+- **TTS commit contradiction (spend-critical):** A6's opening says "TTS = first audio byte"; A6's `commit_point/1` enumeration and the Contracts section say `upstream_accept`. M2.1's "pre-first-byte failover window" is the stale third variant. Post-accept/pre-first-byte failures are answerable as JSON (nothing sent yet, headers included) — but only if ONE commit point survives.
+- **Sync-hold accept is undefined for blocking one-shot upstreams.** Native sync endpoints emit no 2xx until completion. If accept = response headers, ≥1-per-10s heartbeats violate lazy emission (written pre-commit); if accept = request-sent, an upstream 400 becomes a mid-stream `failed`, contradicting "pre-accept failures answer plain JSON". Pin: synthesized heartbeats are gateway-owned and non-committing; commit = first upstream response byte.
+- **Writer-owned finalization untested:** idle_timeout/client-reset killing the handler is the hardest path (monitor → usage writer) and no E2E step exercises it.
+- **ASR 429 vs failover loop:** node-local admission rejects must bypass the failover loop (retrying another provider frees no slots); plan doesn't say so.
+- **Secret bootstrap:** followers "block/poll" with no timeout — a wedged leader hangs the fleet's boot.
+
+**3. Contradictions / stale claims**
+- TTS first-byte vs accept (above); M2.1 window text.
+- `status` vocabulary includes `pending`, but M1.1 says status never appears on attempt rows and video lifecycle lives in `video_jobs` — `pending` is unreachable in `usage_events`.
+- Task IDs listed M3.2, **M3.2c**, **M3.2b** — cosmetic ordering noise in a plan this audited.
+
+**4. Missing first-ship requirements**
+- M1: behavior of a disabled `modality_<x>_enabled` endpoint (404 vs 403 + error code) — unspecified, needed for gate steps.
+- M3: no E2E for sync-hold client-disconnect → upstream cancel + `truncated` attempt row; no concurrent double-terminal idempotency test (two nodes polling one jvid) despite dropping the UNIQUE index.
+- M3.3b: "nightly leader scan" names no trigger mechanism (timer/lease) — nothing in the gateway runs nightly today.
+- M2: client-visible truncation signal is none — document as intentional (close == indistinguishable) and assert it in E2E.
+
+**5. Architecture notes**
+- Add `accept_signal/1` next to `commit_point/1` in the behaviour (per provider mode), so lazy-emission/commit semantics live in one contract.
+- Error taxonomy worth a table: local-reject (`wrong_modality`, `computer_use_requires_native`, caps) vs upstream-translated vs job-state (`job_expired/unknown_key/not_found`→local-row fallback).
+
+**6. Top 5 edits**
+1. `target.md` A6 + Contracts: delete "TTS = first audio byte"; M2.1 → "pre-accept failover window".
+2. A5/Contracts: pin sync-mode commit = first upstream response byte; heartbeats explicitly non-committing; fix lazy-emission wording.
+3. M1.0c: define off-knob endpoint response + E2E step.
+4. M3.4: add sync-hold abort E2E + double-terminal idempotency eunit.
+5. M3.1b/M3.3b: bootstrap timeout (video endpoints 503, boot continues); name the sweep trigger.

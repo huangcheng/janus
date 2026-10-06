@@ -1,0 +1,33 @@
+**1. Verdict: GO WITH FIXES** — the load-bearing decisions (video wire, jvid codec, usage split, commit points) are now sound, but rev 5 still contradicts itself twice and leaves sync-video truncation usage with no landing row.
+
+**2. Critical risks**
+- Normative semantics live in two places (A5/R-summaries vs Contracts); rev 5's own leftovers prove implementers will pick arbitrarily.
+- **Sync holds carry no jvid, yet M3.3/A6 promise writer-owned `truncated` finalization "on handler death"** — the mechanism is keyed to the jvid summary row, which sync flows never create. Client-disconnect truncation has no defined target.
+- M1.0c parameterizes the shared failover loop's commit checks — a refactor of the live chat hot path with no explicit same-commit chat regression step.
+- jvid HMAC "over the canonical dot-joined prefix" is ambiguous: base64url segments as transmitted, or decoded values? Cross-node parse eunit passes either way unless the signed byte layout is pinned.
+- ASR cap-reject "drain where feasible" is unbounded — a client can stream forever during read-and-discard; drain needs a byte/time bound before reset.
+- Gate steps (M1.3/M2.3/M3.4) depend on mock image/TTS/ASR/video-job endpoints; extending the deterministic mock upstream is never tasked.
+
+**3. Contradictions / stale claims**
+- Contracts still says cancel replies "409 on sync-mode ids" — A5/R4 deleted that branch, and sync replies carry no jvid, so it's unreachable. Stale.
+- TTS contract uses `status ok/truncated`; M1.1's enum is `pending|completed|failed|cancelled|abandoned|truncated` — `ok` is undefined.
+- The audit prompt's "per-route timeout overrides" is stale vs the plan (correctly listener-level); plan itself is consistent here.
+
+**4. Missing first-ship requirements**
+- M1: mock image endpoint task; SPEC.md/dashboard API doc updates unlisted.
+- M2: drain bound; per-format content-type validation list.
+- M3: mock submit/poll/cancel job provider as an explicit task; video_jobs retention vs jvid expiry; poll behavior when the listing row is *deleted* (only "disabled mid-job" is covered).
+- M4: anthropic-native mock for the passthrough e2e.
+
+**5. Architecture notes**
+- Collapse to ONE normative table: status enum shared by usage rows and SSE terminals; Contracts references it.
+- Generalize writer-owned finalization to `request_ref`-keyed rows so jvid-less sync flows share the mechanism.
+- jvid codec spec must state the exact HMAC input bytes; treat the decode/verify function as the reference implementation.
+- Provider-endpoint mode table (sync/async) is rightly data — add a "listing deleted" poll policy row.
+
+**6. Top 5 edits**
+1. `target.md` Contracts: delete "409 on sync-mode ids".
+2. `target.md` TTS contract + M1.1: unify status vocabulary (`completed`, not `ok`).
+3. M3.3: define sync-hold truncation landing — finalize the per-attempt row via the request_ref monitor; no jvid row.
+4. M1.3/M2.3/M3.4: add explicit "extend deterministic mock upstream + TEST-FLOWS.md" subtasks.
+5. M3.1: pin the jvid HMAC input byte layout (dot-joined base64url segments, verbatim) and require tamper eunit to mutate decoded-then-re-encoded segments.

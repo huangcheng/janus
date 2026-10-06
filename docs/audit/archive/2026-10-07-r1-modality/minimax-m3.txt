@@ -1,0 +1,32 @@
+**Verdict: GO WITH FIXES** — solid plugin architecture, but multi-node jobs, per-route timeouts, usage-row semantics, and the image-sync claim need explicit design before M3.
+
+**Critical risks:**
+- **Multi-node prod vs node-local job map (M3.1).** ETS TTL 24h is fine, but jobs submitted on janus.noveo.cn aren't pollable from janus.kleos.cn. Back with Postgres (`video_jobs` table via janus_db_conn) or document a sticky-LB contract.
+- **Per-route timeout override (A5) isn't grounded.** Listener opts are set once at 300s in cowboy; per-route transport overrides require extending `cowboy_router:compile` and threading per-modality ceilings into `janus_providers`' gun request setup. **M3.2b must precede M3.2 in the task graph.**
+- **Usage-row semantics for video (M3.3).** "Submit rows stay units=0 pending" is ambiguous: append or update? Appending preserves the per-attempt invariant from context (rows carry `is_terminal`); updating loses the submit attempt. Decide explicitly.
+- **pick_listing_route with prefer_proto (A3).** Image/video/TTS/ASR are single-protocol by nature; proto-bias is meaningless and may break ranking if every route ties on proto.
+- **TTS truncation signaling (terminators).** Plan correctly notes `Truncated: true` can't be set mid-stream; doesn't answer how the client knows bytes are partial. Make this a wire contract (e.g., trailing `0xFF`-bounded sentinel in mp3) or document the gap as a known issue, not "no fake signaling".
+- **Dashscope image-sync claim (A5/M1.2).** qwen-image-edit/variations use the async task model; blanket "image gen sync in both dialects" is likely wrong for the dashscope dialect.
+
+**Contradictions / stale claims:**
+- "Cowboy idle_timeout 300_000" vs "per-route override to 600s" — one wins; spec the merge.
+- M2.2 "stream-through, no spooling" + 25MiB cap — where do bytes accumulate during multipart framing?
+- Static plugin provider table (sync/async mode per endpoint) contradicts A2's "new model class without redesign" AGI promise.
+- M4.1 names "OpenAI-Beta" as relevant; OpenAI's beta convention isn't symmetric with Anthropic's — drop or qualify.
+
+**Missing first-ship:**
+- Rollback: NULL `modality` handling in existing usage readers / dashboard aggregations.
+- janus-auto gating mechanism — how does the virtual model refuse non-chat requests?
+- ASR canonical form fields absent (file, model, language, response_format, temperature).
+- Heartbeat scope: only sync-video needs SSE comments; TTS/image/ASR don't.
+
+**Architecture / design notes:**
+- `janus_modality` behaviour shape: `routes/0`, `translate_req/2`, `render_resp/2`, `usage_unit/0`, `probe_policy/0`, `idle_timeout/0`, `mode/0` (sync|async). Move sync/async mode into settings for genuine pluggability.
+- Knobs are runtime guards inside handlers — cowboy_router is static, so don't try conditional route registration at boot.
+
+**Top 5 concrete edits:**
+1. **M3.1** Replace ETS job map with a Postgres-backed `video_jobs` table (TTL via janus_db_conn) or pin a sticky-LB contract.
+2. **M3.2b** Precede M3.2: implement per-route idle_timeout + gun receive_timeout ceilings; eunit on the config table; document the cowboy_router extension point.
+3. **M3.3** Append completion row (`is_terminal=true, units=N`), keep submit row (`is_terminal=false, units=0`). Update usage-aggregation queries to filter terminal rows.
+4. **A5** Image routes keep 300s; only sync-video routes get 600s override. Verify dashscope image-edit/variations sync claim or move them under the async video plugin.
+5. **M1.0** Runtime `is_enabled/1` check inside handlers; routes always registered. Add NULL-modality guards in usage readers and janus-auto chat-only enforcement at request shape.

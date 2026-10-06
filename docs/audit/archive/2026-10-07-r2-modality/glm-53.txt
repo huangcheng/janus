@@ -1,0 +1,36 @@
+# Audit — Modality Gateway plan (rev 2)
+
+## 1. Verdict
+GO WITH FIXES — rev 2's corrections hold, but the video SSE grammar contradicts itself on async terminals, jvids prove authenticity but not ownership, and ASR admission control uses the wrong status code.
+
+## 2. Critical risks
+- **Grammar self-contradiction:** Contracts say the terminal is "EXACTLY ONE of completed/failed," yet A5 says async submit "delivers queued(jvid) then closes" — a stream with no terminal. The grammar must be per-stream-type: submit-async ends after `submitted(jvid)`; only poll and sync-wrap streams carry completed/failed. Cancel (M3.1/M3.4) has no terminal event and no usage rule — add `cancelled` or cut cancel.
+- **Stateless jvid + poll-only accounting:** a job whose client stops polling is never billed or recorded (no registry, no reconciliation). Document as accepted loss or add a sweep — otherwise usage completeness silently depends on client behavior.
+- **Ownership hole:** the HMAC prevents forging, not replay — any valid agent key can poll/cancel another key's job (jvids appear in client logs). Bind the agent-key id into the HMAC payload; verify on poll/cancel.
+- **Sync-video failover:** the gate only asserts the >310s happy path; add a pre-2xx failover-under-heartbeat case (provider burns ~590s then fails).
+- **TTS disconnect:** "client disconnect aborts upstream" is stated for video only; the same rule must hold for TTS streams or orphan gun streams leak.
+
+## 3. Contradictions / stale claims
+- prompt.md says "revision 1" and "per-route timeout overrides" — rev 2 removed the latter (listener-level idle_timeout); the prompt is stale vs the target.
+- A8 contains Chinese ("二进制") in an English artifact.
+- M1.1 specifies no backfill for existing rows — old usage_events will have NULL modality; dashboard grouping hits it on day one.
+
+## 4. Missing first-ship requirements
+- **M1:** `/v1/models` carries no modality marker, yet chat calls to image models now 400 `wrong_modality` — clients cannot route. Expose modality per listing.
+- **M2:** ASR reply canonicalization (text vs verbose_json, language param) unspecified.
+- **M3:** cancel semantics (upstream cancel call? usage status?) unspecified.
+- **M4:** beta allow-list source (static vs settings knob) unspecified.
+
+## 5. Architecture / design notes
+- Split the event grammar into three stream types (submit-async / poll / sync-wrap), each with its own terminal set — that table is what an implementer needs.
+- Error taxonomy per endpoint: overload (429 + Retry-After) vs payload (413) vs modality (400 `wrong_modality` / `computer_use_requires_native`) — one table.
+- Specify the heartbeat mechanism as a `gun:await(Timeout)` receive loop, not a blocking await plus timer, so implementers don't block past the first heartbeat.
+
+## 6. Top 5 concrete edits
+1. Contracts → video grammar: per-mode terminal rules; add `cancelled` or delete cancel from M3.1/M3.4.
+2. A5/M3.1: include agent-key id in the jvid HMAC payload; enforce owner check on poll/cancel.
+3. A5/A8: ASR inflight cap returns 429 + Retry-After; reserve 413 for the 25MiB size cap.
+4. M1.2/M1.4: add modality to the model surface; `wrong_modality` error names the correct endpoint (already implied — make the surface change explicit).
+5. M1.1: backfill `modality='chat'`, `units=NULL` for existing rows; document abandoned-poll usage loss as an explicit non-goal.
+
+*(Prompt/target rev mismatch — update prompt.md to rev 2 before round 2.)*

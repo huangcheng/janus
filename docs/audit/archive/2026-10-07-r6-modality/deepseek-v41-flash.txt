@@ -1,0 +1,35 @@
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound, but rev 6 still contains self-contradictions (cancel-409, TTS `ok`, mode-homogeneity) and an unguarded terminal-transition claim that must be resolved before M3.
+
+## 2. Critical risks
+- **Sync-hold usage gap**: "writer-owned per-attempt `truncated` row on abort" collides with "attempt rows never carry `status`." Where does `truncated` live? Handler-death monitor also races the writer's own attempt row.
+- **video_jobs terminal transition** claimed "idempotent without a UNIQUE jvid index" via the status transition. Under concurrent poll+terminal on multi-node, both can read `pending`. Needs UNIQUE(jvid) or SELECT…FOR UPDATE; dialect differences are *not* irrelevant.
+- **Mode-homogeneity unresolved**: R4 summary + A5 body allow cross-mode pre-accept failover; R5 pins SAME-MODE. Two implementers will produce different wire behavior.
+- **TTS pre-first-byte client disconnect**: upstream already accepted (billed), but no usage row is specified → silent billing loss.
+- **ASR slot vs failover**: is the slot held across provider retries? Unstated — a retry storm can pin all 4 slots.
+
+## 3. Contradictions / stale claims
+- Contracts still says cancel "409 on sync-mode ids," though rev 6 claims it deleted and sync holds carry no jvid → unreachable branch.
+- TTS "final status (`ok`/`truncated`)" vs vocabulary "completed/truncated/failed — never `ok`."
+- `jvid_v1` codec vs `jvid_` encode/parse naming.
+- M1.0c `modality_image_enabled` default-off vs images shipping in M1.2.
+- A1 calls it "the jvid envelope" though sync replies carry no jvid.
+
+## 4. Missing first-ship requirements
+- `render_reply` per-modality HTTP-error mapping left as "provider table" with no required fields.
+- Probe scheduler honoring batch-probes-off for image/video (entitlement-carrier interaction).
+- `/v1/models` modality filtering + capability flags for consumers.
+- Rollout order for `listings.modality`: new code must feature-detect the column (followers can boot before the leader's migration), not assume it ran.
+- T1 mock progress-grammar capture provenance (real 1.0 captures) — the project's known unrealistic-fixture bug class.
+
+## 5. Architecture notes
+- `commit_point/1` as single source is right; ensure BOTH the failover loop and renderers consult it to prevent drift.
+- Keep terminal emission centralized so "exactly one terminal" is provable; per-endpoint mode is the correct extension point.
+- Unify `job_not_found/job_expired/job_unknown_key/cancelled` into one enum shared by poll JSON and SSE.
+
+## 6. Top 5 edits
+1. **Contracts**: delete "409 on sync-mode ids"; state cancel is async-only, no sync branch.
+2. **TTS contract**: replace `ok` with `completed`; state `status` lives on the single usage row, never attempt rows (or explicitly relax that rule).
+3. **A5/R4/R5**: pick one mode-homogeneity rule (recommend SAME-MODE); delete the other.
+4. **M3.3**: require UNIQUE(jvid) + atomic transition per dialect; drop "dialect differences irrelevant."
+5. **M1.0b**: add feature-detect-column rollout rule + T1 fixture-capture requirement.

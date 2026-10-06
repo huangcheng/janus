@@ -1,0 +1,30 @@
+## 1. Verdict
+GO WITH FIXES — the wire/codec/spend decisions are now coherent, but result persistence for terminal video jobs, a secret-bootstrap race, and one stale contradiction (M1.2 vs A8) remain.
+
+## 2. Critical risks
+- **Terminal-result persistence missing.** jvid is stateless and polls route to the provider, but provider job retention (OpenAI ~hours) is far shorter than jvid `exp` (24h). A poll after provider-side expiry of a *completed* job returns `job_not_found` — a successful generation becomes unretrievable. The gateway must persist the terminal payload (URL/b64 ref) keyed by jvid and serve post-terminal polls locally. No column/table/task covers this.
+- **Secret bootstrap race.** "Generated if absent, written via settings" on a 3-node deploy: two nodes booting together can mint different secrets; ids minted on node A fail HMAC on node B. Needs single-writer (migration leader generates; followers block/poll settings until present).
+- **Usage upsert under-specified.** One-row-per-jvid needs `UNIQUE(jvid)` + dialect-correct upsert (PG `ON CONFLICT` vs SQLite) in M1.1/M3.3; neither the constraint nor the sweep index appears in the migration task.
+- **Sync-cancel 409 is unreachable.** A5 says sync-mode replies carry no jvid; M3.2 says sync endpoints produce no job rows. Then no client ever holds a sync-mode id to DELETE. Either sync-hold calls mint a jvid (enabling cancel/abort) or the 409 clause is dead text.
+- **Entitlement namespace defaults.** New per-modality entitlement codes (M1.0c) without a default-allow rule means flipping `modality_image_enabled` silently denies every existing agent key.
+
+## 3. Contradictions / stale claims
+- **M1.2 vs A8/Contracts:** M1.2 still says "response size cap enforced 413"; R2 pinned responses to pass-through-with-warning and 413 as request-only. Stale.
+- **Poll semantics undefined:** GET JSON default — blocking or immediate-status? Given the SSE-always rationale (idle_timeout is listener-level), a *blocking* JSON poll reintroduces the heartbeat problem. Must be immediate-return; say so.
+
+## 4. Missing first-ship requirements
+- M1.0c: chat-regression gate step (the commit-check refactor touches the live chat hot path).
+- M3.3b: sweep *mechanism* (who schedules nightly — no cron exists in janus_core).
+- M1.3: entitlement default-allow verification for existing keys.
+- ASR: memory bound stated (25MiB × slots) as a documented invariant.
+
+## 5. Design notes
+- Commit-point taxonomy is clean; `commit_point/1` returning atoms keeps the loop plugin-agnostic. Document that `upstream_accept` must be detected from provider *accept* semantics (2xx + job id), not any 2xx (sync providers also 2xx).
+- jvid embeds `agent_key_id` in cleartext — fine (id, not secret), but state it.
+
+## 6. Top 5 edits
+1. Add task: persist terminal video result keyed by jvid (usage row `result` column or side table, retention = exp); post-terminal polls answer locally.
+2. Rewrite M1.2: drop "response size cap enforced 413" → pass-through + warn-log per A8.
+3. Specify leader-only jvid secret bootstrap + follower wait; rotation ordering (verify new+old, sign new only).
+4. M1.1/M3.3: add `UNIQUE(jvid)`, dialect upsert, sweep index; define the sweep scheduler owner.
+5. Resolve sync-cancel: mint jvids for sync-hold calls (DELETE aborts gun stream) or delete the 409 clause; declare GET-poll JSON non-blocking.

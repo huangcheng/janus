@@ -1,0 +1,32 @@
+## 1. Verdict
+GO WITH FIXES — architecture is sound, but the video reply-mode contract, usage-row lifecycle, and backfill heuristics still contain internal contradictions that will produce divergent implementations.
+
+## 2. Critical risks
+- **SSE grammar is mode-ambiguous.** The normative table (`submitted → progress* → completed|failed`) cannot describe async POST (which closes after `submitted` JSON per A1) and sync-hold simultaneously. Implementers will emit heartbeats where none belong, or omit them where required.
+- **Cancel is partly unreachable.** `409 on sync-mode ids` (Contracts) cannot happen because sync replies carry no jvid — DELETE has no id to target. Dead branch → untested code.
+- **Usage row lifecycle split-brain.** M1.1 says "ONE row per jvid (upsert at terminal; polls write none)"; M3.3 says submit writes `status='pending'`. Two contradictory insertion models; the sweep/index (M3.3b) depends on which is true.
+- **Terminator/usage on client abort** for TTS/ASR is unspecified: does a mid-stream disconnect still persist `status=truncated` and chars? Failover-loop `commit_point/1` is per-request, but stream commit is per-chunk — semantics underspecified.
+- **No output caps** on TTS/ASR responses (only request caps); unbounded upstream stream = spend/DoS hole.
+
+## 3. Contradictions / stale claims
+- A5 "wire is ALWAYS SSE" vs A1 "async POST replies JSON `{jvid,status:submitted}`" — R3 already picked the latter; A5 text is stale.
+- M1.1 "family-aware backfill by model-name" contradicts A3 "wrong_modality rejects on THIS column only (no name heuristics)". Heuristic backfill silently mislabels 435 listings.
+- M1.1 `status NULL for old chat rows` vs M3.3 `pending='pending'` — the default/backfill story for the new column is unstated.
+- A6 "attempt rows carry modality+units" vs M1.1 migration only adding modality/units/status — attempt linkage unverified.
+
+## 4. Missing first-ship requirements
+- Disabled-knob endpoint behavior (`modality_*_enabled=false` → 404 vs 403) undefined.
+- Dashboard "column absent → badge hidden": no mechanism (information_schema probe) specified; a raw SELECT will 500 on un-migrated DB.
+- gun-budget < idle_timeout invariant needs an explicit assertion in M3.2b, not prose.
+- jvid rotation retention ↔ exp relation needs a concrete test, not just "retention knob".
+- Backfill idempotency on every boot (migrations run per-node) unaddressed.
+
+## 5. Architecture notes
+Make the SSE table mode-scoped (sync-hold vs async-poll), with one renderer and a `mode` field on the plugin. Keep `status` transitions in one place (terminal writer) so sweep/cancel/abort share the state machine. Error taxonomy is otherwise clean.
+
+## 6. Top 5 edits
+1. `target.md` A5 + Contracts: rewrite SSE grammar as mode-scoped; delete unreachable sync-cancel 409.
+2. M1.1/M3.3: pick submit-inserts-pending + terminal-upsert; fix M1.1 wording; add partial index in M3.3b.
+3. Replace family-aware name backfill with an explicit mapping table (no heuristics).
+4. Add disabled-knob behavior + dashboard schema probe + TTS/ASR output caps.
+5. Specify `commit_point/1` per request shape and add gun-budget<idle_timeout assertion to M3.2b.

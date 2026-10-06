@@ -1,0 +1,33 @@
+Verdict: GO WITH FIXES — sound chassis, but three modeling/observability defects (usage-status, sync-video commit boundary, job-row race) and one dependency assumption (Cowboy 2.12) must be pinned before M1–M3 ship.
+
+Critical risks
+- Sync one-shot video: `upstream_accept` is unobservable when submit/accept is not distinct from completion (A6/M3.2). Lazy emission forbids heartbeat pre-first-byte, so a non-streaming provider that answers >270s later is unservable (idle_timeout). M3.2b's ">310s mock completes" only holds if the mock streams an early byte. Pin the precondition.
+- usage_events `status` contradiction: M1.1 says per-attempt rows "never carry status," but TTS/sync-video truncated/failed must land on their only row; the TTS contract also says both "never ok" and "(ok/truncated)." The row model is broken for non-video modalities.
+- "One usage row per jvid, idempotent without UNIQUE index … dialect differences irrelevant" (M3.3): check-then-insert races under Postgres READ COMMITTED (SQLite's write lock hides it). Must be a single atomic `UPDATE … WHERE status='pending' RETURNING` (+ UNIQUE jvid as belt-and-braces).
+- ASR rides Cowboy 2.12 `read_part` (M2.2): verify rebar.lock actually pins it; the bump is a hot-path dependency change needing a chat regression.
+- The existing probe loop (target.md A7/M4.2) will chat-probe new image/video listings → wrong_modality false-down; M1.0c must edit the running scheduler, not just add an export.
+- M1.0c refactors chat-proxy commit logic — collides with the already-audited translation plan; sequence.
+
+Contradictions/stale claims
+- M3.2 "native sync one-shot → inline-completed reply (no job rows)" vs A5 "sync POST = SSE hold": clarify sync = SSE hold emitting one terminal `completed` (inline payload, no jvid/job row).
+- "per-attempt rows never carry status" vs TTS/sync-video needing it (above).
+- Audit brief expects per-route timeout overrides; plan ships provider-endpoint gun budgets — confirm sufficiency or add `listings.timeout`.
+- Video completed b64 "passes through regardless of size" through the lightweight poll endpoint risks multi-GB JSON; prefer URL, cap/documented for b64.
+- "Migration-leader" nightly sweep + followers "block" on missing jvid secret: leader is boot/deploy-time, not a runtime lease; followers can hang boot. Bound the wait (crash-restart) and use a DB advisory lock for sweeps.
+
+Missing first-ship
+- M1: images `units = n`, not 1. M3: pin video_seconds source (request `seconds` → provider field → documented NULL, mirroring ASR).
+- M3.1b: idempotent mint (conditional INSERT) + bounded boot wait; sweep leader resolution + index `video_jobs(status,ts)`.
+- M2: pin per-provider re-serialization target (form-rebuild vs JSON) in each translator spec.
+- Tie the /v1/models modality badge to availability so a listed-but-disabled image model isn't callable-404 after listing.
+
+Architecture notes
+- Make `commit_point/1` total (default `pre_2xx`); derive `is_terminal` + writer-owned finalization from it. Confirm the writer-owned monitor is a process monitor that still fires on the cowboy idle kill.
+- One canonical per-modality error map (wrong_modality, computer_use_requires_native, job_expired/not_found/unknown_key).
+
+Top 5 edits
+1. M1.1 + TTS contract: unify status vocab (drop `ok`); allow terminal status on TTS/ASR/sync-video attempt rows.
+2. M3.3: one-row-per-jvid via atomic conditional UPDATE/RETURNING (+ UNIQUE jvid); eunit the race.
+3. A5/M3.2/T.1: pin sync-one-shot early-first-byte (≤270s) or pre-flight reject; make the >310s mock stream.
+4. M1.0c: add probe-scheduler modality gating (skip non-chat; manual-only computer-use) to stop false-downs.
+5. M2.2: verify/lock Cowboy ≥2.12 with a chat regression before ASR; add `listings.timeout` (or confirm budgets) and a video-b64 cap + duration-source note.

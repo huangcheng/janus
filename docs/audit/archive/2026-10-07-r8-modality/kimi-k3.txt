@@ -1,0 +1,34 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 8 is internally coherent on the hard problems (jvid codec, lazy emission, writer-owned finalization), but the usage-row status model still contradicts itself and a few lifecycle edges are unspecified.
+
+## 2. Critical risks
+
+- **Status-row contradiction (stale text, again).** M1.1 row-kind (1) says per-attempt rows: "`status` never appears here". Yet the TTS contract says "the usage row records chars + final status (`completed`/`truncated`)" and M3.3 says sync-hold abort → "writer-owned per-attempt `truncated` row". Either TTS/sync-abort rows are terminal-summary rows (not attempt rows), or attempt rows do carry status. As written, two implementers will build different schemas. M1.1's "set ONLY on terminal attempts" vs "`status` never appears here [attempt rows]" is itself ambiguous.
+- **Double-count risk in usage grouping.** A6: attempt rows carry modality+units; M1.1: video also gets ONE terminal row per jvid. Nothing states how the dashboard Usage grouping avoids summing submit-attempt + terminal rows. Need an explicit "terminal row replaces, not adds" rule (e.g. attempt rows for video submits carry `units=NULL`).
+- **"Accept" is defined twice, differently.** TTS commit = "upstream ACCEPT (2xx headers)"; sync-video accept = "first upstream RESPONSE byte (headers or data)". A6's claim that first_media_byte and upstream_accept "coincide" for sync video rests on the provider-table assumption "native sync upstreams emit no headers until done" — one provider that sends early headers silently breaks the commit boundary. Pin accept = first response byte for ALL modalities, and make headers-early sync-video providers a provider-table flag.
+- **video_jobs sweep vs result persistence.** "Swept at exp" deletes terminal rows at 24h, so "local terminal row first — exp never masks results" only holds inside exp. A poll at 25h on a completed job answers `failed(job_expired)`. Acceptable, but the plan presents persistence as the fix for provider retention without stating this ceiling.
+
+## 3. Contradictions / stale claims
+
+- The `commit_point/1` enum lists `first_media_byte` for sync-video while A5/R7 pin ACCEPT = first response byte; keep one name.
+- M1.0c lists per-modality knobs; A5 says "the knob is default-off anyway" for video — but wrong_modality behavior when a modality knob is OFF is unspecified (chat-call-to-image-model: local 400 or upstream 400?).
+
+## 4. Missing first-ship requirements
+
+- **Poll/cancel when the provider or listing is deleted (not just disabled) mid-job** — ETS lookup fails; must map to `failed(job_unroutable)`, not crash. No fixture.
+- M3: no request-body size cap for `POST /v1/videos` (images/ASR have one).
+- M2: TTS 100MiB output cap vs 5000-char input cap is unmoored; derive or justify.
+- M1.3 gate: no step asserting dashboard Usage grouping renders modality without double-counting video rows (ties to risk 2).
+
+## 5. Architecture notes
+
+- jvid, plugin behaviour, and single-statement CAS finalization are sound. Poll local-first ordering correctly makes routing stateless while results persist. ASR monitor-held slots + header-time admission is the right shape. Failover-loop parameterization via `commit_point/1` keeps A6 in one place — good.
+- Consider a `row_kind` discriminator on usage_events rather than overloading is_terminal+status; cheaper than every dashboard query learning the rules.
+
+## 6. Top 5 concrete edits
+
+1. **M1.1**: rewrite the row-kinds paragraph — status lives on terminal-attempt rows (TTS, sync-abort) and the one video summary row; non-terminal attempt rows never carry it. Delete "`status` never appears here".
+2. **A6/Contracts**: pin video submit attempt rows to `units=NULL`; state "terminal row replaces attempts in aggregation" and add the dashboard-grouping assertion to M3.4.
+3. **A5/A6**: single definition — ACCEPT = first upstream response byte for every modality; delete "2xx headers" from the TTS contract; add provider-table flag for headers-early sync-video upstreams (default unsupported).
+4. **A5 video_jobs**: give terminal rows a retention knob independent of jvid `exp` (e.g. `video_result_retention`, default 7d), or explicitly document "results die at exp".
+5. **M3.1**: add poll/cancel mapping for deleted provider/listing → `failed(job_unroutable)` + eunit fixture; add M3 video request-body cap; define wrong_modality behavior under a disabled modality knob.

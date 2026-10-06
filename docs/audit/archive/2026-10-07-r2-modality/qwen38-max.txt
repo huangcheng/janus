@@ -1,0 +1,36 @@
+**1. Verdict:** GO WITH FIXES — rev 2 closed round-1 transport/spend issues, but ships a modality source-of-truth gap, a post-bill image 413 fallacy, an uncapped TTS spend vector, and an ambiguous stateless job-id grammar.
+
+**2. Critical risks**
+- **Modality truth undefined.** No migration/catalog task records which listings are image/audio/video; `wrong_modality`, badges, and endpoint gating all presuppose it. Name heuristics will misclassify (`qwen-mt-uni`, `GLM-5.3-FlashX` are chat-shaped).
+- **Image "response cap enforced with 413"** fires *after* upstream 2xx = already billed: money spent AND image discarded. Size control belongs at request time (`size`/`n` vs provider table).
+- **TTS bills input chars with no input cap** — unbounded spend per request.
+- **jvid parsing ambiguity:** upstream job ids can contain `_`; underscore-joined segments are ambiguous to split. Needs base64url segments or right-anchored parse; HMAC must cover canonical encoding. Secret-unset must fail closed; rotation orphans in-flight jobs (document).
+- **ASR admission returns 413** (payload semantics) for capacity exhaustion — clients don't retry 413; use 503 + Retry-After.
+- **ASR `units=audio_seconds` has no duration source** (upstream usage field? container parse?) — risks inventing numbers, violating the plan's own rule.
+- **M3.2b's >310s gate step adds 5+ min to every `e2e_local.sh` run** — needs a nightly profile or a test-only reduced `idle_timeout` heartbeat-cadence test.
+
+**3. Contradictions / stale**
+- Grammar table says first event is `submitted`; A5 async POST says `queued`. Pick one.
+- M3.4 "TTL expiry" — stateless ids have no gateway TTL; must mean upstream-expired → `failed` mapping.
+- M3.1 lists a cancel endpoint, but no cancel contract, terminal event, or post-accept billing rule exists.
+- M4.1 stripping unknown beta values on *native* routes silently breaks features that would passthrough fine — strip only on translated routes.
+
+**4. Missing first-ship items**
+- M1: `listings.modality` column (migration both dialects + flat copies, seed, dashboard) — prerequisite for everything.
+- Mock upstream extensions (multipart ASR acceptor; video job submit/poll/SSE provider) are depended on but never tasked.
+- Computer-use detection = explicit versioned tool-type registry (`computer_20241022`…), default-deny unknowns.
+- Poll with provider disabled/deleted mid-job: canonical error, not crash.
+- `units=NULL` on chat rows: dashboard aggregations must be modality-filtered/NULL-safe.
+
+**5. Architecture notes**
+- Grammar table needs a mode column (sync / async-submit / poll) stating which events each mode may emit; add `cancelled` or delete cancel.
+- Error taxonomy: pin ASR-capacity→503, `job_not_found`, `job_expired`; reuse the translation plan's envelope.
+- Envelope machinery (M3.2b) must precede provider translators (M3.2) — translators can't be gated without it.
+- Hot-path cost fine: one ETS modality lookup per request; HMAC verify only on `/v1/videos/{id}`.
+
+**6. Top 5 edits**
+1. Add M1.0b: `listings.modality` SMALLINT migration + seed + dashboard field; `wrong_modality` reads only this column.
+2. Rewrite image caps: drop response-413; enforce request-time `size`/`n` per provider table; oversize responses pass through (log warning).
+3. M2.1: add `tts_max_input_chars` knob (400 over); M2.2: capacity rejection → 503 + Retry-After.
+4. M3.1 codec spec: base64url segments, right-anchored parse, HMAC over canonical form, fail-closed missing secret; fixtures include underscore-bearing upstream ids + tamper cases.
+5. Split M3.2b/M3.4: keep gate fast via test-only `idle_timeout=30s` + 31s mock job; move true >310s soak to nightly; add explicit mock-upstream multipart/video tasks under M2/M3.

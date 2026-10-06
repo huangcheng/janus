@@ -1,0 +1,31 @@
+# Audit — rev 8
+
+## 1. Verdict
+**GO WITH FIXES** — architecture is sound and rounds 1–7 closed the structural gaps; what remains is stale-text contradictions where two rounds' fixes coexist, plus a few unspecified edge semantics.
+
+## 2. Critical risks
+- **Pass-through vs 64MiB cap (live contradiction):** Contracts says video `completed` b64 "passes through under the response rule **regardless of size**"; the Images section says the IMAGE/VIDEO JSON buffering cap (64MiB) → `failed(response_too_large)`. An implementer can satisfy either; pick one.
+- **Secret bootstrap owner conflict:** R7 summary says the **dashboard backend** owns bootstrap ("no gateway leader election"); M3.1b body still says "the **migration LEADER** generates… followers block/poll" — i.e., gateway nodes racing. This is the exact race R7 removed.
+- **M3.2b vs M3.4 soak contradiction:** M3.2b says "Gate asserts a >310s mock video" while M3.4 says the >310s check is a documented **manual soak** and CI uses 30s/31s. The M3.2b sentence is stale (pre-R-fix) and would hang the CI gate.
+- **Sync-video commit observable ambiguity:** A5 defines accept as **first upstream response byte**; A6 files sync-video under `first_media_byte` (client SSE event). They coincide under lazy emission, but the shared loop must be told which stream it watches (gun vs client socket) and `commit_point/1` returns one atom.
+- **270s zero-byte pre-accept window:** with heartbeats post-commit only, clients/proxies (nginx 60s `proxy_read_timeout`) will cut sync holds long before 270s first byte. Undocumented practical limit; either document a low realistic sync budget or push slow providers to async.
+- **ASR admission bypass:** header-time check keys on `content-length`; chunked multipart uploads evade it. Specify reject-or-count behavior.
+- **Units double-count:** video per-attempt rows plus the one terminal jvid row both may carry `units=video_seconds`; dashboard sums inflate unless attempt rows are pinned `units=NULL`.
+
+## 3. Contradictions / stale claims
+The three above, plus editorial debris: "else resets.   resets." (A5); "single management instance" sweep assumes one dashboard backend — verify against three prod nodes each running one.
+
+## 4. Missing first-ship requirements
+- Reverse `wrong_modality` (chat model called via `/v1/images`) unstated — make it symmetric.
+- No named dashboard-repo task for secret UI/jobs surface in M3; M1.1c's "sweep at exp" has no owner until M3.3b.
+- Sync-video pre-accept client-timeout guidance (per above).
+
+## 5. Architecture notes
+Add a **commit-signal matrix** per modality (upstream observable → commit_point atom → retry window) next to the A6 table; the video SSE grammar table is good and should be the template. Error taxonomy (`job_expired/job_unknown_key/response_too_large`) is coherent.
+
+## 6. Top 5 edits (target.md)
+1. Contracts, video `completed`: delete "regardless of size"; 64MiB cap governs.
+2. M3.1b: rewrite as dashboard-owned single-writer bootstrap; gateways read-only, timeout-degrade.
+3. M3.2b: replace ">310s gate" with pointer to M3.4's 30s/31s CI proof + manual soak.
+4. A5/A6: pin sync-video commit to upstream-first-response-byte; state the loop watches the gun stream.
+5. A5 ASR: chunked/no-content-length rule; pin video attempt rows to `units=NULL`.

@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — architecture is sound, but video usage accounting, the modality backfill, and the shared failover-loop refactor are under-specified enough to ship double-billing and a no-op gate.
+
+**2. Critical risks**
+- **Video usage double-counts.** Submit writes a pending row; poll writes a completed row; every poll risks another. Nothing states one-row-per-jvid (upsert keyed by jvid) or that polls write no row. Totals double and row count scales with poll frequency. Fix before M3.3.
+- **`units=NULL` is overloaded.** M1.1 backfills chat to NULL; M3.3 derives pending from NULL. Pending detection flags every legacy chat row. Need a distinct `status`/`pending` marker.
+- **Failover loop.** M1.0 adds `commit_point/1` but no task parameterizes `janus_http_proxy` for binary/SSE replies and pre-2xx-only retry. That is the real work; otherwise A6 is aspirational.
+- **SSE heartbeat backpressure.** Slow/non-reading client + 10s heartbeats accumulates in the handler; no drop policy specified.
+- **Submit→SSE, then disconnect.** Job already accepted upstream → orphan pending row; only covered by "documented loss". Make it explicit in M3.3b.
+
+**3. Contradictions / stale claims**
+- A5 says "cowboy has no built-in multipart parser" then says ≥2.7 has `read_part`. Contradicts itself; the normative paragraph shouldn't.
+- A3 backfills all listings to `chat`, yet the goal is that the 435 existing image/audio/video listings reject chat locally. Backfilling them to `chat` makes `wrong_modality` a no-op and leaves the stated upstream-400 unfixed. Needs a family→modality mapping (or unknown-modality tolerance).
+- "no per-route idle_timeout" is correct, but the CI test's test-only 30s listener must not be the prod dispatch.
+
+**4. Missing first-ship requirements**
+- Modality-aware Router bind validation (chat tier must not bind image/audio listings); janus-auto tiers.
+- Knobs asserted in A5/A6/A7 but never wired: `modality_*_enabled`, wall-clock attempt budget, per-modality probe policy, image/video timeout knobs.
+- Binary-body redaction test (A8 rule, no task).
+- Dashboard surfaces for TTS/ASR/video (only images M1.4, computer-use M4.3).
+
+**5. Design notes**
+- Behaviour needs a reply-renderer split (JSON | binary | SSE) and a per-request usage hook the loop calls once, not per event. Lifecycle: one row keyed by jvid, `status ∈ pending/ok/truncated/abandoned/cancelled`.
+- Add a provider-error→canonical table per modality; only video's `job_not_found/job_expired` is named.
+
+**6. Top 5 edits**
+1. M3.3: one usage row per jvid (upsert at terminal; polls write none).
+2. M1.1/M3.3: replace NULL-as-pending with explicit `status`.
+3. M1.0b: family→modality backfill; stop blanket `chat`.
+4. New M1.0c: parameterize `janus_http_proxy` commit points/renderers.
+5. Fix A5 contradiction; add knob-enforcement tasks.

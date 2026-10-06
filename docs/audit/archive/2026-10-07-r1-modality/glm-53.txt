@@ -1,0 +1,32 @@
+**1. Verdict: GO WITH FIXES** — the plugin-on-existing-LB architecture is sound, but the node-local video job registry, the per-route timeout mechanism, and unspecified usage-unit sources would each fail in production as written.
+
+**2. Critical risks**
+- **M3.1 node-local ETS job map vs 3 prod nodes.** Polls/cancels behind the LB land on any node → 404 for a live, money-spent job. Needs DB-backed map (ETS cache, read-through on miss) or node-scoped ids + affinity; plan is silent.
+- **A5 per-route `idle_timeout` is likely not a Cowboy capability** — it's connection-scoped at listener start. Also "heartbeat SSE comments" cannot coexist with sync-video's inline JSON reply (comments corrupt JSON); only whitespace padding works there.
+- **TTS pre-first-byte failover is only real if `stream_reply` (200+content-type) is deferred until first upstream audio byte.** Plan implies, never states; gun receive timeout must cover the window.
+- **Units sources undefined:** audio_seconds (provider-reported vs computed — bytes ≠ seconds), characters (codepoints vs UTF-8 bytes), video_seconds (completion-only, provider field?). Mismatch = billing disputes.
+- **ASR upstream encoding absent:** how vendored multipart bytes reach dashscope (re-chunked multipart? b64 JSON?) is a whole translator surface M2.2 doesn't task.
+- Node restart loses ETS jobs → orphaned paid jobs, no reconciliation.
+
+**3. Contradictions / stale claims**
+- "Polls fan out to the OWNING provider only" presumes the poll reaches the owning node — contradicted by node-local storage.
+- A8 content-type validation exists as prose but no M1.0/M2 task owns it.
+- M3.1 lists cancel endpoints; M3.2 translators cover only submit/poll.
+
+**4. Missing first-ship requirements**
+- M1: backfill `modality='chat'` for existing usage rows; knob-off semantics (403 vs 404) at dispatch and at `pick_listing_route`.
+- M2: TTS format negotiation/406; ASR reply normalization; truncation-seconds rounding rule.
+- M3: cancel translators; SSE progress terminator; job GC/journal on restart.
+- M4: allow-list storage (settings→persistent_term per existing pattern) and where stripped beta values are recorded.
+
+**5. Architecture notes**
+- Fix the behaviour callbacks now: `content_types/0`, `upstream_request/2`, `terminator/0`, `render/…`, `usage_extractor/1`, `timeout_policy/0` — retrofitting later breaks A2's "next modality slots in" promise.
+- Canonical per-modality error envelope must be specified (chat shapes don't cover binary/job replies).
+- M4.1 is the only task touching an existing chat endpoint — it inherits the translation plan's C2 channel rules; state that explicitly as a compat guard.
+
+**6. Top 5 edits**
+1. M3.1 → DB-backed job table + ETS cache; polls read-through on miss.
+2. A5 → verified timeout mechanism (whitespace heartbeats for JSON; SSE comments only for SSE); keep the timeout-table eunit.
+3. M2.2 → add upstream-encoding task + units source-of-truth (provider usage field, local fallback).
+4. M1.1 → backfill migration + knob-off dispatch semantics task.
+5. M1.0/M4.1 → content-type validation and beta allow-list storage/telemetry as explicit checklist items.

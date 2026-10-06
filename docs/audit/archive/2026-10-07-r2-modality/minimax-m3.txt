@@ -1,0 +1,33 @@
+**Verdict: GO WITH FIXES** — solid scope; three concrete errors and one missing predicate must land before M2/M3/M4 work.
+
+**Critical risks**
+1. **Cowboy multipart (A5/M2.2)**: plan claims "no built-in parser; vendor". Cowboy 2.x ships `cowboy_req:read_part/1`. Verify `rebar.lock` before vendoring — almost certainly dead weight.
+2. **`idle_timeout` independence (A5)**: false. Cowboy's listener-level `idle_timeout` (300s) caps response streaming regardless of gun-side await. SSE-always + synthesized heartbeats is the right architectural fix and M3.2b covers it; the prose contradicts itself.
+3. **Computer-use detection undefined (M4.2)**: "bears the computer-use tool" needs a concrete predicate (Anthropic `type == computer_use`? canonical name `computer_use`? beta-header co-occurrence?) — without it the gate isn't implementable.
+5. **`/v1/chat/completions` asymmetry (M4.1 vs M4.2)**: beta passthrough covers both endpoints; computer-use gate covers only `/v1/messages`. Widen or document rationale.
+4. **`prefer_proto` for modalities**: meaningless (image/TTS/ASR/video have no chat protocol); either document LB ignores it for modality calls or remove the claim.
+6. **Wall-clock attempt budget (A6)**: scope unclear for video. Budget = per submit-attempt only; polls use per-poll gun-await. Spell out.
+
+**Contradictions / stale**
+- "Stream-through" (A8) vs "buffered-then-rewritten" (M2.2) — pick one.
+- "Cowboy has no built-in multipart parser" — verify `rebar.lock`.
+- `idle_timeout` "independent" claim — false; cite 300s listener cap.
+
+**Missing first-ship**
+- M4.2a: detection predicate + eunit on captured Anthropic + chat-compat fixtures.
+- M3.1b: HMAC rotation behavior. Stateless jvid with shared secret has no generation byte; rotation silently 404s all in-flight jobs. Add generation to id + rotation keeps old secret one wave + test.
+- M1.1 / M1.4 / M4.3: explicit janus-dashboard tasks (usage grouping, modality badge, computer-use badge), not internal checkboxes.
+- TTS mid-stream error fixture (upstream: 200 headers, 1 chunk, then error) for `ok`/`truncated` accounting.
+- A7: single-shot "Test" button bills — surface cost warning in UI copy (not just "manual").
+
+**Architecture/design**
+- `janus_modality` callbacks: `routes/0`, `translate/3`, `render/3`, `usage_unit/0`, `commit_point/1`, `attempt_budget/0`, `probe_policy/0`, optional `detect_computer_use/1`.
+- Video SSE FSM: `idle → submitted(jvid?) → progress* → terminal(completed|failed)`; client-disconnect aborts upstream gun.
+- Per-modality commit-point + error envelope tables; `units=NULL` = genuinely zero, dashboard derives non-NULL only.
+
+**Top 5 edits**
+1. **M2.2**: "use `cowboy_req:read_part` if Cowboy ≥2.7; vendor only as last resort" — gated by `rebar.lock` check.
+2. **A5**: drop "independent of listener idle_timeout"; cite 300s listener cap; keep SSE-always + heartbeats as the fix.
+3. **M4.2 + M4.2a**: define detection (`type == computer_use` for Anthropic, canonical name match for chat-compat); ship eunit on real fixtures.
+4. **M3.1 + M3.1b**: add generation byte to `jvid_`; document rotation (old secret live one wave); cross-node parse test with rotated secret.
+5. **M1.1/M1.4/M4.3**: open explicit janus-dashboard tickets for usage grouping, modality badge, per-route computer-use badge.

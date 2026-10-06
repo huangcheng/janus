@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the plugin framing is right, but the video job registry and the timeout mechanism are architecturally broken as specified.
+
+## 2. Critical risks
+- **Node-local job ETS vs 3-node LB (blocking):** `jvid_` polls fanned to "the OWNING provider" assume the poll hits the submitting node. Behind the LB it usually won't → spurious 404s/unknown-job. Fix before M3.1 ships: encode route+node in the id (`jvid_<node>_<listing>_<upstream_id>`) or share the registry (Postgres, or ETS replicated). "Node-local" as written is a bug, not a trade-off.
+- **Per-route `idle_timeout` is not a Cowboy feature.** `idle_timeout` is a listener/protocol option; there is no per-route override in the handler. `gun`'s `receive_timeout` is likewise per-connection. A5's mechanism is unverified and, done naively, raises chat's ceiling too. Needs per-request `gun:await` timeouts + a second long-call listener, or explicit proof the cast exists.
+- **Non-idempotent spend on failover.** Image/video submits that time out upstream may already be billed; retrying double-charges and (for sync video) doubles a 5-min wait. Need an explicit "no failover after upstream accept" rule plus a wall-clock attempt budget.
+- **TTS contract self-contradicts:** the `Truncated: true` header is asserted then retracted in the same paragraph. Partial `units` are undefined (input chars vs audio seconds).
+- **ASR "stream-through" is false:** translators need the whole body. 25 MiB × concurrency on the gateway hot path, no admission control → OOM vector.
+- **`units=0` pending** conflates "not yet known" with "genuinely zero"; dashboard pending/completed states cannot be derived.
+
+## 3. Contradictions / stale claims
+- "node-local" vs the stated 3-node deployment.
+- M1.3 allows "mock **or real** 1-image" — violates the local-gate determinism / no-spend rule.
+- A5 says image is 30–90 s sync, yet failover is claimed identical to chat; a 90 s attempt plus retry is not the chat loop.
+- A2 promises entitlement codes per modality; no task creates the carrier/migration.
+
+## 4. Missing first-ship requirements
+Content-type enforcement (415) and body-cap tasks; per-modality error-taxonomy mapping table; `request_ref`/attempt propagation into job ids so the completion can update the pending row; catalog behavior when a knob is off (404 vs still-listed); 10 MiB b64-out and gun body-size caps; 100-continue/chunked-encoding multipart fixtures.
+
+## 5. Architecture notes
+Behaviour must be: `endpoints/2, translate_req/2, render/2, stream_kind/1 (json|binary|job), usage_unit/1, probe_policy/1, timeout_policy/1` — keep `render`/`translate_req` pure so eunit covers them with real captured JSON. Usage: `modality` + nullable `units` + `status`; completion patches the pending row by job id.
+
+## 6. Top 5 edits
+1. **M3.1:** replace node-local ETS with route-encoding job ids or shared registry; add a poll-hits-other-node e2e step.
+2. **A5/M3.2b:** specify per-request `gun:await` timeout + dedicated long-call listener; delete the unverified per-route `idle_timeout` claim.
+3. **M1.1:** nullable `units` + `status`; define TTS units as input characters.
+4. **M1.3:** forbid real spend in the local gate (mock-only, explicit opt-in env otherwise).
+5. **Contracts:** delete the `Truncated` header sentence (usage-only), and state the no-failover-after-first-byte / after-submit-accepted rule explicitly.

@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — the plugin architecture and commit-point abstraction are sound, but three internal contradictions and a cross-node idempotency race must be resolved before any phase starts.
+
+## 2. Critical risks
+- **`/v1/videos` response shape is unpredictable from the request.** Mode is a provider-endpoint property, yet the *same* `POST /v1/videos` returns JSON+close for async providers and an SSE hold for sync ones. A client must pick a parser before it knows the mode. The poll-side `Accept:` upgrade has an opt-in; submit does not. This is the plan's largest wire hole.
+- **Cross-node terminal double-insert.** "Idempotent without a UNIQUE jvid index" + "guarded by the video_jobs transition" is a SELECT-then-UPDATE race: two concurrent polls at terminal both observe `pending`. Needs a conditional `UPDATE … WHERE status='pending' RETURNING` in one txn, or a partial UNIQUE index.
+- **Unbounded response buffering for images/video.** Normalizing `url`/`b64_json` implies buffering; only TTS (100MiB) and ASR (10MiB) have caps. A 50MiB b64 reply has no guard.
+- **Slot accounting vs body read.** Admission must reject before consuming; the plan reads the body to count slots, so cap-reject path is underspecified.
+
+## 3. Contradictions / stale claims
+- **TTS commit point:** A6 says "TTS = first audio byte"; the `commit_point/1` table and the TTS contract say `upstream_accept`. A6 is stale.
+- **`status` scope:** M1.1 says "`status` never appears here" (per-attempt rows), yet TTS/ASR/sync-video truncation and sync-hold aborts all write per-attempt `status=truncated`. Direct contradiction.
+- **Backfill mechanism:** "backfill prefers CATALOG metadata" cannot live in a SQL migration (no catalog access); only the regex fallback is executable there.
+- **Stale text:** duplicated "resets. resets." in A5; R7 header claims M1.1c "closes the R6 ordering dependency," but `video_jobs` has no M1 consumer.
+- **M4.2 allow-list** starts at `computer_20250124`, omitting `computer_20241022`; exact-match silently breaks older clients until an operator edits the knob.
+
+## 4. Missing first-ship requirements
+- Disabled-knob response code (404? 403?) for `modality_<name>_enabled=false`.
+- HTTP-status mapping for canonical errors: `job_expired`, `job_not_found`, `job_unknown_key`, tampered jvid.
+- Image response-size guard; video response-size guard.
+- Concurrency spec for the single-jvid usage insert.
+- `/v1/models` must expose modality (A3 says badge only on dashboard surface).
+
+## 5. Architecture notes
+`commit_point/1` is the right single source, but add a normative return→action table (retry allowed / abort / finalize) so plugins can't diverge. The SSE grammar needs a per-provider-mode event mapping table (`native_percent → progress`, `no-signal → synthesized stage`). Error taxonomy should be one enum shared by JSON and SSE terminals.
+
+## 6. Top 5 concrete edits
+1. M3.1: make sync-hold opt-in explicit — require `Accept: text/event-stream` on submit, or add `mode` to `/v1/models` modality metadata.
+2. A6: delete "TTS = first audio byte"; align every commit-point reference to `upstream_accept`.
+3. M1.1: define `status` as valid on per-attempt rows (truncated/failed) or move truncation to a dedicated column; drop "never appears here."
+4. M1.1c/M3.3: add partial `UNIQUE(jvid)` on usage_events and a conditional `video_jobs` UPDATE-RETURNING for idempotency.
+5. M1.1: move catalog-metadata backfill to an app-level post-migration job; keep only regex in SQL.

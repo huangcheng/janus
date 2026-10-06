@@ -1,0 +1,32 @@
+**Verdict: GO WITH FIXES** — design coherent; five gaps and three contradictions must resolve before M1 ships.
+
+**Critical risks:**
+
+1. **Sync-video heartbeats contradict.** A5 says "≥1 per 10s keeping proxies alive" but also "written only AFTER commit." Pre-commit only the 300s listener idle holds; sync upstreams often take 60s+ to first byte, intermediate proxies (nginx 60s) drop long before. Either define a pre-commit SSE comment heartbeat (clearly distinguishable from progress) or document proxy timeouts as unsupported.
+2. **Terminal-row scope ambiguous.** M1.1 says attempts gain modality/units + ONE guarded terminal row per jvid, but doesn't say if non-video modalities get a terminal row. Decide: terminal row for ALL completed modalities; attempts stay for failover. Otherwise chat/image/TTS/ASR billing semantics drift.
+3. **64MiB reply buffering is unbounded fan-in.** No per-node memory budget stated. N concurrent = N×64MiB peak. State a per-node concurrent cap or stream-to-disk for b64.
+4. **Writer-owned finalization state-handoff missing.** When cowboy kills the handler (idle_timeout/reset), `janus_usage` gets `DOWN`. How does it resolve "which request_ref to mark truncated"? Specify the handoff (ETS row keyed by request_ref, or monitor-tagged state) before T.3 ships.
+5. **M3.3b sweep misses real-time abandonment.** Provider 404s a jvid before nightly sweep → `video_jobs` stays `pending` while polls 404. Poll must mark abandoned on provider 404, not wait.
+
+**Contradictions / stale claims:**
+
+- M3.4 "test-only `idle_timeout=30s` listener" contradicts A5's "no per-route idle_override" invariant. The override IS now real — update AGENTS.md.
+- `units` column for chat: old rows track tokens elsewhere. Confirm tokens migrate to `units` (with backfill) or add a sibling column.
+- Default-allow entitlement + default-off modality knob: flipping `modality_image_enabled` ON without configuring deny codes exposes every key. Add an explicit operator checklist.
+
+**Missing first-ship requirements:**
+
+- M1.0: ship a `janus_m_chat` retrofit behind the behaviour as reference shape.
+- M2.1: enumerate retryable pre-accept (transport/5xx/auth/429) vs non-retryable (4xx) — referenced, not listed.
+- M3.2: per-(provider,model) mode table — which dashscope endpoints are sync vs async.
+- M4.2: enumerate `anthropic-beta` allow-list values; detection must run BEFORE `janus-auto` resolves the route.
+
+**Architecture/design notes:** Plugin + static routes are the right AGI hedge. Single-statement dialect-portable CAS is portable. HMAC jvid + dual-key rotation works. Status vocabulary homing prevents NULL-as-pending. Writer-monitor finalization is clean — request_ref→job state must be queryable cross-process.
+
+**Top 5 concrete edits:**
+
+1. **A5 sync-video**: Replace "≥1 per 10s keeping proxies alive pre-commit" with the honest rule (listener idle only) + proxy caveat — OR ship a pre-commit SSE `: heartbeat\n\n` comment stream.
+2. **M1.1**: Decide terminal-row scope in one sentence — "terminal row for ALL modalities on completion; attempts for failover only" — update M3.3 wording to drop jvid exclusivity.
+3. **M3.1b**: State the dashboard as single-writer owner; document the gateway boot-wait timeout + degradation log; add a unit test for "dashboard unreachable at boot → video-disabled, not hang."
+4. **M1.0c**: Document the deny-code settings schema + the operator runbook for "flip modality on" (entitlement configured in the same change).
+5. **M3.4 / A5 invariant**: Either remove "no per-route idle_override" from AGENTS.md or document the test-only listener as a separate cowboy listener on a different port.

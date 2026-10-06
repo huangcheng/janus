@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — the plan survives R1/R2 hardening, but A1-vs-video-SSE, the A8/Contracts b64-cap contradiction, and orphaned entitlement/knob work need closing before M1.
+
+**2. Critical risks**
+- A1 says "canonical wire = OpenAI shapes where they exist", yet video submit returns SSE (`submitted/queued`) where OpenAI returns JSON job object. OpenAI-shaped clients break on first contact. Either deviate knowingly (document as `jvid` envelope, not OpenAI) or add a JSON accept shim.
+- A8 caps "10MiB image b64 out" while Contracts mandate "response oversize passes through with warning, never truncate/413". Two rules, one body; pick one (recommend: pass-through + warning wins, A8 narrows to *request* bodies only).
+- jvid: spec text shows raw `v1.<upstream_job_id>...` but "upstream ids with dots survive via base64url segments" implies every segment is base64url-encoded. Fix the grammar literally or the right-anchored parse is ambiguous. Secret via `settings`→persistent_term is fine; confirm it never lands in the generation-bumped hot-reload path with a window where secret is absent (fail-closed 500 on all polls).
+- ASR admission: 429 emitted by one node behind LB while peers are idle is client-visible churn; acceptable, but Retry-After must be seconds, not a hint of capacity. Buffered-then-rewritten = 25MiB × 4 ≈ 100MiB/node — state it.
+- M2.3 "truncated-audio accounting" contradicts "413-not-truncate" for ASR input. Truncation exists only after TTS first-byte; delete or reword.
+
+**3. Contradictions / stale claims**
+- Prompt claims "per-route timeout overrides"; plan correctly says Cowboy idle_timeout is listener-only. Prompt is stale, not the plan.
+- Prompt's "backward-compat of unblocking the blocked predicate" is answered nowhere — the plan never names such a predicate.
+- A2/A3 say probe/entitlement rows "inherit" modality, but M1.0b migrates only `listings.modality` — no task adds those columns.
+
+**4. Missing first-ship requirements**
+- Per-modality entitlement codes: A4/M1.3 assert a deny path, no task defines codes or carrier mapping.
+- Settings knobs (`asr_inflight`, `tts_max_input_chars`, jvid secret/exp, timeouts, probe toggles, `modality_*_enabled`) have no dashboard/seed task — settings are dashboard-driven; add one.
+- `janus_usage` writer + eunit (real gen_server, SMALLINT/binary-key fixtures) is implied by M1.1 but not named.
+- Failure-mode/eunit lists for jvid and multipart are named; image translator fixture provenance ("captured real JSON") should say where captures come from.
+
+**5. Design notes**
+- commit_point/1 as single enforcement point is right; assert the failover loop tests each enum value once, not per-plugin.
+- Video SSE grammar is complete (exactly-one terminal, `failed` replaces success terminal) — good; add `event: heartbeat` explicitly distinguishable from `progress` or merge it (clients counting progress will fake-increment).
+- Computer-use detection `computer_*` misses bundled `bash_*`/`text_editor_*` tool types if those count later; note as explicit non-goal.
+
+**6. Top 5 edits**
+1. A1: carve video out of "OpenAI shapes" explicitly; state the jvid SSE envelope is canonical.
+2. A8: limit the 10MiB cap to request bodies; reference the pass-through rule.
+3. M3.1: formal grammar — every segment after `v1` is base64url; add parse fixture with dotted upstream ids.
+4. Add M1.0c: entitlement codes + knob/dashboard exposure + `janus_usage` writer task.
+5. M2.3: delete "truncated-audio accounting"; keep truncation strictly TTS-post-first-byte.

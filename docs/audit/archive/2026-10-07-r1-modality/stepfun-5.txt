@@ -1,0 +1,36 @@
+**1. Verdict:** GO WITH FIXES — architecture (A2 plugins, A1 canonical wire) is sound, but video-mode/LB semantics, cross-node job registry, binary-stream usage terminals, and the per-route `idle_timeout` claim must be corrected before M1 ships.
+
+**2. Critical risks**
+- Cross-node jobs: M3.1 node-local ETS job→route breaks polls across 3 prod nodes under LB; contradicts the cluster unless stickied/replicated.
+- Failover mode disagreement: same model's providers may be sync vs async; LB choice changes response shape (inline vs `{id,status:queued}`) — undefined mid-failover.
+- Binary-stream usage: TTS truncation has no terminal event; reusing `is_terminal` (built for SSE chat) is unproven → missing/duplicate rows.
+- Submit retry after ambiguous timeout = double-spend; no idempotency key.
+- Backward-compat of unblocking the chat-only predicate: failover LB picks leave the chat-only gate unsafe.
+- Zero-overhead-when-disabled invariant for the content-type hot path not stated.
+
+**3. Contradictions / stale claims**
+- M3.2b "per-route `idle_timeout` (route opts)": Cowboy 2 exposes idle_timeout at listener/transport level, **not** per route. Wrong mechanism.
+- "No multipart spool to disk (stream-through)": only valid if upstream accepts multipart. Dashscope ASR family takes URLs/JSON — translator must buffer, contradicting stream-through.
+- `usage_events` is append-only per-attempt; M3.3 needs submit→completion update; schema/writer has no UPDATE path (double-count risk).
+- "Poll fan-out to owning provider" is right but collides with the node-local map above.
+
+**4. Missing first-ship requirements**
+- eunit for binary terminal semantics + unit interpretation (SMALLINT/binary fixtures) before M2.
+- Named 25MiB/10MiB `max_body_size` enforcement point in cowboy.
+- Enumerated ASR upstream shapes (multipart vs URL-JSON) in translator contract.
+- Video poll: define Accept-based JSON-vs-SSE, not "where offered."
+- Canonical error envelope for mixed upstream errors (TTS may return non-200 JSON/HTML pre-first-byte).
+- Submit idempotency key; known-safe beta allow-list instead of silent strip.
+
+**5. Architecture notes**
+- `janus_modality` behaviour add `terminal_signal/1` (binary/EOF vs SSE) and `provider_mode` rows; forbid per-model mode disagreement.
+- Event map per modality: image=JSON close; tts=first-byte+EOF; asr=final JSON; video status enum→canonical; per-attempt attempt rows carry modality+units.
+- Error taxonomy: canonical JSON envelope pre-first-byte; post-first-byte only the truncation header (as planned).
+- Encode `provider_mode` + dialect eligibility so LB only picks compatible providers.
+
+**6. Top 5 edits**
+1. M3.1: distributed (mnesia/Postgres) or sticky job registry + submit idempotency key.
+2. M3.2b: dedicated long-sync cowboy listener with its own idle_timeout + gun ceiling; drop per-route opts.
+3. M1.0/A3: per-model provider-mode constraint + prefer_proto dialect eligibility; block failover across incompatible modes.
+4. M1.1: extend per-attempt writer for binary terminals + video lifecycle (units=0→completed) + `unit_of_measure`; eunit-first with realistic fixtures.
+5. M4.1: typed error/reason on unknown beta strip + default-off zero-overhead gate and named body-cap hook in M1.0/M4.1.

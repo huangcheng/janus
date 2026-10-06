@@ -1,0 +1,7 @@
+<tool_call>
+<function=exec>
+<parameter=command>
+cd /f/Janus && cat rebar.lock 2>/dev/null | head -40; echo ---; grep -rn "v1/messages\|v1/chat/completions" apps/janus_http/src --include=*.erl -l; echo ---; grep -rn "idle_timeout" apps -r | head; echo ---; ls apps/janus_core/priv/migrations/postgres | tail -20
+</parameter>
+</function>
+</tool_call>

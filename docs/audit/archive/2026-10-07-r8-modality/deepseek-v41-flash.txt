@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — architecture is sound, but two correctness holes (chunked-upload admission, two-table idempotency claim) and several internal contradictions must be resolved before implementation.
+
+**2. Critical risks**
+- ASR admission is keyed on `content-length`. Chunked/absent length bypasses both the 25MiB cap and slot accounting; the plan never says reject or count-during-read. Real clients stream multipart.
+- video_jobs→usage_events "single-statement conditional UPDATE" is false: an UPDATE touches only `video_jobs`; the usage insert needs a data-modifying CTE (`WITH u AS (UPDATE … RETURNING) INSERT … SELECT FROM u`) or a transaction, and esqlite's bundled SQLite version must support `UPDATE…RETURNING`. Unverified.
+- Pre-accept zero-byte sync hold vs ≥1/10s heartbeats: heartbeats can't run pre-commit, so clients/proxies idle up to 270s with no bytes. No mitigation exists (any pre-accept byte *is* the commit). Requires a documented client read-timeout contract.
+- Pre-accept budget composition unmapped: per-attempt await must be `min(remaining wall budget, idle−30s)`; the plan states both budgets but not their intersection.
+- Poll path when local row is `pending` and provider is transport-unreachable: no defined response.
+
+**3. Contradictions / stale claims**
+- A5 first paragraph still says "vendor a small streaming parser"; the SETTLED paragraph deletes it; M2.2 still says "multipart streaming parser". Stale.
+- Images: "pass through with a warning log" vs 64MiB buffering cap → `failed`. Normalization forces buffering, so the pass-through sentence is stale for images.
+- `pre_2xx` vs `upstream_accept` are the same commit point for non-streaming; two enum values for one semantic invites drift.
+- M1.0b assumes old gateway code tolerates the new `listings` column; positional tuple reads would break. Unverified.
+
+**4. Missing first-ship requirements**
+- M1: 64MiB cap as a knob, not a constant; image pre-flight cap matrix.
+- M2: chunked-upload admission rule; TTS output-cap truncation observability.
+- M3: sweep/rotation interaction (`abandoned` vs expired id); pending+unreachable mapping.
+- M4: warn-log when unknown `computer_*` rides as an ordinary tool on a translated route.
+
+**5. Architecture notes**
+- Collapse `commit_point` to `pre_2xx | first_media_byte | upstream_accept` only where billing differs; map images to `pre_2xx`, TTS to `upstream_accept`.
+- Make admission rejection a typed loop-bypass error in the shared loop, not a special case.
+- Reuse the C2 channel rule for beta-header stripping already cited.
+
+**6. Top 5 edits**
+1. A5/M2.2: delete "vendor streaming parser"; state `read_part`-based buffered parse.
+2. M1.1/M3.3: replace "single-statement" with explicit CTE-RETURNING or transaction; pin SQLite version.
+3. A5 ASR: define absent/chunked `content-length` behavior (411 or count-during-read + drain).
+4. Contracts: reconcile image pass-through vs cap; make 64MiB a knob.
+5. A6: add budget composition rule and `pending`+unreachable → 502.

@@ -1,0 +1,36 @@
+**Verdict:** GO WITH FIXES — plan is sound on commit points, jvid codec, TTS contract, and wrong_modality local rejects, but has unresolved SSE state-machine ambiguity, missing endpoints, and unenumerated allow-lists.
+
+**Critical risks:**
+- **SSE state-machine for sync one-shot video is undefined.** `submitted → progress* → completed` — for sync, `progress*` has no upstream source; what does `submitted` carry (no jvid)? Synthesized heartbeats for jobs finishing <10s skip entirely, leaving only `submitted → completed`.
+- **Video response size cap missing.** 10MiB image cap exists; sync video b64 (5s 720p) is 10–30MB. TTS streams; needs explicit knob + 413.
+- **Computer-use allow-list unenumerated.** "prefix match, allow-listed" — source unspecified (hardcoded vs settings).
+- **Image edits/variations missing.** `/v1/images/edits` needs the same multipart parser as ASR; non-trivial.
+- **TTS "default 5000, 400 over"** — does 5000 mean strict or with 400 overage? Ambiguous.
+- **Backward-compat of `wrong_modality`** — today upstream 400s; switching to local 400 changes client error handling.
+- **Phase M3.1 (codec) ships before M3.2 (providers)** — codec-binding e2e must land in M3.2's first commit, not M3.1.
+
+**Contradictions vs codebase:**
+- AGENTS.md "open-map `case M of #{}` matches EVERY map" — jvid right-anchored parse must use `binary:split/3`, not case-of-pattern. Plan doesn't say.
+- Image commit = upstream 2xx: body-stream mid-failure = billed + client error. Undocumented.
+- Poll transient 5xx/transport: plan implies immediate `failed`; retry policy before terminal unspecified.
+
+**Missing first-ship:**
+- M1.2: response size cap enforcement point.
+- M2.1: TTS pre-first-byte failure response shape (status, headers); eunit-first mandate.
+- M2.2: ASR `audio_seconds` extraction field per provider.
+- M3.2: `progress` payload taxonomy (sync=stage-only, async=percent+stage).
+- M3.2b: SSE envelope fixtures source pinned (1.0-style captures need explanation).
+- M3.4: poll retry policy on transport/5xx before `failed`.
+- M4.2: Router bind-time warning shape.
+
+**Architecture notes:**
+- `commit_point/1` enum: `pre_2xx | first_media_byte | upstream_accept`. Sync video = `upstream_accept` = first `submitted` event sent to client.
+- SSE: `submitted` carries jvid only when async. `cancelled` is local terminal only.
+- Error taxonomy: `failed(job_expired|tampered|admission_limit)`.
+
+**Top 5 edits:**
+1. **M3.2** pin `progress` payload — sync=`{stage:"processing"}` heartbeat; async=provider percent or synthesized. No percent for sync.
+2. Add `video_max_response_bytes` knob (default 50MiB); sync b64 oversize → 413.
+3. **M4.2** hardcode initial tool-type list `["computer_20250124","computer_20250915",...]`; settings knob for additions.
+4. Add `/v1/images/edits` + `/v1/images/variations` to M1.2 OR document as deferred non-goals.
+5. **TTS**: clarify "default 5000 chars strict; 400 overage soft-rejected with 400 before upstream spend."

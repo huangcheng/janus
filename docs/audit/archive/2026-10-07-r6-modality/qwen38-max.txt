@@ -1,0 +1,34 @@
+**1. Verdict**
+GO WITH FIXES — post-R5 the plan is largely coherent, but a handful of stale contradictions and two unpinned contracts (video POST mode negotiation; sync-provider "accept" semantics) must be fixed before implementation.
+
+**2. Critical risks**
+- **Cowboy idle_timeout assumption unproven**: heartbeats keep sync video holds alive only if cowboy resets `idle_timeout` on *send*. The >310s soak covers it empirically, but no fallback is specified if false. Also "pre-accept = idle−30s" yields a 0s budget on the 30s test listener — formula must be config/proportional.
+- **Sync-mode accept semantics**: a one-shot provider that withholds response headers until completion can never accept inside the pre-accept window (lazy emission forbids writing). Pin accept = upstream response headers; headerless providers must be async-only in the provider table.
+- **Backfill regression**: family-name regex could tag a multimodal chat model (qwen-audio family) as `asr`, turning working chat traffic into 400 `wrong_modality`. Gate on provider-declared metadata only.
+- **Unbounded async spend**: the wall-clock budget bounds sync holds only; nothing caps concurrent async video submissions per agent key.
+- **POST /v1/videos reply shape is provider-dependent** (JSON if async wins, SSE if sync wins, and pre-accept failover may cross modes) with no Accept-negotiation rule — a second A1 divergence documented only in revision history.
+
+**3. Contradictions / stale text**
+- Contracts TTS: usage status "`ok`/`truncated`" vs the unified completed/truncated/failed vocabulary.
+- Contracts video grammar: "DELETE … 409 on sync-mode ids" vs "no sync-409 branch exists" (sync ids don't exist — unreachable).
+- ASR bullet opens "cowboy has no built-in multipart parser; vendor a small streaming parser", then says SETTLED on cowboy 2.12 `read_part`, branch deleted.
+- Kept R4 summary ("UNIQUE jvid, dialect upserts") contradicts R5's guarded-transition-without-UNIQUE-index row model.
+- M1.1 enum includes `pending`, but nothing ever writes pending usage_events rows (lifecycle moved to `video_jobs`).
+
+**4. Missing first-ship requirements**
+- Explicit `video_jobs` migration task — the table is referenced everywhere, created nowhere.
+- One settings task enumerating every new knob (caps, budgets, slots, exp, retention).
+- `/v1/models` modality-badge payload task; admin `/stats` modality counters.
+- janus-auto tier validation must exclude non-chat modality listings.
+- Deleted-listing poll behavior (fall back to local row, else `failed(job_not_found)`).
+- Follower jvid-secret boot block needs a timeout/alert, not indefinite block.
+
+**5. Architecture notes**
+Commit-point table and SSE grammar are the plan's strongest assets — keep `commit_point/1` as the single source. Add one error-taxonomy mapping table (provider not-found/expired/unknown-key/deleted-listing → canonical codes). Fixture discipline is sound; keep read_part fixtures production-shaped.
+
+**6. Top 5 edits**
+1. Sweep the five stale spots in §3 (all one-line deletions/rewordings).
+2. Add task: `video_jobs` migration + jvid secret settings bootstrap (currently homeless).
+3. Specify POST `/v1/videos` Accept negotiation + cross-mode failover reply rule in A1/Contracts.
+4. Pin "accept = upstream headers"; make pre-accept budget a knob; mark the soak the checkpoint proving send-resets-idle.
+5. Hardening trio: metadata-only `wrong_modality`, auto-tier chat restriction, concurrent async-video cap per key.

@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — plugin architecture is sound, but the video transport invariant and two contract/status contradictions must be resolved before M3 ships.
+
+**2. Critical risks**
+- **Video gun-budget vs listener idle invariant is violated for ASYNC submit.** A5 states `budget < caller's SSE window` with video default 600s, but async POST replies JSON and CLOSES under `idle_timeout=300s` — no SSE window exists, so the handler is killed at 300s before gun's 600s budget. Either cap async-submit budget <300s or make submit SSE.
+- **Poll SSE has no max-hold.** A never-terminal job streams indefinitely; needs an `exp`-bounded hold + guaranteed terminal.
+- **Default-allow entitlement mutates the blocked predicate.** Must prove no existing key regresses (eunit + E2E) and confirm the carrier is allow-list, not deny-list.
+- **Rolling deploy:** only *dashboard* tolerance for an un-migrated gateway is stated. New gateway code on a follower before the leader's migration will fail writes on `modality`/`units`/`status`/`jvid`. Needs a migration gate or dual-read.
+- **ASR reply cap "stop streaming, status=truncated" corrupts buffered JSON** — same corruption class as a truncated b64 image; should pass through + warn.
+
+**3. Contradictions / stale claims**
+- Contracts says cancel is `409 on sync-mode ids`; A5 says "No sync-409 branch exists." Delete the Contracts 409.
+- `commit_point/1` returns `pre_2xx`, but A6 prose says images commit AT 2xx headers. Rename/clarify.
+- A4 lists only `modality`+`units`; M1.1 also adds `status`+`jvid`.
+- Prompt framing cites "per-route timeout overrides"; the plan correctly rejects it — ensure no task reintroduces it.
+
+**4. Missing first-ship**
+- Reverse `wrong_modality` (chat model called via `/v1/images|audio|videos`) unspecified.
+- TTS gun budget + audio content-type/format/voice validation.
+- ASR response-format handling (json/text/srt/vtt).
+- M3.1b: listeners must refuse video polls before the secret is present (avoid a 500 storm).
+
+**5. Architecture notes**
+- Behaviour needs a distinct poll/stream handler; terminal emission must be single-source so translation can't emit two terminals.
+- Provider→canonical event mapping belongs in the provider table; `job_*` errors map to the envelope in ONE function.
+
+**6. Top 5 edits**
+1. A5: fix async-submit gun budget (< listener idle) or make submit SSE.
+2. Contracts: delete "409 on sync-mode ids".
+3. A6/M1.0: rename `pre_2xx` → `response_headers`.
+4. M1.1: add gateway migration-gate/dual-write, not just dashboard tolerance.
+5. M1.0c: define default-allow at the predicate level + regression E2E.

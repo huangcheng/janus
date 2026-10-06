@@ -1,0 +1,32 @@
+**1. Verdict**
+GO WITH FIXES — architecture is sound and rev-4 fixes landed, but four correctness gaps (pre-accept idle death, async terminal persistence, usage-writer ambiguity, modality filtering) must be pinned before M1.
+
+**2. Critical risks**
+- Pre-accept idle-timeout death (sync video): lazy emission writes nothing until upstream accept, but video gun budget 600s > listener `idle_timeout` 300s (AGENTS.md confirms idle_timeout kills bodiless handlers). A sync one-shot provider that holds headers until completion idles out at 300s → bodiless 502. Heartbeats only help *post*-accept.
+- Async terminal loss: `video_jobs` persists only *observed* terminals; no background poller. A job completing inside provider retention but not polled in that window returns pending→`job_expired`. "Must not become unretrievable" is overstated.
+- Usage writer: "polls write nothing" contradicts "every terminal UPSERTs" — async terminals arrive on a poll; unclear who upserts. Risk: summary rows stuck `pending`.
+- LB/dispatch modality filter unspecified: a media endpoint could select a chat-labeled listing for the same model name; candidates must be filtered by `modality=endpoint`.
+- ASR memory: 4×25MiB buffered + translation ≈ 100MiB/node worst case; bounded but should be explicit.
+
+**3. Contradictions / stale claims**
+- Contracts still say cancel "409 on sync-mode ids" — R4/A5 deleted that branch (cancel is async-only). Stale.
+- A3 backfills `listings.modality='chat'`, yet grounding needs existing image/audio models labeled; no task re-labels the 435 listings → badges wrong, endpoints unroutable.
+- "budget < SSE window" invariant ignores pre-accept (window is `idle_timeout` there, not unbounded).
+
+**4. Missing first-ship requirements**
+- M1.0b: relabel existing non-chat listings (not just backfill-to-chat).
+- M3.2: explicit pre-accept await knob < `idle_timeout` + slow-accept behavior; gate must add a slow-accept case (the >310s mock likely fast-accepts, masking the bug).
+- M3: background reconciler for pending jvids, or a documented loss window.
+- Fixture sourcing: video "1.0-style captures" + dashscope/volcengine native shapes must be captured before eunit.
+
+**5. Architecture notes**
+- Writer-owned finalization: specify DOWN-vs-terminal ordering (normal exit vs kill); upsert gives idempotency, not ordering.
+- jvid owner-404 doesn't cover multi-key accounts / rotated agent keys.
+- Family-aware usage backfill runs in the boot migration — a large UPDATE can stall boot; batch it.
+
+**6. Top 5 edits**
+1. Contracts: delete "409 on sync-mode ids"; mark `cancelled` async-only.
+2. Add M1.0b task: relabel existing `listings.modality`.
+3. A5/video: add pre-accept gun budget (< `idle_timeout`); fix invariant + gate.
+4. M1.1/M3.3: state that poll-observed terminals upsert via the usage writer.
+5. M3: add reconciler or document missed-completion loss; soften the persistence claim.

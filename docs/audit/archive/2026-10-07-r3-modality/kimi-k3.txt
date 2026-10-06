@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 3 closes the big holes (stateless jvid, SSE-always, commit-point discipline, modality column), but a self-contradiction in the images task, an unspecified HMAC-secret lifecycle, and unowned background work remain.
+
+## 2. Critical risks
+- **M1.2 contradicts the contract.** Task says "response size cap enforced 413"; the contract (and strict status rule: 413 = request body only) says response oversize passes through with a warning log. Stale task text — fix before implementation.
+- **jvid secret lifecycle unspecified.** Fail-closed 500 when the settings secret is missing means: who creates it (dashboard? first-boot generation?), where does the *previous* keyid live during rotation (settings is flat k/v — needs `jvid_secret_current`/`jvid_secret_previous`), and M3.4's "expired id → failed(job_expired)" E2E is impossible without gate-side secret control. Missing bootstrap task.
+- **Pending sweep ownership (M3.3b).** Three prod nodes; an unowned periodic UPDATE will triple-run. Needs leader pinning (reuse migration-leader mechanism) or an idempotent UPDATE…WHERE status='pending'.
+- **Timeout knob granularity.** `gun:await` budgets are global settings knobs (600s video), but video mode/terminal behavior is per-provider-endpoint. A 600s global knob applied to a fast sync provider wastes the wall-clock attempt budget. Make budgets provider-table entries alongside `mode`.
+- **Computer-use probes/entitlement (M4).** A7 covers image/video probe spend, but probes against computer-use-bound models (chat probe + beta header? tool execution?) are undefined — entitlement rows would probe a surface that rejects or misbehaves.
+
+## 3. Contradictions / stale claims
+- M1.2 vs contract on response oversize (above).
+- Framing mentions "per-route timeout overrides" — rev 3 explicitly replaced them with per-plugin gun budgets; keep the language consistent.
+- "Over-budget image calls surface as upstream errors, not hangs" is only true because 120s gun < 300s listener; state the invariant (gun budget MUST stay under listener idle_timeout) explicitly.
+
+## 4. Missing first-ship requirements
+- M1.0b: dashboard reads `listings.modality` — rollout order vs sibling-repo deploy must tolerate the column absent (dashboard-first) or rows unread (gateway-first).
+- M3: jvid secret bootstrap + rotation storage + gate secret injection (above).
+- M2.2: state the per-node memory bound (25MiB × inflight cap) as the rationale for admission control.
+- M3.2b: heartbeat emitter process model (cowboy loop vs spawned timer linked to gun stream) for sync-mode waits.
+
+## 5. Architecture notes
+- `commit_point/1` in the behaviour + single enforcement in janus_http_proxy is the right shape; ensure usage writer treats `truncated` (TTS) and `abandoned` (sweep) as first-class terminal statuses in the existing attempt-row schema.
+- Modality check is an ETS column read on the hot path — negligible; correct call.
+
+## 6. Top 5 edits
+1. Rewrite M1.2's cap line: request caps pre-flight 413/400; response oversize passthrough + warning.
+2. Add M3.1b: jvid secret bootstrap, dual-key rotation storage, dashboard generation UI, gate secret injection for expired/tamper E2E.
+3. Specify M3.3b sweep ownership (migration-leader or idempotent UPDATE).
+4. Move gun budgets into the provider table (per endpoint, next to `mode`); state gun-budget < idle_timeout invariant.
+5. Define M4 probe policy for computer-use models and dashboard-first column-absent tolerance in M1.0b.

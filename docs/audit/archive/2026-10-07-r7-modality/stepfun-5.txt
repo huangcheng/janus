@@ -1,0 +1,25 @@
+**1. Verdict**
+GO WITH FIXES — the architecture and its invariants are consistent across 7 rounds; the gaps are missing implementation specifics (disconnect detection, accounting sums, disabled-route lookup), not redesigns.
+
+**2. Critical risks**
+- **Sync-hold abort is undeliverable as written.** "Client disconnect IS their abort" (A5/M3.2b) has no mechanism: Cowboy never notifies `stream_reply` handlers of disconnects, and with ≥1-event/10s heartbeats you detect it only on the next failed write → up to ~10s of orphan upstream spend and a lingering gun. This is the one claim that cannot ship as stated.
+- **Usage semantics under video failover.** A submit that failsover pre-accept leaves failed attempt rows *plus* the eventual ONE jvid terminal row; the plan never says which rows the dashboard sums → double-count risk.
+- **Blast radius of M1.0c.** It rewrites the shared chat failover loop; a regression there hits every non-modality route. Hot path itself is fine (one ETS read per request; HMAC only on video poll).
+
+**3. Contradictions / stale claims**
+None material at rev 7. Minor: with every jvid segment base64url, dots cannot occur inside segments, so "right-anchored parse" is dead weight (harmless). A3 promises "janus-auto stays chat-only" but no task gates the image/TTS/ASR endpoints against it.
+
+**4. Missing first-ship requirements**
+- M3: route resolution for poll/cancel when the listing is disabled mid-job (hot-reload is claimed; the lookup path is absent).
+- ASR: per-node aggregate memory (4 slots × 25MiB = 100MiB) and the WAV-header duration fallback have no explicit owner.
+- Dashboard tasks (M1.4, M4.3) live in the sibling repo; only T.2 notes the authoring coupling.
+
+**5. Architecture notes**
+Plugin shape, single `commit_point/1` source, error taxonomy, and the jvid codec are sound extension points. One note: `first_media_byte` for both chat streams and sync holds is elegant but forces lazy-emission semantics onto the chat hot path — keep chat's emission behavior byte-identical.
+
+**6. Top 5 concrete edits**
+1. **M3.2b:** pin the disconnect detector — a periodic probe write on the SSE socket catching `{error, closed}`, bounding the orphan-gun window to ≤1 heartbeat; add an E2E step that kills the client mid-hold and asserts the gun dies and a truncate attempt row lands.
+2. **M1.1/M3.3:** state the accounting invariant — per-attempt rows + exactly ONE terminal usage row per jvid, dashboard sums per jvid only, and forbid `"pending"` in `usage_events` (the sweep targets `video_jobs.status`; rename M3.3b accordingly).
+3. **M3.x:** add a jvid route-resolver task that bypasses `listings.enabled` (job is bound at submit) + an E2E step disabling the listing after submit then polling.
+4. **M2.2:** add `asr_max_buffer_bytes` (default 25MiB) enforced during `read_part_body` accumulation; prove the 413 path in eunit with a chunk-split payload; document worst-case per-node heap.
+5. **M1.0c:** run the chat path's existing e2e/soak unchanged in the same commit, and pin `commit_point/1` = `pre_2xx` (chat nonstream) / `first_media_byte` (chat stream) so non-modality behavior stays invariant.

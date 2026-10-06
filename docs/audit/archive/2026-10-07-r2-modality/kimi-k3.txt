@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — sound plugin/LB reuse and correct SSE-always reasoning, but the stateless-jvid TTL contradiction, wrong status codes, and rolling-deploy usage-schema ordering must be fixed first.
+
+## 2. Critical risks
+- **jvid TTL contradiction**: A5 says "no TTL, stateless"; M3.4 E2E tests "TTL expiry." A stateless HMAC id cannot expire unless an `exp` timestamp is inside the signed payload. Pick one.
+- **413 misuse**: ASR admission-cap overflow returns 413 (Payload Too Large). That's a concurrency reject → 429/503. Reserve 413 for size caps. Clients retry 413 differently.
+- **Rolling deploy, usage schema**: 3 prod nodes migrate at boot independently. Old nodes insert rows without `modality`; new dashboard groups by it. Columns need `DEFAULT 'chat'` / NULL-safe derivation, and the dashboard must tolerate pre-migration rows. Migration-vs-code ordering is unstated.
+- **TTS failover window**: pre-first-byte failover requires buffering upstream response headers before `stream_reply`, and the failover loop must retain the replayable request body. Existing per-attempt machinery is chat-shaped; commit-point integration (TTS = first byte, and usage row still written on client disconnect as `truncated`) is asserted but not specified.
+- **SSE-always video**: synthesized 10s heartbeats need a per-request timer process owning both the Cowboy stream and the gun await; client-disconnect-aborts-upstream is stated without a mechanism (Cowboy handler exit vs gun stream cleanup). This is the riskiest new machinery; M3.2b's >310s gate is the right test but also needs a disconnect-abort assertion.
+- **ASR memory**: 25MiB × 4 inflight × node — fine, but state the budget; the per-node cap is not global (3 nodes, LB).
+
+## 3. Contradictions / stale claims
+- Audit prompt promises "per-route timeout overrides for long-blocking sync calls"; rev 2 explicitly rejects them (listener-level only, hence SSE-always). Stale prompt or missing decision.
+- M1.0 "endpoint registration in the agent dispatch" — Cowboy dispatch is set at listener start; plugins can't hot-register routes. Need a static route table delegating to the behaviour.
+- A3 `prefer_proto` assumes protocol metadata; image/video listings need a provider-endpoint table entry (mode, shape) that the catalog must carry — currently only "recorded in the plugin's provider table."
+
+## 4. Missing first-ship requirements
+- M1: settings knob names, dashboard backward-compat with un-migrated rows, flip order (migration → gateway → dashboard).
+- M3: cancel semantics — billed? units stays NULL? cancel on completed job?
+- M3: HMAC secret rotation breaks in-flight jvids — accept-current-plus-previous window needed.
+- M2: content-type allow-list per endpoint (A8 mentions, no task owns it).
+- M4: unknown-beta "recorded" — where (usage row? log? C2 channel already says terminal-event on streams — specify for non-stream).
+
+## 5. Design notes
+`janus_modality` callbacks should make the commit point and usage-unit extractor explicit (per-modality), mirroring the existing attempt-row contract; error taxonomy (`wrong_modality`, `computer_use_requires_native`, `payload_too_large`, `upstream_error`) needs one canonical table shared with the translation plan's C2 envelope.
+
+## 6. Top 5 edits
+1. Resolve jvid expiry: embed `exp` in the HMAC payload (and document rotation) or delete the M3.4 TTL test.
+2. Change admission-cap reject 413 → 429; 413 strictly for size.
+3. Add M1.1b: rolling-deploy contract — column defaults, dashboard NULL-tolerance, migration-before-code order.
+4. M1.0: static Cowboy route table + behaviour delegation; drop hot-registration language.
+5. M3.1/M2.1: specify commit-point + usage-write-on-disconnect integration with the existing failover loop, and add disconnect-abort to the M3.2b gate.

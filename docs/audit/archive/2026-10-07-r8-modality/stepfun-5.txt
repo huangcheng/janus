@@ -1,0 +1,33 @@
+## Verdict
+GO WITH FIXES — the plan is converged and disciplined, but ~5 sentences are stale and three semantics (async-video usage accounting, usage-row atomicity, ASR admission edges) need pinning before coding.
+
+## Critical risks
+1. **Async-video row model is ambiguous.** M1.1 says "existing failover machinery unchanged" (per-attempt rows) AND "usage_events receives exactly ONE terminal row per jvid." Both in the same table = double billing on the dashboard unless attempt rows are suppressed for video. Failed jobs pre-terminal (provider compute consumed, no usable result) get no defined row.
+2. **Usage-row atomicity has a crash window.** CAS `UPDATE video_jobs … WHERE status='pending'` (+ affected-rows) followed by a separate INSERT loses usage if the writer dies between them; a later poll sees non-pending and never inserts. "Single-statement" must mean a true CTE on both dialects, or the sweep must reconcile.
+3. **ASR admission assumes content-length.** Chunked/absent CL has no rule; the 25MiB×4-slot memory bound is undocumented; ASR's `commit_point` is missing from A6's enumeration (presumably `pre_2xx`); slot retention across failover attempts unstated.
+4. **M1.0c changes the shared loop's blocked/commit predicate for chat too** — zero chat regression steps in the M1.3 gate (the prompt's backward-compat concern).
+5. **Computer-use is route-dependent but detection seems post-LB.** Reject-if-misfortune instead of filtering to anthropic-native routes when `computer_*` tools are seen.
+
+## Contradictions / stale claims
+- Contracts: `event: submitted (carries jvid when async)` is **impossible** — async POST answers JSON and closes; only sync holds emit `submitted`.
+- M1.1 row-kind (1) "status never appears here" contradicts the TTS contract (row records `completed`/`truncated`) and T.3 (writer-owned per-attempt `truncated` row).
+- A3 "no name heuristics" vs M1.1's family-regex backfill — scope it to one-time historical rows, never runtime gating.
+- Images "pass through with warning" vs 64MiB reply cap → `failed(response_too_large)` — pick one (cap wins; say it).
+- "local terminal row first — exp never masks results" vs `failed(job_expired)` after 24h: precedence unresolved; terminal-row retention duration unstated.
+- M2.1 "no first-byte window for TTS" vs first-audio-byte silence: accept-then-stall should yield `failed` + units — unspecified.
+
+## Missing per phase
+- **M1**: chat E2E regression on the shared loop; 410-vs-404 shape when a modality knob is off; endpoint absence during rolling deploy (knob stays off fleet-wide until all nodes upgraded).
+- **M2**: slow-upload concurrency fixture (4 slots held during upload) — T.1 lists TTS chunks but not this.
+- **M3**: provider-unreachable poll with no local row (retry-later vs `failed`); cancel-after-completed precedence; provider row deleted post-submit.
+
+## Architecture notes
+- Enumerate ASR in the `commit_point/1` table. Keep the local-reject taxonomy (429 admission / 413 size / `wrong_modality` / `computer_use_requires_native`) strictly separate from provider-paid terminals (`response_too_large`, `truncated`) in one shared error-mapping table.
+- Isolate jvid encode/parse/verify as a pure module — poll, cancel, and the dashboard sweep all consume it; eunit-first per M3.1.
+
+## Top 5 concrete edits
+1. **M1.1**: rewrite row kinds — suppress per-attempt rows for async video; terminal row carries jvid; enforce insert-once via ONE CTE statement (`WITH upd AS (UPDATE video_jobs SET status… WHERE status='pending' RETURNING jvid) INSERT INTO usage_events SELECT…`) on epgsql+esqlite; sweep reconciles terminal-without-usage.
+2. **Contracts**: delete the "when async" parenthetical on `submitted`; amend M1.1(1) to permit `status` on terminal single-shot attempt rows; scope backfill regex.
+3. **A5/A6**: add ASR `pre_2xx` commit point, chunked-CL admission fallback (reject 411/400 or stream-counted), 100MiB/node bound note, slot-held-through-attempts rule.
+4. **M4.2**: detection precedes selection → route-filter to native; reject only when none capable.
+5. **A5 poll order**: pin terminal-row-vs-exp precedence, unreachable-provider poll semantics, terminal retention; add chat regression step to M1.3; M2.1 accept-then-stall → `failed`+units.

@@ -1,0 +1,35 @@
+# Audit — Modality Gateway Plan (rev 3)
+
+## 1. Verdict
+GO WITH FIXES — architecture (plugins, stateless jvid, SSE envelope, commit-point discipline) is sound; fix the poll-wire deviation from A1, cancel-vs-statelessness, and one stale M1.2 clause.
+
+## 2. Critical risks
+- **GET /v1/videos/{id} as SSE contradicts A1.** OpenAI's shape is a JSON job object on poll; SSE-always on GET breaks OpenAI-SDK clients and non-streaming HTTP clients. Need JSON default with explicit SSE upgrade (`Accept: text/event-stream` or `?stream=true`).
+- **Cancel vs statelessness.** `cancelled` is a "local terminal," but a later poll of the same jvid re-queries upstream and emits `progress`/`completed` again — cancel isn't sticky without state. Persist it (usage row status) or declare poll-after-cancel undefined.
+- **ASR admission slots.** Per-node inflight counter must be crash-safe (release in `after`, monitor handler death) or slots leak until node restart → permanent 429.
+- **jvid owner check underspecified.** Does a poll require the agent key in Authorization, or does the embedded `agent_key_id` suffice (then any jvid holder polls)? Define behavior for revoked keys.
+- **Disabled-knob status code.** Static routes exist regardless; what does `modality_video_enabled=false` return — 404 or 503? Unspecified.
+
+## 3. Contradictions / stale claims
+- **M1.2 "response size cap enforced 413"** directly contradicts Contracts ("413 = body size only; response oversize passes through with warning"). Stale rev-2 text.
+- **Pending = `units IS NULL`** collides with M1.1's backfill (`units=NULL` for all chat rows). Pending must key on modality+status, not NULL alone.
+- A1 "OpenAI shapes where they exist" vs SSE poll (above).
+
+## 4. Missing first-ship requirements
+- **M1:** entitlement-code wiring task (A2 promises per-plugin codes; no task adds them); `response_format` handling; disabled-knob status.
+- **M2:** ASR reply shape (`json`/`verbose_json`), language/prompt params; TTS per-provider voice/format table.
+- **M3:** video request pre-flight caps (n/duration/aspect — images got a cap table, video didn't); content-safety rejection mapping; sweep interval.
+- **M4:** initial beta allow-list contents; where stripped headers are "recorded."
+
+## 5. Architecture / design notes
+- Cancel: write `status=cancelled` on the submit usage row; polls check it before hitting upstream — cheap, preserves statelessness; sweep then marks only non-cancelled rows abandoned.
+- Heartbeats: one per-node timer process driving all inflight SSE streams, not a timer per stream.
+- Extend the C2 degradation-channel table with one row per modality terminal (`failed` replacing success terminals, JSON-before-first-byte for TTS).
+- Fixture realism is well covered (straddling multipart, tamper/rotation eunit) — no change.
+
+## 6. Top 5 concrete edits
+1. `target.md` Contracts + M3.1: poll returns OpenAI JSON by default, SSE on explicit upgrade; correct A1.
+2. M1.2: delete "response size cap enforced 413" → "pass through with warning" per Contracts.
+3. M3.1/M3.3b: persist cancel on the usage row; define poll-after-cancel; sweep distinguishes cancelled/abandoned.
+4. M2.2: mandate crash-safe slot release + drain semantics for the 25MiB cap.
+5. M3.2: add video pre-flight request-cap table task mirroring images; add entitlement-code task to M1.

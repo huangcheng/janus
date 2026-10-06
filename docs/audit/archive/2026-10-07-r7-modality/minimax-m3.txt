@@ -1,0 +1,32 @@
+**Verdict: GO WITH FIXES** — architecture is sound; one internal TTS contradiction, one missing per-listing video-mode attribute, and an incomplete behaviour shape must land before the first ship unit.
+
+**Critical risks**
+1. **TTS commit-point contradiction (A6).** Summary line reads "TTS = first audio byte"; the `commit_point/1` clause in the same paragraph reads "TTS and video submits: upstream_accept". R5's rationale (chars bill from accept → no double-charge) supports upstream_accept; the summary line was not swept.
+2. **No per-listing `video_mode`.** M3.2 says mode is "a provider-endpoint property in the plugin's provider table" — but listings.modality=video alone cannot distinguish sync-only from async-only. A sync POST to an async-only listing, or vice versa, can't be rejected by wrong_modality.
+4. **Behaviour shape is incomplete for first-ship.** M1.0 enumerates `routes/0, translate_request/2, render_*, usage_unit/1, probe_policy/0, commit_point/1` — missing `pre_flight_caps/1` (M1.2 images, M3.2c video), `output_cap_bytes/0` (M2.1 TTS), `wrong_modality_check/1` (cross-cut A3), `entitlement_codes/0` (A7).
+5. **M3.4 CI-fast proof has no defined test listener.** AGENTS.md says no per-route idle override exists; "test-only idle_timeout=30s listener" needs an explicit M3.4a (second port + config wired in the test image).
+6. **M2.2 doesn't say where the ASR slot monitor lives.** Without a named slot owner + monitor-on-handler contract, the "release on any exit" guarantee is unprovable.
+8. **M1.1c writer-owned terminal finalization is underspecified.** Which process monitors the handler? How does it signal `janus_usage`? Idle-timeout kills and client resets are the test cases — needs explicit wiring.
+9. **Editing artifacts:** A5 contains the duplicate fragment "else resets.   resets."; R4 summary block still asserts "pre-accept failover may cross modes" (R5 pinned SAME-MODE).
+
+**Contradictions / stale claims vs codebase**
+- A6 self-AI-vs-row on TTS commit (R5 rationale fixes it; summary line wasn't swept).
+- R4 summary "may cross modes" stale — A6 says SAME-MODE.
+
+**Missing first-ship requirements per phase**
+- M1.0b: `listings.video_mode` column + backfill + dashboard badge.
+- M1.0: extend behaviour with `pre_flight_caps/1`, `output_cap_bytes/0`, `wrong_modality_check/1`, `entitlement_codes/0`.
+- M1.1c: writer monitor contract (where, how, signals).
+- M2.1a: TTS input-char counter semantics (code points via `string:length/1`).
+- M2.2a: ASR slot owner + monitor-on-handler wiring.
+- M3.2: explicit computer-use usage_events shape (`modality=computer`, units = input_tokens; emitted only when tool present).
+- M3.4a: test-only 30s listener config + image.
+
+**Top 5 concrete edits**
+1. A6 commit points: replace "TTS = first audio byte" with "TTS = upstream_accept (chars bill from accept; first audio byte is the no-error-signal point — no failover post-accept)". Render commit-point rules as a 6-row table (image / chat-nonstream / chat-stream / sync-video / TTS / video-submit) so prose summary can't drift again.
+2. M1.0b: add `listings.video_mode` migration (TEXT NOT NULL DEFAULT 'both' or enum), dashboard badge, wrong_modality consultation.
+3. M1.0: extend behaviour with the four missing callbacks; update M1.0c wiring task.
+4. M3.4a: test-only listener (port 8181, idle_timeout=30_000) wired in test image; 31s mock gate lives there.
+5. M2.2a: define ASR slot owner (named gen_server per node) + handler monitor; M1.1c: define writer monitor contract. Without these, the "release on any exit" and "writer-owned terminal" invariants are unwritten.
+
+Sweep: delete the "else resets.   resets." duplicate in A5 and the R4 "may cross modes" line.

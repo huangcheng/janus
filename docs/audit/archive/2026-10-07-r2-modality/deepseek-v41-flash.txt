@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — the plugin framing is right, but three mechanisms are unspecified and block M1.2/M3.1/M3.3.
+
+**2. Critical risks**
+- **No catalog modality.** `wrong_modality` (M1.2) and the M1.4 badge need a listing-level modality field; the plan only adds `modality` to `usage_events`. Nothing to read → both tasks unbuildable.
+- **Pending video rows have no correlation.** Submit writes a pending attempt row; completion arrives on a *different* stateless poll request, possibly on another node. jvid carries no `request_ref`, so no UPDATE target. Abandoned jobs stay pending forever — and "no registry/TTL" removes the only sweeper. Needs a correlation id in jvid + a reconciliation sweep.
+- **jvid encoding is ambiguous and weak.** Upstream job ids may contain `_` and `/` (it goes in a URL path); parsing is field-order-dependent, unescaped. `hmac8` = 32 bits, forgeable. Use URL-safe base64 fields + ≥128-bit tag; fixture with a real captured upstream id.
+- **A2 vs A6 contradiction.** A2 claims the failover loop is "untouched"; A6 gives per-modality commit points (image 2xx / TTS first byte / video accept) and poll rules. The loop *is* modified — say which module owns commit-point polymorphism.
+- **413 misuse.** Over-admission is 429/503 + Retry-After, not 413; and 413 for an oversized upstream *response* is wrong (502).
+- **TTS `truncated` is undetectable** without content-length; only abnormal gun termination distinguishes it. Define or drop.
+- **Beta stripping is silent.** Stripping an unknown beta can change reply shape; needs reject-or-echo-stripped-list.
+
+**3. Contradictions / stale claims**
+- prompt.md audits rev 1 ("per-route timeout overrides"); target.md rev 2 correctly refutes that. Auditing rev 2.
+- Non-goal "clients read the envelope's mode" conflicts with the mode being revealed only *after* submit — every client must implement both paths anyway.
+- ASR buffering + 120s image budget + translation all share the 300s listener handler slot; the plan asserts headroom without a concurrency story beyond ASR's cap of 4.
+
+**4. Missing first-ship requirements**
+- M1.1: `listings.modality` migration + ETS contract; nullable `units`.
+- M3.1: URL-safe jvid codec + tamper/collision fixtures.
+- M3.2: per-provider cancel-semantics table.
+- M2.2: 429 admission response.
+- M4.1: where stripped betas are recorded (non-stream vs stream channel).
+- E2E: pending-row reconciliation step.
+
+**5. Architecture notes**
+`janus_modality` should expose `commit_point/1` and `cancel/2`; the failover loop calls them rather than branching on modality. Event grammar table is good — add an assertion helper for "exactly one terminal; failed replaces completed." Error taxonomy must separate local (400/413/429) from upstream (502/504) in the canonical envelope.
+
+**6. Top 5 edits**
+1. Add `listings.modality` migration + ETS field; gate `wrong_modality` on it.
+2. Rewrite jvid: URL-safe base64 fields, 16-byte HMAC, tamper eunit.
+3. Define pending-row correlation + sweep in M3.3.
+4. Fix status codes: 429 for admission, 502 for oversized response.
+5. Add `commit_point/1` to `janus_modality`; name the owning module in A6.

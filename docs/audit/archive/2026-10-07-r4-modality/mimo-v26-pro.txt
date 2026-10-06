@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — the wire decisions are sound, but rev 4 still contradicts itself on the async-POST shape and the response-cap rule, and the modality backfill ships `wrong_modality` dead.
+
+**2. Critical risks**
+- Usage terminal-state persistence on handler death is unspecified. TTS `status=truncated` (idle_timeout kill, client reset) and video `failed` mid-stream require the usage writer — not the dying request process — to finalize the row (monitor + writer-owned upsert). M2.3 asserts it without a mechanism.
+- "ONE row per jvid" (M1.1) collides with the existing per-attempt usage rows and M1.3's "failover row on 401". Specify: attempt rows keep (stream/request_ref/attempt/is_terminal), the jvid row is a separate upserted summary — or failover accounting breaks.
+- ASR admission: slot release "on every exit path" needs monitor-based release, not try/after, or idle_timeout kills leak the 4 slots silently; drain semantics on cap reject (do we read-and-discard or reset?) is asserted, not specified.
+- jvid parse: `listing` values contain `/` and `.` (`ZHIPU/GLM-5.3-FlashX`) — the codec must state every segment is base64url-encoded, not that segments are raw; "right-anchored parse" is then trivial but should be explicit.
+- Hot-path cost is fine (one ETS field + one HMAC), no concern.
+
+**3. Contradictions / stale claims**
+- **A1 vs A5:** A1 (and the rev header) says async POST returns JSON `{jvid,status:"submitted"}`; A5 says async POST streams SSE `queued(jvid)` then closes. Pick one; the rev header picked JSON.
+- **M1.2 vs A8/Contracts:** M1.2 says "response size cap enforced 413"; the Contracts section and A8 say responses pass through with a warning and 413 is request-body-only. M1.2 is stale.
+- **Prompt vs plan:** the framing claims "per-route timeout overrides"; the plan correctly rejects that (listener-level idle_timeout) in favor of SSE + per-request gun budgets. Keep the plan; note the divergence.
+- Cancel's "409 on sync-mode ids" is unreachable: sync-mode replies carry no jvid (A5). Either sync SSE carries an ephemeral jvid or drop the 409 case.
+
+**4. Missing first-ship requirements**
+- M1.0b: `listings.modality` backfill is blanket `chat`, while the M1.1 family-aware backfill covers usage only. Until rows are curated, `wrong_modality` never fires and the badge is wrong. Ship a family-aware listing backfill (or a curated mapping) with the column.
+- No stated default for `jvid exp` retention sweep ordering vs M3.3b ("after id-expiry") — pin the sweep delay relative to exp.
+- No E2E assertion that usage rows land when the client disconnects mid-video SSE (the whole reason for writer-owned finalization).
+
+**5. Design notes**
+- Keep `commit_point/1` as the single A6 authority; add a spec clause that plugins may not implement retry logic locally.
+- Error taxonomy is coherent (`job_not_found/job_expired/job_unknown_key`, `wrong_modality`, `computer_use_requires_native`); add `asr_capacity` to the canonical table so 429 bodies are uniform.
+
+**6. Top 5 edits**
+1. M1.2: delete "response size cap enforced 413" → pass-through + warn.
+2. A5: async POST = JSON `submitted` (drop SSE-queued).
+3. M1.0b: family-aware `listings.modality` backfill.
+4. M1.1: spell out attempt-rows + jvid-summary upsert coexistence.
+5. Add writer-owned terminal persistence spec (TTS truncation, video fail/cancel, disconnects) + eunit for it.

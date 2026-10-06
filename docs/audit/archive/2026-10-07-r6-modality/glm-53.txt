@@ -1,0 +1,29 @@
+**1. Verdict: GO WITH FIXES** — architecture is sound and internally consistent after five rounds; remaining defects are stale text, one unowned truncation-writer gap, and missing gate steps.
+
+**2. Critical risks**
+- **TTS truncation has no writer-owner.** M1.1's monitor-on-handler-death finalization is scoped to video sync holds. A TTS handler killed by idle_timeout mid-stream (post-first-byte) orphans a `truncated` row — same failure mode, no owner.
+- **Sync-video pre-accept blind window.** Lazy emission means nothing is written pre-accept; a client disconnect at t=5s is undetectable until the first write, so a 270s hold can commit upstream spend on a dead client. Acceptable trade-off, but undocumented.
+- **Unbounded sync holds.** ASR got per-node admission slots; concurrent sync-video holds each pin a handler + gun stream for up to 600s with no 429 path. Process cost is cheap, but state it.
+- **Concurrent-poll idempotency unproven.** The single terminal usage row relies on a guarded `video_jobs` transition; multi-node LB means two nodes can poll one jvid simultaneously. No E2E proves the guard under concurrency or cross-node poll (submit on A, poll on B).
+
+**3. Contradictions / stale claims**
+- Contracts bullet still says cancel "409 on sync-mode ids" — dead text: sync holds carry no jvid, and A5 explicitly says no sync-409 branch exists. R5 claimed this was deleted; it wasn't.
+- TTS contract says usage row records "`ok`/`truncated`" — violates the unified completed/truncated/failed vocabulary declared three lines earlier.
+- A5 has a duplicated "resets." fragment; M3.2c is numbered before M3.2b.
+
+**4. Missing first-ship requirements**
+- No E2E step for pre-flight cap 400s (images `n`/`size`, video duration/aspect) despite Contracts requiring 400-before-spend.
+- No concurrent/cross-node poll gate step (M3.4).
+- TTS/ASR writer-owned finalization unspecified.
+
+**5. Design notes**
+- Generalize the handler-death monitor into the shared loop (M1.0c): every plugin with a post-commit stream (TTS, sync video) registers finalization with the usage writer; one mechanism, per-modality status.
+- `job_unknown_key` timing is ambiguous: unknown keyid *during* retention = tamper (400); after retention = `failed(job_unknown_key)`. Pin it.
+- ASR duration fallback chain is well-ordered; keep `units=NULL` loss documented in the Usage page.
+
+**6. Top 5 edits**
+1. `target.md` Contracts/TTS: replace `ok`/`truncated` with `completed`/`truncated`.
+2. `target.md` Contracts/video: delete "(409 on sync-mode ids)".
+3. M1.0c/M2.1: move writer-owned finalization into the shared loop; cover TTS explicitly.
+4. M1.3/M3.4: add cap-400 and cross-node + concurrent-poll gate steps.
+5. A5: dedupe "resets."; add one line documenting the pre-accept disconnect blind window and unbounded sync-hold admission decision; renumber M3.2b/c.

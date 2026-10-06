@@ -1,0 +1,33 @@
+**1. Verdict**
+GO WITH FIXES — the plugin framing is sound, but the video-job transport story (node-local registry, idle_timeout overrides, heartbeats) and TTS partial-failure accounting are not production-ready as written.
+
+**2. Critical risks**
+- **Node-local job registry vs 3 prod nodes**: `GET /v1/videos/{id}` behind LB can land on a different node than submit → spurious 404. Rolling deploys (`deploy_prod.sh`) wipe all in-flight jobs. Registry tuple also omits the upstream provider job id.
+- **A5 per-route idle_timeout is unverified**: assumes Cowboy supports per-request `idle_timeout` override; if not, you need a dedicated slow listener. Also "heartbeat SSE comments" are impossible on a sync one-shot JSON body — that keep-alive mitigation doesn't exist.
+- **TTS accounting undefined**: after first audio byte you can't failover; whether to bill input characters (already consumed upstream) vs partial output seconds is unspecified.
+- **Computer-use on translated routes**: tools cannot survive Anthropic→OpenAI translation; "no schema damage" is the wrong invariant — must hard-reject with canonical 4xx on non-Anthropic-native routes.
+- **ASR**: multipart re-serialization toward upstream unspecified; streaming-parser fixtures must mandate chunk-splits straddling boundaries, not just "real curl bodies".
+- **Video SSE progress passthrough**: no event grammar table, no terminator rule, no fixtures — the exact state-machine area where the translation plan has C1–C6 contracts; modalities have none.
+- **10MiB response cap**: enforcement mechanism unspecified; silent truncation corrupts b64 images.
+- Hot-path cost fine; blocked predicate untouched (good), but chat calls to image models still 400 upstream — define a local reject.
+
+**3. Contradictions / stale claims**
+- Contracts say "modalities do not cross protocols per event" while A1/M1.2 require dashscope→canonical translation.
+- A5 includes images in timeout bumps; implementation lands only in M3.2b, images ship M1.
+- The `Truncated: true` paragraph contradicts itself (admits the header is impossible mid-stream).
+
+**4. Missing first-ship requirements**
+- M1: knob-off endpoint behavior (404 vs 501); canonical modality error envelope; entitlement codes for image models.
+- M2: partial-TTS billing rule; ASR oversize/malformed-boundary error codes; upstream multipart rebuild.
+- M3: registry persistence or deploy drain; cross-node poll strategy; TTL reaper resolving abandoned `units=0` rows.
+- M4: data-plane eligibility enforcement, not just a dashboard badge.
+
+**5. Architecture notes**
+Add: (a) per-modality error taxonomy table (submit/poll/stream-timeout/multipart/entitlement); (b) provider-mode event-mapping tables incl. provider status vocabulary → canonical `queued/running/completed/failed`; (c) usage write-points incl. reaper; (d) decide per-request idle_timeout vs separate slow listener before M3.
+
+**6. Top 5 concrete edits**
+1. **M3.1**: store upstream job id; define cross-node polling (shared Postgres table or deterministic routing); add deploy drain; reaper writes usage at TTL.
+2. **M3.2b**: rewrite transport — verify Cowboy capability or use a slow listener; delete SSE-heartbeat claim for sync bodies.
+3. **M2.1**: define partial-failure billing rule; remove the Truncated-header contradiction.
+4. **M4.2**: invert invariant — reject computer-use beta on non-Anthropic-native routes with canonical 4xx + gate step.
+5. **M1.2/A5**: move image timeout handling into M1 or drop it from A5; add SSE-progress grammar fixture requirement to M3.2.

@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — seven rounds have hardened nearly everything, but the usage-row model still doesn't coherently cover non-video terminal status, and a runtime-leader mechanism is assumed yet never tasked.
+
+**2. Critical risks**
+- **Terminal-row home gap:** M1.1 says attempt rows never carry `status`, yet the TTS contract requires a row recording "chars + final status" and sync-abort needs a writer-owned `truncated` row. Terminal-row machinery is only specified for jvid video rows — images/TTS/ASR have no home for `status`.
+- **Cross-node insert-once:** "guarded by the video_jobs.status transition" needs a dialect-portable CAS (`UPDATE ... WHERE status=<non-terminal>` + affected-rows check on epgsql *and* esqlite); two nodes polling the same jvid can otherwise both finalize. Unspecified.
+- **Leader assumption:** M3.1b single-writer secret bootstrap and M3.3b nightly sweep both require a runtime leader; no task creates the designation/election mechanism.
+- **Poll fallback undefined** when the provider is transport-unreachable but a local terminal row exists (persisted-result whole point partially wasted).
+- Pre-accept 270s budget shared with failover retries can exhaust before the final attempt; ASR cap-reject drain has no budget (slow-upload occupancy).
+
+**3. Contradictions / stale claims**
+- R4 header line "pre-accept failover may cross modes" contradicts the R5/A5 SAME-MODE pin — the stale sweep missed the revision history itself.
+- `'pending'` in the M1.1 status vocabulary is dead: only terminal rows are written, video lifecycle lives in `video_jobs`.
+- T.1 lumps the mock "per phase", contradicting R5's per-ship-unit mock task fix.
+
+**4. Missing first-ship requirements**
+- `/v1/models` response carrying the modality badge (A3 promises it; M1.0b lists dashboard only).
+- `:8090 /stats` counters (ASR slots held, active video jobs) — smoke-read surface.
+- Deleted-listing and deleted-agent-key behavior for poll/cancel (only *disabled* is pinned).
+- Reverse `wrong_modality` (chat-listed model called via an image/TTS endpoint).
+- Named owner for the ASR slot counter.
+
+**5. Architecture notes**
+- Generalize: one writer-serialized terminal row per logical request for all modalities; video adds the DB CAS because finalization is cross-node. State this once in M1.1.
+- Poll resolution order should be normative: provider (bound + reachable) → local terminal row → retryable error; `provider_unreachable` added to the taxonomy alongside `job_not_found/expired/unknown_key`.
+- SSE emitter invariant worth asserting in M3.2b fixtures: exactly one terminal event per hold, and client-disconnect ⇒ no event, only writer row.
+
+**6. Top 5 edits**
+1. Rewrite M1.1 row model: terminal row (status-bearing) for every modality, writer-serialized; video terminal row additionally CAS-guarded; spell the portable CAS primitive.
+2. New task (fold into M3.1b): runtime leader designation (static config or election) consumed by secret bootstrap and M3.3b sweep; follower block/poll semantics.
+3. M3.2/M3.3: add poll fallback when provider is down/deleted, and deleted agent-key owner behavior.
+4. Stale-text pass: remove R4 cross-modes line, drop `'pending'` from the vocabulary, split T.1 into per-ship-unit mock tasks.
+5. Add to M1.0b/M1.2/M2.2: `/v1/models` badge, `/stats` counters, bidirectional wrong_modality, named ASR slot owner + drain budget.

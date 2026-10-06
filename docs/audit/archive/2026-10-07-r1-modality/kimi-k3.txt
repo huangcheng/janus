@@ -1,0 +1,36 @@
+# Modality Gateway Plan — Audit (rev 1)
+
+**1. Verdict: GO WITH FIXES** — architecture (plugin behaviour, canonical shapes, additive usage columns) is sound, but the video job registry, slow-sync transport, and usage-at-poll accounting have concrete holes.
+
+**2. Critical risks**
+
+- **Node-local ETS job registry vs 3 prod nodes (M3.1).** Submit on node A, client poll LBs to node B → opaque `jvid_` id not found. Fix now: encode node/provider in the job id and have the gateway 302/proxy to the owner, or store the route map in Postgres (24h TTL row). "Node-local" is not a documented limitation, it's a prod bug.
+- **Usage recorded only at poll (M3.3).** If the client never polls a completed job, provider spend is never metered. Add a completion-sweep (registry walker polls owning providers for aged jobs) or accept + document the leak with a metric. Currently neither.
+- **Slow-sync transport (A5/M3.2b).** Cowboy `idle_timeout` is a per-listener protocol option; "per-route override" needs a named mechanism (separate listener port, or stream-handler-level adjustment). Worse: **heartbeat SSE comments are impossible in sync video/image replies** — the canonical reply is one JSON object; mid-body comments corrupt it. The plan contradicts itself: heartbeats work only for SSE-progress mode. Sync mode must rely on raised timeouts alone.
+- **TTS truncation contract.** Plan correctly self-catches the impossible `Truncated` header, but the fallback ("terminal chunk count in usage") needs an eunit-pinned partial-seconds rule: what counts when upstream dies mid-frame?
+- **Fixture realism.** M2.2 mandates real curl multipart — good. But M1.2's "captured real reply JSON" must be captured *now*; dashscope native image (wanx family) is historically an **async task API**, which falsifies A5's "image is sync in both dialects" claim for the native endpoints. Verify against the OpenAI-compatible endpoint before M1.2 ships.
+
+**3. Contradictions / stale claims**
+
+- M1.1's "SMALLINT fixtures" is borrowed boilerplate — `modality`/`units` are TEXT/INT, not SMALLINT; the fixture rule should say driver-tuple and binary-key shapes.
+- `usage_events` writer is also touched by the translation plan's per-attempt rows — two plans, one migration sequence; numbering/ordering unassigned.
+
+**4. Missing first-ship requirements**
+
+- M1.0: body-size caps must be enforced *after* agent-key auth but *before* full body read (streaming read with abort) — unspecified.
+- Rolling rollout: new dashboard reads `modality` before old gateway nodes migrate; Usage page must tolerate missing column. Not stated.
+- M3: cancel semantics per provider (some lack cancel) — error taxonomy missing.
+- M2: TTS "first audio byte" must distinguish headers-received from body-byte (gun events) — failover window definition needs this.
+
+**5. Architecture notes**
+
+- `janus_modality` behaviour should declare: `endpoints/0`, `translate_req/2`, `render_reply/3`, `usage_unit/0`, `timeout_policy/0`, `probe_policy/0` — the timeout policy belongs in the behaviour, not bolted on in M3.2b.
+- Error taxonomy: provider-native error JSON → canonical envelope mapping table per modality, shared with translation plan's stop/failure maps.
+
+**6. Top 5 concrete edits**
+
+1. M3.1: replace node-local ETS with owner-encoded job ids + cross-node proxy, or Postgres-backed registry.
+2. A5: delete heartbeat claim for sync JSON replies; specify the actual Cowboy per-route timeout mechanism (likely a second listener).
+3. M3.3: add a pending-job sweep task so un-polled completions still meter.
+4. M1.2: verify dashscope image sync/async reality against both native and OpenAI-compatible endpoints before fixing the translator shape.
+5. M1.0: fold into M1.2 (behaviour lands with its first plugin) and pin auth→size-cap→read ordering.

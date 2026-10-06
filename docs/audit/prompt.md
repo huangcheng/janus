@@ -1,11 +1,11 @@
 # Role
 Audit the attached Janus implementation plan only. Do not write code. Do not call tools.
 
-Janus = Erlang AI gateway (Cowboy :8080 agent API; ETS catalog + generation hot-reload; janus_lb pick with prefer_proto; janus_protocol_translate holds request+reply translation incl. an SSE state machine for chat<->anthropic streams, text+thinking only, eunit 123; dispatch 400s stream translate-blocked requests with no same-protocol route; failover loop with per-attempt usage rows; sibling-repo E2E gate (TEST-FLOWS.md authoritative) with a deterministic mock upstream; dashboard SPA).
+Janus = Erlang AI gateway (Cowboy :8080 agent API / :8090 admin; ETS catalog + generation hot-reload; janus_lb pick with prefer_proto; SSE translate state machines for chat protocols; failover loop with per-attempt usage rows (stream/request_ref/attempt/is_terminal); entitlement carrier + probes; sibling-repo E2E gate (TEST-FLOWS.md authoritative) with a deterministic mock upstream; dashboard SPA; three prod nodes). A separate, already-audited plan covers full chat-protocol translation (C1-C6 contracts, ship units with default-off knobs).
 
-The attached plan targets FULL protocol translation: any client (openai_chat / openai_responses / anthropic_messages) x any provider x stream and non-stream x tools/vision/structured output. Three phases: (1) chat<->anthropic stream tools+vision, (2) responses-client stream translation both directions incl. request grammar, (3) responses-as-provider + conformance fixtures from real SSE transcripts. It documents semantic impossibles (n>1->anthropic, cache_control, previous_response_id) and a shipped route-preference substrate.
+The attached plan extends Janus to full MODALITIES: image generation (sync), TTS (chunked binary out), ASR (multipart in), video generation (BOTH sync one-shot and async job modes under one canonical endpoint), computer use (beta-header passthrough over /v1/messages), as a modality PLUGIN architecture (endpoint + translator + renderer + usage unit + probe policy per modality), with usage_events gaining modality+units columns, per-modality default-off knobs, and per-route timeout overrides for long-blocking sync calls.
 
-This is revision 11 of this plan (rounds 1-10 findings applied). Audit skeptically.
+This is revision 8 of this plan (rounds 1-7 findings applied). Audit skeptically.
 
 # Required output format
 1. Verdict: GO / GO WITH FIXES / NO-GO — one sentence

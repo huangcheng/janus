@@ -1,0 +1,36 @@
+# Audit — Modality Gateway Plan (target.md, rev 3)
+
+## 1. Verdict
+**GO WITH FIXES** — production-grounded and architecturally sound, but it contains one flat internal contradiction (image response-oversize: 413 vs pass-through), an unstable normative grammar (`submitted` vs `queued`; gate vs nightly >310s proof), and three under-specified lifecycle hooks (audio_seconds source, sweep ownership, commit_point arity) that will otherwise ship schema/usage bugs.
+
+## 2. Critical risks
+- **Failover loop**: A2 claims LB/failover "untouched," yet A6/M1.0 make `janus_http_proxy` consult `commit_point/1` — that is a hot-path change; chat's existing commit semantics need an explicit default or chat retries regress while modalities unblock.
+- **jvid lifecycle**: fail-closed on missing/unknown keyid yields local 500 mid-poll after rotation retention lapses; owner-check failure status undefined (403 vs 404 — enumeration); retention vs 24h exp not knob-linked.
+- **audio_seconds unit source**: duration from provider reply or container parse (WAV trivial, mp3/opus hard). Unspecified → invented billing units.
+- **ASR memory**: 25MiB buffered × 4 inflight ≈ 100MiB/node; the rebar.lock / `cowboy_req:read_part` check can evaporate half of M2.2 yet is deferred to M2.2's first commit.
+- **Rolling deploy**: new nodes serve modality endpoints, old nodes 404 them; /v1/models badge + `wrong_modality` error change needs release notes (backward-compat of unblocking).
+
+## 3. Contradictions / stale claims
+- M1.2 "response size cap enforced 413" vs Contracts/Images "RESPONSE-side oversize … pass through with a warning log" — direct conflict; given "413 = body size only," pass-through is the coherent rule.
+- "Wire ALWAYS SSE" vs A1 OpenAI-canonical: OpenAI's `POST /v1/videos` returns a JSON submit; async POST should be JSON, SSE only for the wait phase (sync-provider POST, GET polls).
+- M3.2b (gate asserts >310s) vs M3.4 (CI-fast 31s, >310s nightly) — unreconciled; and no nightly soak exists in the described CI (AGENTS.md: eunit-docker + local gate only).
+- Prompt's "per-route timeout overrides" vs plan's per-modality settings knobs (A5) — plan's choice is better; align the brief.
+
+## 4. Missing first-ship per phase
+- **M1**: symmetric `wrong_modality` (chat-named model on /v1/images/generations); per-provider param tables (n/size/quality/style/response_format); images 120s budget vs 300s idle_timeout tail.
+- **M2**: voice/format translation tables per provider; ASR language/response_format; duration source (above).
+- **M3**: cancel method/path (DELETE /v1/videos/{id}); cancel on sync-mode (no jvid) → 409; sweep ownership/cadence/index; retention knob.
+- **M4**: where unknown betas are "recorded" (log vs event); chat-compat function-name negative e2e.
+
+## 5. Architecture notes
+- Single grammar owner: the renderer module holds the event table; contract text references it, never re-lists names.
+- `commit_point/1` arg = `submit | poll | sync_stream` (not opaque term).
+- Error taxonomy pin: `wrong_modality`, `computer_use_requires_native`, `job_not_found`, `job_expired`, `job_unknown_key`; statuses 413=body-size only, 429+Retry-After=admission, 400=pre-flight caps.
+- `units` numeric type pinned across dialects (seconds are fractional); decide modality-implies-unit vs explicit `unit_kind`.
+
+## 6. Top 5 concrete edits
+1. target.md Contracts: fix the response-oversize contradiction; unify to `submitted` (delete `queued`); async POST = JSON; reconcile M3.2b vs M3.4; name the soak runner or drop the claim.
+2. target.md A5/M2.2: resolve `read_part` from rebar.lock now; add audio_seconds source rule (provider field → WAV header → else units NULL + documented loss).
+3. target.md A6/M1.0: spec `commit_point/1` arity/args + chat default; amend the "failover untouched" claim.
+4. target.md M3.1/M3.3b: owner-check → 404; unknown keyid → `job_unknown_key`; retention knob (retention > max exp); sweep = leader-only nightly scan with index; cancel = DELETE, sync-mode → 409.
+5. target.md M1.0b/M1.1: `modality` TEXT NOT NULL DEFAULT 'chat' (not nullable-only) so old-code rolling writes are correct; `units` numeric type both dialects; symmetric `wrong_modality`.

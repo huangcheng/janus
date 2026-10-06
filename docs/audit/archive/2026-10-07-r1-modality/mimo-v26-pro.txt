@@ -1,0 +1,33 @@
+**1. Verdict: GO WITH FIXES** — sound plugin shape, but job-registry persistence, timeout mechanics, and TTS usage semantics are unresolved and would fail the gate or prod.
+
+**2. Critical risks**
+- **Job registry vs topology:** 24h node-local ETS (M3.1) + three prod nodes/shared LB means `GET /v1/videos/{id}` 404s after restart or on a non-owning node. Needs node-affine routing or a Postgres-backed registry; "poll fan-out to owning provider" assumes the client hit the same node twice.
+- **Per-route `idle_timeout` is not a Cowboy primitive** — it's listener/connection opts. The M3.2b gate (slow >310s call) directly contradicts the 300s listener invariant unless the mechanism is named (separate listener, `cowboy_req:set_options`, heartbeat trick). Same gap for `max_request_body_length` (25MiB/10MiB caps in A8).
+- **TTS unit contradiction:** A4 says `units=characters`; A6 says "usage row records partial seconds". Pick one. The `Truncated` header paragraph self-cancels (headers precede bytes) — delete it, keep terminal-chunk accounting only.
+- **Sync failover semantics undefined:** image/video sync calls have no pre-commit window; an error at 80s must yield an attempt row with `units=0` and defined `is_terminal`. TTS first-byte window is fine but untested against the existing commit rule.
+- **Rolling deploy of the writer:** additive migration is safe only if the writer feature-detects the columns (aliyun is migration leader; followers boot old code).
+- ASR stream-through multipart parsing is the highest-bug-risk unit; fixtures must cover chunk-split boundaries and CRLF variants, not just one full-body buffer.
+
+**3. Contradictions / stale claims**
+- `jvid_` ids are minted by us, yet job ids are called "provider-scoped and opaque" — pick one model.
+- M1.0 content-type routing ships before the multipart parser (M2.2); until then multipart must be explicitly rejected, else the gate breaks between phases.
+- M4.1 cites C2 "terminal-event/usage on streams" for beta **headers** — headers are non-stream; the rule doesn't apply.
+
+**4. Missing first-ship requirements**
+- Mock upstream + `TEST-FLOWS.md` shapes for image/TTS/ASR/video — no task anywhere.
+- `modality_<name>_enabled` knobs (named in "Ordering", never checkboxed).
+- `modality` column type (TEXT vs SMALLINT enum) + fixture convention; eunit fixture rule is stated but not the value mapping.
+- `janus-auto` guard rejecting modality models (A3 asserts it; no task).
+- Entitlement deny-code table per modality (A2 says plugins declare codes; nothing defines them).
+
+**5. Architecture notes**
+- `janus_modality` should return a declarative `spec()`: endpoints, content-types, max_body, timeout_ceiling, usage_unit, probe_policy — the timeout table eunit then tests one table, not scattered opts.
+- Job registry behind a behaviour with two impls (ETS / Postgres).
+- Error taxonomy: pre-200 errors = canonical JSON envelope; post-200 TTS has no error channel — document truncation as usage-only, never fake signaling.
+
+**6. Top 5 edits**
+1. M3.1: replace node-local ETS with node-affine job registry or PG persistence; state restart behavior explicitly.
+2. M3.2b: name the Cowboy timeout/body-cap mechanism; split the >310s gate into its own step.
+3. Fix TTS `units` (characters) and strike the `Truncated` header clause (A6).
+4. Add a phase-task: mock upstream + TEST-FLOWS steps + `modality_*_enabled` knob per phase (M1–M3).
+5. Add: `modality` column DDL/fixture spec + `janus-auto` modality guard + entitlement code table.

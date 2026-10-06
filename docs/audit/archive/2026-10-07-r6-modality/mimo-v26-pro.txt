@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — the design is coherent and R5-hardened, but three stale contract clauses contradict the finalized row model and the terminal-usage guard is unspecified across nodes.
+
+**2. Critical risks**
+- Terminal usage idempotency is under-specified for the real 3-node LB: any node may serve a poll/handle a sync hold, so "insert once, guarded by the video_jobs status transition" must be a single atomic statement (conditional `UPDATE ... WHERE status<>terminal` + insert on affected-rows, per dialect). As written, two concurrent finalizers double-bill.
+- TTS commit is upstream accept, but the plan never states the usage outcome when accept succeeds and the stream dies *before* first byte (client gets JSON error, chars already billable). Define the row (`failed`, chars billed) or you'll get drift.
+- Poll fallback precedence is undefined when provider and local row disagree (local `cancelled` vs provider `completed`, or vice-versa).
+- M1.1's status enum still lists `pending` — a leftover of the deleted NULL-as-pending model.
+
+**3. Contradictions / stale claims**
+- Contracts still say cancel is `DELETE` with "**409 on sync-mode ids**" and "cancel persists **on the usage row**" — both dead in rev 6 (no sync-409 branch; cancel persists in `video_jobs`).
+- TTS contract ends with "`ok`/`truncated`" while the unified vocabulary is completed/truncated/failed ("never `ok`").
+- A5 text garble: "else resets. resets."; drain-vs-reset for cap rejects is left as "where feasible" with no decision rule.
+- Prompt mentions "per-route timeout overrides"; plan correctly replaced these with per-request gun budgets relative to the listener — fine, but don't let reviewers reintroduce per-route knobs.
+
+**4. Missing first-ship requirements**
+- `wrong_modality` is only specified for image-via-chat; TTS/ASR/video-via-chat need the same local 400 naming the endpoint.
+- No e2e step asserts exactly-one usage row under concurrent poll/finalize (see risk 1).
+- No gate assertion that a poll after local `video_jobs` row expiry/`abandoned` sweep still answers the documented shape.
+
+**5. Architecture notes**
+- Commit-point naming (`pre_2xx` = commit at 2xx) invites misreading; rename to `at_2xx`/`pre_accept` per family in the behaviour doc.
+- Error taxonomy is good (job_not_found/expired/unknown_key → `failed(...)`), but `computer_use_requires_native` should join the same canonical envelope table rather than being a one-off 400 string.
+
+**6. Top 5 edits**
+1. Contracts/A5: delete "409 on sync-mode ids"; cancel persistence → `video_jobs` only; remove "usage row" wording.
+2. TTS contract: `ok` → `completed`; drop `pending` from M1.1 enum.
+3. M1.1/M3.3: spell out the atomic cross-node terminal finalization statement per dialect + concurrent-finalize e2e.
+4. Add TTS post-accept pre-first-byte failure semantics (JSON error, billed `failed` row).
+5. Fix "else resets. resets."; pin drain-vs-reset rule and provider-vs-local poll precedence.

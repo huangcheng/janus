@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the architecture is sound and the R5 resolutions are mostly coherent, but three stale-text contradictions survived the revision and a few terminal-state edges remain unspecified.
+
+## 2. Critical risks
+- **Failover/commit correctness**: A6 prose still says "TTS = first audio byte" while the `commit_point/1` table and the TTS contract say `upstream_accept`. If implementers read the prose, they get a failover-after-accept double-bill window — the exact bug A6 exists to prevent.
+- **SSE state machine**: sync-hold lazy emission + same-mode pre-accept failover is correct in the R5 header but contradicted by A5 body text (below). The envelope machinery (M3.2b) must treat "first byte written" as the irreversible commit; nothing in M3.2b's checkbox pins this, it's only in A5 prose.
+- **Fixture realism**: read_part fixtures "straddling boundaries" are specified, good; but no fixture covers a multipart body arriving as **one giant chunk** or a boundary split across a binary audio payload mid-frame. Add both.
+- **Race**: terminal finalization is writer-owned via monitor, but a concurrent poll observing provider-terminal can race the death notification. Guard relies on the `video_jobs` pending→terminal conditional UPDATE — state explicitly that the UPDATE's rows-affected=1 is the single insertion gate.
+- **Hot-path cost**: negligible (one ETS read + HMAC per poll). Fine.
+
+## 3. Contradictions / stale claims
+1. A6: "TTS = first audio byte" vs commit table/Contracts: `upstream_accept`. Stale.
+2. A5: "mode-homogeneity is NOT required pre-accept" vs R5 header: "pre-accept failover pinned SAME-MODE". Stale — header wins, body must be rewritten.
+3. TTS contract: "records chars + final status (`ok`/`truncated`)" two sentences after "never `ok`". Stale.
+4. M1.1 status enum includes `abandoned`/`pending` while R5 header claims vocabulary "unified (completed/truncated/failed)" — the enum is right, the header is imprecise.
+
+## 4. Missing first-ship requirements
+- **M3**: sync-hold *success* usage row shape is undefined (no jvid exists; presumably per-attempt terminal row with `units=video_seconds` — say so). DELETE on an already-terminal or expired jvid: response unspecified (must be idempotent, transition only from `pending`).
+- **M2**: `units=characters` never defines "character" — bytes vs `unicode:characters/1` matters 3× for CJK TTS billing.
+- **M1**: reject ordering unspecified: `wrong_modality` vs entitlement-deny vs auth — determines whether a rejected call leaves a usage row.
+- **M3.1b**: leader death mid-bootstrap (secret half-written) has no recovery path; add "followers re-elect / leader retries on next boot".
+
+## 5. Architecture notes
+`commit_point/1` naming `pre_2xx` is confusing (commit happens *at* 2xx); rename `at_2xx`. Video error taxonomy (`job_not_found/job_expired/job_unknown_key`) is clean; add `job_abandoned` so the sweep is visible to late pollers instead of silent.
+
+## 6. Top 5 edits
+1. Delete "TTS = first audio byte" from A6; keep `upstream_accept` everywhere.
+2. Rewrite A5's pre-accept failover paragraph to same-mode; delete "mode-homogeneity is NOT required".
+3. Replace `ok` with `completed` in the TTS contract; add `job_abandoned` to the failed-event mapping.
+4. Add to M3.3: sync-success usage row shape + DELETE-on-terminal/expired semantics (no-op, return persisted status).
+5. Add to M2.1: "character = `unicode:characters/1` count, NFC as received"; add to M1.0: reject ordering auth → entitlement → wrong_modality, all pre-usage-row.

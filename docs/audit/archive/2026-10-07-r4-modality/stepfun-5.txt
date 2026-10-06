@@ -1,0 +1,31 @@
+## Verdict: GO WITH FIXES
+The wire targets (A1), plugin model (A2), stateless jvid (A5), and spend rules (A6) are coherent and additive to the existing machinery. Deficits concentrate in one architecture that crosshairs several tasks and one prose claim weaker than reality.
+
+## Critical risks
+1. **SSE construction (M3.2b).** The *request* process blocks on `gun`; it cannot tick heartbeats. Synchronous-mode "progress every 10s" silently hangs without a dedicated sink/timer/await process tree plus a client-disconnect latch, upstream abort, and `failed` on budget expiry. Missing.
+2. **Video cancel/poll bookkeeping (M3.1/M3.3).** Poll "never writes" + cancel "best-effort + persists" implies a **DB read before upstream hit** and an idempotent upsert with a single-writer guard. Not written — creates a hot-path implicit dependency and a cancel-vs-complete race.
+3. **Failover (M1.0c).** Example "401 key → failover row" works only among **same-request-shape** providers, otherwise next provider rejects pre-flight against the table; attempt budget otherwise not a real cap. Conflation of compatible vs incompatible retries is an M-ship integrity gap.
+4. **TTS usage location (M2.1/M2.3).** Contract mandates `status=truncated` only resolvable at connection close, but commit is first audio byte — writer must *finish* then *close*; false failure accounting otherwise.
+5. **Backward compat in the extension (M1.1).** Family-aware historical backfill mislabeling risk (sts-model named chat, audio backend co-resident) — regressions, not gains.
+
+## Contradictions / stale claims
+- **M3.4**: says >310s E2E is CI-visible, but idle_timeout is listener-level with no per-route override, so it is an untestable doc unless the mock and heartbeat cadence are parameterized (knob **H**, default 10s) and the invariant becomes fixed (approximately H*11 plus idle_timeout margin).
+- **M1.1 "family-aware" historical backfill** — was never safe; presented as active precision in M-ship where it should be conservative with a documented **correct path** for ambiguous rows.
+- **M3.2/M2.2 budgets** are grouped with videos but sequential to images; provider-table knobs must cover images + TTS before M1 ships.
+
+## Missing first-ship requirements
+- **M1.0**: which dispatcher runs the static route table, and **failover eligibility = shape-compatible**.
+- **M2.2**: 429/bulwark admission strict order **before** parsing; release via monitored/tertiary watcher.
+- **M1.4**: image/video **no-auto-probe** enforced in the probe scheduler, not exposed verb; onboarding representatives won't be accidentally drained by probes.
+- **M3.1b**: explicit first-up-secret ordering with e2e injections.
+- **M4.2**: multi-header detection plumbing, conservative name prefix.
+
+## Architecture / design notes
+Split SSE into sink + await process (treated as generic heartbeat). Event grammar table is complete; verifier mapping is sound (404 mismatch, 400 expired/tamper). Usage units are clean (`tokens` for chats, generic `units`). Modality progress only as one exhaust field — no other correct state for model-role metadata.
+
+## Top 5 concrete edits
+1. **M3.2b** — add a fixed **process spec**: sink, heartbeat timer, upstream await, disconnect latch, upstream abort, `failed` on budget; terminal events `≥1/10s`.
+2. **M1.0c** — failover row code must gate on `translator shape ==`; leave chat unchanged.
+3. **M1.1** — mark backfill conservative; then insert an **explicit state machine** (`pending→completed|cancelled|failed|truncated|abandoned`), `upsert single-writer`, code-causal first-byte continuation and e2e-clear statuses.
+4. **M3.1/M3.3** — implement the **poll path** as: verify → owner mismatch 404 → usage-state read → response (cancel-typed untouched, honest upstream); upsert terminal exactly once; tests for grant-then-poll, grant-then-document, provider-race terminal.
+5. **M3.4** — make the heartbeat a **knob** and the mock completion controlled by it; E2E proves `idle_timeout=30s` survives `≈H*11` of the flow, with a static documented soak for prod latency.

@@ -1,0 +1,33 @@
+## Verdict
+**GO WITH FIXES** — modality-plugin split, stateless `jvid`, and SSE-always-video are the right calls, but five seams (units provenance, TTS header-commit ordering, listing `modality` source, video caps/expiry, admission-control e2e) are unpinned and must be resolved before M1.
+
+## 1. Critical risks
+- **SSE correctness is lifecycle, not transport**: the listener-`idle_timeout` / reset-on-flow claim holds. The real risk is the synthesized-heartbeat state machine's cancel region — it must be tied to the per-request `gun:await` budget and the client-disconnect monitor, kept *separate* from the chat translate machine, or it leaks timers/upstreams on cancel.
+- **Spend/terminator semantics**: one true hole — video usage is committed only when a *poll* observes success. A client that submits then stops polling loses the row permanently while the provider still bills. Similarly, image retry-after-2xx-with-broken-body must be explicitly forbidden (a retry double-charges); the plan implies but never states it.
+- **Grammar fidelity**: multipart parser + dashscope-native image/video shapes are the highest-bug-density areas; vendored multipart must be eunit-first with curl fixtures whose chunks straddle quoted boundaries and split binaries; re-serialization target belongs per provider.
+- **Failover/LB/entitlement**: admission-control counter must be per-node ETS (not shared); route chosen before body read means no mid-upload route switch — fine. Pre-2xx-only retry loop is correct.
+- **Hot path**: negligible except one heartbeat timer per in-flight video — bound concurrent video jobs per node.
+- **Backward-compat of unblocking**: additive columns + default-off knobs — sound.
+
+## 2. Contradictions / stale claims
+- **TTS "headers (content-type/format) out first" + "JSON error pre-first-byte" contradicts itself**: after a 200 with `audio/mpeg`, no error envelope is expressible. Headers must go out *with* the first upstream byte.
+- **M3.4 "TTL expiry"** contradicts the stateless no-TTL `jvid`. Reframe as upstream-side job expiry → canonical `failed(job_not_found)`.
+- No conflict with codebase invariants: 300s listener idle_timeout, SMALLINT 0/1, persistent_term knobs, dual-dialect migrations + flat copies all honored; "no per-route override" is accurate for Cowboy 2.x.
+
+## 3. Missing first-ship requirements
+- **M1**: listings carry no `modality` — `wrong_modality` rejects and endpoint route-matching have no data source. The plan migrates `usage_events` only; it needs a listings `modality` column (default `chat`) too. Biggest gap.
+- **M2**: `audio_seconds` provenance per provider (which upstream response field) is unspecified — the unit is currently unfillable.
+- **M3**: video `b64_json` has no reply cap (images do); wall-clock attempt budget has no default.
+- **M4**: computer-use detection must scan tools, not just the beta header; destination for "recorded unknown beta values" undefined.
+
+## 4. Architecture notes
+- `janus_modality` should export `commit_point/0` (`first_byte | response_complete | accept`) so the generic failover loop knows retry is illegal; plugins emit one-way signals (`local_error | committed | terminal`) feeding existing per-attempt rows (attempt/is_terminal) + modality/units.
+- Error taxonomy: `{local, Reason}` (wrong_modality, admission 413, computer_use_requires_native) vs `{upstream, Mapped}` vs committed-truncation; one envelope renderer per modality.
+- Heartbeat interval as a settings knob (default 10s) so the gate isn't a 6-minute test.
+
+## 5. Top 5 concrete edits
+1. **M1.1**: add listings `modality` column + ETS normalization + flat migration copies; `wrong_modality`, dashboard badges read it.
+2. **M2.1**: TTS 200+content-type only on first upstream byte; pre-first-byte failover + canonical JSON error; `truncated` status in usage row.
+3. **M3.3**: pin `audio_seconds`/`video_seconds` source fields per provider (fixture-verified); document abandoned-poll usage loss + reconcile-on-next-request mitigation.
+4. **M3.2/3.2b**: video URL-first with b64 cap, expired-upstream → `failed(job_not_found)`, heartbeat-interval gate knob (CI lifecycle in seconds + one manual full-latency check).
+5. **M1.3/M2.2 e2e**: real >25MiB upload asserting a clean 413 (Cowboy unread-body semantics), 5th concurrent ASR → 413, post-2xx body-reset yields exactly one usage row with no failover.

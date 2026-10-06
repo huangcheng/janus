@@ -1,0 +1,30 @@
+**1. Verdict: GO WITH FIXES** — the wire/usage/commit semantics are now mostly pinned, but the response-size policy contradicts itself and the modality enum has no slot for the very models cited as motivation.
+
+**2. Critical risks**
+- Response-oversize policy is now tri-state and self-contradictory (see §3) — a renderer implementer can pick either branch and be "spec-compliant".
+- `commit_point/1` return `pre_2xx` is a semantic trap: it names the *absence* of a commit while images' commit IS 2xx. The shared loop's comparison (`Pre2xx =< Commit`) will be written backwards by someone.
+- Sweep ↔ terminal-finalize race on `video_jobs`: dashboard marks `abandoned` at exp while a late gateway CAS (`WHERE status='pending'`) tries to land `completed`. Loser semantics (persisted result? usage row? id-expiry vs 24h `exp` alignment) are unspecified — this can silently drop a *completed* job's usage, a worse loss than the documented never-polled case.
+- TTS post-accept / pre-first-byte failure: "no failover after accept" + "pre-first-byte failures answer JSON error" leaves an un-retryable JSON error window. Pin: answer 502-style JSON, bill chars, `status=failed` — or allow one retry pre-first-byte and move the commit point.
+- ASR admission keys on `content-length`; chunked uploads have none. Undefined → slot leak or unchecked buffering.
+- `modality` enum (chat/image/tts/asr/video/computer) can't express the grounding examples (`qwen-mt-uni`, `ZHIPU/GLM-5.3-FlashX`, realtime) — backfill "unknown → chat" makes non-chat models wrongly chat-callable, defeating `wrong_modality`.
+
+**3. Contradictions / stale**
+- Contracts video grammar still says b64 "passes through under the response rule **regardless of size**", and Images still says oversize "pass through with a warning log (never silently truncate)" — both contradict the R7 64MiB JSON cap → `failed(response_too_large)`.
+- A5 ASR paragraph ends in a duplicated dangling "resets." fragment (stale edit artifact).
+- `DELETE` "persists `status=cancelled` on the usage row" vs M3.3 "the ONE usage_events row is inserted at terminal" — cancel is terminal, but `units` for cancelled/failed video rows is unstated (only "units=video_seconds on completion").
+
+**4. Missing first-ship**
+- M1.1: an `other`/`unknown` modality value + backfill rule, or explicitly gate MT/realtime families out of chat.
+- M3.3b: sweep/terminal race resolution + an eunit/E2E for it.
+- ASR: no-content-length admission rule.
+- M2.1: post-accept/pre-first-byte failure disposition.
+
+**5. Notes**
+Keep `commit_point` as an *atom describing the earliest retryable boundary* (`pre_2xx` → rename `retry_until = '2xx'`); document per-modality `units` for every terminal status in one table; mirror the single-writer CAS idiom used for the jvid secret into `video_jobs` finalization docs.
+
+**6. Top 5 edits**
+1. Delete "regardless of size"/"pass through with warning" sentences; point both at the 64MiB cap (Contracts, A5).
+2. Add `other` modality + backfill clause (M1.1, A3).
+3. Rename `commit_point` values; add the retry-boundary truth table (A6, M1.0c).
+4. Add sweep-vs-finalize CAS resolution to M3.3b.
+5. Fix the "resets." fragment and pin TTS post-accept failure disposition (A5, M2.1).

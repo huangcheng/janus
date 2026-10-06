@@ -1,0 +1,33 @@
+**Verdict: GO WITH FIXES** — rev 6 closes most gaps, but pre-accept failover self-contradicts, `video_jobs` lands after M1.1 depends on it, and the "unified status vocabulary" claim is wrong.
+
+**Critical risks**
+
+1. **Pre-accept failover self-contradicts.** R5 header pins SAME-MODE; A5 body allows cross-mode. Async/sync wires are structurally different — cross-mode cannot dispatch. Pin SAME-MODE in both places. (The rev-6 summary itself contradicts: "pre-accept failover pinned SAME-MODE" vs "pre-accept failover may cross modes" inside the same paragraph.)
+
+2. **`video_jobs` phase gap.** M1.1 row model references `video_jobs.status` transitions; M3.3 creates the table. Move the migration to M1.1 or make the writer conditional — plan does neither.
+
+3. **Lazy emission vs heartbeats.** "Nothing until upstream ACCEPT" + "synthesized ≥1/10s events" — heartbeats ARE writes. Pre-accept can run the full 270s budget. Heartbeat emission must start at request entry.
+
+4. **Status vocabulary mismatch.** R5 header: 3 values; M1.1: 5 + NULL (cancelled, abandoned video-only). State the superset explicitly so writer enum and `video_jobs.status` agree.
+
+5. **`first_media_byte` undefined on synthesized-only sync holds.** No upstream byte ⇒ redefine as "first byte this gateway emits" so `commit_point` is well-defined.
+
+6. **Usage idempotency without UNIQUE jvid index.** Crash between `video_jobs.status` transition and usage INSERT duplicates on next poll. Specify CAS-on-transition (UPDATE…RETURNING or affected-rows check).
+
+7. **TTS post-accept pre-first-byte path.** "JSON error" + "no mid-stream error" + "no post-accept failover" — three rules collide. Specify: pre-headers, one JSON error, no failover; post-first-byte, truncate.
+
+8. **jvid retention "until retention > max exp"** has no mechanism. Add `jvid_retention_hours` knob (≥ `jvid_ttl_hours`).
+
+**Contradictions vs codebase.** Pre-accept mode header/body split (and internal rev-6 split); "vocabulary unified" vs six-value column; rev-6 claim "video wire contradiction resolved ONCE" is false (item 1 unresolved).
+
+**Missing first-ship.** `video_jobs` migration into M1.1; heartbeat timer ownership (pre/post-accept); computer-use EXACT-match fixtures (case-sensitivity, missing-`type`, key-order, `type`-only); SSE Accept-upgrade on cowboy 2.12.0 (content-negotiation without explicit reply override); ASR fixtures with binary split MID-CHUNK; cross-repo TEST-FLOWS paired-commits.
+
+**Architecture notes.** M1.0 static routes compile all plugins — phased rollout needs compile-time `modality_*_enabled` flags so M1 ships without M3 binaries. ASR streaming-parser + buffered-rewriter is fine (parse streaming, buffer for upstream).
+
+**Top 5 edits**
+
+1. **A5 pre-accept failover**: pin SAME-MODE in header and body. Rationale: "request wire shape to async vs sync upstream differs".
+2. **Move `video_jobs` migration to M1.1**; writer gains CAS-on-terminal-transition; M3.3 reads status and inserts usage.
+3. **Status vocabulary**: "column ∈ {completed, truncated, failed, cancelled, abandoned, NULL}; chat ⊆ first three, video ⊆ all five".
+4. **A5 lazy emission + heartbeats**: "synthesized heartbeats begin at request entry; provider progress after upstream ACCEPT; shared ≥1/10s cadence". `first_media_byte` = "first byte this gateway emits".
+5. **TTS post-accept failure**: "between upstream 2xx and first byte (no headers sent), one JSON error allowed, no failover; after first byte, all upstream failures truncate". Add `tts_max_output_bytes` knob.

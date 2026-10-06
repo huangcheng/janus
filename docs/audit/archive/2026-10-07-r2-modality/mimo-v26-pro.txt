@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — the rev-2 corrections (SSE-always, stateless jvid, spend discipline) are right, but the id codec, TTS header ordering, and ASR buffering are still self-contradictory.
+
+**2. Critical risks**
+- **jvid codec is ambiguous.** `jvid_<upstream_job_id>_<provider_id>_<listing>_<hmac8>` splits on `_`, but upstream ids, provider ids, and listings (`qwen-image-2.1-pro`, `ZHIPU/GLM-5.3-FlashX`) contain `_`/`/`. Parse is unresolvable → wrong-provider routing on polls. Also no key-id: one settings-secret rotation invalidates every in-flight job id (the exact wipe rev 2 tried to kill). 8 hex chars = 32 bits of tamper resistance, thin for an unauthenticated-looking surface.
+- **TTS contract contradicts its own failover window.** "Headers out first" + commit at first audio byte: if headers go out before upstream yields audio, a pre-byte upstream failure has already committed 200 to the client — failover is dead and no error frame exists. Headers must be deferred to first upstream byte. Second contradiction: bill input chars ("consumed upstream regardless") vs "never retry after 2xx" — if the provider bills on accept, upstream 200 *is* the commit, not first byte. `truncated` is also undetectable without a declared content-length/expected-duration.
+- **ASR: "buffered-then-rewritten" vs "stream-through, no spooling" are mutually exclusive.** Memory bound is unstated (25MiB × cap = 100MiB/node). Admission refusal as 413 is wrong semantics (429/503 + Retry-After). No task computes `audio_seconds` from the binary.
+- **Images exceed idle_timeout via retry fan-out.** 120s × attempts of silent non-streaming time can cross the 300s listener budget; the wall-clock cap must be ≤ ~290s for non-SSE endpoints. Post-2xx reply failure (size cap 413) has no defined usage/commit handling.
+- **Heartbeat percent is fabricated data** — emit stage-only. Client-disconnect abort on async jobs leaves billed-orphan jobs unaccounted.
+
+**3. Contradictions / stale claims**
+- M3.4 still lists "TTL expiry" though rev 2 abolished TTL/registry.
+- Sync-mode video: `units=video_seconds` at completion, but sync mode has no poll — who writes the row, and where does duration come from?
+- Prompt says "per-route timeout overrides"; rev 2 correctly moved to per-request budgets.
+
+**4. Missing first-ship**
+- Catalog `modality` derivation rule (column or explicit metadata) feeding `wrong_modality`, badges, and probe policy — regex-on-name is not a spec.
+- Reconciliation for jobs never polled again (pending NULL forever) and usage accounting for aborted sync attempts.
+- Entitlement codes per modality; auth/entitlement on `GET /v1/videos/{id}`; secret-rotation story for jvid.
+- NULL-modality handling in Usage grouping for pre-migration rows.
+
+**5. Design notes**
+- Add a modality → endpoint/commit-point/unit/error-envelope mapping table (the C2-style normative table chat has).
+- Error taxonomy: local reject (wrong_modality, computer_use_requires_native, caps) vs upstream-translated vs post-commit terminal — each needs a distinct usage-row status.
+- jvid should be versioned, length-prefixed/base64url fields, key-id prefixed.
+
+**6. Top 5 edits**
+1. M3.1: redesign jvid encoding (unambiguous, versioned, key-id), delete the M3.4 TTL step or add id-scoped expiry.
+2. M2.1: defer TTS headers to first upstream byte; reconcile billing commit point; define `truncated` detection.
+3. M2.2: pick buffered (state the 25MiB×cap memory bound) or true streaming; 429 not 413; add duration-extraction task.
+4. M1.2/M1: cap non-SSE wall-clock under 300s; specify post-2xx 413 usage semantics.
+5. M1.0: add explicit catalog modality derivation + M3.3 reconciliation for unpolled/sync usage writes.

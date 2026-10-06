@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — sound plugin shape and honest transport decisions, but the video wire grammar, TTS commit point, and usage upsert schema have gaps that will ship bugs if M1.0c freezes the shared loop first.
+
+**2. Critical risks**
+- **Video mode fork vs failover:** reply shape (async JSON vs sync SSE hold) is a provider-endpoint property, but the shared failover loop retries across providers. If the sync-mode provider fails pre-accept after heartbeats were already flushed, you cannot switch to an async provider's JSON shape mid-response. Needs a mode-homogeneity rule or hold-first-byte-until-commit.
+- **TTS double-charge:** commit_point = first audio byte permits failover after upstream 2xx headers arrived but before bytes flow — input chars are already billed upstream, violating R1's "no failover after 2xx/accept".
+- **Usage upsert undefined:** "one row per jvid, upsert-on-terminal", but M1.1 adds no `jvid` column and no unique index — `ON CONFLICT` has no target; the pending sweep has nothing to key on.
+- **computer_\* gate:** "hardcoded initial list + settings knob" vs "prefix match on `computer_*`" are different predicates; an unknown future `computer_20260101` is auto-pass or hard-reject depending on which reading wins.
+- Hot-path cost is acceptable (static table, ETS, persistent_term).
+
+**3. Contradictions / stale claims**
+- A5 still says "the wire is ALWAYS SSE" — rev-2 residue; R3/A1 finalized async POST = JSON. The Contracts grammar line "`event: submitted` (carries jvid when async)" is now wrong for POST.
+- M1.2 "response size cap enforced 413" contradicts A8/Contracts/R2: response oversize passes through with warning; 413 is request-body only.
+
+**4. Missing first-ship requirements**
+- M1.1: `jvid` column + unique index; `(status, ts)` index (M3.3b references it but the migration task doesn't list it).
+- M2: gun await budgets for TTS/ASR provider-table rows (only video/images listed).
+- M3: video-seconds source rule (ASR has one, video doesn't); HTTP status policy for JSON polls of failed/expired/unknown-key; how tamper-400 vs `job_unknown_key` is mechanically distinguished (keyid lookup must precede HMAC check).
+- M3.3b: "migration-LEADER-only" is a boot-time concept — name the long-lived process hosting the nightly sweep and its one-of-three guard.
+
+**5. Architecture notes**
+- Add `mode :: sync | async` to provider-table rows; janus_lb/failover filter on it once reply shape commits.
+- Pin the error taxonomy in the behaviour doc: HMAC mismatch on known keyid → 400; unknown keyid/expired → 200 + `failed(...)` envelope; owner mismatch → 404.
+- One module owns per-mode SSE grammar; plugins return stage terms only.
+
+**6. Top 5 concrete edits**
+1. Rewrite A5 video bullets to the R3 decision; drop `submitted(jvid)` from POST SSE grammar.
+2. M1.0c/M3.2: add mode-homogeneous failover rule for video POSTs.
+3. M1.1: add `jvid` column + unique partial index + `(status,ts)` index; upsert = `ON CONFLICT (jvid)`.
+4. Change TTS commit_point to upstream 2xx headers, not first audio byte.
+5. Fix M1.2 (413 = request only) and add video-seconds source rule + poll status-code table to M3.

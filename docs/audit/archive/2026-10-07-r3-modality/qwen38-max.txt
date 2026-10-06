@@ -1,0 +1,43 @@
+## 1. Verdict
+
+**GO WITH FIXES** — audit-hardened and coherent, but it ships one self-contradictory wire decision (always-SSE video) and several under-specified mechanisms (commit point, modality labeling, usage status, rotation secrets).
+
+## 2. Critical risks
+
+- **Video wire violates the canonical shape.** A1 says OpenAI shapes are canonical; OpenAI `/v1/videos` submit/poll is plain JSON. Making POST and GET *always* SSE (A5, M3.2b) breaks every OpenAI-SDK client. JSON must be default; SSE opt-in via `Accept: text/event-stream`.
+- **`commit_point/1` is too weak.** A static atom can't express "first media byte" — that's a runtime event inside the renderer the failover loop can't observe. Worse, status-based commit is wrong for providers that return `200` with an error JSON body (dashscope does this): the loop would treat a billed error as committed or retry a billed success. Need a runtime commit signal + per-provider body sniffing.
+- **Nobody writes `listings.modality`.** Backfill = `chat`; qwen-image stays `chat` forever, so `wrong_modality` never fires and badges lie. No task creates a write path.
+- **`usage_events` lacks `status`.** TTS `ok/truncated` and the video `abandoned` sweep both require it; A4 migrates only `modality`+`units`.
+- **Wall-clock attempt budget (A6) appears in no phase task.**
+- **jvid rotation underspecified:** "settings-held secret" (singular) vs "old keyid retained one wave" — no concrete keyid→secret map, and the rolling-deploy window where nodes hold different generations is unaddressed.
+- **Polling an invalidated listing:** jvid embeds the listing; if it's disabled/deleted before poll, behavior is undefined.
+
+## 3. Contradictions / stale claims
+
+- M1.2 still says "response size cap enforced 413"; the R2 contract section says response oversize *passes through with warning*, 413 = request body only. M1.2 is stale.
+- A8's "10MiB image b64 out" cap contradicts the never-truncate passthrough rule — delete it.
+- A4 column list vs TTS "usage row records final status" (missing column).
+- M3.4 cites a "nightly soak" no task creates; TEST-FLOWS.md has no such lane.
+
+## 4. Missing first-ship requirements
+
+- M1.0b: modality editor (dashboard) + seed re-classification of the 435 existing listings.
+- M3.1: multi-keyid secret store shape + rotation overlap; defined poll semantics when embedded listing is gone (map to `failed`).
+- M2.1: usage-write timing when the client disconnects after first byte; char-counting unit (codepoints vs bytes — matters for Chinese TTS billing).
+- M2.2: `audio_seconds` fallback when provider returns no duration (NULL; never estimate).
+- Cancel accounting when upstream keeps generating after local `cancelled`.
+- M3.4: the nightly-soak harness itself as a task.
+
+## 5. Architecture notes
+
+- Replace the commit enum with `is_committed(Event)` consulted by the loop on renderer/proxy events; keep A6 rules in one place but make commit observable.
+- Per-provider sync/async mode table should surface in dashboard route detail (ops will debug it).
+- Error taxonomy to pin: tamper/grammar → 400, expired → 410-ish `job_expired`, upstream unknown → `failed(job_not_found)`; GET never triggers failover or LB pick.
+
+## 6. Top 5 edits
+
+1. **A5/M3.2b:** JSON-default submit/poll; SSE only via `Accept` negotiation.
+2. **M1.0:** swap `commit_point/1` for a runtime commit-event contract; add 200-with-error-body sniffing.
+3. **M1.0b:** add dashboard modality editor + seed classification task.
+4. **M1.1/A4:** add `status` column; add the wall-clock attempt-budget task.
+5. **M1.2/A8:** fix stale 413-response wording to pass-through+warning; drop the outbound b64 cap.

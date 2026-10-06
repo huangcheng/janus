@@ -1,0 +1,32 @@
+**Verdict: GO WITH FIXES** — rev 5 is close, but three stale statements contradict its own final decisions, and two usage-accounting gaps remain.
+
+**Critical risks**
+- **TTS commit contradiction (must fix):** A6's opening says "TTS = first audio byte", while A6's `commit_point/1` list, the Contracts block, and the rev-5 header say `upstream_accept` (chars billed from accept). Two plausible readings → double-billing risk on post-accept failures.
+- **Cancel contradiction:** rev 5 deletes the sync-409 branch ("cancel is async-only"), yet the Contracts SSE bullet still says "409 on sync-mode ids".
+- **Sync-mode video usage homeless:** sync holds carry no jvid, so the UNIQUE-jvid summary row can't exist for them; M1.1/M3.3 define usage only for jvid jobs. Disconnected sync video (`truncated`, `units=video_seconds`) has no row home.
+- **Persistence vs expiry ordering:** HMAC/exp are verified before the local `video_jobs` fallback, so an expired-but-persisted result is unretrievable. State explicitly: `exp` MUST exceed provider retention, and `job_expired` short-circuits the fallback.
+- **Cross-mode pre-accept failover** ("reply mode follows whichever provider wins") is right, but the sync-hold client contract when a pre-accept failure answers plain JSON (it requested SSE) is unstated — pin it (200-vs-error, no partial SSE).
+- Hot path is fine (one callback + one ETS column); the only new cost is the multipart parser. Require jvid eunit fixtures built from real HMAC output, not hand-truncated digests (the fixture-realism rule).
+
+**Contradictions / stale**
+- M3.2b claims "gate asserts a >310s mock video" vs M3.4's honest "true >310s = documented manual soak, nightly CI is future work". M3.2b predates the soak-honesty fix.
+- Codec spec: "EVERY segment is base64url" vs the literal `v1.` prefix and ambiguous `hmac16` (hex? base64url of 16 raw bytes?).
+
+**Missing first-ship**
+- M1.1's migration column list omits `jvid` + UNIQUE index though the row-kind spec requires them.
+- `video_jobs` result rows have no retention/deletion (unbounded growth; sweep covers only pending).
+- Dashboard must tolerate missing `usage_events.modality/units/status` (M1.0b grants this only for `listings.modality`) — rolling-deploy safety.
+- M2.2 text drops the rebar.lock-first parser decision + record requirement.
+- Poll of an already-terminal job must return terminal immediately, not stream.
+
+**Design notes**
+- Rename `pre_2xx` → `upstream_2xx` ("commit at 2xx"); keep A6 rules solely in the behaviour doc so renderers can't drift.
+- Keep the error taxonomy (400 `wrong_modality`/`computer_use_requires_native`, 413 body-only, 429+Retry-After, `job_*`→`failed`) as one table in `janus_modality`.
+- The provider table (mode, budgets, caps) is the rot-prone piece: typed record + spec.
+
+**Top 5 edits**
+1. Contracts/A6: delete "409 on sync-mode ids"; fix TTS commit → `upstream_accept`.
+2. M3.2b: drop the >310s gate claim; reference the soak runner + artifact path.
+3. M1.1: add `jvid` + UNIQUE index; add sync-mode video usage rule (per-attempt rows only).
+4. A5: exp > provider retention; verify-then-fallback order; `video_jobs` retention knob + leader sweep.
+5. Codec spec: all-but-`v1` segments encoded, `hmac16` = base64url(16 raw bytes); real-HMAC eunit fixtures.

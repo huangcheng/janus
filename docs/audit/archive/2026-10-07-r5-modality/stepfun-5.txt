@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — the plan is comprehensive and largely correct, but several claims are unverified against codebase reality and a few phase-ordering/backward-compat gaps remain.
+
+**2. Critical risks**
+- **jvid fail-closed bootstrap**: if the secret is missing, all polls 500. The plan defers harder than it should: leader-mints/followers-block is a *runtime dependency* on the migration leader being alive. If the leader dies before polling followers get the secret, polls wedge. Needs a fallback (fetch-on-miss from a settings endpoint or pre-seed secret in deploy config).
+- **ASR multipart streaming parser**: cowboy ≥2.7's `read_part` has edge cases with binary-payload boundary straddling in *chunked* transfer encoding. If `rebar.lock` shows cowboy 2.7+ but gateway uses a fork or custom stream setup, fixtures may not match reality.
+- **Usage row split (per-attempt + jvid summary)**: the UNIQUE jvid constraint on `usage_events` means the *summary* row lives in the same table as attempts. If an attempt row accidentally carries the jvid, ON CONFLICT fires on unlimited attempts (retries after accept are impossible per A6, so likely safe, but no schema-level separation). Preference: separate `video_job_usage` view/table.
+- **Writer-owned finalization**: monitor-notify-on-death requires the writer to outlive handlers and be reachable in ALL failure paths (node death during pod eviction = lost row). Acceptable, but not documented as such.
+- **Entitlement default-allow flip**: if a modality knob is default-off, keys are allowed but no traffic flows; flipping to on immediately opens all keys to real spend. No canary/blast-radius step.
+- **Modality backfill heuristic**: "image/audio/video/tts model-name families" is name-based — exactly the "no name heuristics" posture the plan adopts for modality elsewhere. Inconsistent.
+
+**3. Contradictions / stale claims**
+- "Cowboy ≥2.7 read_part wins; fallback is vendored parser" — but M2.2 says "decision recorded in M2.2's first commit" meaning *implementation* still branches. If rebar.lock says ≥2.7, write *only* that path now; vendored parser as untracked contingency invites untested code.
+- "Video wire ALWAYS SSE" (R1 summary) vs R4 "async POST = JSON+close" — the R4 fix survives, but the R1 sentence in the header is stale and confusing.
+- "Per-request gun await budgets (600s video)" vs listener `idle_timeout=300s`: a 600s budget is *below* nothing — if the gun budget exceeds the listener idle timeout, a sync SSE hold holds the connection past 300s. The plan claims heartbeats solve this (they do for the idle clock), but an unresponsive upstream between heartbeats can still hit 300s. Budget must be *inside* the idle_timeout with heartbeat margin, not independent of it.
+
+**4. Missing first-ship requirements per phase**
+- **M1.0c**: the shared-loop parameterization must explicitly specify where the *stream_reply* path diverges for TTS (binary, no SSE event machinery) vs video (SSE with heartbeats) — the plan implies one "renderer" abstraction, but TTS has no event loop at all.
+- **M3.3**: `video_jobs` table needs a sweep index and a documented `exp`-vs-retention boundary; "swept with M3.3b" conflates two different removal policies (expired jvid vs abandoned pending row).
+- **M4.2**: the plan relies on `anthropic-beta` passthrough on `/v1/chat/completions` via `OpenAI-Beta`, but no upstream provider Openai-side beta actually supports computer-use tools. Should verify a provider exists before claiming the route.
+- No **video test provider SS** (SSE-progress mock) fixture spec — M3.2b's "mock video completes end-to-end" needs the exact event grammar the mock emits, or the fixture won't be production-shaped.
+
+**5. Architecture notes**
+- `commit_point/1` as single source of A6 is good, but `commit_point` differs *per attempt type*: chat stream = first_media_byte, but if translation reorders events, commit may occur on a token that would have been dropped by content filtering. Pin commit to the *first event written to socket*, not first parsed from upstream.
+- Error taxonomy: `job_unknown_key` should map to a *local* 500 (crypto/config failure), not a video `failed` event (that's client-visible semantic confusion).
+
+**6. Top 5 concrete edits**
+1. Fix cowboy version claim: check `rebar.lock` now; commit to the 2.7+ path; delete "fallback" branch until forced.
+2. Split jvid summary from attempt rows (separate table or a `summary` boolean + CHECK constraint on `attempt IS NULL`).
+3. Reconcile `idle_timeout=300s` with 600s gun budgets: define budget = idle_timeout - 30s heartbeat margin, not an absolute 600s.
+4. Replace modality backfill name-heuristics with the catalog's provider/type metadata where available; name-regex only as a documented last resort.
+5. Add M3.2b mock SSE fixture grammar spec to the plan (exact JSON per `progress` event) before implementation.

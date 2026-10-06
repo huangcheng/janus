@@ -1,0 +1,36 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 5 is coherent and ship-able, but the sync-video commit point still contradicts the spend-discipline rule, and a few lifecycle/boot edges need pinning before M1/M3.
+
+## 2. Critical risks
+
+- **Sync-video commit contradiction (top issue).** A6's `commit_point/1` table says sync-video holds commit at `first_media_byte`, but a sync one-shot provider bills at upstream accept. A stalled post-accept/pre-first-byte sync generation would retry and **double-charge** — exactly what the images rule forbids. Commit must be `upstream_accept`; post-accept failure = JSON error, no retry (the TTS rule). The chat-C4 analogy is wrong for one-shot generation.
+- **M2.1 stale wording:** "pre-first-byte failover window" contradicts R4's TTS-commit-at-accept. Delete it; post-accept stall is an error, billed, no retry.
+- **Secret bootstrap blocking boot.** Followers "block/poll" until the leader mints — a hung DB stalls entire gateway boot. Fail-closed must scope to video endpoints only, with a bounded wait.
+- **Settings clobber risk.** jvid secret lives in the `settings` table, which the dashboard writes; a wholesale settings save could erase/rotate it, invalidating in-flight jobs. Rotation UI must be explicitly dual-key/retention-aware (M3.1b says generation UI, not clobber-safety).
+- **Poll load:** no per-key poll rate limit or min-interval; async video invites 1s polling loops against the provider on the gateway's dime.
+- **Memory bound unstated:** ASR = 4 slots × 25MiB buffered = 100MiB/node worst case; state it and gate on it.
+
+## 3. Contradictions / stale claims
+
+- jvid prefix written both as `jvid_v1` and `v1.` — pick one literal.
+- Mode-heterogeneous pre-accept failover means the client cannot know whether POST /v1/videos answers JSON or SSE until response headers arrive; this must be a normative contract line (clients branch on Content-Type), not buried in A5.
+
+## 4. Missing first-ship requirements
+
+- M1.0: content-type routing must specify `multipart/form-data; boundary=` handling (boundary param extraction belongs to M2.2, not M1.0).
+- M3: poll throttling/min-interval knob + `Retry-After` hint on polls.
+- M1.3 gate: also assert modality/units on the 401 failover attempt row, not just the success row.
+- M3.1b: define behavior when leader dies mid-mint (lock/leader key, not just "followers block").
+
+## 5. Design notes
+
+- Plugin `commit_point/1` is the right single source; make A6's table normative per modality × provider-mode (sync/async video differ) rather than per modality.
+- Writer-owned terminalization via monitor is sound; document which node upserts when submit and terminal-poll land on different nodes (any-poll-node upserts; UNIQUE jvid makes it idempotent — say so).
+
+## 6. Top 5 concrete edits
+
+1. A6 table: sync-video `commit_point` → `upstream_accept`; add "post-accept failure = JSON error, never retry" for sync video + TTS.
+2. M2.1: delete "pre-first-byte failover window".
+3. M3.1b: scope follower blocking to video routes only; add dashboard clobber-safety (dual-key + retention) and leader-death recovery.
+4. A1/Contracts: normative line — clients discriminate async-JSON vs sync-SSE by response Content-Type.
+5. M3.4/M3.1: add poll min-interval knob + E2E step asserting it; state the ASR 100MiB/node memory bound in A5.
