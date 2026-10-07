@@ -12,6 +12,11 @@
 -define(TOOL_CALLS_PER_STREAM_CAP, 64).
 -define(TOOL_ARGS_TOTAL_CAP, 1024 * 1024).
 
+%% Phase-2 →responses face (C5): 4MiB total accumulated content per
+%% stream (text + tool argument bytes) bounding the terminal-event
+%% output reconstruction. Exceeding takes the C2 error path.
+-define(STREAM_CONTENT_CAP, 4 * 1024 * 1024).
+
 %% One accumulated tool call. `args` holds argument fragments as a
 %% reversed iolist; `block` is the anthropic content_block index on the
 %% chat-upstream face, `chat_index` the chat tool_calls ordinal on the
@@ -24,7 +29,14 @@
     block = undefined :: undefined | non_neg_integer(),
     chat_index = undefined :: undefined | non_neg_integer(),
     header_sent = false :: boolean(),
-    closed = false :: boolean()
+    closed = false :: boolean(),
+    %% Phase-2 →responses face: item_id is the synthesized responses
+    %% output-item id (jitem_…), resp_index the responses output_index —
+    %% neither ever reuses the chat tool index nor the anthropic block
+    %% index (C5: four separate index/id spaces). `id` holds the CALL id
+    %% (upstream call_/tool_ id passes through; jfc_… when synthesized).
+    item_id = undefined :: undefined | binary(),
+    resp_index = undefined :: undefined | non_neg_integer()
 }).
 
 -record(sse_st, {
@@ -64,5 +76,18 @@
     open_tool = undefined :: undefined | non_neg_integer(),
     deferred = [] :: list(),
     tool_seq = 0 :: non_neg_integer(),
-    total_args = 0 :: non_neg_integer()
+    total_args = 0 :: non_neg_integer(),
+    %% Phase-2 →responses face (C1/C5). resp_id = the synthesized
+    %% response id (jresp_…); item_seq allocates responses output_index
+    %% values (their own index space — never a chat tool index nor an
+    %% anthropic block index); msg_item = the open message output item
+    %% (#{id, index, text (reversed binaries)}); items = finished output
+    %% items (reversed) for the terminal response.output reconstruction;
+    %% content_bytes bounds total accumulated content (text + args)
+    %% against ?STREAM_CONTENT_CAP.
+    resp_id = undefined :: undefined | binary(),
+    item_seq = 0 :: non_neg_integer(),
+    msg_item = undefined :: undefined | map(),
+    items = [] :: list(),
+    content_bytes = 0 :: non_neg_integer()
 }).

@@ -10,8 +10,17 @@
 %%% fragments streamed, content_block_stop / finish only after the ONE
 %%% decode-at-close completeness check, deferred interleaved text,
 %%% per-stream accumulator caps) and request-side vision translation
-%%% on the chat<->anthropic pair. The dispatch unblock (1.9 ship unit)
-%%% is NOT part of this: stream_translate_blocked/2 is unchanged.
+%%% on the chat<->anthropic pair.
+%%%
+%%% Phase 2 adds the ->responses STREAM face (plan 2026-10-06): both
+%%% chat and anthropic upstreams render the responses event grammar
+%%% (response.created lazily, output_item.added/delta/output_item.done
+%%% per item, exactly one terminal response.completed /
+%%% response.incomplete / response.failed with usage on the response
+%%% object). The dispatch unblock lives in janus_http_proxy under the
+%%% `translate' settings knob key <<"responses">>;
+%%% stream_translate_blocked/2 itself keeps its conservative view (the
+%%% LB bias / janus-auto / repick consumers are unchanged).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_protocol_translate).
@@ -29,7 +38,9 @@
     sse_events/2,
     translate_sse/4,
     finalize_sse/3,
-    stream_translate_blocked/2
+    stream_translate_blocked/2,
+    %% Phase-2 dispatch gate eligibility (the knob lives in the proxy)
+    responses_stream_gatable/1
 ]).
 
 -define(DEFAULT_MAX_TOKENS, 4096).
@@ -89,9 +100,22 @@ chat_max_tokens(Map) ->
 translate_request(P, P, Map) ->
     {ok, Map};
 translate_request(Client, Provider, Map) ->
-    case reject_unsupported_request(Client, Provider, Map) of
+    %% 1.6 structured output: response_format/json_schema only rides
+    %% same-protocol routes; cross-protocol strips + records the drop.
+    Map1 =
+        case {Client =:= Provider, maps:with([<<"response_format">>, <<"json_schema">>], Map)} of
+            {false, Dropped} when map_size(Dropped) > 0 ->
+                _ = logger:info(#{
+                    what => janus_structured_output_dropped,
+                    keys => maps:keys(Dropped)
+                }),
+                maps:remove(<<"response_format">>, maps:remove(<<"json_schema">>, Map));
+            _ ->
+                Map
+        end,
+    case reject_unsupported_request(Client, Provider, Map1) of
         ok ->
-            case do_translate_request(Client, Provider, Map) of
+            case do_translate_request(Client, Provider, Map1) of
                 {ok, _} = Ok -> Ok;
                 {error, _} = Err -> Err
             end;
@@ -1381,6 +1405,18 @@ n_blocked(Map) ->
         _ -> false
     end.
 
+%% Phase-2 dispatch gate eligibility: true when an openai_responses
+%% streaming request carries nothing beyond the responses-client gate
+%% itself. Vision content and n>1 stay blocked (n_blocked unchanged);
+%% TOOLS ride the translate path — the responses knob is independent of
+%% the tools knob (plan 2.3's 2x2 matrix). stream_translate_blocked/2
+%% keeps blocking all responses clients: the LB bias, janus-auto tier
+%% constraint, and failover repick consume that conservative view; the
+%% knob decision is made in janus_http_proxy's dispatch.
+-spec responses_stream_gatable(map()) -> boolean().
+responses_stream_gatable(Map) when is_map(Map) ->
+    not has_non_text_content(Map) andalso not n_blocked(Map).
+
 has_tools(Map) ->
     case maps:get(<<"tools">>, Map, undefined) of
         L when is_list(L), L =/= [] -> true;
@@ -1482,12 +1518,28 @@ chat_frame(Map) ->
 anthropic_frame(Event, Map) ->
     iolist_to_binary([<<"event: ">>, Event, <<"\ndata: ">>, thoas:encode(Map), <<"\n\n">>]).
 
+%% Phase-2 ->responses face: same event-framed shape (the terminal
+%% EVENT is the terminator — no chat [DONE] on this face, C1).
+responses_frame(Event, Map) ->
+    iolist_to_binary([<<"event: ">>, Event, <<"\ndata: ">>, thoas:encode(Map), <<"\n\n">>]).
+
 chat_synthetic_id() ->
     <<"chatcmpl-", (integer_to_binary(erlang:unique_integer([positive]), 16))/binary>>.
 
 anthropic_synthetic_id() ->
     Hex = string:lowercase(integer_to_binary(erlang:unique_integer([positive]), 16)),
     <<"msg_", (binary:part(Hex, 0, min(8, byte_size(Hex))))/binary>>.
+
+%% Janus-namespaced synthesized ids (C5): the response object id and
+%% the responses output-item id are SEPARATE id spaces from tool call
+%% ids (jfc_, see tool_synthetic_id/0) and never collide with upstream
+%% id prefixes (chatcmpl-/msg_/call_/tool_/fc_/item_). Per-attempt,
+%% non-repeating (erlang:unique_integer, C4).
+responses_resp_id() ->
+    <<"jresp_", (integer_to_binary(erlang:unique_integer([positive]), 16))/binary>>.
+
+responses_item_id() ->
+    <<"jitem_", (integer_to_binary(erlang:unique_integer([positive]), 16))/binary>>.
 
 int_or_undef(V) when is_integer(V), V >= 0 -> V;
 int_or_undef(_) -> undefined.
@@ -1528,6 +1580,10 @@ translate_sse(openai_chat, anthropic_messages, Event, St) ->
     anthro_to_chat(Event, St);
 translate_sse(anthropic_messages, openai_chat, Event, St) ->
     chat_to_anthropic(Event, St);
+translate_sse(openai_responses, openai_chat, Event, St) ->
+    chat_to_responses_stream(Event, St);
+translate_sse(openai_responses, anthropic_messages, Event, St) ->
+    anthro_to_responses_stream(Event, St);
 translate_sse(_ClientProto, _ProviderProto, _Event, St) ->
     {error, translate_unsupported, St}.
 anthro_to_chat(#{type := <<"ping">>}, St) ->
@@ -2316,6 +2372,733 @@ first_choice(D) ->
     end.
 
 %%%-------------------------------------------------------------------
+%%% translate_sse/4 — provider Chat -> client Responses (Phase 2)
+%%%
+%%% C1 skeleton: response.created (LAZY — the first content-bearing
+%%% chunk only; role-only and reasoning-only chunks never trigger it,
+%%% C4), then per output item output_item.added -> delta events ->
+%%% output_item.done, then exactly ONE terminal event carrying usage on
+%%% the response object (C3). response.incomplete is the legal terminal
+%%% when the source finished `length` (C2 map). Chat reasoning_content
+%%% deltas are DROPPED: reasoning/summary item framing waits for the
+%%% 1.0 responses corpus (no event names invented here). tool_calls
+%%% become function_call items (C5: arguments decode ONCE at close;
+%%% text interleaved with an open call defers to its close point and
+%%% flushes as a sequential message item; jitem_/jfc_ id spaces).
+%%%-------------------------------------------------------------------
+
+chat_to_responses_stream(#{type := <<"done">>}, St) ->
+    %% The chat [DONE] terminator: close anything open, then the ONE
+    %% terminal. [DONE] itself has NO responses-face bytes (the
+    %% terminal event is the terminator, C1); finalize covers an EOF
+    %% without [DONE] with the same emitters (terminal_sent guard).
+    responses_finish(St);
+chat_to_responses_stream(#{type := <<"chunk">>, data := D}, St) when
+    is_map(D)
+->
+    case maps:get(<<"error">>, D, undefined) of
+        Err when is_map(Err) ->
+            {error, translate_unsupported, St};
+        _ ->
+            St1 = resp_capture_model(D, resp_capture_usage(D, St)),
+            chat_resp_chunk(D, St1)
+    end;
+chat_to_responses_stream(#{type := _}, St) ->
+    %% Undecodable data (binary): skip, never crash the fold.
+    {ok, [], St}.
+
+chat_resp_chunk(D, St) ->
+    Choice = first_choice(D),
+    Delta = maps:get(<<"delta">>, Choice, #{}),
+    case maps:get(<<"tool_calls">>, Delta, undefined) of
+        Entries when is_list(Entries), Entries =/= [] ->
+            case chat_resp_tool_entries(Entries, St, []) of
+                {error, _, _} = Err ->
+                    Err;
+                {Frames, St1} ->
+                    %% finish_reason may ride the same chunk as the last
+                    %% fragment (dashscope wire) — handled after entries.
+                    chat_resp_finish(Choice, Delta, St1, Frames)
+            end;
+        _ ->
+            case maps:get(<<"function_call">>, Delta, undefined) of
+                FC when FC =/= undefined, FC =/= null ->
+                    %% Legacy function_call deltas do not translate.
+                    {error, translate_unsupported, St};
+                _ ->
+                    chat_resp_finish(Choice, Delta, St, [])
+            end
+    end.
+
+%% Finish handling: the finish chunk CLOSES every open item; the
+%% terminal itself waits for [DONE]/finalize (usage may still arrive on
+%% a trailing usage-only chunk, C1 ->chat wire order).
+chat_resp_finish(Choice, Delta, St, Acc) ->
+    case maps:get(<<"finish_reason">>, Choice, undefined) of
+        FR when is_binary(FR), FR =/= <<>>, not St#sse_st.finish_sent ->
+            case resp_close_tool(St) of
+                {error, _, _} = Err ->
+                    Err;
+                {ToolFrames, St1} ->
+                    %% Content on the finish chunk still streams (mirrors
+                    %% the chat face's flush-after-close order).
+                    case resp_text_delta(Delta, St1) of
+                        {error, _, _} = Err ->
+                            Err;
+                        {TextFrames, St2} ->
+                            {ok, Acc ++ ToolFrames ++ TextFrames, St2#sse_st{
+                                finish_sent = true, finish_reason = FR
+                            }}
+                    end
+            end;
+        _ ->
+            case resp_text_delta(Delta, St) of
+                {error, _, _} = Err ->
+                    Err;
+                {Frames, St1} ->
+                    {ok, Acc ++ Frames, St1}
+            end
+    end.
+
+%% Non-empty content streams through immediately UNLESS a tool call is
+%% open — then it defers to the close point (C5 interleaving rule).
+%% reasoning_content is dropped on this face (corpus-pending, C1).
+%% Deferred bytes count against the content budget AT DEFER TIME (the
+%% only accumulation point for them — the flush never re-counts).
+resp_text_delta(Delta, St) ->
+    case maps:get(<<"content">>, Delta, undefined) of
+        C when is_binary(C), C =/= <<>> ->
+            case St#sse_st.open_tool of
+                undefined ->
+                    resp_emit_text(C, St);
+                _ ->
+                    case resp_budget(St, byte_size(C)) of
+                        true ->
+                            {[],
+                                St#sse_st{
+                                    deferred = [{text, C} | St#sse_st.deferred],
+                                    content_bytes = St#sse_st.content_bytes + byte_size(C)
+                                }};
+                        false ->
+                            {error, translate_unsupported, St}
+                    end
+            end;
+        _ ->
+            {[], St}
+    end.
+
+chat_resp_tool_entries([], St, Acc) ->
+    {Acc, St};
+chat_resp_tool_entries([E | Rest], St, Acc) ->
+    case chat_resp_tool_entry(E, St) of
+        {error, _, _} = Err ->
+            Err;
+        {Frames, St1} ->
+            chat_resp_tool_entries(Rest, St1, Acc ++ Frames)
+    end.
+
+%% Returns only its OWN frames (the chat_resp_tool_entries fold threads
+%% Acc). The chat tool_calls INDEX is the accumulator key — never the
+%% responses output_index (C5).
+chat_resp_tool_entry(#{<<"index">> := Idx} = E, St) when is_integer(Idx), Idx >= 0 ->
+    Fragment = maps:get(<<"arguments">>, maps:get(<<"function">>, E, #{}), undefined),
+    case St#sse_st.open_tool of
+        Idx ->
+            resp_tool_fragment(Idx, Fragment, St);
+        _ ->
+            %% Different call (or none open): close the current one,
+            %% then open for Idx — output items are sequential.
+            case resp_close_tool(St) of
+                {error, _, _} = Err ->
+                    Err;
+                {CloseFrames, St1} ->
+                    case resp_tool_open_chat(Idx, E, St1) of
+                        {error, _, _} = Err ->
+                            Err;
+                        {OpenFrames, St2} ->
+                            case resp_tool_fragment(Idx, Fragment, St2) of
+                                {error, _, _} = Err ->
+                                    Err;
+                                {FragFrames, St3} ->
+                                    {CloseFrames ++ OpenFrames ++ FragFrames, St3}
+                            end
+                    end
+            end
+    end;
+chat_resp_tool_entry(_, St) ->
+    %% Entries always carry an integer index on the wire.
+    {error, translate_unsupported, St}.
+
+resp_tool_open_chat(Idx, E, St) ->
+    case St#sse_st.tools of
+        #{Idx := _} ->
+            %% Index re-opened after its call closed: the wire cannot
+            %% splice a call in half; fail closed.
+            {error, translate_unsupported, St};
+        _ ->
+            case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+                true ->
+                    {error, tool_args_cap, St};
+                false ->
+                    resp_tool_open_chat_validated(Idx, E, St)
+            end
+    end.
+
+resp_tool_open_chat_validated(Idx, E, St) ->
+    case maps:get(<<"name">>, maps:get(<<"function">>, E, #{}), undefined) of
+        Name when is_binary(Name), Name =/= <<>> ->
+            CallId =
+                case maps:get(<<"id">>, E, undefined) of
+                    I when is_binary(I), I =/= <<>> -> I;
+                    _ -> tool_synthetic_id()
+                end,
+            resp_tool_open_item(CallId, Name, Idx, St);
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+%%%-------------------------------------------------------------------
+%%% translate_sse/4 — provider Anthropic -> client Responses (Phase 2)
+%%%
+%%% message_start captures model/input tokens but emits NOTHING (C1
+%%% lazy — the C4 failover window must not close on an eager
+%%% response.created). Thinking/signature deltas are dropped (reasoning
+%%% framing is corpus-pending). tool_use blocks become function_call
+%%% items keyed by the anthropic content_block INDEX (never reused as
+%%% output_index, C5); message_delta with an open tool block fails
+%%% closed; message_stop drives the single terminal.
+%%%-------------------------------------------------------------------
+
+anthro_to_responses_stream(#{type := <<"ping">>}, St) ->
+    {ok, [<<": ping\n\n">>], St};
+anthro_to_responses_stream(#{type := <<"message_start">>, data := D}, St) when
+    is_map(D)
+->
+    Msg = maps:get(<<"message">>, D, #{}),
+    U = maps:get(<<"usage">>, Msg, #{}),
+    InTok = int_or_undef(maps:get(<<"input_tokens">>, U, undefined)),
+    Model =
+        case maps:get(<<"model">>, Msg, undefined) of
+            M when is_binary(M), M =/= <<>> -> M;
+            _ -> undefined
+        end,
+    St1 = merge_tokens(St, InTok, undefined),
+    {ok, [], St1#sse_st{model = first_defined(Model, St1#sse_st.model)}};
+anthro_to_responses_stream(#{type := <<"message_start">>}, St) ->
+    %% Undecodable data: skip, never crash the fold.
+    {ok, [], St};
+anthro_to_responses_stream(#{type := <<"content_block_start">>, data := D}, St) when
+    is_map(D)
+->
+    B = maps:get(<<"content_block">>, D, #{}),
+    case maps:get(<<"type">>, B, undefined) of
+        <<"text">> ->
+            %% Non-empty text on the start object emits as the first delta.
+            case maps:get(<<"text">>, B, undefined) of
+                T when is_binary(T), T =/= <<>> -> resp_wrap(resp_emit_text(T, St));
+                _ -> {ok, [], St}
+            end;
+        <<"thinking">> ->
+            %% Dropped on this face (corpus-pending reasoning framing).
+            {ok, [], St};
+        <<"tool_use">> ->
+            anthro_resp_tool_start(D, St);
+        _ ->
+            {error, translate_unsupported, St}
+    end;
+anthro_to_responses_stream(#{type := <<"content_block_start">>}, St) ->
+    {ok, [], St};
+anthro_to_responses_stream(#{type := <<"content_block_delta">>, data := D}, St) when
+    is_map(D)
+->
+    Delta = maps:get(<<"delta">>, D, #{}),
+    case maps:get(<<"type">>, Delta, undefined) of
+        <<"text_delta">> ->
+            case maps:get(<<"text">>, Delta, undefined) of
+                T when is_binary(T), T =/= <<>> -> resp_wrap(resp_emit_text(T, St));
+                _ -> {ok, [], St}
+            end;
+        <<"thinking_delta">> ->
+            {ok, [], St};
+        <<"signature_delta">> ->
+            {ok, [], St};
+        <<"input_json_delta">> ->
+            anthro_resp_tool_fragment(D, St);
+        _ ->
+            {ok, [], St}
+    end;
+anthro_to_responses_stream(#{type := <<"content_block_delta">>}, St) ->
+    {ok, [], St};
+anthro_to_responses_stream(#{type := <<"content_block_stop">>, data := D}, St) when
+    is_map(D)
+->
+    case maps:get(<<"index">>, D, undefined) of
+        Idx when is_map_key(Idx, St#sse_st.tools), St#sse_st.open_tool =:= Idx ->
+            %% The ONLY close point: ONE decode of the full concat at
+            %% close time (C5) gates output_item.done.
+            case resp_close_tool(St) of
+                {error, _, _} = Err -> Err;
+                {Frames, St1} -> {ok, Frames, St1}
+            end;
+        Idx when is_map_key(Idx, St#sse_st.tools) ->
+            %% Duplicate stop for an already-closed call: no-op (a
+            %% second output_item.done must never be emitted).
+            {ok, [], St};
+        _ ->
+            %% Text/thinking block stop: the message item stays open so
+            %% later text deltas continue the same output item.
+            {ok, [], St}
+    end;
+anthro_to_responses_stream(#{type := <<"content_block_stop">>}, St) ->
+    {ok, [], St};
+anthro_to_responses_stream(#{type := <<"message_delta">>, data := D}, St) when
+    is_map(D)
+->
+    case St#sse_st.open_tool of
+        undefined ->
+            StopIn = maps:get(<<"stop_reason">>, maps:get(<<"delta">>, D, #{}), undefined),
+            U = maps:get(<<"usage">>, D, #{}),
+            OutTok = int_or_undef(maps:get(<<"output_tokens">>, U, undefined)),
+            %% C3 merge rule: message_start.input_tokens +
+            %% message_delta.output_tokens. message_delta's repeated
+            %% input_tokens is IGNORED (the message_start value is
+            %% authoritative — same choice as the ->chat face).
+            St1 = merge_tokens(St, undefined, OutTok),
+            Stop =
+                case StopIn of
+                    S when is_binary(S), S =/= <<>> -> S;
+                    _ -> undefined
+                end,
+            {ok, [], St1#sse_st{stop_reason = first_defined(Stop, St1#sse_st.stop_reason)}};
+        _ ->
+            %% A stop while a tool block is still open: upstream skipped
+            %% content_block_stop; never make the call look finished (C5).
+            {error, translate_unsupported, St}
+    end;
+anthro_to_responses_stream(#{type := <<"message_delta">>}, St) ->
+    {ok, [], St};
+anthro_to_responses_stream(#{type := <<"message_stop">>}, St) ->
+    responses_finish(St);
+anthro_to_responses_stream(#{type := <<"error">>}, St) ->
+    {error, translate_unsupported, St};
+anthro_to_responses_stream(#{type := _}, St) ->
+    %% Unknown events: no-op.
+    {ok, [], St}.
+
+anthro_resp_tool_start(D, St) ->
+    case maps:get(<<"index">>, D, undefined) of
+        Idx when is_integer(Idx), Idx >= 0 ->
+            case St#sse_st.tools of
+                #{Idx := _} ->
+                    %% Duplicate block index: upstream bug, fail closed.
+                    {error, translate_unsupported, St};
+                _ ->
+                    case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+                        true ->
+                            {error, tool_args_cap, St};
+                        false ->
+                            anthro_resp_tool_start_validated(Idx, D, St)
+                    end
+            end;
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+anthro_resp_tool_start_validated(Idx, D, St) ->
+    B = maps:get(<<"content_block">>, D, #{}),
+    case maps:get(<<"name">>, B, undefined) of
+        Name when is_binary(Name), Name =/= <<>> ->
+            CallId =
+                case maps:get(<<"id">>, B, undefined) of
+                    I when is_binary(I), I =/= <<>> -> I;
+                    _ -> tool_synthetic_id()
+                end,
+            resp_wrap(resp_tool_open_item(CallId, Name, Idx, St));
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+anthro_resp_tool_fragment(D, St) ->
+    case maps:get(<<"partial_json">>, maps:get(<<"delta">>, D, #{}), undefined) of
+        P when is_binary(P), P =/= <<>> ->
+            resp_wrap(resp_tool_fragment(maps:get(<<"index">>, D, undefined), P, St));
+        _ ->
+            %% Empty fragment: no bytes, no frame.
+            {ok, [], St}
+    end.
+
+%%%-------------------------------------------------------------------
+%%% Shared responses-face helpers (both source protocols)
+%%%-------------------------------------------------------------------
+
+%% Tag a helper's {Frames, St} result as a translate_sse success;
+%% tagged error tuples pass through unchanged.
+resp_wrap({error, _, _} = Err) ->
+    Err;
+resp_wrap({Frames, St}) ->
+    {ok, Frames, St}.
+
+%% Envelope capture: model + usage only — the response id is ALWAYS
+%% janus-synthesized (jresp_; the upstream chatcmpl-/msg_ id is a
+%% different id space, C5).
+resp_capture_model(D, #sse_st{model = undefined} = St) ->
+    case maps:get(<<"model">>, D, undefined) of
+        M when is_binary(M), M =/= <<>> -> St#sse_st{model = M};
+        _ -> St
+    end;
+resp_capture_model(_, St) ->
+    St.
+
+resp_capture_usage(D, St) ->
+    case maps:get(<<"usage">>, D, undefined) of
+        UMap when is_map(UMap) ->
+            In = int_or_undef(maps:get(<<"prompt_tokens">>, UMap, undefined)),
+            Out = int_or_undef(maps:get(<<"completion_tokens">>, UMap, undefined)),
+            merge_tokens(St, In, Out);
+        _ ->
+            St
+    end.
+
+%% 4MiB total-content budget (C5): bounds text + argument bytes (the
+%% terminal response.output reconstruction reuses the accumulated
+%% bytes, so this bounds both).
+resp_budget(St, N) ->
+    St#sse_st.content_bytes + N =< ?STREAM_CONTENT_CAP.
+
+%% Lazy skeleton (C1): response.created exactly once, on the first
+%% content-bearing event. Usage ZEROED here (framing, not a count —
+%% same convention as the ->anthropic message_start); totals land on
+%% the terminal event.
+resp_ensure_created(#sse_st{role_sent = true} = St) ->
+    {[], St};
+resp_ensure_created(St) ->
+    Id = responses_resp_id(),
+    Frame = responses_frame(
+        <<"response.created">>,
+        #{
+            <<"type">> => <<"response.created">>,
+            <<"response">> => #{
+                <<"id">> => Id,
+                <<"object">> => <<"response">>,
+                <<"status">> => <<"in_progress">>,
+                <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+                <<"usage">> => #{
+                    <<"input_tokens">> => 0,
+                    <<"output_tokens">> => 0,
+                    <<"total_tokens">> => 0
+                }
+            }
+        }
+    ),
+    {[Frame], St#sse_st{role_sent = true, resp_id = Id}}.
+
+%% Open the message output item if none is open, then the text delta.
+%% Budget-checked and counted HERE (direct/anthropic text path); the
+%% deferred flush uses resp_text_frames/2 directly (already counted at
+%% defer time — every byte counts against the cap exactly once).
+resp_emit_text(C, St) ->
+    case resp_budget(St, byte_size(C)) of
+        false ->
+            {error, translate_unsupported, St};
+        true ->
+            resp_text_frames(C, St#sse_st{
+                content_bytes = St#sse_st.content_bytes + byte_size(C)
+            })
+    end.
+
+%% Build created/added/delta frames and append the text to the open
+%% message item. Never fails (budget decided by the caller).
+resp_text_frames(C, St) ->
+    {Created, St1} = resp_ensure_created(St),
+    {Added, St2} = resp_ensure_msg_item(St1),
+    #{id := MsgId, index := MsgIdx} = St2#sse_st.msg_item,
+    Delta = responses_frame(
+        <<"response.output_text.delta">>,
+        #{
+            <<"type">> => <<"response.output_text.delta">>,
+            <<"item_id">> => MsgId,
+            <<"output_index">> => MsgIdx,
+            <<"content_index">> => 0,
+            <<"delta">> => C
+        }
+    ),
+    #{text := Rev} = St2#sse_st.msg_item,
+    St3 = St2#sse_st{msg_item = (St2#sse_st.msg_item)#{text := [C | Rev]}},
+    {Created ++ Added ++ [Delta], St3}.
+
+resp_ensure_msg_item(#sse_st{msg_item = undefined} = St) ->
+    Id = responses_item_id(),
+    Idx = St#sse_st.item_seq,
+    Frame = responses_frame(
+        <<"response.output_item.added">>,
+        #{
+            <<"type">> => <<"response.output_item.added">>,
+            <<"output_index">> => Idx,
+            <<"item">> => #{
+                <<"id">> => Id,
+                <<"type">> => <<"message">>,
+                <<"status">> => <<"in_progress">>,
+                <<"role">> => <<"assistant">>,
+                <<"content">> => []
+            }
+        }
+    ),
+    {[Frame], St#sse_st{
+        msg_item = #{id => Id, index => Idx, text => []},
+        item_seq = Idx + 1
+    }};
+resp_ensure_msg_item(St) ->
+    {[], St}.
+
+%% Close the open message item (output_item.done with the full text);
+%% no-op when none is open. Text items always have content (they only
+%% open on the first delta).
+resp_msg_close(#sse_st{msg_item = undefined} = St) ->
+    {[], St};
+resp_msg_close(St) ->
+    #{id := Id, index := Idx, text := Rev} = St#sse_st.msg_item,
+    Full = iolist_to_binary(lists:reverse(Rev)),
+    Item = #{
+        <<"id">> => Id,
+        <<"type">> => <<"message">>,
+        <<"status">> => <<"completed">>,
+        <<"role">> => <<"assistant">>,
+        <<"content">> => [
+            #{<<"type">> => <<"output_text">>, <<"text">> => Full, <<"annotations">> => []}
+        ]
+    },
+    Frame = responses_frame(
+        <<"response.output_item.done">>,
+        #{
+            <<"type">> => <<"response.output_item.done">>,
+            <<"output_index">> => Idx,
+            <<"item">> => Item
+        }
+    ),
+    {[Frame], St#sse_st{msg_item = undefined, items = [Item | St#sse_st.items]}}.
+
+%% Open a function_call output item: closes the open message item
+%% first (items are sequential), flushes the lazy skeleton, allocates
+%% the responses output_index and the jitem_ item id. `Key` is the
+%% SOURCE-local index space (chat tool_calls index / anthropic block
+%% index) — only ever an accumulator key, never on the wire (C5).
+resp_tool_open_item(CallId, Name, Key, St) ->
+    {MsgFrames, St1} = resp_msg_close(St),
+    {Created, St2} = resp_ensure_created(St1),
+    ItemId = responses_item_id(),
+    Idx = St2#sse_st.item_seq,
+    Added = responses_frame(
+        <<"response.output_item.added">>,
+        #{
+            <<"type">> => <<"response.output_item.added">>,
+            <<"output_index">> => Idx,
+            <<"item">> => #{
+                <<"id">> => ItemId,
+                <<"type">> => <<"function_call">>,
+                <<"status">> => <<"in_progress">>,
+                <<"call_id">> => CallId,
+                <<"name">> => Name,
+                <<"arguments">> => <<>>
+            }
+        }
+    ),
+    TA = #tool_acc{id = CallId, name = Name, item_id = ItemId, resp_index = Idx},
+    {MsgFrames ++ Created ++ [Added], St2#sse_st{
+        tools = (St2#sse_st.tools)#{Key => TA},
+        open_tool = Key,
+        item_seq = Idx + 1
+    }}.
+
+%% Argument fragment: streams through immediately; bytes accumulate
+%% for the ONE decode at close. Caps: 256KiB/call, 1MiB total (C5);
+%% the 4MiB content budget covers the reconstruction.
+resp_tool_fragment(Idx, Fragment, St) ->
+    case St#sse_st.tools of
+        #{Idx := #tool_acc{} = TA0} when St#sse_st.open_tool =:= Idx ->
+            case Fragment of
+                F when is_binary(F), F =/= <<>> ->
+                    PerCall = TA0#tool_acc.args_bytes + byte_size(F),
+                    Total = St#sse_st.total_args + byte_size(F),
+                    case
+                        PerCall > ?TOOL_ARGS_PER_CALL_CAP orelse
+                            Total > ?TOOL_ARGS_TOTAL_CAP
+                    of
+                        true ->
+                            {error, tool_args_cap, St};
+                        false ->
+                            case resp_budget(St, byte_size(F)) of
+                                false ->
+                                    {error, translate_unsupported, St};
+                                true ->
+                                    Delta = responses_frame(
+                                        <<"response.function_call_arguments.delta">>,
+                                        #{
+                                            <<"type">> => <<"response.function_call_arguments.delta">>,
+                                            <<"item_id">> => TA0#tool_acc.item_id,
+                                            <<"output_index">> => TA0#tool_acc.resp_index,
+                                            <<"delta">> => F
+                                        }
+                                    ),
+                                    TA1 = TA0#tool_acc{
+                                        args = [F | TA0#tool_acc.args], args_bytes = PerCall
+                                    },
+                                    {[Delta], St#sse_st{
+                                        tools = (St#sse_st.tools)#{Idx := TA1},
+                                        total_args = Total,
+                                        content_bytes = St#sse_st.content_bytes + byte_size(F)
+                                    }}
+                            end
+                    end;
+                _ ->
+                    %% ""/null/absent: no bytes, no frame.
+                    {[], St}
+            end;
+        #{Idx := _} ->
+            %% Fragment after the call closed (or before it opened):
+            %% upstream bug, fail closed.
+            {error, translate_unsupported, St};
+        _ ->
+            {error, translate_unsupported, St}
+    end.
+
+%% The ONLY emitter of a function_call item's output_item.done — and
+%% only after the ONE decode-at-close completeness check. Deferred
+%% interleaved text flushes after the done, as a sequential message
+%% item (C5). Zero accumulated bytes close with "{}".
+resp_close_tool(#sse_st{open_tool = undefined} = St) ->
+    {[], St};
+resp_close_tool(St) ->
+    Key = St#sse_st.open_tool,
+    TA = maps:get(Key, St#sse_st.tools),
+    Args = tool_args_of(TA),
+    case tool_args_complete(Args) of
+        ok ->
+            Full =
+                case Args of
+                    <<>> -> <<"{}">>;
+                    _ -> Args
+                end,
+            Item = #{
+                <<"id">> => TA#tool_acc.item_id,
+                <<"type">> => <<"function_call">>,
+                <<"status">> => <<"completed">>,
+                <<"call_id">> => TA#tool_acc.id,
+                <<"name">> => TA#tool_acc.name,
+                <<"arguments">> => Full
+            },
+            Done = responses_frame(
+                <<"response.output_item.done">>,
+                #{
+                    <<"type">> => <<"response.output_item.done">>,
+                    <<"output_index">> => TA#tool_acc.resp_index,
+                    <<"item">> => Item
+                }
+            ),
+            St1 = St#sse_st{
+                tools = (St#sse_st.tools)#{Key := TA#tool_acc{args = [], args_bytes = 0, closed = true}},
+                open_tool = undefined,
+                items = [Item | St#sse_st.items]
+            },
+            {FlushFrames, St2} = resp_flush_deferred(St1),
+            {[Done] ++ FlushFrames, St2};
+        {error, incomplete_json} ->
+            %% Truncated arguments at close time: output_item.done must
+            %% never follow a truncated call — C2 error path via the
+            %% caller (response.failed replaces the terminal).
+            {error, translate_unsupported, St}
+    end.
+
+%% Flush deferred text at the tool close point: consecutive text runs
+%% coalesce (merge_runs), order is preserved, and each run continues
+%% into a (possibly new) sequential message item. Bytes were counted at
+%% DEFER time — the flush emits without re-counting.
+resp_flush_deferred(#sse_st{deferred = []} = St) ->
+    {[], St};
+resp_flush_deferred(St) ->
+    Runs = merge_runs(lists:reverse(St#sse_st.deferred), []),
+    lists:foldl(
+        fun({text, Bin}, {FAcc, SAcc}) ->
+            {F, S2} = resp_text_frames(Bin, SAcc),
+            {FAcc ++ F, S2}
+        end,
+        {[], St#sse_st{deferred = []}},
+        Runs
+    ).
+
+%% Terminator driver for [DONE] / message_stop: close anything open,
+%% then exactly ONE terminal event.
+responses_finish(#sse_st{terminal_sent = true} = St) ->
+    {ok, [], St};
+responses_finish(St) ->
+    case resp_close_tool(St) of
+        {error, _, _} = Err ->
+            Err;
+        {ToolFrames, St1} ->
+            {Frames, St2} = responses_finish_tail(St1),
+            {ok, ToolFrames ++ Frames, St2}
+    end.
+
+%% Close the open message item, ensure the skeleton, emit the ONE
+%% terminal. Usage totals ride the response object (C3); nulls when
+%% the upstream reported nothing (never invented).
+responses_finish_tail(St) ->
+    {MsgFrames, St1} = resp_msg_close(St),
+    {TermFrames, St2} = resp_terminal(St1),
+    {MsgFrames ++ TermFrames, St2}.
+
+resp_terminal(St0) ->
+    {Created, St} = resp_ensure_created(St0),
+    Incomplete = responses_incomplete(St),
+    Resp0 = #{
+        <<"id">> => resp_id_of(St),
+        <<"object">> => <<"response">>,
+        <<"status">> =>
+            case Incomplete of
+                true -> <<"incomplete">>;
+                false -> <<"completed">>
+            end,
+        <<"model">> => bin_or(St#sse_st.model, <<"unknown">>),
+        <<"output">> => lists:reverse(St#sse_st.items),
+        <<"usage">> => resp_usage(St)
+    },
+    {Ev, Resp} =
+        case Incomplete of
+            true ->
+                {<<"response.incomplete">>, Resp0#{
+                    <<"incomplete_details">> => #{<<"reason">> => <<"max_output_tokens">>}
+                }};
+            false ->
+                {<<"response.completed">>, Resp0}
+        end,
+    Frame = responses_frame(Ev, #{<<"type">> => Ev, <<"response">> => Resp}),
+    {Created ++ [Frame], St#sse_st{terminal_sent = true, usage_sent = true}}.
+
+%% C2 map: chat finish_reason=length / anthropic stop_reason=max_tokens
+%% -> response.incomplete(incomplete_details.reason=max_output_tokens).
+responses_incomplete(St) ->
+    St#sse_st.finish_reason =:= <<"length">> orelse St#sse_st.stop_reason =:= <<"max_tokens">>.
+
+resp_id_of(#sse_st{resp_id = Id}) when is_binary(Id), Id =/= <<>> ->
+    Id;
+resp_id_of(_) ->
+    responses_resp_id().
+
+resp_usage(St) ->
+    In = St#sse_st.in_tokens,
+    Out = St#sse_st.out_tokens,
+    #{
+        <<"input_tokens">> => resp_usage_val(In),
+        <<"output_tokens">> => resp_usage_val(Out),
+        <<"total_tokens">> => resp_total(In, Out)
+    }.
+
+resp_usage_val(undefined) -> null;
+resp_usage_val(N) when is_integer(N) -> N.
+
+resp_total(In, Out) when is_integer(In), is_integer(Out) -> In + Out;
+resp_total(_, _) -> null.
+
+%%%-------------------------------------------------------------------
 %%% finalize_sse/3 — exactly one terminator
 %%%-------------------------------------------------------------------
 
@@ -2368,6 +3151,23 @@ finalize_sse(anthropic_messages, normal, #sse_st{open_tool = Open} = St) when Op
 finalize_sse(anthropic_messages, normal, St) ->
     {Frames, St1} = finalize_anthropic_normal(St),
     {ok, Frames, St1#sse_st{terminal_sent = true}};
+finalize_sse(openai_responses, normal, #sse_st{open_tool = Open} = St) when Open =/= undefined ->
+    %% EOF inside a tool call: the ONE decode at close decides —
+    %% complete args close the item normally, truncated args take the
+    %% C2 error path (output_item.done must never follow a truncated
+    %% call, C5).
+    case resp_close_tool(St) of
+        {error, _, _} ->
+            finalize_sse(
+                openai_responses, {error, upstream, <<"truncated tool arguments">>}, St
+            );
+        {ToolFrames, St1} ->
+            {Frames, St2} = responses_finish_tail(St1),
+            {ok, ToolFrames ++ Frames, St2#sse_st{terminal_sent = true}}
+    end;
+finalize_sse(openai_responses, normal, St) ->
+    {Frames, St1} = responses_finish_tail(St),
+    {ok, Frames, St1#sse_st{terminal_sent = true}};
 finalize_sse(openai_chat, {error, Kind, Msg}, St) ->
     Err = chat_frame(#{
         <<"error">> => #{<<"message">> => trunc_200(Msg), <<"type">> => error_type(Kind)}
@@ -2382,7 +3182,30 @@ finalize_sse(anthropic_messages, {error, Kind, Msg}, St) ->
         }
     ),
     StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
-    {ok, [Err, StopFrame], St#sse_st{terminal_sent = true}}.
+    {ok, [Err, StopFrame], St#sse_st{terminal_sent = true}};
+finalize_sse(openai_responses, {error, Kind, Msg}, St) ->
+    %% C2: a failure before any content frame still flushes the OPENING
+    %% skeleton (responses SDKs require response.created), then
+    %% response.failed ALONE — no completed may follow a failure, and
+    %% usage never rides the failure wire (usage row only).
+    {Created, St1} = resp_ensure_created(St),
+    Failed = responses_frame(
+        <<"response.failed">>,
+        #{
+            <<"type">> => <<"response.failed">>,
+            <<"response">> => #{
+                <<"id">> => resp_id_of(St1),
+                <<"object">> => <<"response">>,
+                <<"status">> => <<"failed">>,
+                <<"error">> => #{
+                    <<"type">> => error_type(Kind),
+                    <<"code">> => error_type(Kind),
+                    <<"message">> => trunc_200(Msg)
+                }
+            }
+        }
+    ),
+    {ok, Created ++ [Failed], St1#sse_st{terminal_sent = true}}.
 
 %% The anthropic normal-EOF tail: start (if never sent), a zero-content
 %% block for an empty face, close, delayed message_delta, message_stop.

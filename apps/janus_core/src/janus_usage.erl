@@ -207,7 +207,7 @@ do_flush(#state{buf = Buf} = State) ->
         <<"(ts, agent_key_id, model_id, provider_id, provider_key_id, "
           " protocol, stream, status, prompt_tokens, completion_tokens, latency_ms, "
           " error_code, attempt, request_ref, is_terminal, request_id, "
-          " modality, units, outcome)">>,
+          " modality, units, outcome, cache_read_input_tokens)">>,
     Failed =
         lists:foldl(
             fun(Rows, Acc) ->
@@ -283,7 +283,7 @@ build_insert(Cols, Rows) ->
     {ValuesSql, Params} =
         lists:foldl(
             fun(Ev, {SqlAcc, PAcc}) ->
-                Ph = string:join(lists:duplicate(19, "?"), ", "),
+                Ph = string:join(lists:duplicate(20, "?"), ", "),
                 Params = [
                     maps:get(ts, Ev, erlang:system_time(second)),
                     int_or_null(maps:get(agent_key_id, Ev, null)),
@@ -303,7 +303,8 @@ build_insert(Cols, Rows) ->
                     bin_or_null(maps:get(request_id, Ev, null)),
                     modality_bin(maps:get(modality, Ev, <<"chat">>)),
                     num_or_null(maps:get(units, Ev, null)),
-                    outcome_bin(maps:get(outcome, Ev, null))
+                    outcome_bin(maps:get(outcome, Ev, null)),
+                    int_or_null(maps:get(cache_read_input_tokens, Ev, null))
                 ],
                 {SqlAcc ++ ["(" ++ Ph ++ ")"], PAcc ++ Params}
             end,
@@ -426,24 +427,34 @@ build_insert_shape_test() ->
     ),
     %% 19 placeholders per row (16 legacy + modality/units/outcome),
     %% one VALUES group per row.
-    ?assertEqual(38, length(Params)),
+    ?assertEqual(40, length(Params)),
+    Row20 = lists:duplicate(20, "?"),
     ?assertMatch(
-        <<"INSERT INTO usage_events (a, b) VALUES "
-          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), "
-          "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)">>,
-        Sql
+        {ok, _},
+        begin
+            Want = iolist_to_binary([
+                <<"INSERT INTO usage_events (a, b) VALUES (">>,
+                string:join(Row20, ", "), <<"), (">>,
+                string:join(Row20, ", "), <<")">>
+            ]),
+            case Sql of
+                Want -> {ok, matched};
+                _ -> {error, Sql}
+            end
+        end
     ),
     %% row 2: status 502 present, prompt defaults to null (not 0);
     %% attempt defaults to 1, is_terminal to true, request_id to null;
     %% modality defaults to chat, units and outcome to null.
-    ?assertEqual(502, lists:nth(27, Params)),
-    ?assertEqual(null, lists:nth(28, Params)),
-    ?assertEqual(1, lists:nth(32, Params)),
-    ?assertEqual(true, lists:nth(34, Params)),
-    ?assertEqual(null, lists:nth(35, Params)),
-    ?assertEqual(<<"chat">>, lists:nth(36, Params)),
-    ?assertEqual(null, lists:nth(37, Params)),
-    ?assertEqual(null, lists:nth(38, Params)).
+    ?assertEqual(502, lists:nth(28, Params)),
+    ?assertEqual(null, lists:nth(29, Params)),
+    ?assertEqual(1, lists:nth(33, Params)),
+    ?assertEqual(true, lists:nth(35, Params)),
+    ?assertEqual(null, lists:nth(36, Params)),
+    ?assertEqual(<<"chat">>, lists:nth(37, Params)),
+    ?assertEqual(null, lists:nth(38, Params)),
+    ?assertEqual(null, lists:nth(39, Params)),
+    ?assertEqual(null, lists:nth(40, Params)).
 
 chunk_test() ->
     ?assertEqual([[1, 2], [3]], janus_usage:chunk([1, 2, 3], 2)),

@@ -8,8 +8,13 @@
 -include("janus_protocol_translate.hrl").
 
 -export([handle/5, model_field/1]).
-%% Exported for eunit (usage capture helpers).
--export([maybe_trim/2, maybe_inject_stream_usage/4, stream_translate_blocked_for/2]).
+%% Exported for eunit (usage capture helpers + Phase-2 knob).
+-export([
+    maybe_trim/2,
+    maybe_inject_stream_usage/4,
+    stream_translate_blocked_for/2,
+    responses_stream_translate_enabled/0
+]).
 
 -define(MAX_BODY, 10 * 1024 * 1024).
 
@@ -246,6 +251,18 @@ tools_stream_translate_enabled() ->
         _ -> false
     end.
 
+%% Phase-2 ship knob (plan 2.3): streaming translate for
+%% openai_responses CLIENTS over chat/anthropic providers. Same
+%% settings key `translate`, map key <<"responses">>; absent = OFF
+%% (default-off discipline — the dashboard PUTs {"tools": bool} today;
+%% the gateway reads this key independently, no dashboard change
+%% required). Independent of the tools knob (2x2 matrix, plan 2.3).
+responses_stream_translate_enabled() ->
+    case persistent_term:get({janus, translate_cfg}, undefined) of
+        Cfg when is_map(Cfg) -> maps:get(<<"responses">>, Cfg, false) =:= true;
+        _ -> false
+    end.
+
 stream_pick_opts(ClientProto, Map) ->
     case stream_translate_blocked_for(ClientProto, Map) of
         true ->
@@ -254,7 +271,47 @@ stream_pick_opts(ClientProto, Map) ->
             #{}
     end.
 
+-define(COMPUTER_USE_TOOLS, [<<"computer_20250124">>]).
+
+has_computer_use_tool(Map) when is_map(Map) ->
+    case maps:get(<<"tools">>, Map, undefined) of
+        L when is_list(L) ->
+            lists:any(
+                fun
+                    (#{<<"type">> := T}) ->
+                        lists:member(T, ?COMPUTER_USE_TOOLS);
+                    (_) ->
+                        false
+                end,
+                L
+            );
+        _ ->
+            false
+    end;
+has_computer_use_tool(_) ->
+    false.
+
 dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
+    %% M4.2 computer-use gate: the computer_* tool family only ever
+    %% rides anthropic-native routes — hard-reject locally instead of
+    %% letting translation damage the schema.
+    case
+        ClientProto =:= anthropic_messages andalso
+            ProviderProto =/= anthropic_messages andalso
+            has_computer_use_tool(Map)
+    of
+        true ->
+            _ = track(400, Route, #{}),
+            reply_err(
+                ClientProto, Req, State, 400,
+                <<"computer_use_requires_native">>,
+                <<"computer-use tools require an anthropic-protocol provider route">>
+            );
+        false ->
+            dispatch_after_computer_use(ClientProto, ProviderProto, Route, Body, Map, Req, State)
+    end.
+
+dispatch_after_computer_use(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
     WantStream = janus_protocol_translate:wants_stream(Map),
     case get(janus_usage_ctx) of
         undefined -> ok;
@@ -267,15 +324,27 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
                 false ->
                     call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
                 true ->
-                    %% Decide BEFORE any bookkeeping: with the tools
-                    %% knob ON the request proceeds on the translate
-                    %% path (its own terminal accounting fires there);
-                    %% recording a 400 here would double-count every
-                    %% knob-on request as a failure.
+                    %% Decide BEFORE any bookkeeping: with a knob ON the
+                    %% request proceeds on the translate path (its own
+                    %% terminal accounting fires there); recording a 400
+                    %% here would double-count every knob-on request as a
+                    %% failure.
                     KnobOn =
-                        translatable_stream_pair(ClientProto, ProviderProto) =:= true andalso
-                            ClientProto =/= openai_responses andalso
-                            tools_stream_translate_enabled(),
+                        case ClientProto of
+                            openai_responses ->
+                                %% Phase-2 knob: responses clients stream
+                                %% through the chat/anthropic ->responses
+                                %% emitters. Tools ride THIS knob (independent
+                                %% of the tools knob, plan 2.3 matrix); vision
+                                %% and n>1 stay blocked (n_blocked unchanged).
+                                responses_stream_pair(ProviderProto) andalso
+                                    janus_protocol_translate:responses_stream_gatable(Map) andalso
+                                    responses_stream_translate_enabled();
+                            _ ->
+                                translatable_stream_pair(ClientProto, ProviderProto) =:= true andalso
+                                    ClientProto =/= openai_responses andalso
+                                    tools_stream_translate_enabled()
+                        end,
                     case KnobOn of
                         true ->
                             call_translate(ClientProto, ProviderProto, Route, Map, true, Req, State);
@@ -307,6 +376,12 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
 translatable_stream_pair(openai_chat, anthropic_messages) -> true;
 translatable_stream_pair(anthropic_messages, openai_chat) -> true;
 translatable_stream_pair(_, _) -> false.
+
+%% Phase-2: the provider protocols the ->responses stream emitters
+%% cover. Responses-provider streaming is Phase 3.
+responses_stream_pair(openai_chat) -> true;
+responses_stream_pair(anthropic_messages) -> true;
+responses_stream_pair(_) -> false.
 
 call_native(ClientProto, ProviderProto, Route, Body, Map, WantStream, Req, State) ->
     Result = upstream_call(ProviderProto, Route, Body, Map, WantStream),
@@ -385,10 +460,15 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
             {error, crashed}
     end.
 
-%% Slice A include_usage: only provider openai_chat + client Messages.
+%% Include_usage injection: only provider openai_chat (never send
+%% stream_options to anthropic/responses upstreams, C3), for clients
+%% whose translated face reads the trailing usage chunk — anthropic
+%% (message_delta.usage) and responses (response.<terminal>.usage).
 %% The injected field rides the TRANSLATED provider body (the client's
 %% own stream_options never survives translation).
-maybe_inject_include_usage(anthropic_messages, openai_chat, true, ProviderMap) ->
+maybe_inject_include_usage(ClientProto, openai_chat, true, ProviderMap) when
+    ClientProto =:= anthropic_messages; ClientProto =:= openai_responses
+->
     Inject = application:get_env(janus_core, usage_inject_include_usage, true),
     case Inject of
         true -> {true, ProviderMap#{<<"stream_options">> => #{<<"include_usage">> => true}}};
@@ -468,6 +548,16 @@ translate_chunk(ClientProto, ProviderProto, Chunk, Req2) ->
                                 throw(
                                     {janus_translate, upstream,
                                         <<"upstream sent an unsupported stream construct">>}
+                                );
+                            {error, tool_args_cap, StNext} ->
+                                %% C5 accumulator cap (args/calls/total or
+                                %% the 4MiB content budget): the C2 error
+                                %% path — target-format error event +
+                                %% terminator via finalize, not a crash.
+                                put(janus_sse_state, StNext),
+                                throw(
+                                    {janus_translate, upstream,
+                                        <<"tool call accumulator cap exceeded">>}
                                 )
                         end
                     end,

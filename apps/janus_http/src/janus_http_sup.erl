@@ -22,7 +22,13 @@ init([]) ->
             %% each route fronts one plugin module.
             {"/v1/images/generations", janus_http_modality, [janus_m_images]},
             {"/v1/audio/speech", janus_http_modality, [janus_m_audio_speech]},
-            {"/v1/audio/transcriptions", janus_http_modality, [janus_m_audio_asr]}
+            {"/v1/audio/transcriptions", janus_http_modality, [janus_m_audio_asr]},
+            %% Video (spec M3): the exact route takes the POST submit;
+            %% the [...]-route lets the plugin path-switch GET/DELETE
+            %% on cowboy path_info ([Jvid] poll/cancel, [Jvid,
+            %% <<"content">>] download).
+            {"/v1/videos", janus_http_modality, [janus_m_video]},
+            {"/v1/videos/[...]", janus_http_modality, [janus_m_video]}
         ]}
     ]),
     %% Admin plane: read-only stats for the standalone dashboard to poll.
