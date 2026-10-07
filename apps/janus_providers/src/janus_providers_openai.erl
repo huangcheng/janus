@@ -35,8 +35,15 @@ responses(Route, Body, ReqMap) ->
     | {ok, stream, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
     | {error, term()}.
 responses(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
-    %% Gateway is stateless — never ask upstream to store responses.
-    call(Route, ReqMap#{<<"store">> => false}, <<"/responses">>, Opts).
+    %% Gateway is stateless — DEFAULT store off when the client
+    %% didn't choose (audit find: forcing false also overwrote an
+    %% explicit client store=true on the native passthrough).
+    ReqMap1 =
+        case maps:get(<<"store">>, ReqMap, undefined) of
+            undefined -> ReqMap#{<<"store">> => false};
+            _ -> ReqMap
+        end,
+    call(Route, ReqMap1, <<"/responses">>, Opts).
 
 call(Route, ReqMap, PathSuffix, Opts) ->
     Stream = maps:get(stream, Opts, false) =:= true,

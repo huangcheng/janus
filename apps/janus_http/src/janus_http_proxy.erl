@@ -318,6 +318,25 @@ dispatch_after_computer_use(ClientProto, ProviderProto, Route, Body, Map, Req, S
         Ctx0 -> put(janus_usage_ctx, Ctx0#{stream => WantStream})
     end,
     Native = ClientProto =:= ProviderProto,
+    %% C-1 (audit 2026-10-07): streaming toward a Responses-protocol
+    %% PROVIDER has no SSE translator (Phase 3) — guard pre-flight
+    %% instead of failing mid-stream behind a committed 200.
+    case
+        WantStream andalso ClientProto =/= ProviderProto andalso
+            ProviderProto =:= openai_responses
+    of
+        true ->
+            _ = track(400, Route, #{}),
+            reply_err(
+                ClientProto, Req, State, 400,
+                <<"stream_requires_native_protocol">>,
+                <<"streaming toward a responses-protocol provider is not translated (phase 3)">>
+            );
+        false ->
+            dispatch_after_c1_guard(Native, WantStream, ClientProto, ProviderProto, Route, Body, Map, Req, State)
+    end.
+
+dispatch_after_c1_guard(Native, WantStream, ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
     case {Native, WantStream} of
         {false, true} ->
             case janus_protocol_translate:stream_translate_blocked(ClientProto, Map) of
@@ -367,6 +386,13 @@ dispatch_after_computer_use(ClientProto, ProviderProto, Route, Body, Map, Req, S
                     end
             end;
         {true, _} ->
+            %% include_usage injection stays on the NATIVE path too:
+            %% it is the README-documented usage-accounting mechanism
+            %% (without it native streams record null token counts),
+            %% and maybe_inject_stream_usage/4 SKIPS requests where the
+            %% client set its own stream_options — a client knob is
+            %% never overwritten (re-verified after the 2026-10-07
+            %% audit flagged it; the overwrite claim did not hold).
             {Body2, Map2} = maybe_inject_stream_usage(ClientProto, WantStream, Body, Map),
             call_native(ClientProto, ProviderProto, Route, Body2, Map2, WantStream, Req, State);
         {false, false} ->

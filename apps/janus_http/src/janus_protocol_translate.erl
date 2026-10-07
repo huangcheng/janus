@@ -218,6 +218,13 @@ part_non_text(#{<<"type">> := <<"tool_result">>}) ->
     false;
 part_non_text(#{<<"type">> := <<"function">>}) ->
     false;
+%% Responses tool-loop history items (audit A-1): these are TEXT-class
+%% — falling through to the type catch-all rejected the whole loop
+%% with a misleading "vision" error.
+part_non_text(#{<<"type">> := <<"function_call">>}) ->
+    false;
+part_non_text(#{<<"type">> := <<"function_call_output">>}) ->
+    false;
 part_non_text(#{<<"role">> := _, <<"content">> := C}) ->
     content_has_non_text(C);
 part_non_text(#{<<"type">> := <<"message">>, <<"content">> := C}) ->
@@ -1203,6 +1210,14 @@ messages_resp_to_chat(Map) ->
             {ok, #{
                 <<"id">> => maps:get(<<"id">>, Map, <<"chatcmpl-janus">>),
                 <<"object">> => <<"chat.completion">>,
+                %% Audit find (Kimi 2026-10-07): `created` is a required
+                %% chat-completion field — strict clients broke on the
+                %% translated non-stream path (the stream path had it).
+                <<"created">> =>
+                    case maps:get(<<"created">>, Map, undefined) of
+                        undefined -> erlang:system_time(second);
+                        C when is_integer(C) -> C
+                    end,
                 <<"model">> => maps:get(<<"model">>, Map, <<>>),
                 <<"choices">> => [
                     #{
@@ -1444,7 +1459,12 @@ sse_loop(Bin, Ev, Datas, Acc) ->
         [_Incomplete] when byte_size(Bin) > ?SSE_LEFTOVER_CAP ->
             {error, leftover_cap};
         [_Incomplete] ->
-            {ok, lists:reverse(Acc), Bin};
+            %% C-2 regression (audit 2026-10-07): the pending event's
+            %% already-parsed lines (Ev/Datas) were dropped here, so a
+            %% chunk split mid-event lost fields. Re-encode them into
+            %% the leftover — self-contained, the next chunk re-parses.
+            Pending = pending_prefix(Ev, Datas),
+            {ok, lists:reverse(Acc), <<Pending/binary, Bin/binary>>};
         [Line0, Rest] ->
             Line = strip_cr(Line0),
             case Line of
@@ -1487,6 +1507,21 @@ strip_cr(Line) ->
 
 strip_one_space(<<$\s, V/binary>>) -> V;
 strip_one_space(V) -> V.
+
+%% Rebuild the pending event's parsed lines as literal SSE text so the
+%% leftover binary is self-contained across chunk boundaries.
+pending_prefix(none, []) ->
+    <<>>;
+pending_prefix(Ev, Datas) ->
+    EvLine =
+        case Ev of
+            none -> <<>>;
+            _ -> [<<"event: ">>, Ev, <<"
+">>]
+        end,
+    DataLines = [[<<"data: ">>, D, <<"
+">>] || D <- lists:reverse(Datas)],
+    iolist_to_binary([EvLine, DataLines]).
 
 %% Anthropic events carry the type on the `event:` line; OpenAI chunks
 %% have no event line. [DONE] becomes a bare done marker.
