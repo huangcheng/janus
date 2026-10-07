@@ -585,6 +585,19 @@ Row kinds, explicit (no double-encoding): (1) PER-ATTEMPT rows —
       monitor-driven `truncated` rows land without the request
       process.
 
+## Standing decision (operator, 2026-10-07): standard protocols only
+
+NO provider-dialect adapters — the gateway speaks the standard agent
+protocols (OpenAI Chat / Responses / Anthropic Messages) and the
+OpenAI-standard modality endpoint shapes, and that is all. Providers
+that only offer proprietary shapes (minimax /v1/image_generation-style
+video, dashscope native aigc, stepaudio) do NOT ride the gateway until
+their vendor ships a standard-compatible endpoint. One grandfathered
+exception exists (the minimax T2I translator, built before this
+decision) — it stays, the category is frozen: no NEW dialect adapters,
+ever. Video therefore has no servable production provider today; its
+knob stays OFF until a standard /v1/videos provider exists.
+
 ## Non-goals (documented, not faked)
 
 - Realtime websocket APIs (audio/video live) — separate spec if ever;

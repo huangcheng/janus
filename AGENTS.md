@@ -74,6 +74,13 @@ English. Respond in the user's language (Chinese → Chinese).
 
 - **Pure gateway**: no business logic beyond routing/LB/adjudication on
   the data plane; management logic belongs in the dashboard repo.
+- **Standard protocols only**: the data plane speaks OpenAI
+  Chat/Responses, Anthropic Messages, and the OpenAI-standard modality
+  endpoint shapes (/v1/images/generations, /v1/audio/speech,
+  /v1/audio/transcriptions, /v1/videos). NO provider-dialect adapters
+  (operator decision 2026-10-07) — a provider without standard-shaped
+  endpoints does not ride the gateway. One grandfathered exception:
+  the minimax T2I translator; the category is frozen.
 - Config flows dashboard → shared Postgres → generation bump → gateways
   poll & hot-reload (never edit `sys.config` by hand on servers; the
   `settings` table overrides it via `janus_config:distribute_settings`
