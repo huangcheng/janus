@@ -104,7 +104,9 @@ preflight(ProviderName, Route, Agent, Map, Req, State) ->
             call_upstream(ProviderName, Route, Agent, Map, N, Started, Req, State)
     end.
 
-call_upstream(<<"minimax">>, Route, Agent, Map, N, Started, Req, State) ->
+%% Prefix match: "minimax" (chat-protocol provider) and dedicated
+%% image providers named "minimax-image" etc. share the native T2I API.
+call_upstream(<<"minimax", _/binary>>, Route, Agent, Map, N, Started, Req, State) ->
     Reply =
         janus_modality:upstream_post(
             Route,
@@ -239,7 +241,7 @@ size_msg(_ProviderName) ->
 %%  - wxh_providers() additionally accept any WxH whose sides are
 %%    positive multiples of 8 (the qwen-image family's free sizes).
 -spec valid_size(binary(), term()) -> boolean().
-valid_size(<<"minimax">>, _Size) ->
+valid_size(<<"minimax", _/binary>>, _Size) ->
     true;
 valid_size(ProviderName, undefined) when is_binary(ProviderName) ->
     true;
