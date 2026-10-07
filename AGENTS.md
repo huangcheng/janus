@@ -11,7 +11,15 @@ English. Respond in the user's language (Chinese → Chinese).
 - `apps/janus_core` — DB (epgsql/esqlite via `janus_db_conn`), ETS catalog
   (`janus_catalog`), LB (`janus_lb`), usage writer (`janus_usage`), seed
 - `apps/janus_http` — Cowboy listeners (:8080 agent API, :8090 read-only
-  admin `/stats`), protocol translate, `janus_auto` (janus-auto adjudicator)
+  admin `/stats` + `/metrics`), protocol translate (`janus_protocol_translate`,
+  SSE state machines for all translatable pairs), `janus_auto` (janus-auto
+  adjudicator), modality plugins (`janus_modality` shared plumbing +
+  `janus_m_images` / `janus_m_audio_speech` / `janus_m_audio_asr` /
+  `janus_m_video` behind one cowboy front door `janus_http_modality`,
+  `janus_multipart` RFC 7578 parser, `janus_jvid` HMAC job-id codec).
+  Real captured wire fixtures: `apps/janus_http/test/fixtures/`
+  (`sse/` transcripts, `probes/` provider replies) — eunit consumes
+  these; never invent frames.
 - `apps/janus_providers` — upstream adapters (OpenAI/Anthropic over gun)
 - `apps/janus_dashboard/` — **stale leftover, dashboard moved out**; ignore it
 - `../janus-dashboard/` — FastAPI backend (`app/`), SPA (`spa/`),
@@ -28,8 +36,11 @@ English. Respond in the user's language (Chinese → Chinese).
    to preserve; only then write the code.
 3. **All testing is LOCAL** (`bash ../janus-dashboard/scripts/e2e_local.sh`,
    real-stack gate (step count grows with TEST-FLOWS.md): real Postgres + real gateway + real upstream).
-   Production is NEVER mutated by tests — only the read-only smoke
-   (`run_test_flows.py --smoke`) runs there.
+   Gate spans E.* (entitlement/failover/translation incl. knob matrix
+   E.7-E.14), M.* (modality: real minimax image, real mimo TTS/ASR,
+   knob default-off), TF-1..11. Production is NEVER mutated by tests —
+   only the read-only smoke (`run_test_flows.py --smoke`) runs there
+   (S.8 /metrics skips when stats_host is container-network-only).
 4. **Browser-test the UI** (all pages/features via real clicks), not just
    APIs. Built-in browser tools or `browser-use`; screenshots saved to a
    durable path and referenced when reporting.
@@ -90,6 +101,21 @@ English. Respond in the user's language (Chinese → Chinese).
   persistent_term, not name-registered casts.
 - Catalog is ETS rebuilt from DB; `enabled` columns are SMALLINT 0/1 —
   normalize to booleans on read, write 1/0 in SQL (never `true`).
+- Feature knobs (settings keys → persistent_term, ALL default off,
+  flipped by the operator on the Providers page): `translate.tools` /
+  `translate.responses` gate the cross-protocol stream translations;
+  `modality.{image,tts,asr,video,computer}` gate the modality
+  endpoints (503 `modality_disabled` when off). Knob-off must keep its
+  legacy 400/503 path working (gate asserts both regimes).
+- usage_events carries `modality/units/outcome/cache_read_input_tokens`
+  (migration 010/012); modality plugins record units = images n / TTS
+  chars; video lifecycle lives in `video_jobs` (migration 011).
+- Streaming toward a responses-protocol PROVIDER is pre-flight 400
+  (`stream_pair_untranslatable` — Phase 3 not built); a chat-family
+  call naming a non-chat listing is rejected locally (`wrong_modality`).
+- SSE parser: chunk-fragmentation-safe (pending event lines re-encoded
+  into the leftover — regression eunit drives real fixtures at chunk
+  size 7 and byte-at-a-time; fragmented MUST equal whole).
 - Cowboy listeners set `idle_timeout => 300_000` — upstreams may take
   60s+ to first byte; the default 60s kills handlers (bodiless 502).
 - Agent model surface = union of all provider listings
@@ -107,4 +133,9 @@ English. Respond in the user's language (Chinese → Chinese).
 
 - `../janus-dashboard/docs/TEST-FLOWS.md` — the E2E flows + authoring rules
 - `docs/SCHEMA_ETS_CONTRACT.md`, `../janus-dashboard/docs/SPEC.md`
-- `docs/superpowers/plans/*.md` — audited specs (usage stats, auto-router)
+- `docs/superpowers/plans/*.md` — audited specs (usage stats,
+  auto-router, observability metrics, full protocol translation,
+  modality gateway). `docs/audit/SYNTHESIS.md` + archive hold the
+  multi-model audit rounds behind them; `tools/` holds the provider
+  probe/capture scripts (read keys from the operator temp env file,
+  never committed).
