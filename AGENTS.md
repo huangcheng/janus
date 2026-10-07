@@ -112,7 +112,10 @@ English. Respond in the user's language (Chinese → Chinese).
   chars; video lifecycle lives in `video_jobs` (migration 011).
 - Streaming toward a responses-protocol PROVIDER is pre-flight 400
   (`stream_pair_untranslatable` — Phase 3 not built); a chat-family
-  call naming a non-chat listing is rejected locally (`wrong_modality`).
+  call naming a non-chat listing is rejected locally (`wrong_modality`)
+  — EXCEPT a chat/Responses call naming an openai_decisions-ONLY
+  listing, which is `protocol_requires_native` (Decisions is its own
+  native face; never `wrong_modality`).
 - SSE parser: chunk-fragmentation-safe (pending event lines re-encoded
   into the leftover — regression eunit drives real fixtures at chunk
   size 7 and byte-at-a-time; fragmented MUST equal whole).
