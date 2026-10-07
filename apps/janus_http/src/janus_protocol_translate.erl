@@ -44,7 +44,13 @@
     %% Audit R2: a stream toward a responses-protocol provider is never
     %% translatable cross-protocol (no Phase-3 SSE translator) — shared
     %% by the dispatch guard and route selection.
-    stream_pair_untranslatable/2
+    stream_pair_untranslatable/2,
+    %% Tools/tool_choice shape translation (audit Q4).
+    responses_tool_choice_to_chat/1,
+    chat_tool_choice_to_responses/1,
+    chat_tool_to_responses/1,
+    responses_tool_to_chat/1,
+    responses_tools_to_chat/1
 ]).
 
 -define(DEFAULT_MAX_TOKENS, 4096).
@@ -912,7 +918,16 @@ chat_to_responses(Map) ->
                         null ->
                             {ok, Out4};
                         Tools when is_list(Tools) ->
-                            {ok, Out4#{<<"tools">> => Tools}};
+                            case chat_tools_to_responses(Tools) of
+                                {ok, RespTools} ->
+                                    OutT = Out4#{<<"tools">> => RespTools},
+                                    case chat_tool_choice_to_responses(maps:get(<<"tool_choice">>, Map, undefined)) of
+                                        undefined -> {ok, OutT};
+                                        TC -> {ok, OutT#{<<"tool_choice">> => TC}}
+                                    end;
+                                {error, _} = TErr ->
+                                    TErr
+                            end;
                         _ ->
                             {error, {translate_unsupported, <<"invalid tools">>}}
                     end;
@@ -1064,7 +1079,17 @@ responses_to_chat(Map) ->
                             case maps:get(<<"tools">>, Map, undefined) of
                                 undefined -> {ok, Out3};
                                 null -> {ok, Out3};
-                                Tools when is_list(Tools) -> {ok, Out3#{<<"tools">> => Tools}};
+                                Tools when is_list(Tools) ->
+                                    case responses_tools_to_chat(Tools) of
+                                        {ok, ChatTools} ->
+                                            OutT = Out3#{<<"tools">> => ChatTools},
+                                            case responses_tool_choice_to_chat(maps:get(<<"tool_choice">>, Map, undefined)) of
+                                                undefined -> {ok, OutT};
+                                                TC -> {ok, OutT#{<<"tool_choice">> => TC}}
+                                            end;
+                                        {error, _} = TErr ->
+                                            TErr
+                                    end;
                                 _ -> {error, {translate_unsupported, <<"invalid tools">>}}
                             end;
                         {error, _} = Err ->
@@ -1159,6 +1184,79 @@ flatten_response_content(_) ->
 
 %% function_call_output.output is a string OR an array of content parts
 %% in the Responses spec — flatten both to a chat tool-message string.
+%% Tools cross the chat/responses boundary in different shapes:
+%% responses = flat {type,name,parameters,description?}; chat = wrapped
+%% {type,function,{name,parameters,description}}. Reshape both ways;
+%% already-correct shapes pass through untouched (upstream find, the
+%% verbatim passthrough got flat tools rejected by chat providers).
+responses_tools_to_chat(Tools) ->
+    reshape(Tools, fun responses_tool_to_chat/1).
+
+responses_tool_to_chat(#{<<"function">> := _} = T) ->
+    %% Already chat-wrapped — pass untouched.
+    {ok, T};
+responses_tool_to_chat(#{<<"type">> := <<"function">>} = T) ->
+    case maps:with([<<"name">>, <<"parameters">>, <<"description">>], T) of
+        #{<<"name">> := _} = Fn0 ->
+            Fn = Fn0#{<<"type">> => <<"function">>},
+            {ok, #{<<"type">> => <<"function">>, <<"function">> => Fn}};
+        _ ->
+            {error, {translate_unsupported, <<"responses tool missing name">>}}
+    end;
+responses_tool_to_chat(T) when is_map(T) ->
+    %% Custom type — pass.
+    {ok, T}.
+
+chat_tools_to_responses(Tools) ->
+    reshape(Tools, fun chat_tool_to_responses/1).
+
+chat_tool_to_responses(#{<<"name">> := _, <<"type">> := <<"function">>} = T) ->
+    %% Already responses-flat — pass untouched.
+    {ok, T};
+chat_tool_to_responses(#{<<"type">> := <<"function">>, <<"function">> := Fn} = T) when is_map(Fn) ->
+    case maps:get(<<"name">>, Fn, undefined) of
+        undefined ->
+            {error, {translate_unsupported, <<"chat tool missing name">>}};
+        _ ->
+            Flat0 = maps:merge(
+                maps:with([<<"name">>, <<"parameters">>, <<"description">>], Fn),
+                #{<<"type">> => <<"function">>}
+            ),
+            {ok, maps:merge(Flat0, maps:without([<<"type">>, <<"function">>], T))}
+    end;
+chat_tool_to_responses(T) when is_map(T) ->
+    %% Custom type — pass.
+    {ok, T}.
+
+%% tool_choice crosses with the same flat/wrapped split as tools.
+responses_tool_choice_to_chat(#{<<"type">> := <<"function">>} = TC) ->
+    case maps:get(<<"name">>, TC, undefined) of
+        undefined -> undefined;
+        Name -> #{<<"type">> => <<"function">>, <<"function">> => #{<<"name">> => Name}}
+    end;
+responses_tool_choice_to_chat(undefined) -> undefined;
+responses_tool_choice_to_chat(null) -> undefined;
+responses_tool_choice_to_chat(Bin) when is_binary(Bin) -> Bin;
+responses_tool_choice_to_chat(_) -> undefined.
+
+chat_tool_choice_to_responses(#{<<"type">> := <<"function">>, <<"function">> := #{<<"name">> := Name}}) ->
+    #{<<"type">> => <<"function">>, <<"name">> => Name};
+chat_tool_choice_to_responses(Bin) when is_binary(Bin) -> Bin;
+chat_tool_choice_to_responses(_) -> undefined.
+
+reshape(Tools, F) ->
+    reshape_loop(Tools, F, []).
+
+reshape_loop([], _F, Acc) ->
+    {ok, lists:reverse(Acc)};
+reshape_loop([T | Rest], F, Acc) ->
+    case F(T) of
+        {ok, T2} -> reshape_loop(Rest, F, [T2 | Acc]);
+        {error, _} = Err -> Err
+    end;
+reshape_loop(_, _F, _Acc) ->
+    {error, {translate_unsupported, <<"invalid tools">>}}.
+
 flatten_tool_output(Bin) when is_binary(Bin) ->
     {ok, Bin};
 flatten_tool_output(List) when is_list(List) ->
