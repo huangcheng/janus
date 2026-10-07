@@ -11,7 +11,8 @@
     decrypt_key/1,
     post/3,
     post/6,
-    post_stream/3
+    post_stream/3,
+    get/3
 ]).
 
 -define(UA, <<"opencode/2.0.15">>).
@@ -138,6 +139,56 @@ post(Host, Port, Path, Tls, Headers, Body) when is_list(Host), is_integer(Port) 
 post(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Body) ->
     post(Host, Port, Path, Tls, Headers, Body).
 
+%% Minimal GET (video job polls, spec M3.1): post/6's connection
+%% logic with method GET and no body. The timeout applies to BOTH the
+%% response await and each body chunk await, mirroring the caller's
+%% per-request budget.
+-spec get(map(), [{binary(), binary()}], timeout()) ->
+    {ok, pos_integer(), map(), binary()} | {error, term()}.
+get(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, TimeoutMs)
+    when is_list(Host), is_integer(Port), is_integer(TimeoutMs), TimeoutMs > 0
+->
+    Transport =
+        case Tls of
+            true -> tls;
+            false -> tcp
+        end,
+    Opts = #{
+        transport => Transport,
+        tls_opts => janus_tls_opts(),
+        connect_timeout => ?CONNECT_MS
+    },
+    case gun:open(Host, Port, Opts) of
+        {ok, Conn} ->
+            try
+                case gun:await_up(Conn, ?CONNECT_MS) of
+                    {ok, _} ->
+                        Stream = gun:get(Conn, Path, Headers),
+                        case gun:await(Conn, Stream, TimeoutMs) of
+                            {response, fin, Status, RespHeaders} ->
+                                {ok, Status, headers_map(RespHeaders), <<>>};
+                            {response, nofin, Status, RespHeaders} ->
+                                case collect_body(Conn, Stream, TimeoutMs, <<>>) of
+                                    {ok, RespBody} ->
+                                        {ok, Status, headers_map(RespHeaders), RespBody};
+                                    {error, _} = Err ->
+                                        Err
+                                end;
+                            {error, Reason} ->
+                                {error, {await, Reason}};
+                            Other ->
+                                {error, {unexpected_await, Other}}
+                        end;
+                    {error, Reason} ->
+                        {error, {await_up, Reason}}
+                end
+            after
+                gun:close(Conn)
+            end;
+        {error, Reason} ->
+            {error, {open, Reason}}
+    end.
+
 %% Stream POST: returns a drain fun that yields raw body chunks then closes gun.
 %% DrainFun(ChunkFun) -> ok | {error, term()} where ChunkFun(binary()) -> ok.
 -spec post_stream(map(), [{binary(), binary()}], binary()) ->
@@ -205,9 +256,12 @@ drain_stream(Conn, Stream, ChunkFun) ->
     end.
 
 collect_body(Conn, Stream, Acc) ->
-    case gun:await(Conn, Stream, ?BODY_MS) of
+    collect_body(Conn, Stream, ?BODY_MS, Acc).
+
+collect_body(Conn, Stream, TimeoutMs, Acc) ->
+    case gun:await(Conn, Stream, TimeoutMs) of
         {data, nofin, Data} ->
-            collect_body(Conn, Stream, <<Acc/binary, Data/binary>>);
+            collect_body(Conn, Stream, TimeoutMs, <<Acc/binary, Data/binary>>);
         {data, fin, Data} ->
             {ok, <<Acc/binary, Data/binary>>};
         {error, Reason} ->
