@@ -1,0 +1,89 @@
+{
+  "stem": "2026-10-07-openai-decisions-design-r6",
+  "target": "2026-10-07-openai-decisions-design-r6-target.md",
+  "source": "F:\\Janus\\docs\\superpowers\\specs\\2026-10-07-openai-decisions-design-r6.md",
+  "started_at": "2026-10-07T14:55:56.279644+00:00",
+  "finished_at": null,
+  "provisional": true,
+  "panel_size": 7,
+  "pass_count": 7,
+  "required_pass": 5,
+  "quorum_met": true,
+  "degraded": false,
+  "allow_degraded": false,
+  "master_model": "alibaba/qwen3.8-max",
+  "pi_version": "1.0.4",
+  "models": [
+    {
+      "slug": "minimax-m3",
+      "model": "minimax-cn/MiniMax-M3",
+      "exit_code": 0,
+      "duration_ms": 58007,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — scope and falsifiable gates are solid, but gun first-byte timeout, probe classifier, and precedence disjointness must be pinned before implementation starts.",
+      "error": null
+    },
+    {
+      "slug": "mimo-v26-pro",
+      "model": "mimo/mimo-v2.6-pro",
+      "exit_code": 0,
+      "duration_ms": 81586,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the decision log is unusually rigorous (falsifiable D15, hard-gated O1/O2), but a few contracts are underspecified or self-contradictory before this is implem",
+      "error": null
+    },
+    {
+      "slug": "stepfun-5",
+      "model": "stepfun/step-5-preview",
+      "exit_code": 0,
+      "duration_ms": 91615,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the plan is mostly sound but has a timeout contradiction, a missing `Content-Type` gate, and a probe crash-recovery gap that must be resolved before implement",
+      "error": null
+    },
+    {
+      "slug": "qwen38-max",
+      "model": "alibaba/qwen3.8-max",
+      "exit_code": 0,
+      "duration_ms": 190623,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — close the buffering/memory, probe-ownership, and old-beam crash gaps before implementation starts.",
+      "error": null
+    },
+    {
+      "slug": "deepseek-v41-flash",
+      "model": "volcengine-ark/deepseek-v4-1-flash-260910",
+      "exit_code": 0,
+      "duration_ms": 21729,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the pipeline and precedence are unusually well specified, but it bundles two shared-code refactors with a new face and leaves probe billability and `in_flight",
+      "error": null
+    },
+    {
+      "slug": "glm-53",
+      "model": "zhipuai-coding-plan/glm-5.3",
+      "exit_code": 0,
+      "duration_ms": 84789,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the core design is sound and falsifiable, but the write gate depends on unspecified infrastructure and one terminal error path has no client-facing contract.",
+      "error": null
+    },
+    {
+      "slug": "kimi-k3",
+      "model": "kimi-for-coding/k3",
+      "exit_code": 0,
+      "duration_ms": 58759,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the spec is thorough and internally consistent on the big items (precedence, D15, write gate), but several falsifiable-behavior gaps (missing `model`, keepali",
+      "error": null
+    }
+  ],
+  "master": null
+}

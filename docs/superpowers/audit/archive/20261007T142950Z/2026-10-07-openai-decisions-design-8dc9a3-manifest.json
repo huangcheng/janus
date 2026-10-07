@@ -1,0 +1,89 @@
+{
+  "stem": "2026-10-07-openai-decisions-design-8dc9a3",
+  "target": "2026-10-07-openai-decisions-design-8dc9a3-target.md",
+  "source": "F:\\Janus\\docs\\superpowers\\specs\\2026-10-07-openai-decisions-design.md",
+  "started_at": "2026-10-07T14:29:25.692587300+00:00",
+  "finished_at": null,
+  "provisional": true,
+  "panel_size": 7,
+  "pass_count": 7,
+  "required_pass": 5,
+  "quorum_met": true,
+  "degraded": false,
+  "allow_degraded": false,
+  "master_model": "alibaba/qwen3.8-max",
+  "pi_version": "1.0.4",
+  "models": [
+    {
+      "slug": "minimax-m3",
+      "model": "minimax-cn/MiniMax-M3",
+      "exit_code": 0,
+      "duration_ms": 70692,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — design is right for first ship, but D15 proxy change, readyz derivation, probe budget, D13 sanitization, and upstream-error envelope need closing before D13 c",
+      "error": null
+    },
+    {
+      "slug": "mimo-v26-pro",
+      "model": "mimo/mimo-v2.6-pro",
+      "exit_code": 0,
+      "duration_ms": 58812,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is unusually disciplined, but the probe cooldown/budget has no schema decision and D6's \"one protocol per row\" sits ambiguously beside the dual-fac",
+      "error": null
+    },
+    {
+      "slug": "stepfun-5",
+      "model": "stepfun/step-5-preview",
+      "exit_code": 0,
+      "duration_ms": 78769,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the spec is thorough, but D15 connect-fail detection, readyz precision, and a hard D13 abort gate must be nailed before code.",
+      "error": null
+    },
+    {
+      "slug": "qwen38-max",
+      "model": "alibaba/qwen3.8-max",
+      "exit_code": 0,
+      "duration_ms": 134994,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — coherent design with correct D13 gating, but the §4.2 pipeline contradicts its own precedence table, and the readyz write gate has an operational lockout path",
+      "error": null
+    },
+    {
+      "slug": "deepseek-v41-flash",
+      "model": "volcengine-ark/deepseek-v4-1-flash-260910",
+      "exit_code": 0,
+      "duration_ms": 32110,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the fail-closed posture is sound, but the request pipeline order is self-contradictory and several referenced error codes are undefined.",
+      "error": null
+    },
+    {
+      "slug": "glm-53",
+      "model": "zhipuai-coding-plan/glm-5.3",
+      "exit_code": 0,
+      "duration_ms": 94006,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — architecture is sound and round-5 hardened, but one internal contradiction (pipeline order), an underspecified D15 error contract, and unbounded write-gate/st",
+      "error": null
+    },
+    {
+      "slug": "kimi-k3",
+      "model": "kimi-for-coding/k3",
+      "exit_code": 0,
+      "duration_ms": 68949,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is thorough, but the request-pipeline ordering contradicts itself and the write gate couples management-plane writes to follower health without fai",
+      "error": null
+    }
+  ],
+  "master": null
+}

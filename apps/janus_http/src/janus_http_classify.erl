@@ -11,12 +11,14 @@ endpoint(<<"/v1/chat/completions">>) -> chat;
 endpoint(<<"/v1/responses">>) -> responses;
 endpoint(<<"/v1/messages">>) -> messages;
 endpoint(<<"/v1/models">>) -> models;
+endpoint(<<"/v1/decisions">>) -> decisions;
 endpoint(_) -> other.
 
 protocol(<<"/v1/chat/completions">>) -> openai_chat;
 protocol(<<"/v1/responses">>) -> openai_responses;
 protocol(<<"/v1/messages">>) -> anthropic_messages;
 protocol(<<"/v1/models">>) -> none;
+protocol(<<"/v1/decisions">>) -> openai_decisions;
 protocol(_) -> other.
 
 status_class(S) when is_integer(S), S >= 200, S < 300 -> <<"2xx">>;

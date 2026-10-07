@@ -55,15 +55,23 @@
 
 -define(DEFAULT_MAX_TOKENS, 4096).
 
--type proto() :: openai_chat | openai_responses | anthropic_messages.
+-type proto() :: openai_chat | openai_responses | anthropic_messages | openai_decisions.
 
+%% openai_decisions (spec 2026-10-07 D2) is normalize-ONLY: it never
+%% appears in any translate_request/translate_response pair (D4 — the
+%% Decisions face is native passthrough). The trailing catch-all is
+%% what makes OLD beams (deployed without the openai_decisions clause)
+%% skip rows of the new protocol instead of crashing: unknown binary
+%% -> {error, unknown_protocol} -> fail closed (TF-D.12).
 -spec normalize_protocol(term()) -> {ok, proto()} | {error, unknown_protocol}.
 normalize_protocol(<<"openai_chat">>) -> {ok, openai_chat};
 normalize_protocol(<<"openai_responses">>) -> {ok, openai_responses};
 normalize_protocol(<<"anthropic_messages">>) -> {ok, anthropic_messages};
+normalize_protocol(<<"openai_decisions">>) -> {ok, openai_decisions};
 normalize_protocol(openai_chat) -> {ok, openai_chat};
 normalize_protocol(openai_responses) -> {ok, openai_responses};
 normalize_protocol(anthropic_messages) -> {ok, anthropic_messages};
+normalize_protocol(openai_decisions) -> {ok, openai_decisions};
 normalize_protocol(undefined) -> {ok, openai_chat};
 normalize_protocol(null) -> {ok, openai_chat};
 normalize_protocol(_) -> {error, unknown_protocol}.

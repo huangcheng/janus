@@ -1,0 +1,1 @@
+Warning: Invalid settings file C:\Users\huang\.pi\agent\settings.json: EPERM: operation not permitted, mkdir 'C:\Users\huang\.pi\agent\settings.json.lock'

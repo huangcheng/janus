@@ -1,0 +1,94 @@
+{
+  "stem": "2026-10-07-openai-decisions-design-8dc9a3",
+  "target": "2026-10-07-openai-decisions-design-8dc9a3-target.md",
+  "source": "F:\\Janus\\docs\\superpowers\\specs\\2026-10-07-openai-decisions-design.md",
+  "started_at": "2026-10-07T13:56:07.067182800+00:00",
+  "finished_at": "2026-10-07T14:03:07.306549700+00:00",
+  "provisional": false,
+  "panel_size": 7,
+  "pass_count": 7,
+  "required_pass": 5,
+  "quorum_met": true,
+  "degraded": false,
+  "allow_degraded": false,
+  "master_model": "alibaba/qwen3.8-max",
+  "pi_version": "1.0.4",
+  "models": [
+    {
+      "slug": "minimax-m3",
+      "model": "minimax-cn/MiniMax-M3",
+      "exit_code": 0,
+      "duration_ms": 77113,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — shape is right, but probe fingerprint, body-cap/image-budget mismatch, missing rollback migration, and log-redaction gap must be tightened before implementati",
+      "error": null
+    },
+    {
+      "slug": "mimo-v26-pro",
+      "model": "mimo/mimo-v2.6-pro",
+      "exit_code": 0,
+      "duration_ms": 84449,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the fail-closed routing and error-precedence design is sound, but the live-fixture gate, probe fingerprint allowlist, and failover/billing interaction need cl",
+      "error": null
+    },
+    {
+      "slug": "stepfun-5",
+      "model": "stepfun/step-5-preview",
+      "exit_code": 0,
+      "duration_ms": 84395,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the fail-closed routing and error precedence are sound, but the probe contract, fixture redaction scope, and two mechanics (failover policy, gateway \"advertis",
+      "error": null
+    },
+    {
+      "slug": "qwen38-max",
+      "model": "alibaba/qwen3.8-max",
+      "exit_code": 0,
+      "duration_ms": 110778,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — round-3 spec is tight, but billing-retry semantics, an unmapped-usage blind spot, and a circular probe dependency must be pinned before implementation.",
+      "error": null
+    },
+    {
+      "slug": "deepseek-v41-flash",
+      "model": "volcengine-ark/deepseek-v4-1-flash-260910",
+      "exit_code": 0,
+      "duration_ms": 26606,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the face/error/precedence design is sound, but listing discovery can poison the chat catalog and two ship-gate mechanisms are deferred past the point of usefu",
+      "error": null
+    },
+    {
+      "slug": "glm-53",
+      "model": "zhipuai-coding-plan/glm-5.3",
+      "exit_code": 0,
+      "duration_ms": 71706,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is coherent and fail-closed, but sync over-stamping, probe ordering, and an unpinned 400-fingerprint allowlist must be resolved in the doc before i",
+      "error": null
+    },
+    {
+      "slug": "kimi-k3",
+      "model": "kimi-for-coding/k3",
+      "exit_code": 0,
+      "duration_ms": 72205,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is thorough and the fail-closed posture is sound, but the probe contract is under-specified, one precedence case is missing, and the release-order ",
+      "error": null
+    }
+  ],
+  "master": {
+    "ok": true,
+    "exit_code": 0,
+    "duration_ms": 420201,
+    "error": null
+  }
+}

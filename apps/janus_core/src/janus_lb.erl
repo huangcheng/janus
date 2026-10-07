@@ -26,6 +26,9 @@
     %% Pure prefer-proto filter (eunit-tested with an injected lookup
     %% fun; production wires it to the catalog).
     prefer_proto_filter/3,
+    %% Hard face-protocol filter (Decisions spec §4.5) — same
+    %% injection style; mechanism only, the proxy owns the policy.
+    protocol_filter/3,
     %% Entitlement carrier observability (spec Part B/C)
     bump_stat/1,
     stats/0
@@ -198,6 +201,39 @@ route_protocol(R) ->
         _ -> undefined
     end.
 
+%% Hard face-eligibility filter (Decisions spec §4.5): unlike
+%% prefer_proto (a bias that falls back), routes dropped here are
+%% NEVER pickable for this request. Pick opts (policy owned by
+%% janus_http_proxy):
+%%   require_proto  => binary()   — keep ONLY routes on exactly that
+%%                                   provider protocol (the Decisions
+%%                                   face; unknown protocols fail
+%%                                   closed to no_route, D2)
+%%   exclude_protos => [binary()] — drop routes on the listed
+%%                                   protocols (every other face
+%%                                   excludes openai_decisions);
+%%                                   unknown protocols are KEPT — they
+%%                                   defer to the dispatch-time
+%%                                   unknown_protocol guard (D2/TF-D.12)
+%% Pure + total for eunit (inject the proto lookup like
+%% prefer_proto_filter/3).
+protocol_filter(Routes, Opts, RouteProto) when is_map(Opts) ->
+    R1 =
+        case Opts of
+            #{require_proto := Proto} when is_binary(Proto) ->
+                [R || R <- Routes, RouteProto(R) =:= Proto];
+            _ ->
+                Routes
+        end,
+    case Opts of
+        #{exclude_protos := Excluded} when is_list(Excluded) ->
+            [R || R <- R1, not lists:member(RouteProto(R), Excluded)];
+        _ ->
+            R1
+    end;
+protocol_filter(Routes, _, _) ->
+    Routes.
+
 do_pick_route(ModelId, Opts, State) ->
     case catalog_generation_ok(Opts) of
         false ->
@@ -217,7 +253,10 @@ do_pick_listing_route(Name, Opts, State) ->
 pick_from_routes(
     PickKey, Routes0, Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}
 ) ->
-    Routes1 = [R || R <- Routes0, maps:get(enabled, R, true)],
+    Routes1 =
+        protocol_filter(
+            [R || R <- Routes0, maps:get(enabled, R, true)], Opts, fun route_protocol/1
+        ),
     case Routes1 of
         [] ->
             {error, no_route};

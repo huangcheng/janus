@@ -28,6 +28,7 @@
     models_serving => {gauge, <<"Models in the serving catalog.">>},
     lb_routes_cooling => {gauge, <<"LB routes currently cooling down.">>},
     lb_stats_total => {counter, <<"LB counters from janus_lb:stats/0 (cumulative).">>},
+    decisions_upstream_429_total => {counter, <<"Upstream Decisions 429 responses (Retry-After passthrough).">>},
     usage_writer_buffered_rows => {gauge, <<"Usage writer buffered rows.">>},
     uptime_seconds => {gauge, <<"VM wall-clock uptime.">>},
     build_info => {untyped, <<"Build/version info.">>}

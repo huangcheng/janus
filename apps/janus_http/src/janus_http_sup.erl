@@ -3,21 +3,53 @@
 
 -export([start_link/0]).
 -export([init/1]).
+%% Agent-face registry read by /readyz (write-gate advertisement,
+%% Decisions spec §4.3) and by eunit.
+-export([agent_routes/0, agent_protocols/0, publish_agent_protocols/0]).
 
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+%% Agent face registry — the SINGLE source for (a) the cowboy agent
+%% dispatch entries and (b) the `protocols` list /readyz advertises at
+%% listener start (dashboard write gate polls it before allowing
+%% Decisions provider writes; captured from the handler modules
+%% registered for agent routes, unauthenticated like healthz —
+%% accepted disclosure, §4.3).
+-spec agent_routes() -> [{string(), module(), atom()}].
+agent_routes() ->
+    [
+        {"/v1/chat/completions", janus_http_chat, openai_chat},
+        {"/v1/responses", janus_http_responses, openai_responses},
+        {"/v1/messages", janus_http_messages, anthropic_messages},
+        %% Fourth agent face (D1): native Decisions passthrough.
+        {"/v1/decisions", janus_http_decisions, openai_decisions}
+    ].
+
+%% Sorted unique protocol binaries advertised on /readyz. Kept in
+%% persistent_term at supervisor init (boot-order-safe convention —
+%% readyz may be scraped before any handler ran).
+-spec agent_protocols() -> [binary()].
+agent_protocols() ->
+    persistent_term:get({janus, agent_protocols}, []).
+
+publish_agent_protocols() ->
+    Protocols =
+        lists:usort([atom_to_binary(Proto, utf8) || {_, _, Proto} <- agent_routes()]),
+    persistent_term:put({janus, agent_protocols}, Protocols),
+    ok.
+
 init([]) ->
+    ok = publish_agent_protocols(),
     Port = application:get_env(janus, http_port, 8080),
     Bind = bind("JANUS_HTTP_BIND", http_bind),
+    AgentDispatch = [{Path, Handler, []} || {Path, Handler, _Proto} <- agent_routes()],
     Dispatch = cowboy_router:compile([
         {'_', [
             {"/healthz", janus_http_health, []},
             {"/readyz", janus_http_ready, []},
-            {"/v1/models", janus_http_models, []},
-            {"/v1/chat/completions", janus_http_chat, []},
-            {"/v1/responses", janus_http_responses, []},
-            {"/v1/messages", janus_http_messages, []},
+            {"/v1/models", janus_http_models, []}
+        ] ++ AgentDispatch ++ [
             %% Modality plugins (spec 2026-10-07): static dispatch,
             %% each route fronts one plugin module.
             {"/v1/images/generations", janus_http_modality, [janus_m_images]},

@@ -1,0 +1,94 @@
+{
+  "stem": "2026-10-07-openai-decisions-design",
+  "target": "2026-10-07-openai-decisions-design-target.md",
+  "source": "F:\\Janus\\docs\\superpowers\\specs\\2026-10-07-openai-decisions-design.md",
+  "started_at": "2026-10-07T13:20:43.275744500+00:00",
+  "finished_at": "2026-10-07T13:34:10.016171400+00:00",
+  "provisional": false,
+  "panel_size": 7,
+  "pass_count": 7,
+  "required_pass": 5,
+  "quorum_met": true,
+  "degraded": false,
+  "allow_degraded": false,
+  "master_model": "alibaba/qwen3.8-max",
+  "pi_version": "1.0.4",
+  "models": [
+    {
+      "slug": "minimax-m3",
+      "model": "minimax-cn/MiniMax-M3",
+      "exit_code": 0,
+      "duration_ms": 61577,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — sound framing, but several pins (probe semantics, reject site, dual-listing aggregation) must be sharpened before plan-time.",
+      "error": null
+    },
+    {
+      "slug": "mimo-v26-pro",
+      "model": "mimo/mimo-v2.6-pro",
+      "exit_code": 0,
+      "duration_ms": 39820,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the fail-closed posture and dual-repo awareness are sound, but the wrong-face 400 contract conflicts with the existing `/v1/models` semantics and the usage/me",
+      "error": null
+    },
+    {
+      "slug": "stepfun-5",
+      "model": "stepfun/step-5-preview",
+      "exit_code": 0,
+      "duration_ms": 80525,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES",
+      "error": null
+    },
+    {
+      "slug": "qwen38-max",
+      "model": "alibaba/qwen3.8-max",
+      "exit_code": 0,
+      "duration_ms": 127209,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — sound passthrough design, but fail-closed guarantees leak through LB wording, entitlement semantics are undefined, and the project's default-off knob conventi",
+      "error": null
+    },
+    {
+      "slug": "deepseek-v41-flash",
+      "model": "volcengine-ark/deepseek-v4-1-flash-260910",
+      "exit_code": 0,
+      "duration_ms": 18856,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the reuse of existing auth/LB/usage plumbing is sound, but the upstream premise is uncaptured and several first-ship contracts are undefined.",
+      "error": null
+    },
+    {
+      "slug": "glm-53",
+      "model": "zhipuai-coding-plan/glm-5.3",
+      "exit_code": 0,
+      "duration_ms": 60059,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the fail-closed native-passthrough design is sound and consistent with Janus invariants, but the listing-sync mechanism is undefined and several acceptances a",
+      "error": null
+    },
+    {
+      "slug": "kimi-k3",
+      "model": "kimi-for-coding/k3",
+      "exit_code": 0,
+      "duration_ms": 34455,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the fail-closed design is sound, but the spec pins almost nothing against a live Decisions response, leaving auth, usage, and probe contracts to be invented a",
+      "error": null
+    }
+  ],
+  "master": {
+    "ok": true,
+    "exit_code": 0,
+    "duration_ms": 323871,
+    "error": null
+  }
+}

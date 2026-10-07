@@ -1,0 +1,94 @@
+{
+  "stem": "2026-10-07-openai-decisions-design-r6",
+  "target": "2026-10-07-openai-decisions-design-r6-target.md",
+  "source": "F:\\Janus\\docs\\superpowers\\specs\\2026-10-07-openai-decisions-design-r6.md",
+  "started_at": "2026-10-07T15:04:10.946892+00:00",
+  "finished_at": "2026-10-07T15:16:54.224848+00:00",
+  "provisional": false,
+  "panel_size": 7,
+  "pass_count": 7,
+  "required_pass": 5,
+  "quorum_met": true,
+  "degraded": false,
+  "allow_degraded": false,
+  "master_model": "alibaba/qwen3.8-max",
+  "pi_version": "1.0.4",
+  "models": [
+    {
+      "slug": "minimax-m3",
+      "model": "minimax-cn/MiniMax-M3",
+      "exit_code": 0,
+      "duration_ms": 94602,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES",
+      "error": null
+    },
+    {
+      "slug": "mimo-v26-pro",
+      "model": "mimo/mimo-v2.6-pro",
+      "exit_code": 0,
+      "duration_ms": 124930,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — decisions and failure semantics are tightly pinned, but upstream auth handling, the 60 s first-byte timeout, and unbounded body buffering must be resolved bef",
+      "error": null
+    },
+    {
+      "slug": "stepfun-5",
+      "model": "stepfun/step-5-preview",
+      "exit_code": 0,
+      "duration_ms": 79374,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the core architecture is sound and D15’s terminal retry rule is falsifiable, but the write-gate readiness probe lacks a positive-path regression, and the shar",
+      "error": null
+    },
+    {
+      "slug": "qwen38-max",
+      "model": "alibaba/qwen3.8-max",
+      "exit_code": 0,
+      "duration_ms": 84187,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — two unclassified failure paths and one unverified cross-host dependency must be closed before implementation.",
+      "error": null
+    },
+    {
+      "slug": "deepseek-v41-flash",
+      "model": "volcengine-ark/deepseek-v4-1-flash-260910",
+      "exit_code": 0,
+      "duration_ms": 23842,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the shape is sound, but D15's failover signal is likely unimplementable as written and two \"disjoint\" claims are not disjoint.",
+      "error": null
+    },
+    {
+      "slug": "glm-53",
+      "model": "zhipuai-coding-plan/glm-5.3",
+      "exit_code": 0,
+      "duration_ms": 84921,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — routing/precedence/failover are decision-complete; the gaps are one unspecified error contract and two unverified operational assumptions.",
+      "error": null
+    },
+    {
+      "slug": "kimi-k3",
+      "model": "kimi-for-coding/k3",
+      "exit_code": 0,
+      "duration_ms": 85034,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the spec is unusually rigorous (precedence, D15 falsifiability, write gate), but header-forwarding policy, upstream read deadlines, and write-gate TOCTOU gaps",
+      "error": null
+    }
+  ],
+  "master": {
+    "ok": true,
+    "exit_code": 0,
+    "duration_ms": 280011,
+    "error": null
+  }
+}

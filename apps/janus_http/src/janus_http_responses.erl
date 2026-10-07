@@ -1,5 +1,9 @@
 %%%-------------------------------------------------------------------
 %%% @doc OpenAI Responses API agent endpoint.
+%%%
+%%% Shared preamble (request-id, auth, capped body read) lives in
+%%% janus_http_preamble since spec 2026-10-07 D16 — this module is the
+%%% D16 regression anchor: behavior identical to the inlined version.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_http_responses).
@@ -10,28 +14,9 @@
 -define(MAX_BODY, 10 * 1024 * 1024).
 
 init(Req0, State) ->
-    erase(janus_req_counted),
-    ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
-    Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
-    put(janus_request_id, ReqId),
-    case janus_http_auth:require_agent(Req1) of
-        {ok, Agent, Req2} ->
-            case cowboy_req:read_body(Req2, #{length => ?MAX_BODY}) of
-                {ok, Body, Req3} ->
-                    janus_http_proxy:handle(openai_responses, Agent, Body, Req3, State);
-                {more, _, Req3} ->
-                    Body = thoas:encode(#{
-                        error => #{
-                            message => <<"body exceeds limit">>,
-                            type => <<"janus_error">>,
-                            code => <<"request_too_large">>
-                        }
-                    }),
-                    Req4 = cowboy_req:reply(
-                        413, #{<<"content-type">> => <<"application/json">>}, Body, Req3
-                    ),
-                    {ok, Req4, State}
-            end;
-        {error, ReqErr} ->
-            {ok, ReqErr, State}
+    case janus_http_preamble:read(Req0, #{face => openai_responses, max_body => ?MAX_BODY}) of
+        {ok, Agent, Body, Req1} ->
+            janus_http_proxy:handle(openai_responses, Agent, Body, Req1, State);
+        {error, Req1} ->
+            {ok, Req1, State}
     end.

@@ -651,9 +651,13 @@ binary_to_tier(<<"flagship">>) -> flagship;
 binary_to_tier(B) when is_binary(B) -> B.
 
 judge_model_route(JM) ->
+    %% Decisions spec TF-D.7: the judge is an auto-protocol (chat
+    %% translate) call — it must never ride an openai_decisions route.
+    %% Reuse the proxy's face policy (single source) as pick opts.
+    Opts = janus_http_proxy:face_eligibility_opts(openai_chat),
     case janus_catalog:lookup_model(JM) of
         {ok, #{id := Id, enabled := true}} ->
-            case janus_lb:pick_route(Id, #{}) of
+            case janus_lb:pick_route(Id, Opts) of
                 {ok, Route} -> {ok, Route};
                 _ -> error
             end;
@@ -662,7 +666,7 @@ judge_model_route(JM) ->
             %% the agent-visible surface (a provider listing that was
             %% never bound on the Router page) — fall back to the
             %% direct-listing pick, sharing the LB pipeline.
-            case janus_lb:pick_listing_route(JM, #{}) of
+            case janus_lb:pick_listing_route(JM, Opts) of
                 {ok, Route} -> {ok, Route};
                 _ -> error
             end

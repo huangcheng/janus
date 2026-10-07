@@ -15,6 +15,21 @@
     stream_translate_blocked_for/2,
     responses_stream_translate_enabled/0
 ]).
+%% Exported for eunit (Decisions spec 2026-10-07): face eligibility
+%% gate + ordered pre-pick pipeline + forward-decision predicates.
+-export([
+    proto_gate/2,
+    route_eligible/2,
+    protocol_requires_native_msg/2,
+    face_eligibility_opts/1,
+    stream_pick_opts/2,
+    decisions_pre_pick/2,
+    decisions_auto_model/1,
+    decisions_presend_failure/1,
+    decisions_local_error/1,
+    %% error envelope builder (envelope-shape eunit, Decisions spec)
+    error_map/3
+]).
 
 -define(MAX_BODY, 10 * 1024 * 1024).
 
@@ -22,7 +37,8 @@
 -define(USAGE_TAIL_BYTES, 16384).
 -define(USAGE_TAIL_CHUNKS, 256).
 
-%% ClientProto = openai_chat | openai_responses | anthropic_messages
+%% ClientProto = openai_chat | openai_responses | anthropic_messages |
+%%                openai_decisions (native passthrough only, D4)
 -spec handle(atom(), map(), binary(), cowboy_req:req(), term()) ->
     {ok, cowboy_req:req(), term()}.
 handle(ClientProto, Agent, Body, Req, State) ->
@@ -67,6 +83,33 @@ handle(ClientProto, Agent, Body, Req, State) ->
             erlang:raise(Class, Reason, Stack)
     end.
 
+handle_body(openai_decisions, Agent, Body, Req, State) ->
+    %% Decisions pipeline §4.2 steps 3-5: JSON parse -> grant check by
+    %% body model -> stream guard (D18: body field ONLY — the Accept
+    %% header is never examined). Step 6 (pick/eligibility) runs in
+    %% do_proxy/6. No janus-auto routing on this face (§4.5 last row).
+    case thoas:decode(Body) of
+        {ok, Map} when is_map(Map) ->
+            case decisions_pre_pick(Agent, Map) of
+                {ok, Model} ->
+                    do_proxy(openai_decisions, Model, Body, Map, Req, State);
+                {error, {Status, Code, Msg}} ->
+                    reply_err(openai_decisions, Req, State, Status, Code, Msg)
+            end;
+        {ok, _} ->
+            reply_err(
+                openai_decisions,
+                Req,
+                State,
+                400,
+                <<"invalid_json">>,
+                <<"request body must be a JSON object">>
+            );
+        {error, _} ->
+            reply_err(
+                openai_decisions, Req, State, 400, <<"invalid_json">>, <<"request body must be JSON">>
+            )
+    end;
 handle_body(ClientProto, Agent, Body, Req, State) ->
     case thoas:decode(Body) of
         {ok, Map} when is_map(Map) ->
@@ -115,6 +158,58 @@ extract_model(_Proto, Map) ->
             {error, <<"model must be a non-empty string">>}
     end.
 
+%%--------------------------------------------------------------------
+%% OpenAI Decisions face (spec 2026-10-07). Native passthrough only:
+%% no translate clauses anywhere (D4), no streaming (§4.6), no auto
+%% routing, failover only on pre-send failures (D15).
+%%--------------------------------------------------------------------
+
+%% §4.2 steps 3-5 as one ordered function (exported so eunit can pin
+%% the ORDER, not just the outcomes): model extract -> grant check ->
+%% stream guard. Precedence rows 2/3 are disjoint BY order — a
+%% denylisted model with "stream": true reports model_not_allowed
+%% (grant outranks stream), an allowed model with "stream": true
+%% reports stream_not_supported (stream outranks route resolution).
+decisions_pre_pick(Agent, Map) when is_map(Map) ->
+    case extract_model(openai_decisions, Map) of
+        {error, Msg} ->
+            {error, {400, <<"invalid_request">>, Msg}};
+        {ok, Model} ->
+            case model_allowed(Agent, Model) of
+                false ->
+                    {error,
+                        {403, <<"model_not_allowed">>, <<"model not in allowlist">>}};
+                true ->
+                    %% D18: reject on the BODY field only (boolean
+                    %% true or the string "true", same rule as every
+                    %% other face's wants_stream); an
+                    %% `Accept: text/event-stream` header alone never
+                    %% reaches this check — headers are not inputs.
+                    case janus_protocol_translate:wants_stream(Map) of
+                        true ->
+                            {error,
+                                {400, <<"stream_not_supported">>,
+                                    <<"decisions does not support streaming">>}};
+                        false ->
+                            {ok, Model}
+                    end
+            end
+    end.
+
+%% §4.5 last row: the janus-auto virtual model is never callable on
+%% /v1/decisions — it resolves to protocol_requires_native, not a
+%% route. Reads the configured auto model name (default janus-auto);
+%% total — a broken router config degrades to the default name.
+decisions_auto_model(Name) when is_binary(Name) ->
+    AutoModel =
+        case catch janus_auto:snapshot() of
+            #{model := M} when is_binary(M) -> M;
+            _ -> <<"janus-auto">>
+        end,
+    Name =:= AutoModel;
+decisions_auto_model(_) ->
+    false.
+
 proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
     %% janus-auto skips cross-protocol tier members ONLY when the
     %% stream translate path is blocked (tools/vision/n>1 or a
@@ -148,24 +243,81 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State) ->
             )
     end.
 
+do_proxy(openai_decisions, ModelName, Body, Map, Req, State) ->
+    inc_total_once(),
+    put(janus_req_model, ModelName),
+    %% §4.5 last row: janus-auto on the Decisions face answers
+    %% protocol_requires_native — the auto-router itself is never
+    %% consulted on this face (its tiers are chat-protocol routes).
+    case decisions_auto_model(ModelName) of
+        true ->
+            _ = track(400, #{}, #{}),
+            reply_err(
+                openai_decisions,
+                Req,
+                State,
+                400,
+                <<"protocol_requires_native">>,
+                <<"client face openai_decisions cannot call model that requires janus-auto">>
+            );
+        false ->
+            proxy_common(openai_decisions, ModelName, Body, Map, Req, State)
+    end;
 do_proxy(ClientProto, ModelName, Body, Map, Req, State) ->
     inc_total_once(),
     put(janus_req_model, ModelName),
-    %% wrong_modality guard (modality spec Contracts): a chat-family
-    %% call naming a non-chat-listed model is rejected LOCALLY — the
-    %% upstream would only 400 with a worse message.
-    case janus_catalog:model_modality(ModelName) of
-        <<"chat">> ->
-            proxy_after_modality(ClientProto, ModelName, Body, Map, Req, State);
-        Other ->
-            Msg = iolist_to_binary([
-                <<"model is of modality '">>, Other, <<"'; call ">>,
-                janus_modality:endpoint_for(Other), <<" instead">>
-            ]),
+    proxy_common(ClientProto, ModelName, Body, Map, Req, State).
+
+%% Shared post-count pipeline for every face: face-eligibility gate
+%% (§4.5 rows 4-5) runs BEFORE the wrong_modality guard (TF-D.13 —
+%% eligibility outranks modality, and a chat-family call naming a
+%% Decisions-only listing must answer protocol_requires_native, never
+%% wrong_modality), then the modality guard, then the pick.
+proxy_common(ClientProto, ModelName, Body, Map, Req, State) ->
+    case proto_gate(ClientProto, ModelName) of
+        {error, protocol_requires_native} ->
             _ = track(400, #{}, #{}),
-            reply_err(ClientProto, Req, State, 400, <<"wrong_modality">>, Msg)
+            reply_err(
+                ClientProto,
+                Req,
+                State,
+                400,
+                <<"protocol_requires_native">>,
+                protocol_requires_native_msg(ClientProto, ModelName)
+            );
+        ok ->
+            %% wrong_modality guard (modality spec Contracts): a chat-family
+            %% call naming a non-chat-listed model is rejected LOCALLY — the
+            %% upstream would only 400 with a worse message.
+            case janus_catalog:model_modality(ModelName) of
+                <<"chat">> ->
+                    proxy_after_modality(ClientProto, ModelName, Body, Map, Req, State);
+                Other ->
+                    Msg = iolist_to_binary([
+                        <<"model is of modality '">>, Other, <<"'; call ">>,
+                        janus_modality:endpoint_for(Other), <<" instead">>
+                    ]),
+                    _ = track(400, #{}, #{}),
+                    reply_err(ClientProto, Req, State, 400, <<"wrong_modality">>, Msg)
+            end
     end.
 
+proxy_after_modality(openai_decisions, ModelName, Body, Map, Req, State) ->
+    %% §4.2 step 6 + §4.5 row 8: pick among ELIGIBLE routes only
+    %% (require_proto openai_decisions — the LB applies the hard
+    %% filter; rows 6/7 surface as the pick's existing errors).
+    PickOpts = face_eligibility_opts(openai_decisions),
+    Pick =
+        case resolve_model(ModelName) of
+            {ok, ModelId} -> janus_lb:pick_route(ModelId, PickOpts);
+            error -> janus_lb:pick_listing_route(ModelName, PickOpts)
+        end,
+    case Pick of
+        {ok, Route} ->
+            decisions_dispatch(Route, Body, Map, Req, State, 1);
+        {error, Reason} ->
+            reply_pick_error(openai_decisions, Req, State, Reason)
+    end;
 proxy_after_modality(ClientProto, ModelName, Body, Map, Req, State) ->
     PickOpts = stream_pick_opts(ClientProto, Map),
     case resolve_model(ModelName) of
@@ -223,7 +375,96 @@ provider_protocol(#{provider_id := Pid}) ->
             janus_protocol_translate:normalize_protocol(maps:get(protocol, Map, undefined));
         error ->
             {error, unknown_protocol}
-    end.
+    end;
+%% Total (Decisions spec §4.5): the eligibility gate feeds it raw
+%% route maps — a malformed route must defer (unknown), never crash.
+provider_protocol(_) ->
+    {error, unknown_protocol}.
+
+%%--------------------------------------------------------------------
+%% Face eligibility (§4.5 eligibility filter + rows 4-5)
+%%--------------------------------------------------------------------
+
+%% §4.5 rows 4-5 pre-gate, ordered and disjoint from rows 6-8 (the
+%% pick owns those). `ok` = proceed (unknown names defer to the pick's
+%% no_route so the usage row and 404 semantics stay byte-identical);
+%% `{error, protocol_requires_native}` = the name exists in the
+%% catalog but EVERY route speaks a protocol this face may not call.
+%% Runs before the wrong_modality guard (TF-D.13).
+-spec proto_gate(atom(), binary()) -> ok | {error, protocol_requires_native}.
+proto_gate(ClientProto, ModelName) when is_binary(ModelName) ->
+    Routes =
+        case resolve_model(ModelName) of
+            {ok, ModelId} -> janus_catalog:routes_for_model(ModelId);
+            error -> janus_catalog:listings_for(ModelName)
+        end,
+    case Routes of
+        [] ->
+            ok;
+        _ ->
+            case lists:any(fun(R) -> route_eligible(ClientProto, R) end, Routes) of
+                true -> ok;
+                false -> {error, protocol_requires_native}
+            end
+    end;
+proto_gate(_, _) ->
+    ok.
+
+%% Eligibility filter (§4.5): the Decisions client rides ONLY
+%% openai_decisions routes; chat/responses/anthropic clients EXCLUDE
+%% openai_decisions routes. Unknown provider protocols defer (kept) —
+%% old beams skip such rows and fail closed at dispatch with
+%% unknown_protocol (D2/TF-D.12), never here.
+-spec route_eligible(atom(), map()) -> boolean().
+route_eligible(ClientProto, Route) when is_map(Route) ->
+    case provider_protocol(Route) of
+        {ok, openai_decisions} -> ClientProto =:= openai_decisions;
+        {ok, _Other} -> ClientProto =/= openai_decisions;
+        {error, unknown_protocol} -> true
+    end;
+route_eligible(_, _) ->
+    true.
+
+%% Pinned message shape (§4.2 table): F = the calling face, P = the
+%% protocol the named model requires (first non-eligible route's
+%% protocol; deterministic by catalog order).
+-spec protocol_requires_native_msg(atom(), binary()) -> binary().
+protocol_requires_native_msg(ClientProto, ModelName) ->
+    P = first_required_proto(ModelName),
+    iolist_to_binary([
+        <<"client face ">>,
+        atom_to_binary(ClientProto, utf8),
+        <<" cannot call model that requires ">>,
+        P
+    ]).
+
+first_required_proto(ModelName) ->
+    Routes =
+        case resolve_model(ModelName) of
+            {ok, ModelId} -> janus_catalog:routes_for_model(ModelId);
+            error -> janus_catalog:listings_for(ModelName)
+        end,
+    first_proto(Routes).
+
+first_proto([Route | Rest]) ->
+    case provider_protocol(Route) of
+        {ok, Proto} -> atom_to_binary(Proto, utf8);
+        {error, unknown_protocol} -> first_proto(Rest)
+    end;
+first_proto([]) ->
+    <<"another protocol">>.
+
+%% Face -> LB pick-opt policy (§4.5): mechanism in janus_lb
+%% (protocol_filter/3), policy here. The Decisions face requires its
+%% own protocol; every other face excludes Decisions routes. Applied
+%% by stream_pick_opts/2 so the initial pick AND failover repicks
+%% share one source (auto-router tier resolution picks by NAME — the
+%% exclude is per-protocol route level, exactly TF-D.7's line).
+-spec face_eligibility_opts(atom()) -> map().
+face_eligibility_opts(openai_decisions) ->
+    #{require_proto => <<"openai_decisions">>};
+face_eligibility_opts(_) ->
+    #{exclude_protos => [<<"openai_decisions">>]}.
 
 %% True when this request wants streaming AND the streaming translate
 %% path cannot carry it (responses client, or tools/vision/n>1).
@@ -265,19 +506,25 @@ responses_stream_translate_enabled() ->
         _ -> false
     end.
 
+%% Pick opts = face-eligibility policy (§4.5, hard filter — see
+%% face_eligibility_opts/1) + the stream same-protocol bias. The bias
+%% prefers same-protocol routes for EVERY stream (audit R2, C-1): a
+%% plain-text stream is not "blocked" for translation, but a
+%% responses-protocol route can never serve one cross-protocol —
+%% without the bias the LB could strand the request on the dispatch
+%% guard's 400 while native routes exist. It falls back to all routes
+%% when no same-protocol route exists, so translated streams and the
+%% explanatory 400s still work. Exported for eunit: the Decisions face
+%% must always carry require_proto, the other faces must always
+%% exclude openai_decisions, stream or not.
+-spec stream_pick_opts(atom(), map()) -> map().
 stream_pick_opts(ClientProto, Map) ->
-    %% Prefer same-protocol routes for EVERY stream (audit R2, C-1): a
-    %% plain-text stream is not "blocked" for translation, but a
-    %% responses-protocol route can never serve one cross-protocol —
-    %% without the bias the LB could strand the request on the dispatch
-    %% guard's 400 while native routes exist. Falls back to all routes
-    %% when no same-protocol route exists, so translated streams and
-    %% the explanatory 400s still work.
+    Base = face_eligibility_opts(ClientProto),
     case janus_protocol_translate:wants_stream(Map) of
         true ->
-            #{prefer_proto => atom_to_binary(ClientProto, utf8)};
+            Base#{prefer_proto => atom_to_binary(ClientProto, utf8)};
         false ->
-            #{}
+            Base
     end.
 
 -define(COMPUTER_USE_TOOLS, [<<"computer_20250124">>]).
@@ -691,7 +938,157 @@ call_adapter(openai_chat, Route, Body, Map, Opts) ->
 call_adapter(openai_responses, Route, Body, Map, Opts) ->
     janus_providers_openai:responses(Route, Body, Map, Opts);
 call_adapter(anthropic_messages, Route, Body, Map, Opts) ->
-    janus_providers_anthropic:messages(Route, Body, Map, Opts).
+    janus_providers_anthropic:messages(Route, Body, Map, Opts);
+call_adapter(openai_decisions, Route, Body, Map, Opts) ->
+    janus_providers_openai:decisions(Route, Body, Map, Opts).
+
+%%--------------------------------------------------------------------
+%% Decisions upstream attempt loop (D15)
+%%
+%% Failover ONLY on pre-send failures — gun open/await_up errors,
+%% provably before any request byte is written. ANY HTTP status,
+%% mid-body error, response-cap breach or 60 s first-byte timeout is
+%% terminal: no second upstream. Decisions never enters
+%% failover_decide/6 (post-send retries are opted out by not calling
+%% it); chat/responses/anthropic failover paths are untouched.
+%%--------------------------------------------------------------------
+
+-define(DECISIONS_PRESEND_TRIES, 3).
+
+%% True only for the two provably pre-send error tags (D15 signals).
+decisions_presend_failure({error, {open, _}}) -> true;
+decisions_presend_failure({error, {await_up, _}}) -> true;
+decisions_presend_failure(_) -> false.
+
+decisions_dispatch(Route, Body, Map, Req, State, Attempt) ->
+    Result = upstream_call(openai_decisions, Route, Body, Map, #{stream => false}),
+    case decisions_presend_failure(Result) andalso Attempt < ?DECISIONS_PRESEND_TRIES of
+        true ->
+            failover_start(),
+            put(janus_failover_attempt, Attempt + 1),
+            SafeReason =
+                case Result of
+                    {error, R} -> sanitize_upstream_error(R);
+                    _ -> presend
+                end,
+            _ = note_provider_failure(Route, SafeReason),
+            _ = release_route_inflight(Route),
+            _ = record_failover_row(Route, 502, null),
+            janus_lb:bump_stat(requests_retried),
+            retry_jitter(),
+            case repick_route(openai_decisions, Map, 3) of
+                {ok, Route2} ->
+                    decisions_dispatch(Route2, Body, Map, Req, State, Attempt + 1);
+                error ->
+                    decisions_terminal(Result, Route, Req, State)
+            end;
+        false ->
+            decisions_terminal(Result, Route, Req, State)
+    end.
+
+%% Terminal handling: upstream status+body forwarded VERBATIM except
+%% sensitive upstream headers are stripped (content-type survives;
+%% Retry-After is forwarded on 429); local caps/timeouts answer with
+%% the pinned §4.2 codes.
+decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) when Status =:= 429 ->
+    _ = track_proxied(429, Route, #{}),
+    _ = note_key_failure(Route, Headers, Status),
+    _ = release_route_inflight(Route),
+    janus_metrics:inc(decisions_upstream_429_total, #{}),
+    Req2 = cowboy_req:reply(Status, decisions_filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) when Status =:= 401 ->
+    _ = track_proxied(401, Route, #{}),
+    _ = note_auth_failure(Route, Status),
+    _ = release_route_inflight(Route),
+    decisions_reply_verbatim(Status, Headers, RespBody, Req, State);
+decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) when Status =:= 403 ->
+    _ = track_proxied(403, Route, #{}),
+    _ = note_route_failure(Route, retry_reason(Headers, Status)),
+    _ = release_route_inflight(Route),
+    decisions_reply_verbatim(Status, Headers, RespBody, Req, State);
+decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 500 ->
+    _ = track_proxied(Status, Route, #{}),
+    _ = note_provider_failure(Route, retry_reason(Headers, Status)),
+    _ = release_route_inflight(Route),
+    decisions_reply_verbatim(Status, Headers, RespBody, Req, State);
+decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) when Status >= 400 ->
+    _ = track_proxied(Status, Route, #{}),
+    _ = release_route_inflight(Route),
+    decisions_reply_verbatim(Status, Headers, RespBody, Req, State);
+decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) ->
+    %% Success: body verbatim (no translate, D4). Usage tokens are
+    %% null-safe until O1 is pinned from the D13 live fixture: a
+    %% body usage object maps known token fields, absence records
+    %% null prompt/completion (janus_usage_missing is dashboard-side).
+    _ = note_key_success(Route),
+    _ = note_route_success(Route),
+    _ = track_proxied(
+        Status,
+        Route,
+        usage_or_undef(janus_usage_parse:from_response_body(openai_decisions, RespBody))
+    ),
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State};
+decisions_terminal({error, crashed}, Route, Req, State) ->
+    _ = track_proxied(500, Route, #{}),
+    _ = release_route_inflight(Route),
+    reply_err(openai_decisions, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
+decisions_terminal({error, response_too_large}, Route, Req, State) ->
+    _ = track_proxied(502, Route, #{}),
+    _ = release_route_inflight(Route),
+    {Code, Msg} = decisions_local_error(response_too_large),
+    reply_err(openai_decisions, Req, State, 502, Code, Msg);
+decisions_terminal({error, Reason}, Route, Req, State) ->
+    Status = error_http_status(Reason),
+    _ = track_proxied(Status, Route, #{}),
+    case is_transient(Reason) of
+        true ->
+            _ = note_provider_failure(Route, sanitize_upstream_error(Reason));
+        false ->
+            ok
+    end,
+    _ = release_route_inflight(Route),
+    logger:warning(#{
+        what => janus_proxy_upstream_error,
+        reason => sanitize_upstream_error(Reason),
+        provider => route_provider_name(Route),
+        model => route_model_name(Route)
+    }),
+    decisions_error_reply(Status, Req, State).
+
+%% Pinned local error codes (§4.2 table). Pure mapping — exported for
+%% eunit so the code+message pairs stay verbatim.
+decisions_local_error(upstream_timeout) ->
+    {<<"upstream_timeout">>, <<"upstream decisions response timed out">>};
+decisions_local_error(response_too_large) ->
+    {<<"upstream_response_too_large">>, <<"upstream decisions response exceeds size limit">>};
+decisions_local_error(_) ->
+    {<<"upstream_error">>, <<"upstream request failed">>}.
+
+decisions_error_reply(504, Req, State) ->
+    {Code, Msg} = decisions_local_error(upstream_timeout),
+    reply_err(openai_decisions, Req, State, 504, Code, Msg);
+decisions_error_reply(Status, Req, State) ->
+    {Code, Msg} = decisions_local_error(other),
+    reply_err(openai_decisions, Req, State, Status, Code, Msg).
+
+decisions_reply_verbatim(Status, Headers, RespBody, Req, State) ->
+    Req2 = cowboy_req:reply(Status, filter_headers(Headers), RespBody, Req),
+    {ok, Req2, State}.
+
+%% Non-2xx passthrough keeps only content-type (sensitive upstream
+%% headers stripped); a 429 additionally forwards Retry-After (§4.2).
+decisions_filter_headers(Headers) when is_map(Headers) ->
+    Base = filter_headers(Headers),
+    case maps:get(<<"retry-after">>, Headers, undefined) of
+        Ra when is_binary(Ra), Ra =/= <<>> ->
+            Base#{<<"retry-after">> => Ra};
+        _ ->
+            Base
+    end;
+decisions_filter_headers(Headers) ->
+    filter_headers(Headers).
 
 %%--------------------------------------------------------------------
 %% Upstream result handling

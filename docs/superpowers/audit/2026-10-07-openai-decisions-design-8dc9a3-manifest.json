@@ -1,0 +1,94 @@
+{
+  "stem": "2026-10-07-openai-decisions-design-8dc9a3",
+  "target": "2026-10-07-openai-decisions-design-8dc9a3-target.md",
+  "source": "F:\\Janus\\docs\\superpowers\\specs\\2026-10-07-openai-decisions-design.md",
+  "started_at": "2026-10-07T14:33:56.981822100+00:00",
+  "finished_at": "2026-10-07T14:48:03.397169200+00:00",
+  "provisional": false,
+  "panel_size": 7,
+  "pass_count": 7,
+  "required_pass": 5,
+  "quorum_met": true,
+  "degraded": false,
+  "allow_degraded": false,
+  "master_model": "alibaba/qwen3.8-max",
+  "pi_version": "1.0.4",
+  "models": [
+    {
+      "slug": "minimax-m3",
+      "model": "minimax-cn/MiniMax-M3",
+      "exit_code": 0,
+      "duration_ms": 84203,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — design is close to shippable, but the D15 failover contract and O1/O2 pin-or-block question are not falsifiable as written, and the precedence table is ambigu",
+      "error": null
+    },
+    {
+      "slug": "mimo-v26-pro",
+      "model": "mimo/mimo-v2.6-pro",
+      "exit_code": 0,
+      "duration_ms": 61590,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is thorough and fail-closed, but an internal pipeline-order contradiction and two unbounded contracts (failover signaling, write-gate node liveness",
+      "error": null
+    },
+    {
+      "slug": "stepfun-5",
+      "model": "stepfun/step-5-preview",
+      "exit_code": 0,
+      "duration_ms": 116154,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is coherent and the gating discipline (D11/D13) is right, but probe ownership/accounting, write-gate failure semantics, and an unbounded upstream r",
+      "error": null
+    },
+    {
+      "slug": "qwen38-max",
+      "model": "alibaba/qwen3.8-max",
+      "exit_code": 0,
+      "duration_ms": 155521,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the spec is unusually mature, but the write-gate reachability fallback, the CHECK-vs-unknown-protocol contradiction, and shared-proxy D15 regression scope mus",
+      "error": null
+    },
+    {
+      "slug": "deepseek-v41-flash",
+      "model": "volcengine-ark/deepseek-v4-1-flash-260910",
+      "exit_code": 0,
+      "duration_ms": 37048,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — the design is disciplined, but D15's shared-proxy change and D9's break of an existing invariant are under-specified for a billable face.",
+      "error": null
+    },
+    {
+      "slug": "glm-53",
+      "model": "zhipuai-coding-plan/glm-5.3",
+      "exit_code": 0,
+      "duration_ms": 90937,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — a mature round-5 design with sound gating (D13 before code), but the stated pipeline order is internally impossible and three failure-path contracts are unspe",
+      "error": null
+    },
+    {
+      "slug": "kimi-k3",
+      "model": "kimi-for-coding/k3",
+      "exit_code": 0,
+      "duration_ms": 80453,
+      "retries": 0,
+      "pass": true,
+      "verdict": "GO WITH FIXES — design is sound and internally consistent, but the write-gate readiness semantics, probe cost/audit handling, and the D11/D13 gating sequence need tightening ",
+      "error": null
+    }
+  ],
+  "master": {
+    "ok": true,
+    "exit_code": 0,
+    "duration_ms": 363312,
+    "error": null
+  }
+}
