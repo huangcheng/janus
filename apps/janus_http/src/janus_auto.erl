@@ -819,11 +819,12 @@ first_available([Name | Rest], Constraint) ->
         false -> first_available(Rest, Constraint)
     end.
 
-%% Streaming rides the client's own protocol only: janus-auto never
-%% picks a translated stream, even where the chat<->anthropic knobs
-%% allow one (deliberately more conservative than the proxy dispatch),
-%% which also excludes the never-translatable responses-provider
-%% direction (audit R2, C-1). Unknown providers defer to the proxy.
+%% For translate-blocked streams the proxy asks janus-auto to stay on
+%% the client's own protocol (the constraint is opt-in via the
+%% `stream` flag in the constraint map); plain-text streams may still
+%% route cross-protocol where the knobs allow. Same-protocol selection
+%% also excludes the never-translatable responses-provider direction
+%% (audit R2, C-1). Unknown providers defer to the proxy.
 stream_compatible(Name, #{stream := true, client_proto := ClientProto}) when
     is_atom(ClientProto)
 ->

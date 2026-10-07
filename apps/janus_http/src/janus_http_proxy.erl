@@ -228,7 +228,9 @@ provider_protocol(#{provider_id := Pid}) ->
 %% True when this request wants streaming AND the streaming translate
 %% path cannot carry it (responses client, or tools/vision/n>1).
 %% Exported for eunit; the single source for the auto-router tier
-%% constraint, the LB pick bias, and dispatch's 400.
+%% constraint and dispatch's 400. (The LB pick bias no longer derives
+%% from this — stream_pick_opts prefers same-protocol for every stream,
+%% audit R2 C-1.)
 -spec stream_translate_blocked_for(atom(), map()) -> boolean().
 stream_translate_blocked_for(ClientProto, Map) ->
     janus_protocol_translate:wants_stream(Map)
