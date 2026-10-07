@@ -51,5 +51,15 @@ route_without_provider_id_uses_inline_protocol_test() ->
         filter([#{protocol => <<"openai_chat">>}, #{other => 1}], <<"openai_chat">>)
     ).
 
+preference_applies_within_pickable_set_test() ->
+    %% ocr review (2026-10-07): pick_from_routes composes preference
+    %% with the PICKABLE set — same-protocol preferred when pickable,
+    %% ALL pickable routes otherwise, so a cooling same-protocol route
+    %% never strands a translatable stream on a 503.
+    Pickable = [#{provider_id => 2}, #{provider_id => 3}],
+    ?assertEqual([#{provider_id => 2}], filter(Pickable, <<"anthropic_messages">>)),
+    OnlyCrossProtocolPickable = [#{provider_id => 2}],
+    ?assertEqual(OnlyCrossProtocolPickable, filter(OnlyCrossProtocolPickable, <<"openai_chat">>)).
+
 empty_input_test() ->
     ?assertEqual([], filter([], <<"openai_chat">>)).

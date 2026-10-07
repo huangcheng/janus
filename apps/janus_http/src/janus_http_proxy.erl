@@ -1024,10 +1024,15 @@ repick_route(ClientProto, Map, Tries) ->
     Blocked =
         janus_protocol_translate:wants_stream(Map) andalso
             janus_protocol_translate:stream_translate_blocked(ClientProto, Map),
+    %% Spend attempts on candidate routes (ocr review 2026-10-07):
+    %% the same same-protocol bias the initial pick applies, else the
+    %% round-robin cursor can burn the retry budget on routes the
+    %% ProtoOK filter below would discard anyway.
+    PickOpts = stream_pick_opts(ClientProto, Map),
     Pick =
         case resolve_model(ModelName) of
-            {ok, ModelId} -> janus_lb:pick_route(ModelId, #{});
-            error -> janus_lb:pick_listing_route(ModelName, #{})
+            {ok, ModelId} -> janus_lb:pick_route(ModelId, PickOpts);
+            error -> janus_lb:pick_listing_route(ModelName, PickOpts)
         end,
     case Pick of
         {ok, Route} ->

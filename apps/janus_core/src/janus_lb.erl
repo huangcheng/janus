@@ -168,12 +168,13 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internals
 %%--------------------------------------------------------------------
 
-%% A streaming request that cannot ride the translate path (responses
-%% client, or tools/vision/n>1) must land on a same-protocol route.
-%% When the caller passes prefer_proto, keep only the routes whose
-%% provider speaks that protocol — but fall back to ALL routes when
-%% none matches, so the dispatch-level 400 (which explains exactly
-%% what is missing) stays the reachable outcome instead of no_route.
+%% A streaming request prefers a same-protocol route (responses client,
+%% or tools/vision/n>1 must ride one; every other stream rides one when
+%% available — audit R2). The preference composes with the PICKABLE
+%% set (ocr review 2026-10-07): applied after cooling/enabled filtering
+%% and falling back to ALL pickable routes when no same-protocol route
+%% is pickable, so a cooling native route strands a stream on a 503
+%% only when there is genuinely nothing else healthy to serve it.
 prefer_proto_routes(Routes, Opts) ->
     case Opts of
         #{prefer_proto := Proto} when is_binary(Proto) ->
@@ -216,22 +217,20 @@ do_pick_listing_route(Name, Opts, State) ->
 pick_from_routes(
     PickKey, Routes0, Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}
 ) ->
-    Routes1 = prefer_proto_routes(
-        [R || R <- Routes0, maps:get(enabled, R, true)], Opts
-    ),
+    Routes1 = [R || R <- Routes0, maps:get(enabled, R, true)],
     case Routes1 of
         [] ->
             {error, no_route};
         _ ->
             Now = erlang:monotonic_time(millisecond),
-            Available = [
+            Available0 = [
                 R
              || R <- Routes1,
                 not is_cooling(provider_target(R), Cool, Now),
                 not is_cooling(route_target(R), Cool, Now),
                 provider_enabled(R)
             ],
-            case Available of
+            case Available0 of
                 [] ->
                     %% All routes filtered out: cooling is only the
                     %% diagnosis when at least one provider is
@@ -241,8 +240,12 @@ pick_from_routes(
                         false -> {error, provider_disabled};
                         true -> {error, {all_cooling, remaining_cooldown_ms(Routes1, Cool, Now)}}
                     end;
-                Candidates ->
-                    case pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight) of
+                _ ->
+                    %% Preference among PICKABLE routes only (see
+                    %% prefer_proto_routes/2): falls back to all of
+                    %% them when no same-protocol route is pickable.
+                    Available = prefer_proto_routes(Available0, Opts),
+                    case pick_usable_route(PickKey, Available, Cool, Cursors, Now, Inflight) of
                         {ok, _} = Ok ->
                             Ok;
                         {error, Reason} = Err ->
@@ -250,13 +253,13 @@ pick_from_routes(
                                 what => janus_lb_no_usable_route,
                                 pick_key => PickKey,
                                 reason => Reason,
-                                candidates => length(Candidates)
+                                candidates => length(Available)
                             }),
                             case Reason of
                                 all_cooling ->
                                     {error,
                                         {all_cooling,
-                                            remaining_cooldown_ms(Candidates, Cool, Now)}};
+                                            remaining_cooldown_ms(Available, Cool, Now)}};
                                 _ ->
                                     Err
                             end
