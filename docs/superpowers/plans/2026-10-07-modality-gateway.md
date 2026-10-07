@@ -127,6 +127,8 @@ the two canonical families; the capture corpus stays authoritative
 for what providers ACTUALLY emit (de-facto deviations beat the doc):
 
 - **OpenAI** — official OpenAPI 3 spec: github.com/openai/openai-openapi
+  (operator-provided reference URL, pinned here per the 2026-10-07
+  handoff)
   (ALIGNMENT CHECK rev 10: images/audio/videos request+response
   params verified against it — video status vocabulary, /content
   download, verbose_json.duration, response_format enums; remaining
@@ -138,6 +140,9 @@ for what providers ACTUALLY emit (de-facto deviations beat the doc):
 - **Anthropic Messages** — official OpenAPI spec shipped in their SDK
   repos / docs (docs.claude.com, Messages API + tool-use +
   computer-use beta pages). Snapshot the spec version with M4.
+  Community-maintained machine-readable mirror (operator-provided
+  reference): github.com/laszukdawid/anthropic-openapi-spec — useful
+  for offline schema diffs; the vendor docs remain normative.
 - **Transport standards these ride on (real standards):** SSE framing
   (WHATWG HTML Living Standard, server-sent events — our `event:`/
   `data:`/`
