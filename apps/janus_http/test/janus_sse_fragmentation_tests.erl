@@ -30,6 +30,9 @@ frag_loop(Bin, N, Buf, Acc) ->
 
 fragmented_equals_whole_at_size_7_test() ->
     {ok, Bin} = file:read_file(?FIXTURE),
+    %% Pin the event count too — a regression dropping events on BOTH
+    %% paths would otherwise pass vacuously.
+    ?assertEqual(41, length(fixture_events())),
     ?assertEqual(fixture_events(), frag_events(Bin, 7)).
 
 fragmented_equals_whole_byte_at_a_time_test() ->

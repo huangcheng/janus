@@ -819,8 +819,11 @@ first_available([Name | Rest], Constraint) ->
         false -> first_available(Rest, Constraint)
     end.
 
-%% A streaming client cannot cross protocol boundaries (translate is
-%% non-stream only): skip members whose provider protocol differs.
+%% Streaming rides the client's own protocol only: janus-auto never
+%% picks a translated stream, even where the chat<->anthropic knobs
+%% allow one (deliberately more conservative than the proxy dispatch),
+%% which also excludes the never-translatable responses-provider
+%% direction (audit R2, C-1). Unknown providers defer to the proxy.
 stream_compatible(Name, #{stream := true, client_proto := ClientProto}) when
     is_atom(ClientProto)
 ->

@@ -40,7 +40,11 @@
     finalize_sse/3,
     stream_translate_blocked/2,
     %% Phase-2 dispatch gate eligibility (the knob lives in the proxy)
-    responses_stream_gatable/1
+    responses_stream_gatable/1,
+    %% Audit R2: a stream toward a responses-protocol provider is never
+    %% translatable cross-protocol (no Phase-3 SSE translator) — shared
+    %% by the dispatch guard and route selection.
+    stream_pair_untranslatable/2
 ]).
 
 -define(DEFAULT_MAX_TOKENS, 4096).
@@ -225,12 +229,24 @@ part_non_text(#{<<"type">> := <<"function_call">>}) ->
     false;
 part_non_text(#{<<"type">> := <<"function_call_output">>}) ->
     false;
+%% Responses `reasoning` history items are text-class echoes of the
+%% assistant's own chain — the input mapper skips them (audit R2).
+part_non_text(#{<<"type">> := <<"reasoning">>}) ->
+    false;
 part_non_text(#{<<"role">> := _, <<"content">> := C}) ->
     content_has_non_text(C);
 part_non_text(#{<<"type">> := <<"message">>, <<"content">> := C}) ->
     content_has_non_text(C);
-part_non_text(#{<<"type">> := _}) ->
-    true;
+%% Unknown types are NOT vision (audit R2): the input mappers reject
+%% them with honest "unsupported …" errors. Only genuinely multimodal
+%% part types take the vision reject.
+part_non_text(#{<<"type">> := T}) when is_binary(T) ->
+    lists:member(T, [
+        <<"input_image">>, <<"image_url">>, <<"image">>,
+        <<"input_audio">>, <<"audio">>,
+        <<"input_video">>, <<"video">>,
+        <<"input_file">>, <<"file">>, <<"document">>
+    ]);
 part_non_text(M) when is_map(M) ->
     false;
 part_non_text(_) ->
@@ -1095,8 +1111,17 @@ input_items_to_chat(
     [#{<<"type">> := <<"function_call_output">>, <<"call_id">> := Id, <<"output">> := Out} | Rest],
     Acc
 ) ->
-    Msg = #{<<"role">> => <<"tool">>, <<"tool_call_id">> => Id, <<"content">> => Out},
-    input_items_to_chat(Rest, [Msg | Acc]);
+    case flatten_tool_output(Out) of
+        {ok, Text} ->
+            Msg = #{<<"role">> => <<"tool">>, <<"tool_call_id">> => Id, <<"content">> => Text},
+            input_items_to_chat(Rest, [Msg | Acc]);
+        {error, _} = Err ->
+            Err
+    end;
+input_items_to_chat([#{<<"type">> := <<"reasoning">>} | Rest], Acc) ->
+    %% Echo of the assistant's own reasoning — providers don't need it
+    %% back; skip so the standard Responses agent loop rides (audit R2).
+    input_items_to_chat(Rest, Acc);
 input_items_to_chat([#{<<"role">> := Role, <<"content">> := C} | Rest], Acc) when
     is_binary(Role)
 ->
@@ -1132,6 +1157,15 @@ flatten_response_content(List) when is_list(List) ->
 flatten_response_content(_) ->
     {error, {translate_unsupported, <<"invalid content">>}}.
 
+%% function_call_output.output is a string OR an array of content parts
+%% in the Responses spec — flatten both to a chat tool-message string.
+flatten_tool_output(Bin) when is_binary(Bin) ->
+    {ok, Bin};
+flatten_tool_output(List) when is_list(List) ->
+    flatten_response_content(List);
+flatten_tool_output(_) ->
+    {error, {translate_unsupported, <<"invalid function_call_output">>}}.
+
 %%--------------------------------------------------------------------
 %% Response translation
 %%--------------------------------------------------------------------
@@ -1142,6 +1176,21 @@ translate_response(P, P, Map) ->
     {ok, Map};
 translate_response(Client, Provider, Map) ->
     do_translate_response(Client, Provider, Map).
+
+%% Total unix-seconds coercion for translated response timestamps —
+%% upstream null/garbage falls back to now, never a case_clause (R2).
+created_unix(V) when is_integer(V) ->
+    V;
+created_unix(_) ->
+    erlang:system_time(second).
+
+-spec stream_pair_untranslatable(proto(), proto()) -> boolean().
+stream_pair_untranslatable(openai_responses, openai_responses) ->
+    false;
+stream_pair_untranslatable(_, openai_responses) ->
+    true;
+stream_pair_untranslatable(_, _) ->
+    false.
 
 do_translate_response(openai_chat, anthropic_messages, Map) ->
     %% Provider spoke messages; client wants chat.
@@ -1213,11 +1262,7 @@ messages_resp_to_chat(Map) ->
                 %% Audit find (Kimi 2026-10-07): `created` is a required
                 %% chat-completion field — strict clients broke on the
                 %% translated non-stream path (the stream path had it).
-                <<"created">> =>
-                    case maps:get(<<"created">>, Map, undefined) of
-                        undefined -> erlang:system_time(second);
-                        C when is_integer(C) -> C
-                    end,
+                <<"created">> => created_unix(maps:get(<<"created">>, Map, undefined)),
                 <<"model">> => maps:get(<<"model">>, Map, <<>>),
                 <<"choices">> => [
                     #{
@@ -1281,6 +1326,12 @@ responses_resp_to_chat(Map) ->
             {ok, #{
                 <<"id">> => maps:get(<<"id">>, Map, <<"chatcmpl-janus">>),
                 <<"object">> => <<"chat.completion">>,
+                %% Same required-field fix as the anthropic face (R2):
+                %% Responses payloads name the timestamp `created_at`.
+                <<"created">> =>
+                    created_unix(
+                        maps:get(<<"created_at">>, Map, maps:get(<<"created">>, Map, undefined))
+                    ),
                 <<"model">> => maps:get(<<"model">>, Map, <<>>),
                 <<"choices">> => [
                     #{
@@ -1341,6 +1392,9 @@ chat_resp_to_responses(Map) ->
                 <<"id">> => maps:get(<<"id">>, Map, <<"resp_janus">>),
                 <<"object">> => <<"response">>,
                 <<"status">> => <<"completed">>,
+                %% `created_at` is required on the Responses object (R2);
+                %% mirror the chat face's `created`.
+                <<"created_at">> => created_unix(maps:get(<<"created">>, Map, undefined)),
                 <<"model">> => maps:get(<<"model">>, Map, <<>>),
                 <<"output">> => OutputItems,
                 <<"usage">> => #{

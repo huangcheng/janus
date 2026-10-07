@@ -102,7 +102,7 @@ Three layers, in the order they should fail:
 
 ## Usage statistics
 
-Every proxied request (streaming included) is recorded into `usage_events`: token counts, upstream status, latency, and the key/model/provider/provider-key ids. Rows are kept 31 days and swept daily; the dashboard's Usage page reads the rollups. Streams get the terminal usage chunk via polite `stream_options.include_usage` injection — disable with app env `janus_core.usage_inject_include_usage = false` if an upstream rejects the field.
+Every proxied request (streaming included) is recorded into `usage_events`: token counts, upstream status, latency, and the key/model/provider/provider-key ids. Rows are kept 31 days and swept daily; the dashboard's Usage page reads the rollups. Streams get the terminal usage chunk via polite `stream_options.include_usage` injection — disable with app env `janus_core.usage_inject_include_usage = false` if an upstream rejects the field. Injection only fills an ABSENT knob: on native chat routes a client-supplied `stream_options` passes through verbatim; cross-protocol requests never carry it over — `include_usage` is injected toward chat-protocol upstreams so translated streams still record token counts.
 
 ## Observability (Prometheus)
 

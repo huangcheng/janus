@@ -264,7 +264,14 @@ responses_stream_translate_enabled() ->
     end.
 
 stream_pick_opts(ClientProto, Map) ->
-    case stream_translate_blocked_for(ClientProto, Map) of
+    %% Prefer same-protocol routes for EVERY stream (audit R2, C-1): a
+    %% plain-text stream is not "blocked" for translation, but a
+    %% responses-protocol route can never serve one cross-protocol —
+    %% without the bias the LB could strand the request on the dispatch
+    %% guard's 400 while native routes exist. Falls back to all routes
+    %% when no same-protocol route exists, so translated streams and
+    %% the explanatory 400s still work.
+    case janus_protocol_translate:wants_stream(Map) of
         true ->
             #{prefer_proto => atom_to_binary(ClientProto, utf8)};
         false ->
@@ -301,6 +308,7 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
             has_computer_use_tool(Map)
     of
         true ->
+            _ = release_route_inflight(Route),
             _ = track(400, Route, #{}),
             reply_err(
                 ClientProto, Req, State, 400,
@@ -320,12 +328,14 @@ dispatch_after_computer_use(ClientProto, ProviderProto, Route, Body, Map, Req, S
     Native = ClientProto =:= ProviderProto,
     %% C-1 (audit 2026-10-07): streaming toward a Responses-protocol
     %% PROVIDER has no SSE translator (Phase 3) — guard pre-flight
-    %% instead of failing mid-stream behind a committed 200.
+    %% instead of failing mid-stream behind a committed 200. Route
+    %% selection uses the same predicate to avoid stranding streams here.
     case
-        WantStream andalso ClientProto =/= ProviderProto andalso
-            ProviderProto =:= openai_responses
+        WantStream andalso
+            janus_protocol_translate:stream_pair_untranslatable(ClientProto, ProviderProto)
     of
         true ->
+            _ = release_route_inflight(Route),
             _ = track(400, Route, #{}),
             reply_err(
                 ClientProto, Req, State, 400,
@@ -1019,9 +1029,21 @@ repick_route(ClientProto, Map, Tries) ->
         end,
     case Pick of
         {ok, Route} ->
+            RouteProto = provider_protocol(Route),
+            %% Never fail over INTO a responses-protocol provider on a
+            %% stream it cannot serve (audit R2, C-1): that turns a
+            %% recoverable failure into the dispatch guard's terminal 400.
+            StreamUnservable =
+                janus_protocol_translate:wants_stream(Map) andalso
+                    case RouteProto of
+                        {ok, RP} ->
+                            janus_protocol_translate:stream_pair_untranslatable(ClientProto, RP);
+                        _ ->
+                            false
+                    end,
             ProtoOK =
-                (not Blocked) orelse
-                    (provider_protocol(Route) =:= {ok, ClientProto}),
+                ((not Blocked) orelse (RouteProto =:= {ok, ClientProto})) andalso
+                    (not StreamUnservable),
             case key_attempted(Route) orelse not ProtoOK of
                 true ->
                     _ = release_route_inflight(Route),
