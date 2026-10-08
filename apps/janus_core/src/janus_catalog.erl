@@ -40,6 +40,11 @@
     lookup_api_key/1,
     lookup_api_keys/1,
     provider_keys/1,
+    %% Fleet quota gossip (native-distribution spec B2): all agent-key
+    %% metas (id + limits) for the heartbeat publisher.
+    api_keys/0,
+    %% Fleet command F.1: pinned `catalog_cache_flush` MFA.
+    flush/0,
     %% Entitlement carrier (spec Part B)
     entitlement_denied/3,
     entitlement_codes/0
@@ -323,6 +328,51 @@ provider_keys(ProviderId) ->
         [{_, Keys}] -> Keys;
         _ -> []
     end.
+
+%% All agent-key metas across every prefix (fleet quota heartbeat:
+%% limits live in these rows; per-prefix lookup is auth-shaped and
+%% cannot enumerate).
+-spec api_keys() -> [map()].
+api_keys() ->
+    try
+        ets:foldl(
+            fun
+                ({_Prefix, Metas}, Acc) when is_list(Metas) -> Metas ++ Acc;
+                ({_Prefix, Meta}, Acc) when is_map(Meta) -> [Meta | Acc];
+                (_, Acc) -> Acc
+            end,
+            [],
+            table(api_keys_by_prefix)
+        )
+    catch
+        _:_ -> []
+    end.
+
+%% Fleet command `catalog_cache_flush` (spec F.1): pure-local
+%% idempotent cache clear. Drops the published catalog pointer (picks
+%% answer catalog_not_ready, exactly like a cold boot) and nudges an
+%% immediate FORCE reload so the poll's same-generation skip cannot
+%% leave the node cold — the tables are reaped on their normal delayed
+%% schedule so in-flight lookups never badarg.
+-spec flush() -> ok.
+flush() ->
+    try
+        case get() of
+            undefined ->
+                ok;
+            Pub = #{catalog := _Tabs} ->
+                _ = persistent_term:erase(?PT_KEY),
+                _ = schedule_delete(Pub),
+                logger:info(#{what => janus_catalog_flushed})
+        end
+    catch
+        Class:Reason ->
+            logger:warning(#{what => janus_catalog_flush_failed, class => Class, reason => Reason})
+    end,
+    %% Detached: the reload is a gen_server call with a 30 s DB budget
+    %% and must never block the erpc executor.
+    _ = spawn(fun() -> catch janus_config:reload() end),
+    ok.
 
 %%--------------------------------------------------------------------
 %% Entitlement carrier (spec Part B)

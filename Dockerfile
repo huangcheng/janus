@@ -49,4 +49,8 @@ ENV JANUS_SQLITE_PATH=/var/lib/janus/janus.db
 EXPOSE 8080 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz || wget -qO- http://127.0.0.1:8090/healthz || exit 1
-CMD ["bin/janus", "foreground"]
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+USER root
+RUN chmod +x /docker-entrypoint.sh && apk add --no-cache openssl || true
+USER janus
+ENTRYPOINT ["/docker-entrypoint.sh"]

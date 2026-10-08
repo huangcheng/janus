@@ -18,7 +18,10 @@
     retry_after_sec/1,
     kind_code/1,
     tpm_bucket_now/0,
-    reset_for_test/0
+    reset_for_test/0,
+    %% Fleet quota gossip (native-distribution spec B2): current-bucket
+    %% usage per agent key for the 2 s heartbeat publisher.
+    current_usage/0
 ]).
 
 -define(RPM, janus_quota_rpm).
@@ -62,6 +65,64 @@ reset_for_test() ->
     erase(janus_quota_admitted),
     erase(janus_quota_charged),
     ok.
+
+%% Current-bucket usage per agent key for the fleet quota heartbeat
+%% (native-distribution spec B2): #{Id => {Rpm, Tpm, Daily}} — only
+%% keys with rows in the CURRENT rpm/tpm bucket and today's daily
+%% bucket appear. Tolerant of missing tables (fleet off / not yet
+%% ensured reads empty).
+-spec current_usage() -> #{term() => {non_neg_integer(), non_neg_integer(), non_neg_integer()}}.
+current_usage() ->
+    try
+        Bucket = rpm_bucket_now(),
+        Rpm = fold_bucket(?RPM, Bucket),
+        Tpm = fold_bucket(?TPM, Bucket),
+        Daily = fold_daily(?DAILY),
+        maps:fold(
+            fun(Id, N, Acc) -> put_usage(Id, 1, N, Acc) end,
+            maps:fold(
+                fun(Id, N, Acc) -> put_usage(Id, 2, N, Acc) end,
+                maps:fold(
+                    fun(Id, N, Acc) -> put_usage(Id, 3, N, Acc) end,
+                    #{},
+                    Daily
+                ),
+                Tpm
+            ),
+            Rpm
+        )
+    catch
+        _:_ -> #{}
+    end.
+
+put_usage(Id, Pos, N, Acc) ->
+    {R, T, D} = maps:get(Id, Acc, {0, 0, 0}),
+    case Pos of
+        1 -> Acc#{Id => {N, T, D}};
+        2 -> Acc#{Id => {R, N, D}};
+        3 -> Acc#{Id => {R, T, N}}
+    end.
+
+fold_bucket(Tab, Bucket) ->
+    ets:foldl(
+        fun
+            ({{Id, B}, N}, Acc) when is_integer(N), B =:= Bucket -> Acc#{Id => N};
+            (_, Acc) -> Acc
+        end,
+        #{},
+        Tab
+    ).
+
+fold_daily(Tab) ->
+    Today = utc_day(),
+    ets:foldl(
+        fun
+            ({{Id, {Y, M, D}}, N}, Acc) when is_integer(N), {Y, M, D} =:= Today -> Acc#{Id => N};
+            (_, Acc) -> Acc
+        end,
+        #{},
+        Tab
+    ).
 
 -spec admit(map()) -> ok | {error, {quota, rpm | tpm | daily, pos_integer()}}.
 admit(Agent) when is_map(Agent) ->

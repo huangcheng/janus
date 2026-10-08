@@ -29,6 +29,13 @@
     lb_routes_cooling => {gauge, <<"LB routes currently cooling down.">>},
     lb_stats_total => {counter, <<"LB counters from janus_lb:stats/0 (cumulative).">>},
     decisions_upstream_429_total => {counter, <<"Upstream Decisions 429 responses (Retry-After passthrough).">>},
+    fleet_signals_tx_total => {counter, <<"Fleet signals broadcast (egress, knob-gated).">>},
+    fleet_signals_rx_total => {counter, <<"Fleet signals received (ingress, pre-validation).">>},
+    fleet_bad_ingress_total => {counter, <<"Fleet signals dropped at ingress validation (incl. judge-model mismatch).">>},
+    fleet_remote_cool_last_resort_total => {counter, <<"Picks where the remote-cool consult was ignored to keep a last candidate.">>},
+    fleet_commands_total => {counter, <<"Fleet commands executed, by command and outcome.">>},
+    fleet_lease_holder => {gauge, <<"1 on the fleet lease holder node, 0 elsewhere.">>},
+    fleet_mirror_rows => {gauge, <<"Rows currently held in fleet mirror tables.">>},
     usage_writer_buffered_rows => {gauge, <<"Usage writer buffered rows.">>},
     uptime_seconds => {gauge, <<"VM wall-clock uptime.">>},
     build_info => {untyped, <<"Build/version info.">>}

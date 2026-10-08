@@ -16,6 +16,12 @@
 
 -export([start_link/0]).
 -export([maybe_route/2, maybe_route/3, stats/0, snapshot/0, apply_db_settings/1]).
+%% Fleet decision-cache sharing (native-distribution spec B2):
+%% judge_model/0 is the ingress-side JudgeModel-match reference;
+%% fleet_cache_put/4 is the receive-side write API (never cross-owner
+%% raw ETS); pos_read/2 is exported read-only for the eunit suite
+%% (same convention as janus_lb's pure-filter exports).
+-export([judge_model/0, fleet_cache_put/4, pos_read/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(CACHE, janus_auto_cache).
@@ -911,6 +917,16 @@ pos_read(Hash, JM) ->
 
 pos_write(Hash, Tier, JM, Cfg) ->
     Exp = now_ms() + Cfg#acfg.ttl * 1000,
+    pos_write_ttl(Hash, Tier, JM, Exp),
+    %% Miss-only fleet publish (spec B2): pos_write runs ONLY after a
+    %% cache miss that was then fetched from the judge — a hit never
+    %% publishes, so there is no invalidation storm.
+    _ = fleet_publish_cache_put(Hash, Tier, JM, Cfg#acfg.ttl),
+    ok.
+
+%% Shared writer for the local miss path and the fleet receive path
+%% (the latter must NOT re-publish).
+pos_write_ttl(Hash, Tier, JM, Exp) ->
     Kind = pos,
     Seq = bump(cache_seq),
     try
@@ -920,6 +936,57 @@ pos_write(Hash, Tier, JM, Cfg) ->
     catch
         _:_ -> ok
     end.
+
+%% Local configured judge for the fleet ingress JudgeModel-match drop
+%% (rolling-deploy generation lag must not poison cross-version
+%% routing). Safe off the request path.
+-spec judge_model() -> binary() | undefined.
+judge_model() ->
+    try
+        (normalized())#acfg.judge_model
+    catch
+        _:_ -> undefined
+    end.
+
+%% Receive-side fleet write (spec B2): applies the entry into the
+%% LOCAL decision cache with the same duration on this node's clock.
+%% Judge must match the local config (double-checked here — ingress
+%% already gated on it); TTL clamped to the cache_put class (300 s).
+-spec fleet_cache_put(term(), binary() | atom(), binary(), pos_integer()) ->
+    ok | {error, judge_mismatch} | {error, badarg}.
+fleet_cache_put(Hash, TierWire, JudgeModel, TtlSec) when
+    is_integer(Hash), is_binary(TierWire), is_binary(JudgeModel), is_integer(TtlSec), TtlSec > 0
+->
+    case judge_model() of
+        JudgeModel ->
+            Tier = binary_to_tier(TierWire),
+            Ttl = min(TtlSec, 300),
+            pos_write_ttl(Hash, Tier, JudgeModel, now_ms() + Ttl * 1000),
+            ok;
+        _Other ->
+            {error, judge_mismatch}
+    end;
+fleet_cache_put(_, _, _, _) ->
+    {error, badarg}.
+
+%% Egress hook (Part 0.1 invariant): persistent_term knob check first,
+%% then catch-guarded publish — zero cost when off, no badarg when the
+%% fleet process is absent. Tier travels as a binary; the local phash2
+%% key travels as the 64-hex wire digest.
+fleet_publish_cache_put(Hash, Tier, JM, TtlSec) ->
+    case catch janus_fleet:enabled() of
+        true ->
+            catch janus_fleet:publish(
+                {cache_put, janus_fleet:hash_to_wire(Hash), tier_to_wire(Tier), JM, TtlSec * 1000}
+            );
+        _ ->
+            ok
+    end.
+
+tier_to_wire(T) when T =:= fast; T =:= big; T =:= flagship ->
+    atom_to_binary(T, utf8);
+tier_to_wire(B) when is_binary(B) ->
+    B.
 
 neg_write(Hash, JM) ->
     Kind = neg,
@@ -1714,5 +1781,22 @@ u(Text, Parts) ->
         <<"role">> => <<"user">>,
         <<"content">> => [#{<<"type">> => <<"text">>, <<"text">> => Text} | Parts]
     }.
+
+fleet_pos_write_hook_survives_missing_fleet_test() ->
+    %% Miss-only publish hook (spec B2): knob on with no janus_fleet
+    %% process at all — the hook is catch-guarded, the row still lands.
+    reclaim_tables(),
+    persistent_term:put({janus, fleet_enabled}, true),
+    pos_write(414141, big, <<"jm">>, cfg()),
+    ?assertEqual({ok, big}, pos_read(414141, <<"jm">>)),
+    persistent_term:put({janus, fleet_enabled}, false),
+    ets:delete(?CACHE, {pos, 414141}).
+
+fleet_wire_hash_roundtrip_test() ->
+    [begin
+        Wire = janus_fleet:hash_to_wire(N),
+        ?assertEqual(64, byte_size(Wire)),
+        ?assertEqual(N, binary:decode_unsigned(binary:decode_hex(Wire)))
+    end || N <- [0, 1, 268435455]].
 
 -endif.

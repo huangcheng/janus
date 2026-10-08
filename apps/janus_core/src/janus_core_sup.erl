@@ -54,8 +54,38 @@ init([]) ->
                     type => worker,
                     modules => [janus_model_sync]
                 }
-            ],
+            ] ++ fleet_children(),
     {ok, {SupFlags, Children}}.
+
+%% Fleet subtree (spec Part A / 0.12): present ONLY when the knob is
+%% on, registered TRANSIENT so a crash-looping fleet supervisor parks
+%% itself (exhausted intensity exits `shutdown`; transient children are
+%% not restarted on shutdown) without ever restarting its siblings.
+fleet_children() ->
+    case env_truthy(os:getenv("JANUS_FLEET_ENABLED")) of
+        true ->
+            [
+                #{
+                    id => janus_fleet_sup,
+                    start => {janus_fleet_sup, start_link, []},
+                    restart => transient,
+                    shutdown => 5000,
+                    type => supervisor,
+                    modules => [janus_fleet_sup]
+                }
+            ];
+        false ->
+            []
+    end.
+
+env_truthy(false) ->
+    false;
+env_truthy("") ->
+    false;
+env_truthy(Val) when is_list(Val) ->
+    lists:member(string:lowercase(Val), ["1", "true", "yes", "on"]);
+env_truthy(_) ->
+    false.
 
 db_conn_children() ->
     case code:ensure_loaded(janus_db_conn) of

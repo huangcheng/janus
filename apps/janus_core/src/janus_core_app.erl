@@ -5,6 +5,10 @@
 
 start(_StartType, _StartArgs) ->
     _ = janus_log:setup(),
+    %% Fleet knob env -> persistent_term BEFORE the supervisor builds
+    %% its child list (spec Part 0.1): the child-list condition reads
+    %% the env var directly, hook-path knob checks read only the PT key.
+    ok = janus_fleet:init_knob(),
     case janus_core_sup:start_link() of
         {ok, _Pid} = Ok ->
             %% Quota ETS before any Cowboy request (Slice Q).

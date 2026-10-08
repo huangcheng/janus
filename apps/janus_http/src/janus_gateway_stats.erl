@@ -34,7 +34,7 @@ handle(<<"GET">>, [], Req) ->
     %% statement discards the new map (immutability) and /stats would
     %% ship only the three counter fields.
     Base = janus_http_stats:snapshot(),
-    Stats = Base#{
+    Stats0 = Base#{
         generation => janus_config:generation(),
         ready => janus_config:ready(),
         backend => janus_db:select_backend(),
@@ -47,13 +47,44 @@ handle(<<"GET">>, [], Req) ->
         usage => Usage,
         usage_writer => Usage
     },
+    %% `fleet` appears ONLY when the knob is on (spec Part C) — knob-off
+    %% /stats is byte-identical to today's.
+    Stats = maybe_fleet(Stats0),
     reply_json(200, Stats, Req);
+handle(<<"GET">>, [<<"fleet">>], Req) ->
+    case fleet_on() of
+        true ->
+            reply_json(200, safe_fleet_status(), Req);
+        false ->
+            reply_json(404, #{error => #{code => <<"fleet_disabled">>}}, Req)
+    end;
 handle(<<"GET">>, [<<"logs">>], Req) ->
     Limit = qs_int(Req, <<"limit">>, 100, 1, 2000),
     {ok, Events, Total} = janus_log_tail:recent(Limit, undefined),
     reply_json(200, #{events => Events, total => Total}, Req);
 handle(_, _, Req) ->
     reply_json(405, #{error => #{code => <<"method_not_allowed">>}}, Req).
+
+fleet_on() ->
+    case catch janus_fleet:enabled() of
+        true -> true;
+        _ -> false
+    end.
+
+maybe_fleet(Stats) ->
+    case fleet_on() of
+        true -> Stats#{fleet => safe_fleet_status()};
+        false -> Stats
+    end.
+
+%% The Part A read path is ETS/pg reads, never a gen_server call — a
+%% parked janus_fleet still answers (status: down), and a crashed read
+%% helper degrades to a stub rather than a 500.
+safe_fleet_status() ->
+    case catch janus_fleet:status() of
+        M when is_map(M) -> M;
+        _ -> #{status => down}
+    end.
 
 uptime_sec() ->
     %% Wall clock seconds since boot (erlang:statistics(wall_clock) is

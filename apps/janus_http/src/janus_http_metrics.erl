@@ -69,7 +69,7 @@ render(Req) ->
                 _ ->
                     0
             end,
-        Rows = janus_metrics:snapshot() ++ DropRows ++ LbRows,
+        Rows = janus_metrics:snapshot() ++ DropRows ++ LbRows ++ fleet_rows(),
         Gauges =
             [
                 {catalog_generation, gauge_val(fun janus_config:generation/0, 0, catalog_generation), #{}},
@@ -79,7 +79,7 @@ render(Req) ->
                 {usage_writer_buffered_rows, Buffered, #{}},
                 {uptime_seconds, WallMs div 1000, #{}},
                 {build_info, 1, #{<<"version">> => Version}}
-            ],
+            ] ++ fleet_gauges(),
         Body = janus_metrics_render:render(Rows, Gauges),
         cowboy_req:reply(200, #{
             <<"content-type">> => <<"text/plain; version=0.0.4; charset=utf-8">>
@@ -108,6 +108,72 @@ safe(Fun, What) ->
                 class => Class, reason => Reason
             }),
             error
+    end.
+
+%%%--------------------------------------------------------------------
+%%% Fleet series (native-distribution spec Part C): present ONLY when
+%%% the knob is on; a parked janus_fleet (tables gone) omits rather
+%%% than fabricating zeros — status comes from /stats.fleet instead.
+%%%--------------------------------------------------------------------
+
+fleet_rows() ->
+    case catch janus_fleet:enabled() of
+        true ->
+            C = case catch janus_fleet:counters() of
+                M when is_map(M) -> M;
+                _ -> #{}
+            end,
+            Base = [
+                {{counter, MetricName, []}, V}
+             || {CtrName, MetricName} <- [
+                    {signals_tx, fleet_signals_tx_total},
+                    {signals_rx, fleet_signals_rx_total},
+                    {bad_ingress, fleet_bad_ingress_total},
+                    {remote_cool_last_resort, fleet_remote_cool_last_resort_total}
+                ],
+                V <- [maps:get(CtrName, C, undefined)],
+                is_integer(V)
+            ],
+            Cmd = [
+                {{counter, fleet_commands_total, [
+                    {<<"command">>, CmdB},
+                    {<<"outcome">>, janus_metrics:to_bin(Outcome)}
+                ]}, V}
+             || {{cmd_outcome, CmdB, Outcome}, V} <- maps:to_list(C), is_integer(V)
+            ],
+            Base ++ Cmd;
+        _ ->
+            []
+    end.
+
+fleet_gauges() ->
+    case catch janus_fleet:enabled() of
+        true ->
+            Status = case catch janus_fleet:status() of
+                M when is_map(M) -> M;
+                _ -> #{}
+            end,
+            Holder = case Status of
+                #{lease := #{holder := H}} when is_atom(H) -> H;
+                _ -> undefined
+            end,
+            Sizes = case Status of
+                #{mirror_sizes := S} when is_map(S) -> S;
+                _ -> #{}
+            end,
+            [
+                {fleet_lease_holder,
+                    case Holder of
+                        undefined -> 0;
+                        _ -> bool01(Holder =:= node())
+                    end,
+                    #{}}
+            ] ++ [
+                {fleet_mirror_rows, int_or_zero(N, fleet_mirror_size), #{<<"mirror">> => janus_metrics:to_bin(K)}}
+             || {K, N} <- maps:to_list(Sizes)
+            ];
+        _ ->
+            []
     end.
 
 gauge_val(Fun, Default, What) ->

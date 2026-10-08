@@ -64,13 +64,17 @@ init([]) ->
         ]}
     ]),
     %% Admin plane: read-only stats for the standalone dashboard to poll.
-    %% Token-authenticated (JANUS_STATS_TOKEN); no UI, no write API.
+    %% Token-authenticated (JANUS_STATS_TOKEN); no UI, no write API —
+    %% EXCEPT the closed-enum fleet command channel (native-distribution
+    %% spec F.1, operator sign-off): the exact path must precede the
+    %% /stats/[...] catch-all.
     AdminPort = application:get_env(janus, admin_port, 8090),
     AdminBind = bind("JANUS_ADMIN_BIND", admin_bind),
     AdminDispatch = cowboy_router:compile([
         {'_', [
             {"/healthz", janus_http_health, []},
             {"/stats", janus_gateway_stats, []},
+            {"/stats/fleet/command", janus_http_fleet, []},
             {"/stats/[...]", janus_gateway_stats, []},
             {"/metrics", janus_http_metrics, []}
         ]}

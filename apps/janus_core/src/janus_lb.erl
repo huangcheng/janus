@@ -15,6 +15,8 @@
 -module(janus_lb).
 -behaviour(gen_server).
 
+-include("janus_lb.hrl").
+
 -export([start_link/0, cooling_count/0]).
 -export([
     note_failure/2,
@@ -33,6 +35,14 @@
     %% Hard face-protocol filter (Decisions spec §4.5) — same
     %% injection style; mechanism only, the proxy owns the policy.
     protocol_filter/3,
+    %% Fleet distribution (native-distribution spec Part B):
+    %% cool_clear/1 is the pinned F.1 command MFA; the three filters
+    %% below are pure with injected consults (same style as above).
+    cool_clear/1,
+    remote_cool_filter/2,
+    remote_lat_postfilter/3,
+    lat_publish_eval/6,
+    lat_verdict/4,
     %% Entitlement carrier observability (spec Part B/C)
     bump_stat/1,
     stats/0
@@ -58,18 +68,24 @@
 %% Latency shedding: EWMA of upstream call wall time per route target.
 %% A candidate is degraded when its EWMA exceeds BOTH the absolute
 %% floor and FACTOR x the best eligible peer (>= MIN_SAMPLES samples).
+%% (?EWMA_MIN_SAMPLES / ?EWMA_STALE_MS live in janus_lb.hrl, shared
+%% with the fleet remote consults so local and fleet verdicts cannot
+%% drift.)
 -define(EWMA_ALPHA_PCT, 25).
--define(EWMA_MIN_SAMPLES, 4).
 -define(EWMA_CLAMP_MS, 30000).
--define(EWMA_STALE_MS, 600000).
 -define(DEFAULT_DEGRADED_FACTOR_PCT, 300).
 -define(DEFAULT_DEGRADED_FLOOR_MS, 1500).
+
+%% Fleet latency-publish coalescer state lives in the gen_server
+%% (#state.lat_pub, per target): {LastVerdict, Pending :: {Verdict,
+%% ConsecutiveEvals}, LastPublishMono}.
 
 -record(state, {
     cooldowns :: ets:tid(),
     inflight :: ets:tid(),
     cursors :: ets:tid(),
-    latency :: ets:tid()
+    latency :: ets:tid(),
+    lat_pub = #{} :: map()
 }).
 
 -type target() ::
@@ -182,9 +198,9 @@ handle_cast({note_auth_failure, ProviderId, KeyId, Reason}, State) ->
 handle_cast({note_success, Target}, State) ->
     do_note_success(Target, State),
     {noreply, State};
-handle_cast({note_latency, Target, Ms}, #state{latency = Lat} = State) ->
-    do_note_latency(normalize_target(Target), Ms, Lat),
-    {noreply, State};
+handle_cast({note_latency, Target, Ms}, #state{latency = Lat, lat_pub = Pub} = State) ->
+    Pub1 = do_note_latency(normalize_target(Target), Ms, Lat, Pub),
+    {noreply, State#state{lat_pub = Pub1}};
 handle_cast({release_inflight, Target}, #state{inflight = Inflight} = State) ->
     dec_inflight(Target, Inflight),
     {noreply, State};
@@ -278,6 +294,132 @@ latency_fun(Lat) ->
             _ ->
                 undefined
         end
+    end.
+
+%%%--------------------------------------------------------------------
+%%% Fleet distribution (native-distribution spec Part B)
+%%%--------------------------------------------------------------------
+
+%% Egress hook (Part 0.1 invariant): persistent_term knob check first,
+%% then a catch-guarded publish — zero cost when off, no badarg when
+%% the fleet process is absent or parked.
+maybe_publish(Msg) ->
+    case catch janus_fleet:enabled() of
+        true -> catch janus_fleet:publish(Msg);
+        _ -> ok
+    end.
+
+%% Remote-cool consult (pure; injected consult fun Target ->
+%% boolean): any single live sender's unexpired row cools the target —
+%% EXCEPT when that would remove the last available candidate: then
+%% the remote rows are ignored for this pick (advisory-only, never a
+%% hard remote 503) and last_resort is flagged for counting.
+remote_cool_filter(Routes, RemoteCoolFun) when is_list(Routes) ->
+    Kept = [
+        R
+     || R <- Routes,
+        not (RemoteCoolFun(provider_target(R)) orelse RemoteCoolFun(route_target(R)))
+    ],
+    case Kept of
+        [] when Routes =/= [] -> {Routes, last_resort};
+        [] -> {Routes, passthrough};
+        _ -> {Kept, shed}
+    end.
+
+%% Remote latency quorum post-filter (pure; runs AFTER the local
+%% degraded_filter): drop a candidate only when >= ?REMOTE_LAT_QUORUM
+%% distinct live senders hold unexpired degraded rows AND there is no
+%% fresh, sufficiently-sampled local EWMA for it (local wins); if the
+%% post-filter would empty the set, return the pre-filter set
+%% (never-shed-last, mirroring degraded_filter).
+remote_lat_postfilter(Routes, RemoteRowsFun, LocalFun) when is_list(Routes) ->
+    Kept = [R || R <- Routes, not remote_lat_shed(route_target(R), RemoteRowsFun, LocalFun)],
+    case Kept of
+        [] -> Routes;
+        _ -> Kept
+    end.
+
+remote_lat_shed(Target, RemoteRowsFun, LocalFun) ->
+    case LocalFun(Target) of
+        {_Ms, Samples} when Samples >= ?EWMA_MIN_SAMPLES ->
+            false;
+        _ ->
+            DegradedSenders = lists:usort([S || {S, degraded} <- RemoteRowsFun(Target)]),
+            length(DegradedSenders) >= ?REMOTE_LAT_QUORUM
+    end.
+
+%% Sender-side local verdict for the publish path (pure): the target's
+%% EWMA judged against the FRESH rows of its own family (same model) —
+%% identical thresholds to degraded_filter so a published verdict is
+%% exactly what the sender's local pick would conclude.
+lat_verdict(Self, FamilySamples, FactorPct, FloorMs) ->
+    Eligible = [{Ms, S} || {Ms, S} <- FamilySamples, S >= ?EWMA_MIN_SAMPLES],
+    case Eligible of
+        [] ->
+            healthy;
+        _ ->
+            Best = lists:min([Ms || {Ms, _} <- Eligible]),
+            case is_degraded(Self, Best, FactorPct, FloorMs) of
+                true -> degraded;
+                false -> healthy
+            end
+    end.
+
+%% Publish coalescer (pure; Part 0.4 storm bound): a verdict flip
+%% publishes only after 2 consecutive evaluations (hysteresis); while
+%% a route stays locally degraded a heartbeat republishes at most
+%% every ?FLEET_HEARTBEAT_MS; healthy flips announce as well.
+lat_publish_eval(Entry, Target, Verdict, EwmaMs, Samples, Now) ->
+    {LastV, {PV, PN}, LastPub} = lat_entry(Entry),
+    Pending =
+        case PV =:= Verdict of
+            true -> {PV, PN + 1};
+            false -> {Verdict, 1}
+        end,
+    {LastV1, Flipped} =
+        case Pending of
+            {V, N} when N >= 2, V =/= LastV -> {V, true};
+            _ -> {LastV, false}
+        end,
+    Heartbeat =
+        Verdict =:= degraded andalso LastV1 =:= degraded andalso
+            Now - LastPub >= ?FLEET_HEARTBEAT_MS,
+    {Publish, NewLastPub} =
+        case Flipped orelse Heartbeat of
+            true -> {{lb_lat, Target, Verdict, EwmaMs, Samples, ?FLEET_LAT_TTL_MS}, Now};
+            false -> {undefined, LastPub}
+        end,
+    {{LastV1, Pending, NewLastPub}, Publish}.
+
+lat_entry(undefined) -> {healthy, {healthy, 0}, 0};
+lat_entry(Entry) when tuple_size(Entry) =:= 3 -> Entry.
+
+%% F.1 command target: clear the LOCAL cooldown row for the target
+%% (idempotent, tolerant when LB is down). The fleet-wide purge signal
+%% is broadcast separately by the command originator only.
+-spec cool_clear(target()) -> ok.
+cool_clear(Target) ->
+    try
+        _ = ets:delete(?COOLDOWNS, normalize_target(Target)),
+        ok
+    catch
+        _:_ -> ok
+    end.
+
+remote_cool_fun() ->
+    case catch janus_fleet:enabled() of
+        true -> fun janus_fleet:remote_cooling/1;
+        _ -> fun(_) -> false end
+    end.
+
+remote_lat_fun() ->
+    case catch janus_fleet:enabled() of
+        true ->
+            fun(Target) ->
+                [{S, V} || {S, _E, _N, V} <- janus_fleet:remote_lat_rows(Target)]
+            end;
+        _ ->
+            fun(_) -> [] end
     end.
 
 degraded_factor_pct() ->
@@ -374,7 +516,16 @@ pick_from_routes(
                 not is_cooling(route_target(R), Cool, Now),
                 provider_enabled(R)
             ],
-            case Available0 of
+            %% Remote-cool consult (Part B): any single live sender's
+            %% unexpired mirror row cools the candidate — except when
+            %% it would remove the LAST candidate (never a hard remote
+            %% 503; the ignored case is counted).
+            {Available0b, CoolFlag} = remote_cool_filter(Available0, remote_cool_fun()),
+            case CoolFlag of
+                last_resort -> _ = catch janus_fleet:bump(remote_cool_last_resort);
+                _ -> ok
+            end,
+            case Available0b of
                 [] ->
                     %% All routes filtered out: cooling is only the
                     %% diagnosis when at least one provider is
@@ -388,7 +539,7 @@ pick_from_routes(
                     %% Preference among PICKABLE routes only (see
                     %% prefer_proto_routes/2): falls back to all of
                     %% them when no same-protocol route is pickable.
-                    Available = prefer_proto_routes(Available0, Opts),
+                    Available = prefer_proto_routes(Available0b, Opts),
                     case pick_usable_route(PickKey, Available, Cool, Cursors, Now, Inflight, Lat) of
                         {ok, _} = Ok ->
                             Ok;
@@ -413,14 +564,17 @@ pick_from_routes(
 
 %% Prefer another provider when this one's keys are exhausted; shed
 %% candidates whose EWMA latency is degraded relative to their peers
-%% (falls back to the full usable set when data is insufficient).
+%% (falls back to the full usable set when data is insufficient), then
+%% apply the remote latency quorum post-filter (Part B).
 pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight, Lat) ->
     Usable = [R || R <- Candidates, has_usable_key(R, Cool, Now)],
     case Usable of
         [] ->
             {error, classify_key_failures(Candidates, Cool, Now)};
         _ ->
-            Healthy = degraded_filter(Usable, latency_fun(Lat), degraded_factor_pct(), degraded_floor_ms()),
+            Healthy0 = degraded_filter(Usable, latency_fun(Lat), degraded_factor_pct(), degraded_floor_ms()),
+            Healthy =
+                remote_lat_postfilter(Healthy0, remote_lat_fun(), latency_fun(Lat)),
             Picked = weighted_rr_pick(PickKey, Healthy, Cursors),
             case select_key(PickKey, Picked, Cool, Cursors, Now) of
                 {ok, Key} ->
@@ -581,19 +735,28 @@ do_note_failure(Target, Reason, #state{cooldowns = Cool}) ->
     Ms = cooldown_ms(SafeReason),
     Now = erlang:monotonic_time(millisecond),
     Until = Now + Ms,
-    {FinalUntil, FinalReason} =
+    {FinalUntil, FinalReason, WasCooling} =
         case ets:lookup(Cool, Key) of
             [{_, Existing, PrevReason}] when is_integer(Existing), Existing > Now ->
                 case Existing >= Until of
-                    true -> {Existing, PrevReason};
-                    false -> {Until, SafeReason}
+                    true -> {Existing, PrevReason, true};
+                    false -> {Until, SafeReason, true}
                 end;
             [{_, Existing}] when is_integer(Existing), Existing > Now ->
-                {max(Existing, Until), SafeReason};
+                {max(Existing, Until), SafeReason, true};
             _ ->
-                {Until, SafeReason}
+                {Until, SafeReason, false}
         end,
     ets:insert(Cool, {Key, FinalUntil, FinalReason}),
+    case WasCooling of
+        false ->
+            %% Into-cool transition ONLY (spec Part B storm closure):
+            %% one publish per cooldown episode per (Target, Class);
+            %% extensions of an existing cooldown never re-publish.
+            maybe_publish({lb_cool, Key, min(FinalUntil - Now, ?FLEET_COOL_CAP_MS), FinalReason});
+        true ->
+            ok
+    end,
     logger:info(#{
         what => janus_lb_cooldown,
         target => Key,
@@ -632,11 +795,31 @@ provider_has_non_auth_blocked_key(ProviderId, Cool, Now) ->
 
 do_note_success(Target, #state{cooldowns = Cool, inflight = Inflight}) ->
     Key = normalize_target(Target),
+    Now = erlang:monotonic_time(millisecond),
+    %% Edge ONLY (spec Part B): an unexpired cooldown row actually
+    %% existed and is being cleared — per-success casts are forbidden.
+    Cleared =
+        case ets:lookup(Cool, Key) of
+            [{_, Until, _}] when is_integer(Until), Until > Now -> true;
+            [{_, Until}] when is_integer(Until), Until > Now -> true;
+            _ -> false
+        end,
     ets:delete(Cool, Key),
     dec_inflight(Key, Inflight),
+    case Cleared of
+        true ->
+            %% (a) tell peers to drop THIS node's cool-row for the
+            %% target (per-sender retraction), and (b) clear the
+            %% target's rows in BOTH local remote mirrors — local
+            %% evidence wins, literally.
+            maybe_publish({lb_recovered, Key}),
+            catch janus_fleet:local_success_clear(Key);
+        false ->
+            ok
+    end,
     ok.
 
-do_note_latency(Target, Ms, Lat) ->
+do_note_latency(Target, Ms, Lat, Pub) ->
     Now = erlang:monotonic_time(millisecond),
     {Ewma, Samples} =
         case ets:lookup(Lat, Target) of
@@ -646,7 +829,41 @@ do_note_latency(Target, Ms, Lat) ->
                 {Ms, 1}
         end,
     ets:insert(Lat, {Target, Ewma, Samples, Now}),
-    ok.
+    Verdict = family_verdict(Target, {Ewma, Samples}, Lat, Now),
+    {Entry, Publish} = lat_publish_eval(maps:get(Target, Pub, undefined), Target, Verdict, Ewma, Samples, Now),
+    _ =
+        case Publish of
+            undefined -> ok;
+            Msg -> maybe_publish(Msg)
+        end,
+    Pub#{Target => Entry}.
+
+%% Family-relative local verdict: targets of the same pick family
+%% (same model) share alternatives, so the sender-side verdict uses
+%% the same eligible-best rule as the pick path's degraded_filter.
+family_verdict(Target, Self, Lat, Now) ->
+    case family_prefix(Target) of
+        undefined ->
+            healthy;
+        Prefix ->
+            Family = fresh_family_samples(Prefix, Lat, Now),
+            lat_verdict(Self, Family, degraded_factor_pct(), degraded_floor_ms())
+    end.
+
+family_prefix({route, ModelId, _ProviderId}) -> {route, ModelId};
+family_prefix(_) -> undefined.
+
+fresh_family_samples(Prefix, Lat, Now) ->
+    Pattern = {list_to_tuple(tuple_to_list(Prefix) ++ ['_']), '$1', '$2', '$3'},
+    try
+        [
+            {Ewma, Samples}
+         || [Ewma, Samples, Updated] <- ets:match(Lat, Pattern),
+            Now - Updated < ?EWMA_STALE_MS
+        ]
+    catch
+        _:_ -> []
+    end.
 
 is_cooling(Target, Cool, Now) ->
     case ets:lookup(Cool, Target) of

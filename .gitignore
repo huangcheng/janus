@@ -33,3 +33,6 @@ apps/janus_dashboard/priv/www/
 docs/audit*/
 !docs/audit*/SYNTHESIS.md
 fixtures
+# App test fixtures are repo content (janus_http wire captures, janus_core
+# fleet TLS chains) — the bare `fixtures` rule targets operator capture dirs.
+!apps/*/test/fixtures/
