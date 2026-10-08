@@ -1,4 +1,4 @@
-# Native Erlang Distribution for the Janus Fleet — SPEC (rev 7)
+# Native Erlang Distribution for the Janus Fleet — SPEC (rev 11 — FINAL)
 
 > **For implementers:** single source of truth once ratified. All
 > comments, commits, and docs in English. Status: DRAFT — round-6 folds
@@ -40,17 +40,94 @@
 >   noting `deploy_prod.sh` uses compose recreate + `/healthz`, never
 >   erl_call subcommands.
 
+**Rev 11 (final) — rounds 1/2/4 all 7/7 GO WITH FIXES, converged at
+> hygiene level:** erpc catch normalized (`error:{erpc,R} -> {error,R}`
+first clause); cache_put first_seen tombstones GC at
+first_seen + 2xTTL + 60 s grace; MFAs pinned for all four commands
+(fleet_status -> janus_fleet:status/0; config_reload_nudge ->
+janus_config:reload/0; catalog_cache_flush -> janus_catalog:flush/0;
+lb_cool_clear -> janus_lb:cool_clear/1 NEW exported API);
+lb_cool_purge published ONCE by the command originator only
+(ingress-bounded like every signal); lease failover is TICK-based
+(holder expiry on the 5 s tick, nodedown accelerates, not the
+mechanism); "hottest" = highest Used/Limit ratio this cycle; the
+8 192/sender cap is AGGREGATE across all mirrors (stated once);
+fleet_status executes LOCALLY via direct call (no erpc to self);
+Part C mirrors enum covers quota rows; gate order pinned
+F.5-F.1-F.2-F.3-F.4-F.6-F.8-F.7 (pause-based last); F.6 fleet-off
+control = pre-recreate measurement of the same binding; Target
+byte-clamped at ingress; connector retry caps at 5 min then
+log-only; cert-gen script on the rollout checklist; stale
+expires_in_ms/(phase 3) wording scrubbed.
+> **Rev 10 — pi-audit round 2 (7/7 GO WITH FIXES) folds:** replay
+> exception cross-referenced INTO Part 0.2; cache_put replay bound
+> made enforceable (per-(sender,Hash) first_seen; expires_at ≤
+> first_seen + 2×TTL); quota WindowId boundary rule (accept current
+> AND previous bucket); erpc wrapper pinned as
+> `try erpc:call(...) catch C:R -> {error,C,R}` with common classes
+> documented (undef/noconnection/timeout — F.7 paused peer expects
+> `timeout`, not `noconnection`); F.1 command registry pins exact
+> M:F:A per name + `function_exported` precheck + strict local arg
+> validation (lb_cool_clear target shape) + per-command timeouts
+> (fleet_status 1 s/peer, nudge 10 s); ingress byte clamps
+> (AgentKeyId ≤ 128 B, Hash = exact 64-hex-char digest); quota
+> publishes top-N (32) hottest keys per cycle + aggregate mirror cap
+> 8 192/sender across ALL mirrors; `{lb_cool_purge}` + quota +
+> cache_put shapes added to the ingress enum; nodedown purge scope =
+> ALL signal mirrors (cache_put entries TTL-only — a peer's cached
+> decisions remain valid after its death); decision-cache writes via
+> an exported janus-auto API, never cross-owner raw ETS; entrypoint
+> pre-flight (knob on ⇒ TLS dir/optfile/certs exist, else loud
+> exit); F.6 comparison binding pinned single-listing + TF-F.8
+> (cache_put round-trip) added; lease `expires_in_ms` →
+> `next_check_in_ms`; goal scrubbed of "(phase 3)" wording.
+> **Rev 9 — pi-audit round 1 (7/7 GO WITH FIXES) applied:**
+> F.3 restated as RESIDUAL TRUST (erpc has no server-side MFA ACL —
+> any cert+cookie peer can execute anything; the enum constrains only
+> the admin-token HTTP surface, and Part 0.6 now discloses fleet-wide
+> execution as the steal consequence); erpc error contract fixed
+> (call/5 RAISES — wrapper catches undef/noconnection/timeout and
+> aggregates per-node; unknown names 400 locally, never fanned);
+> quota gossip is ADVISORY-ONLY in v1 (mirrors + /stats, never
+> consumed by the pick — Slice-Q limits are per-node so cross-node
+> merge is undefined; the earlier-shed idea is withdrawn, F.6
+> rewritten to observability + no-behavior-change); quota heartbeat
+> TTL 6 s (3× cadence), ≥50%-used publish filter, 2-evaluation
+> hysteresis on the 80% crossing, WindowId bucket alignment rule;
+> cache_put gets its own TTL class (≤ 300 s), per-sender entry cap
+> (4 096), JudgeModel-must-match-local-config drop, replay-TTL
+> extension accepted and bounded; lb_cool_clear gains a
+> {lb_cool_purge, Target} fleet retraction (mirror rows keyed by
+> other senders live to TTL otherwise); the lease no longer gates the
+> quota publisher (every node publishes its own rows; dual-publish is
+> bounded by the filter+cap) — v1 lease duty is observability +
+> phase-4 readiness; :8090 boundary change (read-only → idempotent
+> fleet commands) is called out for operator sign-off.
+> **Rev 8 — operator enhancement "full Erlang power":** adds Part F
+(erpc fleet command channel with a CLOSED command enum + pg leader
+lease) and pulls the former phase-3 payloads (quota gossip, judge
+decision-cache sharing) into scope as Part B2 — all under the same
+Part 0 failure-mode discipline. The non-goals list is amended, not
+overturned: mnesia/global/raft stay out; cross-node REQUEST
+forwarding stays out (the data plane never proxies agent traffic
+through a peer); what is added is remote code execution for
+control-plane commands and self-expiring advisory payloads only, with
+remote spawn explicitly rejected (F.3).
+
 **Goal.** The three production gateways (aliyun leader, jdcloud +
 tencent followers) behave as one Erlang cluster for *ephemeral runtime
 signals* — LB cooldowns, latency-degradation state, (phase 3) quota
-counters and judge decision-cache entries — so a sick provider learned
+counters and judge decision-cache entries (all in scope since rev 8) — so a sick provider learned
 about on one node is avoided by all nodes within ~100 ms instead of
 each node paying its own learning tax (today: N failed/slow requests
 per node before the local LB reacts).
 
 **Non-goals.** No mnesia, no `global`, no cross-node request
-forwarding/proxying, no distributed config writes, no hot code
-upgrades, no Raft/consensus. Postgres remains the sole authority for
+forwarding/proxying (agent traffic NEVER transits a peer), no
+distributed config writes, no hot code upgrades, no Raft/consensus.
+Remote execution (Part F) is a CLOSED enum of control-plane commands —
+never arbitrary module:function:args, never secrets, never agent
+payloads. Postgres remains the sole authority for
 config/catalog; nothing in this spec changes the generation-poll
 mechanism.
 
@@ -73,7 +150,10 @@ single-node behavior.
    an optimization**.
 2. **Stale remote state outliving recovery** — every signal is
    self-expiring (lazy expiry on read + a 30 s sweeper, same discipline
-   as `janus_lb` cooldowns). No replay, no persistence. Latency
+   as `janus_lb` cooldowns). No persistence. Replay is forbidden on
+   every signal EXCEPT one accepted, bounded deviation: a replayed
+   `cache_put` extends its entry by at most one TTL, and the enforced
+   per-(sender,Hash) bound is `expires_at <= first_seen + 2xTTL` (B2). Latency
    signals carry the sender's own `Verdict` — a healthy flip
    overwrites the row, so remote shedding can never outlive the
    sender's recovery (Part B).
@@ -108,9 +188,12 @@ single-node behavior.
    impersonation is closed (client verifies cert against the exact
    dialed node name automatically); inbound, a stolen fleet key for
    node X can additionally CLAIM node Y's name at the dist handshake —
-   accepted and bounded: signal merge rules limit blast radius
-   (quorum, self-limiting TTLs), and revocation = CA reissue. Anything
-   failing (a)–(d) is dropped and counted.
+   accepted and bounded **for SIGNAL ingress** (quorum,
+   self-limiting TTLs), and revocation = CA reissue. **With Part F,
+   the same stolen key additionally enables arbitrary remote code
+   execution on peers (Erlang distribution has no MFA allow-list —
+   F.3); the cert is the only real boundary.** Anything failing
+   (a)–(d) is dropped and counted.
 7. **Mixed versions during rolling deploy** — every message is tagged
    `{janus_fleet, 1, Payload}`; unknown tags/shapes are dropped and
    counted, so old and new nodes coexist.
@@ -227,7 +310,9 @@ entrypoint RENDERS the effective vm.args:
   `[A-Za-z0-9_-]{32}`), keeping `bin/janus rpc`/`remote_console` alive
   in standalone mode.
 - Precondition: `JANUS_FLEET_ENABLED=true` ∧ cookie unset ⇒ entrypoint
-  exits non-zero with a loud error (Part 0.5).
+  exits non-zero with a loud error (Part 0.5). Same loud exit when
+  knob on ∧ (TLS dir missing / optfile unwritable / any cert file
+  unreadable) — fail fast at boot, never an idle cluster surprise.
 - ONLY when `JANUS_FLEET_ENABLED=true`, append the fleet block (port
   rendered from `$JANUS_FLEET_DIST_PORT` — single source):
 
@@ -474,7 +559,9 @@ Ingress (`janus_fleet:handle_cast`):
   `janus_fleet_remote_cool` (a node retracts only its own signals;
   latency rows are unaffected).
 - On `nodedown` / `pg` leave: eagerly delete that sender's rows from
-  BOTH mirrors — documented as firing ≥ 60 s late (net_ticktime); TTL
+  ALL signal mirrors (cool, latency, quota); cache_put entries are
+  deliberately NOT purged (a departed peer's cached decisions remain
+  valid; TTL ≤ 300 s is their bound) — documented as firing ≥ 60 s late (net_ticktime); TTL
   is the real cleanup.
 - 30 s sweeper pass deletes expired rows even if never read.
 
@@ -503,6 +590,126 @@ Consumption (`janus_lb` read path):
   literally). Local success/failure always overwrites local state
   immediately; nothing remote ever blocks a local recovery.
 
+## Part B2 — Quota gossip + judge decision-cache sharing (former phase 3, now in scope)
+
+Both payloads ride the same `{janus_fleet, 1, _}` channel, mirrors,
+TTLs, ingress validation, and local-wins discipline as Part B.
+
+**Quota counters — ADVISORY-OBSERVABILITY ONLY in v1.** Slice-Q
+limits are PER-NODE (the operator's Slice Q spec); a cross-node merge
+is semantically undefined (per-node budgets make remote rows
+non-authoritative; shared budgets would need a sum, not a max, plus
+exactly-once accounting nobody has). v1 therefore: each node
+publishes `{quota, AgentKeyId, WindowId, WindowSec, {Used, Limit},
+6_000}` on a **2 s coalesced heartbeat** for the **top-32 hottest keys ≥ 50 %
+of limit** (per-cycle publish cap; AgentKeyId clamped ≤ 128 bytes at
+ingress) (plus an edge-latched publish when a counter crosses 80 % —
+2 consecutive evaluations, latency-coalescer discipline); receivers
+upsert per-(sender, key, window) into a `janus_fleet_remote_quota`
+mirror — a sender's row for the CURRENT **or PREVIOUS** WindowId is
+accepted (bucket-boundary races make a strict match flicker at the
+edge; older buckets drop) — that is **read by /stats and /metrics ONLY — the pick path
+never consults it**. Behavior with the fleet on is therefore
+byte-identical to today (the F.6 gate asserts exactly that);
+fleet-aware early shedding is deferred to a spec revision that first
+defines budget ownership. TTL 6 s = 3× cadence (jitter margin; the
+2 s == TTL flicker is the bug this avoids). **WindowId =
+floor(epoch_seconds / WindowSec)** — a pure bucket index, not an
+expiry timestamp: receivers compute their own current WindowId and
+drop mismatches (clock skew ± s vs ≥ 60 s buckets is immaterial).
+Row cap 8 192/sender.
+
+**Judge decision-cache sharing (janus-auto).** On a LOCAL cache MISS
+that is then fetched and cached, the node publishes
+`{cache_put, Hash, Tier, JudgeModel, TTLms}` — miss-only (a hit never
+publishes; no invalidation storm). Ingress applies cache_put-specific
+rules on top of the Part B validation: Hash must be an exact
+64-hex digest; per-(sender, Hash) `first_seen` tracking enforces the
+replay bound `expires_at <= first_seen + 2xTTL` (a replying peer
+cannot extend an entry past two lifetimes); TTL clamped to its OWN
+class (≤ 300 s — the generic ≤ 30 s clamp does not apply); **JudgeModel
+must equal the local configured judge**, else the entry is dropped
+and counted (rolling-deploy generation lag cannot poison cross-
+version routing); a per-sender cache-entry cap of 4 096 (drop+count
+beyond); writes are idempotent-upsert keyed by Hash. Receivers write
+into their local decision cache with the SAME duration on their own
+clock. Entries are pure (tier + judge name). **Replay extends an
+entry's life by at most one TTL** — an accepted, bounded deviation
+from "no replay" (the payload is beneficial-and-pure; a malicious
+replayer extends a correct decision's cache hit, which is harmless).
+Blast radius of a poisoned entry: duplicate upstream judge calls
+within ≤ 300 s, self-expiring. Sender validity is the handshake-cert
+boundary from Part 0.6.
+
+## Part F — Full-power control plane: erpc fleet commands + pg leader lease
+
+**F.1 Closed-enum fleet commands.** The admin plane (:8090,
+token-authed as today) gains `POST /stats/fleet/command` with a
+CLOSED command enum; each name maps to one exported, audited,
+idempotent function — NEVER arbitrary MFA. v1 enum:
+
+- `fleet_status` → `janus_fleet:status/0` — read-only fan-out (LOCAL node via direct call, never erpc-to-self) (what /stats.fleet shows locally) gathered
+  in one call.
+- `config_reload_nudge` → `janus_config:reload/0`
+  (idempotent; makes the generation poll immediate after a dashboard
+  write).
+- `catalog_cache_flush` → `janus_catalog:flush/0` — pure-local idempotent cache clear.
+- `lb_cool_clear {target}` — clears that target's LOCAL cooldown row
+  on every peer AND broadcasts `{lb_cool_purge, Target}` (new signal:
+  receivers delete EVERY sender's cool-row for that target from the
+  mirror — operator override semantics; without the purge, mirror
+  rows keyed by other senders would outlive the local clear to TTL,
+  re-sticking the pick for ≤ 30 s). Audited like every command.
+
+Mechanics: a **command registry** pins the exact `M:F:A` per enum
+name (`function_exported` prechecked; args validated locally —
+`lb_cool_clear` target shape checked before ANY fan-out; unknown
+name → 400, no fan-out, counter-asserted). Fan-out is parallel
+`erpc:call(Peer, M, F, A, Timeout)` with per-command timeouts
+(fleet_status 1 s, nudge/flush/clear 10 s), wrapped as
+`try erpc:call(...) catch error:{erpc, R} -> {error, R}; Class:Reason -> {error, Class, Reason} end`
+(erpc raises `error:{erpc, Reason}` — normalized first; other classes pass through). Common classes: `undef` (version skew),
+`noconnection` (peer down), `timeout` (peer PAUSED — TCP alive, no
+answer; F.7 asserts this for a paused peer). A down peer is `{error, noconnection}`;
+PARTIAL SUCCESS IS SUCCESS (advisory cluster — no quorum, ever).
+Every command is audited locally (actor/command/per-node results).
+Version skew during rolling deploys: a command an old node lacks
+raises `undef` there → per-node `{error, undef}`, reported, nothing
+crashes (eunit drives the wrapper with a deliberately-missing
+function; the gate does not need a skewed cluster). **Boundary
+change, operator sign-off:** :8090 goes from read-only to hosting
+idempotent fleet commands — same token auth, every invocation
+audited.
+
+**F.2 pg leader lease (no global, no Raft).** v1 duty:
+observability + phase-4 readiness ONLY — it does NOT gate the quota
+publisher (quota rows are per-sender; every node publishes its own,
+storm-bounded by the ≥50 % filter + row cap; a single-publisher
+lease would blind the fleet to keys hot only on non-holders). The
+first real duty lands in phase 4 (video pending sweep migration);
+until then the lease is reported (`/stats.fleet.lease`,
+`fleet_lease_holder`) and gate-asserted to converge, nothing more. Design: holder = the LOWEST node name among live
+pg members (deterministic, zero election traffic); each node ticks a
+5 s lease check; on holder `nodedown`, the next-lowest claims within
+net_ticktime + 5 s. `/stats.fleet.lease` reports
+`{holder, next_check_in_ms}`; `fleet_lease_holder` metric is 1 on the
+holder, 0 elsewhere; `/stats.fleet.lease` reports
+`{holder, next_check_in_ms}`. Split-brain dual-publish is accepted and bounded
+(storm invariant), documented.
+
+**F.3 Residual trust, stated honestly.** Erlang distribution has NO
+server-side MFA allow-list: ANY node holding the fleet cookie + a
+valid peer cert can `erpc`/`spawn` ANY exported function on peers.
+The F.1 enum closes only the admin-token HTTP surface — it is a
+policy on what WE trigger, not a capability the system enforces. The
+true boundary is the TLS peer cert (Part 0.6); a stolen fleet key
+therefore means fleet-wide code execution, and Part 0.6's residual
+paragraph is amended accordingly. This is the accepted cost of
+native distribution; the mitigations are the closed HTTP enum (no
+convenience foot-gun), audit on every command, CA revocation as the
+kill switch, and the dist port being security-grouped to peer IPs.
+Growing the enum still requires a spec revision (auditable drift).
+
 ## Part C — Observability
 
 - `/stats` gains `fleet` **only when the knob is on**:
@@ -514,6 +721,11 @@ Consumption (`janus_lb` read path):
   so the TF-F.* gate asserts real state and operators can see exactly
   whose signal is in effect. The dashboard Nodes page can surface it
   later (separate SPA change, not in this spec).
+- `/metrics` gains `fleet_commands_total{command, outcome}`,
+  `fleet_lease_holder` (1 on the holder, 0 elsewhere), and Part B's
+  signal counters; `/stats.fleet` additionally reports the last 20
+  fleet commands (ring, with per-node results) and
+  `lease {holder, next_check_in_ms}`.
 - `/metrics` gains `fleet_signals_tx_total`,
   `fleet_signals_rx_total`, `fleet_bad_ingress_total`,
   `fleet_remote_cool_last_resort_total`, and mirror row-count gauges.
@@ -534,8 +746,7 @@ loopback-free distribution. Gate preconditions: the targeted binding
 for F.2/F.3 MUST have ≥ 2 live listings (one sabotaged, one healthy
 mock alternative), else "succeeds via the alternative" / "never hit"
 are vacuous; F.5's comparison binding has exactly ONE listing
-(deterministic route). **Execution order: F.5 → recreate gw3
-fleet-on → F.1 → F.2 → F.3 → F.4** (`signals_rx` is cumulative — no
+(deterministic route). **Execution order: F.5 → recreate gw3 fleet-on → F.1 → F.2 → F.3 → F.4 → F.6 → F.8 → F.7 (pause-based steps last; state restored between steps)** (`signals_rx` is cumulative — no
 mid-suite reset; the recreate transition between F.5 and F.1 is an
 explicit gate step). New TEST-FLOWS steps (TF-F.*):
 
@@ -597,10 +808,36 @@ explicit gate step). New TEST-FLOWS steps (TF-F.*):
    status + same body modulo volatile fields (request id, timestamps),
    (e) gw3 appears in no peer's `fleet.nodes`.
 
-Phase 3 (separate spec revision, not implemented in v1): quota counter
-gossip (~2 s cadence, documented approximation) and judge
-decision-cache sharing (`{cache_put, Hash, Tier, JudgeModel, TTL}` on
-miss only).
+6. **F.6 quota gossip (observability-only):** drive a key's traffic
+   at gw1 until its local counter crosses 80%; assert (a) gw2's
+   `/stats.fleet` quota mirror shows the row within one heartbeat
+   (≤ 3 s), (b) gw2's pick behavior is BYTE-IDENTICAL to a control
+   run with the fleet knob off (same upstream hit counts — the pick
+   never consults the quota mirror), (c) stopping gw1's traffic → the
+   row TTLs out within 6 s + sweeper. No shed is asserted anywhere
+   (advisory-only is the spec).
+6b. **F.8 cache_put round-trip:** with the SAME tier config on
+   gw1/gw2 and janus-auto traffic driven at gw1 until a decision is
+   fetched+cached (miss), assert gw2's local decision cache serves
+   the same hash WITHOUT its own upstream miss (mock judge counter
+   deltas); a cache_put whose JudgeModel ≠ gw2's configured judge is
+   dropped+counted (visible in `fleet_bad_ingress_total`).
+7. **F.7 fleet commands + lease:** `fleet_status` via gw1's admin
+   plane returns all three nodes' fleet state in one call; an unknown
+   command name → local 400, zero peers contacted (log-asserted);
+   the F.6 comparison binding has exactly ONE listing (deterministic
+   hit counts); `lb_cool_clear` removes a cooled target's LOCAL
+   cooldown row on ALL nodes AND its mirror rows on all peers within
+   the cast window (purge signal); a PAUSED peer's slot reads
+   `{error, timeout}` (TCP alive, no answer) and the command still
+   succeeds on the rest (partial-success-is-success); pausing the lease holder moves
+   the lease to the next-lowest node within net_ticktime + 5 s
+   (single holder observed); eunit drives the try/catch wrapper with
+   undef/timeout/noconnection.
+
+Phase 4 (separate spec revision): dashboard-side video pending sweep
+onto the lease; fleet-coordinated rolling-deploy drain; DNS-based
+peer discovery if the fleet ever outgrows static peers.
 
 ## Part E — Explicitly rejected alternative
 
