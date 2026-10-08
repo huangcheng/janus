@@ -9,13 +9,14 @@
 
 ## Tables
 - `config_meta` — `config_generation BIGINT NOT NULL` (single row, CAS target)
-- `api_keys` — `id`, `prefix`, `key_hash`, `enabled`, `created_at`
+- `api_keys` — `id`, `prefix`, `key_hash`, `enabled`, `created_at`, `rpm_limit` (nullable INT, mig 014), `tpm_limit` (nullable INT, mig 014), `daily_token_limit` (nullable, mig 014); NULL = unlimited
 - `api_key_models` — `api_key_id`, `model_id` (allowlist join)
-- `providers` — `id`, `name`, `base_url`, `protocol` (`openai_chat`|`anthropic_messages`|`openai_responses`), `enabled`
+- `providers` — `id`, `name`, `base_url`, `protocol` (`openai_chat`|`anthropic_messages`|`openai_responses`|`openai_decisions`), `enabled`
 - `provider_keys` — `id`, `provider_id`, `secret_ciphertext`, `key_id`, `weight`, `enabled`
 - `models` — `id`, `name` (agent-facing model id), `enabled`
 - `model_routes` — `model_id`, `provider_id`, `upstream_model_id` (nullable alias), `weight`, `priority`, `enabled`
-- `usage_events` — `id`, `ts`, `agent_key_id` (nullable, FK SET NULL), `model_id` (nullable, FK SET NULL), `provider_id` (nullable, FK SET NULL), `provider_key_id` (nullable, FK SET NULL), `protocol`, `stream` (SMALLINT 0/1), `status`, `prompt_tokens` (nullable), `completion_tokens` (nullable), `latency_ms` (nullable), `error_code` (nullable), `attempt`, `request_ref` (nullable), `is_terminal`, `request_id` (nullable)
+- `usage_events` — `id`, `ts`, `agent_key_id` (nullable, FK SET NULL), `model_id` (nullable, FK SET NULL), `provider_id` (nullable, FK SET NULL), `provider_key_id` (nullable, FK SET NULL), `protocol`, `stream` (SMALLINT 0/1), `status` (HTTP status INTEGER), `prompt_tokens` (nullable), `completion_tokens` (nullable), `latency_ms` (nullable), `error_code` (nullable), `attempt`, `request_ref` (nullable), `is_terminal`, `request_id` (nullable), `modality` (nullable TEXT, mig 010), `units` (nullable NUMERIC, mig 010), `outcome` (nullable TEXT — lifecycle/result tag, **not** HTTP status; mig 010), `cache_read_input_tokens` (nullable, mig 012)
+- `video_jobs` — `jvid` (PK), `provider_id`, `upstream_id`, `status`, `created_ts` (mig 011; async video lifecycle)
 
 ## ETS tables
 - `janus_metrics` — named **public set** (`write_concurrency` + `read_concurrency`), created by `janus_metrics:init/0` from the `janus_http` app master at boot; init is idempotent and failure is logged, never fatal. Keys: `{counter, Name, Labels}` / `{hist, Name, Labels, LeBin}` / `{hist_sum_us, Name, Labels}` (integer µs) / `{hist_count, Name, Labels}`; `Labels` = sorted `[{K, V}]` binaries. All writes are `ets:update_counter/4` with a default tuple (atomic create-and-bump); readers `tab2list` via `snapshot/0`. Label values only from closed enums + operator-defined provider names — never request ids, key ids, or model names.

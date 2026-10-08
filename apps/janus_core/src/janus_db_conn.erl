@@ -220,9 +220,12 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
                 "FROM provider_keys ORDER BY provider_id, id"
             >>,
             [id, provider_id, secret_ciphertext, key_id, weight, enabled]},
-        {api_keys, <<"SELECT id, prefix, key_hash, enabled FROM api_keys ORDER BY id">>, [
-            id, prefix, key_hash, enabled
-        ]},
+        {api_keys,
+            <<
+                "SELECT id, prefix, key_hash, enabled, rpm_limit, tpm_limit, daily_token_limit "
+                "FROM api_keys ORDER BY id"
+            >>,
+            [id, prefix, key_hash, enabled, rpm_limit, tpm_limit, daily_token_limit]},
         {api_key_models,
             <<"SELECT api_key_id, model_id FROM api_key_models ORDER BY api_key_id, model_id">>, [
                 api_key_id, model_id

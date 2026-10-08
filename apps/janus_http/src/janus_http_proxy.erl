@@ -1910,6 +1910,14 @@ do_track(Status, Route, Usage, Observe) ->
                     })
             end,
             put(janus_req_counted, true),
+            Prompt = maps:get(prompt, Usage, null),
+            Completion = maps:get(completion, Usage, null),
+            case {get(janus_request_id), maps:get(id, Agent, null)} of
+                {Rid, Aid} when is_binary(Rid), is_integer(Aid) ->
+                    _ = janus_quota:charge_tokens(Rid, Aid, Prompt, Completion);
+                _ ->
+                    ok
+            end,
             janus_usage:record(#{
                 ts => erlang:system_time(second),
                 agent_key_id => maps:get(id, Agent, null),
@@ -1919,8 +1927,8 @@ do_track(Status, Route, Usage, Observe) ->
                 protocol => Proto,
                 stream => usage_bool_int(Stream),
                 status => Status,
-                prompt => maps:get(prompt, Usage, null),
-                completion => maps:get(completion, Usage, null),
+                prompt => Prompt,
+                completion => Completion,
                 latency_ms => LatencyMs,
                 error_code => pd(janus_failover_err_code, null),
                 attempt => pd(janus_failover_attempt, 1),

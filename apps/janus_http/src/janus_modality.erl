@@ -72,24 +72,31 @@ run_enabled(Plugin, Req0, State) ->
     put(janus_request_id, ReqId),
     case janus_http_auth:require_agent(Req1) of
         {ok, Agent, Req2} ->
-            Max = Plugin:max_body(),
-            case cowboy_req:read_body(Req2, #{length => Max}) of
-                {ok, Body, Req3} ->
-                    Meta = #{request_id => ReqId},
-                    Plugin:process(Req3, State, Agent, Body, Meta);
-                {more, _, Req3} ->
-                    reply_json(
-                        Req3,
-                        State,
-                        413,
-                        #{
-                            error => #{
-                                message => <<"body exceeds limit">>,
-                                type => <<"janus_error">>,
-                                code => <<"request_too_large">>
-                            }
-                        }
-                    )
+            erase(janus_quota_admitted),
+            erase(janus_quota_charged),
+            case janus_quota:admit(Agent) of
+                ok ->
+                    Max = Plugin:max_body(),
+                    case cowboy_req:read_body(Req2, #{length => Max}) of
+                        {ok, Body, Req3} ->
+                            Meta = #{request_id => ReqId},
+                            Plugin:process(Req3, State, Agent, Body, Meta);
+                        {more, _, Req3} ->
+                            reply_json(
+                                Req3,
+                                State,
+                                413,
+                                #{
+                                    error => #{
+                                        message => <<"body exceeds limit">>,
+                                        type => <<"janus_error">>,
+                                        code => <<"request_too_large">>
+                                    }
+                                }
+                            )
+                    end;
+                {error, {quota, Kind, Sec}} ->
+                    {ok, reply_quota_modality(Req2, State, Kind, Sec), State}
             end;
         {error, ReqErr} ->
             {ok, ReqErr, State}
@@ -209,6 +216,7 @@ reply_bytes(Req, State, Status, ContentType, Body) ->
 %% Usage row: the plugin passes modality/units/outcome + the usual
 %% fields; route context is pulled from the pdict like the proxy does.
 record_usage(#{status := _} = Ev0, Route) ->
+    ReqId = get(janus_request_id),
     Ev = Ev0#{
         provider_id => maps:get(provider_id, Route, null),
         provider_key_id =>
@@ -216,7 +224,50 @@ record_usage(#{status := _} = Ev0, Route) ->
                 #{id := Kid} -> Kid;
                 _ -> null
             end,
-        request_id => get(janus_request_id)
+        request_id => ReqId
     },
+    case {ReqId, maps:get(agent_key_id, Ev, null)} of
+        {Rid, Aid} when is_binary(Rid), is_integer(Aid) ->
+            _ = janus_quota:charge_tokens(
+                Rid, Aid, maps:get(prompt, Ev, null), maps:get(completion, Ev, null)
+            );
+        _ ->
+            ok
+    end,
     _ = janus_usage:record(Ev),
     ok.
+
+reply_quota_modality(Req, _State, Kind, Sec) ->
+    Code =
+        case Kind of
+            rpm -> <<"quota_rpm">>;
+            tpm -> <<"quota_tpm">>;
+            daily -> <<"quota_daily">>
+        end,
+    case get(janus_req_counted) of
+        true ->
+            ok;
+        _ ->
+            put(janus_req_counted, true),
+            janus_metrics:inc(requests_total, #{
+                endpoint => janus_http_classify:endpoint(cowboy_req:path(Req)),
+                protocol => janus_http_classify:protocol(cowboy_req:path(Req)),
+                status_class => <<"4xx">>
+            })
+    end,
+    Body = thoas:encode(#{
+        error => #{
+            message => <<"agent key quota exceeded (", Code/binary, ")">>,
+            type => <<"janus_error">>,
+            code => Code
+        }
+    }),
+    cowboy_req:reply(
+        429,
+        #{
+            <<"content-type">> => <<"application/json">>,
+            <<"retry-after">> => integer_to_binary(Sec)
+        },
+        Body,
+        Req
+    ).

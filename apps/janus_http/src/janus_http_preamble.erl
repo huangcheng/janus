@@ -36,12 +36,19 @@ read(Req0, Opts) when is_map(Opts) ->
     AuthOpts = #{allow_x_api_key => maps:get(allow_x_api_key, Opts, false)},
     case janus_http_auth:require_agent(Req1, AuthOpts) of
         {ok, Agent, Req2} ->
-            Max = maps:get(max_body, Opts, ?DEFAULT_MAX_BODY),
-            case cowboy_req:read_body(Req2, #{length => Max}) of
-                {ok, Body, Req3} ->
-                    {ok, Agent, Body, Req3};
-                {more, _, Req3} ->
-                    {error, reply_too_large(Req3, Opts)}
+            erase(janus_quota_admitted),
+            erase(janus_quota_charged),
+            case janus_quota:admit(Agent) of
+                ok ->
+                    Max = maps:get(max_body, Opts, ?DEFAULT_MAX_BODY),
+                    case cowboy_req:read_body(Req2, #{length => Max}) of
+                        {ok, Body, Req3} ->
+                            {ok, Agent, Body, Req3};
+                        {more, _, Req3} ->
+                            {error, reply_too_large(Req3, Opts)}
+                    end;
+                {error, {quota, Kind, Sec}} ->
+                    {error, reply_quota(Req2, Opts, Kind, Sec)}
             end;
         {error, ReqErr} ->
             {error, ReqErr}
@@ -52,6 +59,46 @@ reply_too_large(Req, Opts) ->
         error_envelope(maps:get(face, Opts, openai_chat), <<"request_too_large">>, <<"body exceeds limit">>)
     ),
     cowboy_req:reply(413, #{<<"content-type">> => <<"application/json">>}, Body, Req).
+
+reply_quota(Req, Opts, Kind, Sec) when is_integer(Sec), Sec > 0 ->
+    Code = quota_code(Kind),
+    Msg = <<"agent key quota exceeded (", Code/binary, ")">>,
+    case get(janus_req_counted) of
+        true ->
+            ok;
+        _ ->
+            put(janus_req_counted, true),
+            janus_metrics:inc(requests_total, #{
+                endpoint => janus_http_classify:endpoint(cowboy_req:path(Req)),
+                protocol => janus_http_classify:protocol(cowboy_req:path(Req)),
+                status_class => <<"4xx">>
+            })
+    end,
+    logger:warning(#{
+        what => janus_agent_reject,
+        status => 429,
+        code => Code,
+        method => cowboy_req:method(Req),
+        path => cowboy_req:path(Req),
+        request_id => get(janus_request_id)
+    }),
+    Body = thoas:encode(
+        error_envelope(maps:get(face, Opts, openai_chat), Code, Msg)
+    ),
+    SecBin = integer_to_binary(Sec),
+    cowboy_req:reply(
+        429,
+        #{
+            <<"content-type">> => <<"application/json">>,
+            <<"retry-after">> => SecBin
+        },
+        Body,
+        Req
+    ).
+
+quota_code(rpm) -> <<"quota_rpm">>;
+quota_code(tpm) -> <<"quota_tpm">>;
+quota_code(daily) -> <<"quota_daily">>.
 
 %% Same envelopes the faces inlined before the extraction (byte-identical).
 error_envelope(anthropic_messages, Code, Msg) ->

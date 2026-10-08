@@ -461,23 +461,25 @@ schema changes.
 
 ## 5. Phase 2 — after Phase 1 E2E is green
 
-No implementation until Phase 1 done. Each item is its own future spec.
+**Superseded by**
+`docs/superpowers/specs/2026-10-08-industrial-operator-phase2-design.md`
+(xray 6/6 GO WITH FIXES, rev 2). Stub kept for history:
 
 ### 5.1 Agent-key quotas (RPM / TPM / daily cap)
 
 Per-node limits first (not global). Dashboard writes limits; gateway
-429 + `retry-after`.
+429 + `retry-after`. → full design in Phase 2 Slice Q.
 
 ### 5.2 LB explainability (read-only)
 
 Compact cooldown snapshot on `GET /stats`. Must not call `pick_route`
-speculatively.
+speculatively. → Phase 2 Slice L.
 
 ### 5.3 janus-auto audit trail
 
 Response header
 `x-janus-route: name;tier=fast;origin=rules`.
-Do not put this inside `choices`.
+Do not put this inside `choices`. → Phase 2 Slice A.
 
 ## 6. Testing rules (project-wide)
 

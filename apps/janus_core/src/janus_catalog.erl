@@ -14,7 +14,7 @@
 %%%   providers => [#{id, name, base_url, protocol, enabled}],
 %%%   provider_keys => [#{id, provider_id, secret_ciphertext, key_id,
 %%%                       weight, enabled}],
-%%%   api_keys => [#{id, prefix, key_hash, enabled}],
+%%%   api_keys => [#{id, prefix, key_hash, enabled, rpm_limit, tpm_limit, daily_token_limit}],
 %%%   api_key_models => [#{api_key_id, model_id}]}
 %%% ```
 %%% Provider secrets stay as ciphertext / opaque `{KeyId, Cipher}` refs.
@@ -618,6 +618,9 @@ insert_api_keys(Tid, Keys, AllowRows) ->
                 prefix => Prefix,
                 key_hash => row_get(Row, key_hash),
                 enabled => truthy(row_get(Row, enabled, true)),
+                rpm_limit => null_int(row_get(Row, rpm_limit, null)),
+                tpm_limit => null_int(row_get(Row, tpm_limit, null)),
+                daily_token_limit => null_int(row_get(Row, daily_token_limit, null)),
                 model_ids =>
                     case maps:find(Id, Allow) of
                         {ok, Ms} -> lists:reverse(Ms);
@@ -677,6 +680,12 @@ truthy(<<"f">>) -> false;
 truthy(<<"false">>) -> false;
 truthy(undefined) -> true;
 truthy(_) -> true.
+
+%% Quota columns: SQL NULL / missing → atom null for janus_quota.
+null_int(null) -> null;
+null_int(undefined) -> null;
+null_int(N) when is_integer(N), N > 0 -> N;
+null_int(_) -> null.
 
 to_pos_int(N, _Default) when is_integer(N), N > 0 -> N;
 to_pos_int(N, Default) when is_binary(N) ->
