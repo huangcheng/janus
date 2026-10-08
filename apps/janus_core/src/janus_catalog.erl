@@ -683,9 +683,11 @@ truthy(_) -> true.
 
 %% Quota columns: SQL NULL / missing → atom null (unlimited).
 %% 0 is preserved (hard block — never map to unlimited).
+%% Negatives clamp to 0 (fail closed) — never become unlimited.
 null_int(null) -> null;
 null_int(undefined) -> null;
 null_int(N) when is_integer(N), N >= 0 -> N;
+null_int(N) when is_integer(N) -> 0;
 null_int(_) -> null.
 
 to_pos_int(N, _Default) when is_integer(N), N > 0 -> N;

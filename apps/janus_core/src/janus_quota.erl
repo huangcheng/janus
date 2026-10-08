@@ -253,8 +253,18 @@ maybe_gc_stale() ->
         [{_, Last}] when is_integer(Last), Now - Last < ?GC_MIN_SEC ->
             ok;
         _ ->
-            ets:insert(?META, {last_gc, Now}),
-            gc_stale()
+            %% Only one concurrent admit wins the throttle window.
+            case ets:insert_new(?META, {gc_lock, Now}) of
+                true ->
+                    try
+                        ets:insert(?META, {last_gc, Now}),
+                        gc_stale()
+                    after
+                        ets:delete(?META, gc_lock)
+                    end;
+                false ->
+                    ok
+            end
     end.
 
 %% Collect keys then delete — never delete inside foldl (ETS traversal).
