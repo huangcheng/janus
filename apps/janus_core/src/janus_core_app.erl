@@ -7,6 +7,8 @@ start(_StartType, _StartArgs) ->
     _ = janus_log:setup(),
     case janus_core_sup:start_link() of
         {ok, _Pid} = Ok ->
+            %% Quota ETS before any Cowboy request (Slice Q).
+            _ = janus_quota:ensure(),
             maybe_auto_seed(),
             Ok;
         Err ->

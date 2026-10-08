@@ -4,7 +4,9 @@
 %%% RPM / TPM use a rolling 60s bucket; daily uses UTC calendar day.
 %%% NULL limits short-circuit with no ETS writes. Admit must run once
 %%% per client request (outside failover). Token charge is idempotent
-%%% per request_id (pdict + ETS).
+%%% per request_id (pdict + ETS). Modality plugins that only report
+%%% `units` (no prompt/completion) do not advance TPM/daily — RPM still
+%%% applies via admit/1.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_quota).
@@ -14,6 +16,7 @@
     admit/1,
     charge_tokens/4,
     retry_after_sec/1,
+    kind_code/1,
     tpm_bucket_now/0,
     reset_for_test/0
 ]).
@@ -22,6 +25,8 @@
 -define(TPM, janus_quota_tpm).
 -define(DAILY, janus_quota_daily).
 -define(CHARGED, janus_quota_charged).
+-define(META, janus_quota_meta).
+-define(GC_MIN_SEC, 30).
 
 -spec ensure() -> ok.
 ensure() ->
@@ -29,12 +34,18 @@ ensure() ->
     _ = ensure_table(?TPM),
     _ = ensure_table(?DAILY),
     _ = ensure_table(?CHARGED),
+    _ = ensure_table(?META),
     ok.
 
 ensure_table(Name) ->
     case ets:info(Name) of
         undefined ->
-            ets:new(Name, [named_table, public, set, {write_concurrency, true}]);
+            try
+                ets:new(Name, [named_table, public, set, {write_concurrency, true}])
+            catch
+                error:badarg ->
+                    Name
+            end;
         _ ->
             Name
     end.
@@ -47,6 +58,7 @@ reset_for_test() ->
     true = ets:delete_all_objects(?TPM),
     true = ets:delete_all_objects(?DAILY),
     true = ets:delete_all_objects(?CHARGED),
+    true = ets:delete_all_objects(?META),
     erase(janus_quota_admitted),
     erase(janus_quota_charged),
     ok.
@@ -63,9 +75,7 @@ admit(Agent) when is_map(Agent) ->
                     put(janus_quota_admitted, true),
                     ok;
                 false ->
-                    gc_stale(),
-                    %% Read-only TPM/daily checks before RPM bump so a
-                    %% lagging token limit never burns an RPM slot.
+                    maybe_gc_stale(),
                     case check_tpm(Agent) of
                         {error, _} = Err ->
                             Err;
@@ -93,11 +103,12 @@ unlimited(Agent) ->
         limit_of(Agent, tpm_limit) =:= unlimited andalso
         limit_of(Agent, daily_token_limit) =:= unlimited.
 
+%% null/undefined = unlimited; 0 = hard block (always exceed); >0 = cap.
 limit_of(Agent, Key) ->
     case maps:get(Key, Agent, null) of
         null -> unlimited;
         undefined -> unlimited;
-        N when is_integer(N), N > 0 -> N;
+        N when is_integer(N), N >= 0 -> N;
         _ -> unlimited
     end.
 
@@ -105,17 +116,21 @@ check_and_bump_rpm(Agent) ->
     case limit_of(Agent, rpm_limit) of
         unlimited ->
             ok;
+        0 ->
+            {error, {quota, rpm, retry_after_sec(rpm)}};
         Limit ->
             Id = maps:get(id, Agent),
             Bucket = rpm_bucket_now(),
             Key = {Id, Bucket},
-            New = ets:update_counter(?RPM, Key, {2, 1}, {Key, 0}),
-            case New =< Limit of
+            %% Read-then-bump under one update_counter list: Old is the
+            %% pre-increment value; second op clamps at Limit.
+            [Old, _New] = ets:update_counter(
+                ?RPM, Key, [{2, 0}, {2, 1, Limit, Limit}], {Key, 0}
+            ),
+            case Old < Limit of
                 true ->
                     ok;
                 false ->
-                    %% Compensate the bump so the counter stays at Limit.
-                    _ = ets:update_counter(?RPM, Key, {2, -1}),
                     {error, {quota, rpm, retry_after_sec(rpm)}}
             end
     end.
@@ -124,6 +139,8 @@ check_tpm(Agent) ->
     case limit_of(Agent, tpm_limit) of
         unlimited ->
             ok;
+        0 ->
+            {error, {quota, tpm, retry_after_sec(tpm)}};
         Limit ->
             Id = maps:get(id, Agent),
             Bucket = tpm_bucket_now(),
@@ -142,6 +159,8 @@ check_daily(Agent) ->
     case limit_of(Agent, daily_token_limit) of
         unlimited ->
             ok;
+        0 ->
+            {error, {quota, daily, retry_after_sec(daily)}};
         Limit ->
             Id = maps:get(id, Agent),
             Day = utc_day(),
@@ -170,12 +189,17 @@ charge_tokens(RequestId, AgentKeyId, Prompt, Completion) when
                 true ->
                     mark_charged(RequestId),
                     Bucket = tpm_bucket_now(),
-                    _ = ets:update_counter(?TPM, {AgentKeyId, Bucket}, {2, Tokens}, {{AgentKeyId, Bucket}, 0}),
+                    _ = ets:update_counter(
+                        ?TPM, {AgentKeyId, Bucket}, {2, Tokens}, {{AgentKeyId, Bucket}, 0}
+                    ),
                     Day = utc_day(),
-                    _ = ets:update_counter(?DAILY, {AgentKeyId, Day}, {2, Tokens}, {{AgentKeyId, Day}, 0}),
+                    _ = ets:update_counter(
+                        ?DAILY, {AgentKeyId, Day}, {2, Tokens}, {{AgentKeyId, Day}, 0}
+                    ),
                     ok;
                 false ->
-                    mark_charged(RequestId),
+                    %% No tokens (null usage / modality units-only): do not
+                    %% mark charged so a later tokenized finalize can still charge.
                     ok
             end
     end;
@@ -218,55 +242,80 @@ retry_after_sec(_) ->
     Rem = 60 - (erlang:system_time(second) rem 60),
     max(1, min(60, Rem)).
 
-%% Drop RPM/TPM buckets older than 2 windows; daily older than 2 days;
-%% charged ids older than 2 hours.
+-spec kind_code(rpm | tpm | daily) -> binary().
+kind_code(rpm) -> <<"quota_rpm">>;
+kind_code(tpm) -> <<"quota_tpm">>;
+kind_code(daily) -> <<"quota_daily">>.
+
+maybe_gc_stale() ->
+    Now = erlang:system_time(second),
+    case ets:lookup(?META, last_gc) of
+        [{_, Last}] when is_integer(Last), Now - Last < ?GC_MIN_SEC ->
+            ok;
+        _ ->
+            ets:insert(?META, {last_gc, Now}),
+            gc_stale()
+    end.
+
+%% Collect keys then delete — never delete inside foldl (ETS traversal).
 gc_stale() ->
     NowBucket = rpm_bucket_now(),
     CutBucket = NowBucket - 2,
-    ets:foldl(
-        fun({{Id, B} = K, _N}, Acc) when is_integer(Id), is_integer(B), B < CutBucket ->
-                ets:delete(?RPM, K),
-                Acc;
-            (_, Acc) ->
-                Acc
-        end,
-        ok,
-        ?RPM
+    delete_keys(
+        ?RPM,
+        ets:foldl(
+            fun({{Id, B} = K, _N}, Acc) when is_integer(Id), is_integer(B), B < CutBucket ->
+                    [K | Acc];
+                (_, Acc) ->
+                    Acc
+            end,
+            [],
+            ?RPM
+        )
     ),
-    ets:foldl(
-        fun({{Id, B} = K, _N}, Acc) when is_integer(Id), is_integer(B), B < CutBucket ->
-                ets:delete(?TPM, K),
-                Acc;
-            (_, Acc) ->
-                Acc
-        end,
-        ok,
-        ?TPM
+    delete_keys(
+        ?TPM,
+        ets:foldl(
+            fun({{Id, B} = K, _N}, Acc) when is_integer(Id), is_integer(B), B < CutBucket ->
+                    [K | Acc];
+                (_, Acc) ->
+                    Acc
+            end,
+            [],
+            ?TPM
+        )
     ),
     {UY, UM, UD} = utc_day(),
     CutDay = calendar:date_to_gregorian_days({UY, UM, UD}) - 2,
-    ets:foldl(
-        fun({{_Id, {Y, M, D}} = K, _N}, Acc) ->
-                case calendar:date_to_gregorian_days({Y, M, D}) < CutDay of
-                    true -> ets:delete(?DAILY, K);
-                    false -> ok
-                end,
-                Acc;
-            (_, Acc) ->
-                Acc
-        end,
-        ok,
-        ?DAILY
+    delete_keys(
+        ?DAILY,
+        ets:foldl(
+            fun({{_Id, {Y, M, D}} = K, _N}, Acc) ->
+                    case calendar:date_to_gregorian_days({Y, M, D}) < CutDay of
+                        true -> [K | Acc];
+                        false -> Acc
+                    end;
+                (_, Acc) ->
+                    Acc
+            end,
+            [],
+            ?DAILY
+        )
     ),
     CutTs = erlang:system_time(second) - 7200,
-    ets:foldl(
-        fun({Rid, Ts}, Acc) when is_integer(Ts), Ts < CutTs ->
-                ets:delete(?CHARGED, Rid),
-                Acc;
-            (_, Acc) ->
-                Acc
-        end,
-        ok,
-        ?CHARGED
+    delete_keys(
+        ?CHARGED,
+        ets:foldl(
+            fun({Rid, Ts}, Acc) when is_integer(Ts), Ts < CutTs ->
+                    [Rid | Acc];
+                (_, Acc) ->
+                    Acc
+            end,
+            [],
+            ?CHARGED
+        )
     ),
     ok.
+
+delete_keys(Tab, Keys) ->
+    lists:foreach(fun(K) -> ets:delete(Tab, K) end, Keys).

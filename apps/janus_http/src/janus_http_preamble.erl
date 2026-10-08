@@ -61,7 +61,7 @@ reply_too_large(Req, Opts) ->
     cowboy_req:reply(413, #{<<"content-type">> => <<"application/json">>}, Body, Req).
 
 reply_quota(Req, Opts, Kind, Sec) when is_integer(Sec), Sec > 0 ->
-    Code = quota_code(Kind),
+    Code = janus_quota:kind_code(Kind),
     Msg = <<"agent key quota exceeded (", Code/binary, ")">>,
     case get(janus_req_counted) of
         true ->
@@ -95,10 +95,6 @@ reply_quota(Req, Opts, Kind, Sec) when is_integer(Sec), Sec > 0 ->
         Body,
         Req
     ).
-
-quota_code(rpm) -> <<"quota_rpm">>;
-quota_code(tpm) -> <<"quota_tpm">>;
-quota_code(daily) -> <<"quota_daily">>.
 
 %% Same envelopes the faces inlined before the extraction (byte-identical).
 error_envelope(anthropic_messages, Code, Msg) ->

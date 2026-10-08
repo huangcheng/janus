@@ -15,7 +15,8 @@ janus_quota_test_() ->
             fun admit_once_per_request/0,
             fun charge_idempotent/0,
             fun tpm_lagging_admit/0,
-            fun null_usage_charges_zero/0
+            fun null_usage_charges_zero/0,
+            fun zero_rpm_blocks/0
         ]}}.
 
 reset() ->
@@ -71,4 +72,14 @@ null_usage_charges_zero() ->
     reset(),
     Rid = <<"req_1111111111111111">>,
     ok = janus_quota:charge_tokens(Rid, 3, null, null),
-    ?assertEqual([], ets:lookup(janus_quota_tpm, {3, janus_quota:tpm_bucket_now()})).
+    ?assertEqual([], ets:lookup(janus_quota_tpm, {3, janus_quota:tpm_bucket_now()})),
+    %% Null charge does not mark charged — a later tokenized charge works.
+    ok = janus_quota:charge_tokens(Rid, 3, 10, 0),
+    [{_, N}] = ets:lookup(janus_quota_tpm, {3, janus_quota:tpm_bucket_now()}),
+    ?assertEqual(10, N).
+
+zero_rpm_blocks() ->
+    reset(),
+    Agent = #{id => 99, rpm_limit => 0, tpm_limit => null, daily_token_limit => null},
+    put(janus_request_id, <<"req_0000000000000000">>),
+    ?assertMatch({error, {quota, rpm, _}}, janus_quota:admit(Agent)).

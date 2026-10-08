@@ -681,10 +681,11 @@ truthy(<<"false">>) -> false;
 truthy(undefined) -> true;
 truthy(_) -> true.
 
-%% Quota columns: SQL NULL / missing → atom null for janus_quota.
+%% Quota columns: SQL NULL / missing → atom null (unlimited).
+%% 0 is preserved (hard block — never map to unlimited).
 null_int(null) -> null;
 null_int(undefined) -> null;
-null_int(N) when is_integer(N), N > 0 -> N;
+null_int(N) when is_integer(N), N >= 0 -> N;
 null_int(_) -> null.
 
 to_pos_int(N, _Default) when is_integer(N), N > 0 -> N;

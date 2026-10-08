@@ -72,6 +72,7 @@ run_enabled(Plugin, Req0, State) ->
     put(janus_request_id, ReqId),
     case janus_http_auth:require_agent(Req1) of
         {ok, Agent, Req2} ->
+            erase(janus_req_counted),
             erase(janus_quota_admitted),
             erase(janus_quota_charged),
             case janus_quota:admit(Agent) of
@@ -238,12 +239,7 @@ record_usage(#{status := _} = Ev0, Route) ->
     ok.
 
 reply_quota_modality(Req, _State, Kind, Sec) ->
-    Code =
-        case Kind of
-            rpm -> <<"quota_rpm">>;
-            tpm -> <<"quota_tpm">>;
-            daily -> <<"quota_daily">>
-        end,
+    Code = janus_quota:kind_code(Kind),
     case get(janus_req_counted) of
         true ->
             ok;
@@ -255,6 +251,14 @@ reply_quota_modality(Req, _State, Kind, Sec) ->
                 status_class => <<"4xx">>
             })
     end,
+    logger:warning(#{
+        what => janus_agent_reject,
+        status => 429,
+        code => Code,
+        method => cowboy_req:method(Req),
+        path => cowboy_req:path(Req),
+        request_id => get(janus_request_id)
+    }),
     Body = thoas:encode(#{
         error => #{
             message => <<"agent key quota exceeded (", Code/binary, ")">>,
