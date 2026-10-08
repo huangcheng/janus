@@ -254,6 +254,7 @@ maybe_gc_stale() ->
             ok;
         _ ->
             %% Only one concurrent admit wins the throttle window.
+            %% Lock value is a timestamp so a killed holder can be reclaimed.
             case ets:insert_new(?META, {gc_lock, Now}) of
                 true ->
                     try
@@ -263,7 +264,13 @@ maybe_gc_stale() ->
                         ets:delete(?META, gc_lock)
                     end;
                 false ->
-                    ok
+                    case ets:lookup(?META, gc_lock) of
+                        [{_, LockTs}] when is_integer(LockTs), Now - LockTs >= ?GC_MIN_SEC ->
+                            ets:delete(?META, gc_lock),
+                            maybe_gc_stale();
+                        _ ->
+                            ok
+                    end
             end
     end.
 
