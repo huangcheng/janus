@@ -90,6 +90,9 @@ paths = [
     '''(^|/)docs/WSL2-DEV\.md$''',        # has env var NAMES but no values
     '''(^|/)design/.*''',                  # design docs reference patterns, not live keys
     '''(^|/)rebar\.lock$''',
+    # fleet spec + audit snapshots quote the cookie placeholder in prose
+    '''(^|/)docs/(audit|superpowers)/target\.md$''',
+    '''(^|/)docs/audit/archive/.*\.md$''',
 ]
 regexes = [
     '''sk-\[REDACTED\]''',
@@ -98,4 +101,10 @@ regexes = [
     '''JANUS_API_KEY_PEPPER=dev''',           # dev/CI placeholder
     '''JANUS_DASHBOARD_PASSWORD=dev''',       # dev/CI placeholder
     '''sk-8e91e931c68c4e069df943229419731c''', # already-rotated benchmark key (in .gitignore'd files only)
+    # erlang-cookie rule fires on ${JANUS_ERLANG_COOKIE} variable SYNTAX
+    # in spec/audit docs — a ${VAR} placeholder can never be a secret
+    # erlang-cookie rule fires on ${JANUS_ERLANG_COOKIE} variable SYNTAX
+    # (a ${VAR} placeholder can never be a secret)
+    '''-setcookie ["`]?\$\{?JANUS_ERLANG_COOKIE'''
 ]
+
