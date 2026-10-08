@@ -732,18 +732,26 @@ translate_result(ClientProto, ProviderProto, Route, Result, Req, State) ->
     end.
 
 upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
-    try
-        call_adapter(ProviderProto, Route, Body, Map, #{stream => WantStream})
-    catch
-        Class:CatchReason:Stack ->
-            logger:error(#{
-                what => janus_proxy_crashed,
-                class => Class,
-                reason => sanitize_upstream_error(CatchReason),
-                stack => janus_seed:redact_stack(Stack)
-            }),
-            {error, crashed}
-    end.
+    T0 = erlang:monotonic_time(millisecond),
+    Result =
+        try
+            call_adapter(ProviderProto, Route, Body, Map, #{stream => WantStream})
+        catch
+            Class:CatchReason:Stack ->
+                logger:error(#{
+                    what => janus_proxy_crashed,
+                    class => Class,
+                    reason => sanitize_upstream_error(CatchReason),
+                    stack => janus_seed:redact_stack(Stack)
+                }),
+                {error, crashed}
+        end,
+    %% Wall time of THIS attempt (connect + first byte for streams, plus
+    %% body for unary); read by note_route_success/1 to feed the LB
+    %% latency EWMA. Retried attempts overwrite it — attribution always
+    %% lands on the route that produced the terminal result.
+    put(janus_upstream_ms, erlang:monotonic_time(millisecond) - T0),
+    Result.
 
 %% Include_usage injection: only provider openai_chat (never send
 %% stream_options to anthropic/responses upstreams, C3), for clients
@@ -975,7 +983,7 @@ decisions_dispatch(Route, Body, Map, Req, State, Attempt) ->
             _ = release_route_inflight(Route),
             _ = record_failover_row(Route, 502, null),
             janus_lb:bump_stat(requests_retried),
-            retry_jitter(),
+            timer:sleep(retry_jitter()),
             case repick_route(openai_decisions, Map, 3) of
                 {ok, Route2} ->
                     decisions_dispatch(Route2, Body, Map, Req, State, Attempt + 1);
@@ -1363,7 +1371,9 @@ failover_decide(ClientProto, Route, Map, Body, Result0, Req, State) ->
                 true ->
                     failover_note(Route, Result),
                     failover_record_attempt(Route, Result, ErrCode),
-                    retry_jitter(),
+                    %% Spec Part C: sleep the jitter — retry bursts must
+                    %% not hammer a sick upstream back-to-back.
+                    timer:sleep(retry_jitter()),
                     janus_lb:bump_stat(requests_retried),
                     put(janus_failover_attempt, Attempt + 1),
                     mark_key_attempted(Route),
@@ -1475,7 +1485,11 @@ failover_note(Route, {ok, Status, _H, _B}) when Status >= 500 ->
     _ = note_provider_failure(Route, {http, Status}),
     _ = release_route_inflight(Route),
     ok;
-failover_note(Route, {error, _Reason}) ->
+failover_note(Route, {error, Reason}) ->
+    %% Transport-class failure: bench the provider like a mid-loop 5xx,
+    %% else every subsequent request keeps re-opening connections to a
+    %% sick endpoint until a TERMINAL outcome finally cools it.
+    _ = note_provider_failure(Route, sanitize_upstream_error(Reason)),
     _ = release_route_inflight(Route),
     ok;
 failover_note(Route, _Other) ->
@@ -1824,7 +1838,19 @@ note_route_failure(Route, Reason) ->
     janus_lb:note_failure(route_target(Route), Reason).
 
 note_route_success(Route) ->
+    maybe_note_latency(Route),
     janus_lb:note_success(route_target(Route)).
+
+%% Feed the LB latency EWMA from the last upstream_call's wall time
+%% (pdict). Absent on paths that never reached upstream_call — those
+%% must not invent a sample.
+maybe_note_latency(Route) ->
+    case get(janus_upstream_ms) of
+        Ms when is_integer(Ms), Ms >= 0 ->
+            janus_lb:note_latency(route_target(Route), Ms);
+        _ ->
+            ok
+    end.
 
 release_route_inflight(Route) ->
     janus_lb:release_inflight(route_target(Route)).

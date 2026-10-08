@@ -1,9 +1,9 @@
 %%%-------------------------------------------------------------------
 %%% @doc Node-local LB runtime ETS owner.
 %%%
-%%% Owns cool-downs, in-flight counters, and weighted-RR cursors in
-%%% separate ETS tables from the catalog. Config publish must never
-%%% wipe these tables.
+%%% Owns cool-downs, in-flight counters, weighted-RR cursors, and the
+%%% per-route latency EWMA in separate ETS tables from the catalog.
+%%% Config publish must never wipe these tables.
 %%%
 %%% Failover is across providers for a model: an invalid/dead key is
 %%% keyed per provider_key (shared by every model on that provider).
@@ -19,6 +19,7 @@
 -export([
     note_failure/2,
     note_success/1,
+    note_latency/2,
     note_auth_failure/3,
     release_inflight/1,
     pick_route/2,
@@ -26,6 +27,9 @@
     %% Pure prefer-proto filter (eunit-tested with an injected lookup
     %% fun; production wires it to the catalog).
     prefer_proto_filter/3,
+    %% Pure latency-degradation filter (same injection style; the
+    %% production wiring reads the latency ETS table).
+    degraded_filter/4,
     %% Hard face-protocol filter (Decisions spec §4.5) — same
     %% injection style; mechanism only, the proxy owns the policy.
     protocol_filter/3,
@@ -47,14 +51,25 @@
 -define(INFLIGHT, janus_lb_inflight).
 -define(CURSORS, janus_lb_rr_cursors).
 -define(ENT_STATS, janus_lb_ent_stats).
+-define(LATENCY, janus_lb_latency).
 -define(DEFAULT_COOLDOWN_MS, 5000).
 -define(AUTH_COOLDOWN_MS, 60000).
 -define(MAX_RETRY_AFTER_MS, 300000).
+%% Latency shedding: EWMA of upstream call wall time per route target.
+%% A candidate is degraded when its EWMA exceeds BOTH the absolute
+%% floor and FACTOR x the best eligible peer (>= MIN_SAMPLES samples).
+-define(EWMA_ALPHA_PCT, 25).
+-define(EWMA_MIN_SAMPLES, 4).
+-define(EWMA_CLAMP_MS, 30000).
+-define(EWMA_STALE_MS, 600000).
+-define(DEFAULT_DEGRADED_FACTOR_PCT, 300).
+-define(DEFAULT_DEGRADED_FLOOR_MS, 1500).
 
 -record(state, {
     cooldowns :: ets:tid(),
     inflight :: ets:tid(),
-    cursors :: ets:tid()
+    cursors :: ets:tid(),
+    latency :: ets:tid()
 }).
 
 -type target() ::
@@ -93,6 +108,18 @@ note_success(undefined) ->
     ok;
 note_success(Target) ->
     gen_server:cast(?SERVER, {note_success, Target}).
+
+%% @doc Record one upstream call's wall time (connect + first-byte for
+%% streams, plus body for unary calls) against a route target; feeds
+%% the EWMA degradation filter. Samples are clamped so one hang cannot
+%% poison the average.
+-spec note_latency(target(), non_neg_integer()) -> ok.
+note_latency(undefined, _Ms) ->
+    ok;
+note_latency(_Target, Ms) when not is_integer(Ms) ->
+    ok;
+note_latency(Target, Ms) ->
+    gen_server:cast(?SERVER, {note_latency, Target, min(max(Ms, 0), ?EWMA_CLAMP_MS)}).
 
 %% @doc Decrement in-flight only — never clears an active cool-down.
 -spec release_inflight(target()) -> ok.
@@ -133,8 +160,11 @@ init([]) ->
     _ = ets:new(?ENT_STATS, [
         named_table, set, public, {write_concurrency, true}
     ]),
+    Latency = ets:new(?LATENCY, [
+        named_table, set, public, {read_concurrency, true}, {write_concurrency, true}
+    ]),
     logger:info(#{what => janus_lb_started}),
-    {ok, #state{cooldowns = Cool, inflight = Inflight, cursors = Cursors}}.
+    {ok, #state{cooldowns = Cool, inflight = Inflight, cursors = Cursors, latency = Latency}}.
 
 handle_call({pick_route, ModelId, Opts}, _From, State) ->
     {reply, do_pick_route(ModelId, Opts, State), State};
@@ -151,6 +181,9 @@ handle_cast({note_auth_failure, ProviderId, KeyId, Reason}, State) ->
     {noreply, State};
 handle_cast({note_success, Target}, State) ->
     do_note_success(Target, State),
+    {noreply, State};
+handle_cast({note_latency, Target, Ms}, #state{latency = Lat} = State) ->
+    do_note_latency(normalize_target(Target), Ms, Lat),
     {noreply, State};
 handle_cast({release_inflight, Target}, #state{inflight = Inflight} = State) ->
     dec_inflight(Target, Inflight),
@@ -199,6 +232,75 @@ route_protocol(R) ->
     case janus_catalog:lookup_provider(maps:get(provider_id, R, undefined)) of
         {ok, #{protocol := P}} when is_binary(P) -> P;
         _ -> undefined
+    end.
+
+%% Latency degradation filter (pure; eunit-driven with an injected
+%% lookup fun). EwmaFun(route_target(R)) -> undefined | {EwmaMs,
+%% Samples}. A candidate is degraded only when it has enough samples,
+%% its EWMA exceeds the absolute floor, AND it is more than FactorPct
+%% percent of the best eligible peer. Cold routes (no/insufficient
+%% data) are never degraded and never feed the best computation. The
+%% survivor set can only be empty when nothing was eligible (the best
+%% route itself never satisfies the strict inequality), but fall back
+%% to the input regardless: availability beats preference.
+degraded_filter(Routes, _EwmaFun, _FactorPct, _FloorMs) when length(Routes) < 2 ->
+    Routes;
+degraded_filter(Routes, EwmaFun, FactorPct, FloorMs) when is_list(Routes) ->
+    Sampled = [{R, EwmaFun(route_target(R))} || R <- Routes],
+    Eligible = [{R, Ms} || {R, {Ms, S}} <- Sampled, S >= ?EWMA_MIN_SAMPLES],
+    case Eligible of
+        [] ->
+            Routes;
+        _ ->
+            Best = lists:min([Ms || {_, Ms} <- Eligible]),
+            case [R || {R, S} <- Sampled, not is_degraded(S, Best, FactorPct, FloorMs)] of
+                [] -> Routes;
+                Survivors -> Survivors
+            end
+    end.
+
+is_degraded({Ms, Samples}, Best, FactorPct, FloorMs) ->
+    Samples >= ?EWMA_MIN_SAMPLES andalso Ms > FloorMs andalso Ms * 100 > FactorPct * Best;
+is_degraded(_, _, _, _) ->
+    false.
+
+%% ETS-backed lookup for the pick path: entries older than the
+%% staleness window are treated as no-data (and dropped lazily).
+latency_fun(Lat) ->
+    Now = erlang:monotonic_time(millisecond),
+    fun(Target) ->
+        case ets:lookup(Lat, Target) of
+            [{_, Ms, Samples, Updated}] when Now - Updated < ?EWMA_STALE_MS ->
+                {Ms, Samples};
+            [{_, _, _, _}] ->
+                ets:delete(Lat, Target),
+                undefined;
+            _ ->
+                undefined
+        end
+    end.
+
+degraded_factor_pct() ->
+    env_int("JANUS_LB_DEGRADED_FACTOR_PCT", ?DEFAULT_DEGRADED_FACTOR_PCT).
+
+degraded_floor_ms() ->
+    env_int("JANUS_LB_DEGRADED_FLOOR_MS", ?DEFAULT_DEGRADED_FLOOR_MS).
+
+env_int(Name, Default) ->
+    case os:getenv(Name) of
+        false ->
+            Default;
+        "" ->
+            Default;
+        Val ->
+            try
+                case list_to_integer(Val) of
+                    N when is_integer(N), N > 0 -> N;
+                    _ -> Default
+                end
+            catch
+                _:_ -> Default
+            end
     end.
 
 %% Hard face-eligibility filter (Decisions spec §4.5): unlike
@@ -251,7 +353,10 @@ do_pick_listing_route(Name, Opts, State) ->
     end.
 
 pick_from_routes(
-    PickKey, Routes0, Opts, #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight}
+    PickKey,
+    Routes0,
+    Opts,
+    #state{cooldowns = Cool, cursors = Cursors, inflight = Inflight, latency = Lat}
 ) ->
     Routes1 =
         protocol_filter(
@@ -284,7 +389,7 @@ pick_from_routes(
                     %% prefer_proto_routes/2): falls back to all of
                     %% them when no same-protocol route is pickable.
                     Available = prefer_proto_routes(Available0, Opts),
-                    case pick_usable_route(PickKey, Available, Cool, Cursors, Now, Inflight) of
+                    case pick_usable_route(PickKey, Available, Cool, Cursors, Now, Inflight, Lat) of
                         {ok, _} = Ok ->
                             Ok;
                         {error, Reason} = Err ->
@@ -306,14 +411,17 @@ pick_from_routes(
             end
     end.
 
-%% Prefer another provider when this one's keys are exhausted.
-pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight) ->
+%% Prefer another provider when this one's keys are exhausted; shed
+%% candidates whose EWMA latency is degraded relative to their peers
+%% (falls back to the full usable set when data is insufficient).
+pick_usable_route(PickKey, Candidates, Cool, Cursors, Now, Inflight, Lat) ->
     Usable = [R || R <- Candidates, has_usable_key(R, Cool, Now)],
     case Usable of
         [] ->
             {error, classify_key_failures(Candidates, Cool, Now)};
         _ ->
-            Picked = weighted_rr_pick(PickKey, Usable, Cursors),
+            Healthy = degraded_filter(Usable, latency_fun(Lat), degraded_factor_pct(), degraded_floor_ms()),
+            Picked = weighted_rr_pick(PickKey, Healthy, Cursors),
             case select_key(PickKey, Picked, Cool, Cursors, Now) of
                 {ok, Key} ->
                     bump_inflight(route_target(Picked), Inflight),
@@ -526,6 +634,18 @@ do_note_success(Target, #state{cooldowns = Cool, inflight = Inflight}) ->
     Key = normalize_target(Target),
     ets:delete(Cool, Key),
     dec_inflight(Key, Inflight),
+    ok.
+
+do_note_latency(Target, Ms, Lat) ->
+    Now = erlang:monotonic_time(millisecond),
+    {Ewma, Samples} =
+        case ets:lookup(Lat, Target) of
+            [{_, Old, N, _}] ->
+                {(?EWMA_ALPHA_PCT * Ms + (100 - ?EWMA_ALPHA_PCT) * Old) div 100, N + 1};
+            [] ->
+                {Ms, 1}
+        end,
+    ets:insert(Lat, {Target, Ewma, Samples, Now}),
     ok.
 
 is_cooling(Target, Cool, Now) ->
