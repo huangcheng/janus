@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the rev-9/10 folds land, but cache_put's harm model is understated, the purge signal and command-channel authz are under-specified, and F.6 has no surviving fleet-off control.
+
+## 2. Critical risks (new parts)
+- **cache_put poisoning ≠ "duplicate upstream calls."** Only `JudgeModel` is validated; `Tier` is unauthenticated. A cert-holding peer (or replayer) can overwrite the idempotent-upsert keyed by Hash and **misroute tier** for up to `first_seen+2×TTL` (600 s). The stated blast radius is wrong.
+- **`{lb_cool_purge}` is the one non-self-expiring, destructive signal.** It deletes *every* sender's cool rows fleet-wide, bypassing local-wins and TTL. Within the trust boundary it is a cooldown-DoS that forces the fleet back onto a known-sick provider. No rate/bound/validation beyond generic ingress.
+- **:8090 token privilege escalation.** A read-only admin credential now triggers fleet-wide `erpc` (config reload, cache flush, cool clear). Same-token reuse is not called out as an authz change.
+- **Quota top-32 selection is undefined** ("hottest" over which set, tie-break, per-cycle churn) — observability claim is non-deterministic.
+- **F.6 control is unbuildable as written**: after `recreate gw3 fleet-on`, no fleet-off node survives, yet F.6 demands "byte-identical to a control run with the knob off."
+
+## 3. Contradictions / stale claims
+- F.2 reports lease twice: `{holder, expires_in_ms}` **and** `{holder, next_check_in_ms}` (rev-10 rename left a stale clause).
+- Non-goals say "remote spawn explicitly rejected"; F.3 admits erpc/spawn of *any* export is possible — rejected only by HTTP policy, not the system.
+- Part C `mirrors` shape `[cool|lat]` omits the B2 quota mirror that `mirror_sizes` presumably counts.
+- `lb_cool_clear`: unclear whether the *originator* or *each peer* emits `{lb_cool_purge}` — the latter is an N-fold purge storm.
+
+## 4. Missing first-ship requirements
+- Concrete `M:F:A` for `catalog_cache_flush` and `lb_cool_clear` (registry names only two of four).
+- `first_seen` storage/lifetime (lost on `janus_fleet` restart ⇒ replay bound resets).
+- Purge-signal ingress rule + whether it is bounded/audited.
+- Separate token or explicit sign-off for the command channel.
+
+## 5. Design notes
+F.1 registry/timeout/undef handling is sound; pg 2-arity pin and TTL-only degradation are consistent. The quota "advisory-only, byte-identical" framing is defensible once selection is deterministic.
+
+## 6. Top 5 edits
+1. Correct cache_put blast radius (tier misrouting ≤2×TTL); validate `Tier` or state the real bound.
+2. Pin `M:F:A` for all four commands; specify originator-only single `lb_cool_purge` + its ingress bound.
+3. Define command-channel authz (distinct token or signed sign-off).
+4. Remove the stale F.2 lease clause; add quota mirror to Part C shape.
+5. Give F.6 a real fleet-off control (separate gw4 or pre-recreate measurement); define top-32 selection.

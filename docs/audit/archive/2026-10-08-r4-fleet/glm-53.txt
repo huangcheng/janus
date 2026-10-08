@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — rev 10 folds are present and coherent; what remains is one understated blast-radius claim, unspecified `first_seen` lifecycle, gate-order gaps, and stale text — all fixable in-spec.
+
+**2. Critical risks**
+- **cache_put blast radius understated.** A poisoned entry doesn't just cause "duplicate upstream judge calls" — the cached decision *selects the serving tier*, so a wrong-tier entry misroutes real agent traffic on that hash for ≤ 300 s. Judge-call duplication is merely the recovery cost.
+- **`first_seen` table lifecycle unspecified.** Per-(sender,Hash) replay-bound tracking has no GC rule; without expiry tied to `first_seen + 2×TTL`, it grows unbounded and itself becomes a leak the 4096 entry cap doesn't cover.
+- **Gate execution order omits F.6/F.7/F.8.** F.7 pauses a peer and the lease holder; if run before F.4/F.6, paused state leaks into their preconditions. Sequencing must be pinned.
+- **`{lb_cool_purge}` is a fleet-wide lever for any certed peer** — erases every sender's cool rows (keep-sick-route-hot). Bounded by advisory-only + last-resort, but it should be counted/audited like a command.
+
+**3. Contradictions / stale claims**
+- `expires_in_ms` survives in F.2 (twice) and Part C after the rev-10 rename to `next_check_in_ms`.
+- Part C's `mirrors` shape lists only `cool|lat` rows, yet F.6(a)/F.8 assert quota and decision-cache rows visible in `/stats.fleet`.
+- F.6(c) "TTLs out within 6 s + sweeper": with a 30 s sweeper that's ≤ 36 s unless the `/stats` read path lazily filters expired rows — state which mechanism the assertion relies on.
+- B2 quota: "read by /stats and /metrics ONLY" — but no quota mirror rows in Part C's metrics/mirror list.
+
+**4. Missing first-ship requirements**
+- Count WindowId/WindowSec-mismatch quota drops (sender/receiver config skew) in `fleet_bad_ingress_total`.
+- `fleet_status` self handling: local call vs erpc loopback (timeout budget) — pin it.
+- Cert-expiry alerting threshold (13-month certs; `/stats` exposure alone is not monitoring).
+
+**5. Architecture/design notes**
+erpc timeout classes are correct (10 s command timeout < 60 s tick, so a paused peer yields `timeout`, not `noconnection` — matches F.7). Lease dual-hold is harmless while observability-only — hold that line until budget ownership is specified. Quota cadence is safe: 3 nodes × ≤32 keys / 2 s with TTL 6 s = 3× cadence margin. `-connect_all false` + connector loop + nodedown rejoin is coherent.
+
+**6. Top 5 concrete edits**
+1. Rewrite the B2 blast radius: "misrouted tier selection for requests on that hash, ≤ 300 s, self-expiring; duplicated judge calls on expiry are the recovery cost."
+2. Add `first_seen` GC: delete when `now > first_seen + 2×TTL + grace`; share the per-sender cap.
+3. Fix `expires_in_ms` → `next_check_in_ms` in F.2/Part C; extend the Part C mirrors enum with `quota | cache` rows.
+4. Pin full gate order: F.5 → F.1 → F.2 → F.3 → F.4 → F.6 → F.8 → F.7 (pause-based steps last; assert state restored between steps).
+5. Count quota window-mismatch drops; specify `fleet_status` local-node handling (direct call, no erpc, no timeout).

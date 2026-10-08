@@ -1,0 +1,32 @@
+**1. Verdict: GO WITH FIXES** — rev 9's folds landed, but Part B2 leaves its two payload hooks unnamed and its replay bound unenforced, and F.6/F.7 assert state and timing the spec never defines.
+
+**2. Critical risks**
+- **Quota heartbeat storm**: "2 s coalesced heartbeat per key ≥50%" is still one message per key per tick — 500 hot keys ≈ 250 msgs/s/node over WAN. The row cap bounds storage, not message rate. Coalesce into one per-sender batched message per tick; cap keys per batch.
+- **cache_put replay bound is asserted, not specified**: "extends life by at most one TTL" has no ingress rule (e.g. ignore cache_put for an unexpired Hash, or cap new ExpiresAt at old+TTL). As written, replay extends indefinitely.
+- **cache_put writes violate the stated architecture boundary** ("everything lands in local ETS mirror tables"): receivers write *into janus-auto's working cache* — bypassing mirrors, the tolerant-read helpers, and local-wins. Name the ownership/sweeper path or mirror+consult.
+- **Unnamed hook points**: B2 never states where quota counters are read (Slice-Q enforcement site?) or where cache_put is published (cache-fill path in `janus_auto`?) — Part B verified its three hooks against `janus_lb.erl`; B2 must do the same.
+- **Fan-out params**: `lb_cool_clear {target}` and command-name parsing need `binary_to_existing_atom` + target ∈ known targets, checked locally before erpc — else atom-table growth and arbitrary-atom fan-out reopen the enum.
+- **F.7 lease timing vs F.4**: `docker pause` does not fire nodedown until ~net_ticktime (60 s) — F.4 says so explicitly. The gate must wait ~65–70 s and say so; lease has no fencing (fine for observability-only, mandatory before phase-4 sweep duty).
+
+**3. Contradictions / stale claims**
+- Part C's `/stats.fleet` schema has no quota-mirror field, yet F.6 asserts `/stats.fleet` quota rows exist.
+- Part 0.2 "local evidence wins" is undefined for cache entries injected remotely (a cached decision isn't evidence — say so).
+- F.6(b) "byte-identical control run" needs fresh mock counters or delta comparison; cumulative counters make it vacuous.
+
+**4. Missing first-ship requirements**
+- Quota mirror in `/stats.fleet` + its metrics/sweep accounting.
+- Audit-ring durability statement (in-memory, restart-lossy).
+- `fleet_status` must be parked-safe (`janus_fleet` may be down).
+- WindowId rollover blind spot (rows drop at bucket boundary) noted as accepted.
+
+**5. Design notes**
+- Residual-trust restatement (F.3) is now honest; keep it referenced from Part 0.6 — done.
+- Advisory-only quota v1 is the right call; the withdrawn earlier-shed stays withdrawn.
+- `{lb_cool_purge, Target}` is the correct fix for foreign-sender mirror rows.
+
+**6. Top 5 edits**
+1. Specify cache_put ingress replay rule + mirror-vs-cache decision + hook point.
+2. Batch quota gossip per sender per tick; name the counter source hook.
+3. Add quota fields to Part C schema and mirror-size bounds.
+4. Validate command params locally (`existing_atom`, target ∈ catalog) before fan-out.
+5. Restate F.7 lease-move wait as ~net_ticktime+5 s with the pause caveat from F.4.

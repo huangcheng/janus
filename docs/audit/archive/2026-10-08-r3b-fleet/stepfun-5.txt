@@ -1,0 +1,29 @@
+**1. Verdict** — GO WITH FIXES: the rev-9 folds are coherent, but F.7's gate contradicts F.4's own pause semantics, and B2's cache_put ships ungated with an unenforceable cap.
+
+**2. Critical risks**
+- **F.7 is untestable as written.** `docker pause` keeps TCP ESTABLISHED — F.4 says nodedown will not fire — so "a peer down (paused) → `{error, noconnection}`" is false until net_ticktime tick-timeout (~60 s); before that erpc raises `timeout`. Use `docker stop`, or explicitly wait past tick-timeout and document the timeout→noconnection transition. The lease-migration claim only works via that same tick-timeout path — state it, or it silently depends on window length.
+- **cache_put has no gate and weak mechanics.** No TF-F.* step exercises judge sharing though it changes janus-auto routing fleet-wide. The 4096/sender cap is unenforceable in a hash-keyed local cache (sender not stored); "replay extends by at most one TTL" is asserted, not enforced — a republishing sender extends forever. Blast radius is wrong-tier routing ≤ 300 s, not "duplicate upstream judge calls."
+- **The "closed enum" isn't pinned.** `catalog_cache_flush` and lb_cool_clear's local half name no exported function (needs new `janus_lb:clear_cooldown/1`); `janus_config:reload/0` existence unverified; `status/0` is undefined yet erpc'd on possibly-parked/knob-off peers — define it to return `{error, disabled|down}`; wrapper must catch `error:` too, not just exit classes.
+- **Quota publisher has no located state.** Which process/ETS holds Slice-Q counters, read how cheaply every 2 s? WindowId alignment assumes ≥ 60 s buckets ("± s vs ≥ 60 s buckets") — verify against the Slice-Q spec.
+- **F.4 timing-fragile:** "TTL is the mechanism" holds only while pause < net_ticktime; a longer pause fires tick-timeout nodedown → eager delete. Cap the window explicitly.
+
+**3. Contradictions / stale**
+- Part C's `mirrors` shape (`cool|lat`) predates B2 — F.6(a) asserts a quota row it cannot carry; cache kind likewise absent.
+- "Dual-publish bounded by the storm invariant" — stale: the lease gates nothing in v1; say blast radius is zero. `expires_in_ms` has no defined TTL/renewal observable — non-holders cannot compute it.
+- F.6(b)'s knob-off control (gw2) is missing from the execution order; 0.8(d) counts the lat last-resort case but names no counter.
+
+**4. Missing first-ship**
+- Gate for cache_put, or explicit deferral of B2-cache.
+- Intruder-cert source for F.1(a)/(b): `fleet_cert_gen.sh` flag or gate-local openssl.
+- lb_cool_clear target validation before fan-out (local 400) + no-op-if-uncooled semantics.
+
+**5. Notes**
+- Casts carry no sender — claimed-sender validation is the ceiling; consistent with F.3 but state it at 0.6(d). A sender-tracked `janus_fleet` cache mirror + write-through makes the cap enforceable and ingress auditable.
+- Quota heartbeat reads a cheap ETS snapshot, never the usage-writer process.
+
+**6. Top 5 edits**
+1. Rewrite F.7: `docker stop` for noconnection/lease tests, or wait > net_ticktime and assert the transition.
+2. Add TF-F.8 judge-cache step (peer hit via judge-call counter delta; JudgeModel-mismatch drop) or defer B2-cache.
+3. Pin the enum to exported MFAs; validate lb_cool_clear's target locally; park-safe `status/0`; catch error:/exit:/throw:.
+4. cache_put → mirror + write-through, first-write-wins-until-expiry, corrected blast radius; `/stats.fleet` gains quota/cache kinds.
+5. Name the quota state owner + read cost; assert WindowSec ≥ 60 s or restate alignment; add gw2's knob-off control run.

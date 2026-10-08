@@ -1,0 +1,28 @@
+**Verdict:** GO WITH FIXES — round-2 folds are coherent and the local-wins/TTL discipline is enforced, but two mechanical bugs (erpc wrapper, quota WindowSec) and one closed-enum hole (`catalog_cache_flush` MFA) must close before ship.
+
+**Critical risks (new parts):**
+
+- **erpc returns tuples, not exceptions.** OTP 27 `erpc:call/4,5` returns `{ok, R} | {error, Class, Reason}`. The spec's `try erpc:call(...) catch C:R -> {error,C,R}` is dead code for timeout/noconnection/undef. F.7 expects `{error, timeout}` (a tuple), contradicting the wrapper. Implementation will pattern-match; spec text misleads auditors.
+- **Quota WindowSec skew is silent.** WindowId = `floor(epoch / WindowSec)` is per-side. Sender/receiver with mismatched WindowSec → diverging WindowIds → every row rejected. No ingress equality check. Validate `Msg.WindowSec == janus_fleet:local_window_sec()`; drop+count otherwise.
+- **`catalog_cache_flush` MFA not pinned.** Registry says "the pure-local idempotent cache clears" — no M:F:A. Same gap the registry exists to close.
+- **Lease has no fencing token.** v1 only reads; state explicitly "fenced-by-absence; no phase-4 work reads the lease as authority yet."
+- **`/stats/fleet/command` has no rate limit.** Token reuse from :8090 means token leak gives fleet RCE (F.3 disclosed). Add token-scoped per-minute cap.
+- **F.1(a) prose is imprecise.** Non-fleet-CA cert fails at path validation (`unknown_ca`) before verify_fun runs. Test passes; prose should say so.
+
+**Contradictions / stale:** erpc wrapper vs F.7 tuple expectation; "WindowId matches current OR previous" assumes WindowSec parity (not stated); round-2 "ALL signal mirrors" wording contradicts the cache_put exception (restructure); F.1(a) confuses layer of rejection. Part A/B/C/D and amended Part 0.6 residual check out.
+
+**Missing first-ship:** pin `catalog_cache_flush` MFA + `function_exported` precheck; validate WindowSec equality at quota ingress; replace erpc try/catch with case match; add `/stats/fleet/command` rate limit; rewrite F.1(a) prose; specify audit-log destination (file vs /stats vs pg).
+
+**Architecture/design notes:** mirror ownership under `janus_fleet` + tolerant helpers is the right crash-safety shape; nodedown purges cool/lat/quota but NOT cache_put is correct (cache_put's TTL is its bound); pg scope pinning (`janus_fleet_pg`/`janus_fleet`/2-arity) preserves the mimo-arity-bug lesson; local-wins enforced at both edges (clear-on-success for cool, fresh-local-blocks-shed for latency) — literal; F.5 → recreate → F.1 → F.2 → F.3 → F.4 ordering correct (F.6 before F.1 would contaminate signals_rx).
+
+**Top 5 concrete edits:**
+
+1. Replace the F.1 erpc wrapper with `case erpc:call(Peer, M, F, A, Timeout) of {ok, R} -> {ok, R}; {error, C, R} -> {error, C, R} end`. Note: erpc returns tuples; case match is the contract.
+
+2. At quota ingress, validate `Msg.WindowSec == janus_fleet:local_window_sec()` before upsert; drop+count otherwise. State the fleet-wide-WindowSec assumption.
+
+3. Pin `catalog_cache_flush` in the F.1 registry (e.g. `janus_catalog:flush_cache/0`); add `function_exported` precheck row.
+
+4. F.1(a) prose: "a non-fleet-CA cert carrying a configured peer's SAN is refused at the TLS handshake via path validation (`unknown_ca`); `verify_fun` never receives `valid_peer` for it." Eunit fixture unchanged.
+
+5. Restructure the round-2 nodedown-purge sentence: "nodedown purges that sender's rows from `janus_fleet_remote_cool`, `_lat`, and `_quota`; cache_put entries are TTL-only — a peer's cached decisions remain valid after its death."

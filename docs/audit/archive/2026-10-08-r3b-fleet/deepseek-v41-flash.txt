@@ -1,0 +1,27 @@
+## 1. Verdict
+**GO WITH FIXES** — rev-9 folds land, but F.3 is self-defeating as written, and cache_put/purge have unresolved correctness edges.
+
+## 2. Critical risks (new parts)
+- **F.3 contradicts Part 0.8f.** Once a sender's local `degraded_filter` sheds the slow route it stops sampling → EWMA goes stale → heartbeats stop → row TTLs out (15 s) → gw3 unsheds mid-test. "Senders keep sampling" is asserted, not enforced; the gate must drive traffic *at the slow route bypassing the local filter* or pin sampling, and assert ≥2 live rows at shed time.
+- **cache_put poisoning.** `JudgeModel` equality does **not** guarantee the tier→listing mapping is equal under generation lag — a remote tier decision can be locally wrong for ≤300 s. Also "replay extends by at most one TTL" is per-replay → **unbounded absolute age** under continuous replay.
+- **lb_cool_clear purge is async.** The `{lb_cool_purge, Target}` cast is best-effort; a partitioned peer misses it, its mirror cool-rows live to TTL (30 s) and **re-stick the pick** — the operator override is not durable.
+- **F.6 control undefined.** "Byte-identical to fleet-off control" requires recreating gw2 fleet-off, tearing down the cluster under test. No control artifact is specified.
+
+## 3. Contradictions / stale claims
+- Part C puts `lease` + last-20-commands in `/stats.fleet`; Part A's read-path description omits both.
+- Part 0.8f (senders stop sampling → stale → self-heal) directly conflicts with F.3's continuity assumption.
+
+## 4. Missing first-ship requirements
+- No rate-limit / request-id on `POST /stats/fleet/command` — repeat fan-out is a DoS on the admin plane.
+- Quota publish rate is bounded only on receive (`cap 8192`); send rate = (keys ≥50 %) × 0.5 Hz is unbounded.
+- No absolute-age cap on cache_put entries.
+
+## 5. Architecture notes
+Residual-RCE disclosure (F.3) is honest and correct. Compile the command table as a frozen constant (it is) and allow per-command timeouts — a 5 s cap may be short for `config_reload_nudge` during a real reload.
+
+## 6. Top 5 concrete edits
+1. **F.3:** drive the slow route directly / pin sampling so EWMA cannot go stale; assert two live degraded rows at probe time.
+2. **cache_put:** add an absolute-age cap (≤300 s from first insert) *and* require a matching config-generation / tier-map fingerprint, not just `JudgeModel`.
+3. **lb_cool_clear:** delete mirror rows synchronously via `erpc` on each peer; keep the cast purge as best-effort backstop.
+4. **F.6:** define the fleet-off control explicitly (pre-recreate counter snapshot or a control binding).
+5. Add rate-limit + idempotency key to the command endpoint; document the 5 s erpc cap as tunable.

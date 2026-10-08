@@ -1,0 +1,20 @@
+**1. Verdict: GO WITH FIXES** — the fold discipline holds and the failure-mode coverage is real, but two new-parts bugs (lease failover under pause, replay-bound reset) must be fixed before ship.
+
+**2. Critical risks**
+- **Lease failover contradicts F.4's pause semantics.** F.7 asserts pausing the lease holder moves the lease "within net_ticktime + 5 s" — but a `docker pause`d node keeps TCP ESTABLISHED, so `nodedown` never fires (F.4 asserts exactly this). The paused holder also still believes it holds → dual-hold until unpause. The lease needs its own liveness bound (e.g. holder validity = 2–3× the 5 s tick, re-evaluated from pg membership + last-seen), not `nodedown`. F.2's "on holder nodedown" wording has the same hole.
+- **Replay bound resets after TTL.** `expires_at ≤ first_seen + 2×TTL` is only enforced while `first_seen` survives; if the tracking row is deleted when the entry expires (or in the sweeper), a replay one tick later restarts the clock → unbounded extension across generations. First-seen tombstones must outlive the entry by ≥ 2×TTL (or the bound becomes "≤ 2 extension events per Hash per sender lifetime").
+- **Quota 80 % latch vs top-32 cap is undefined.** Does an edge-latched publish compete with the 32-key budget (starved when 33 keys are hot)? What is "consecutive evaluation" for a counter — per request, per heartbeat tick? Pin both.
+- `erpc` 1 s `fleet_status` timeout over three-cloud WAN is tight; partial-success-is-success saves the command, but define the reported shape when *all* slots time out.
+
+**3. Contradictions / stale claims**
+- F.7 lease assertion vs F.4 pause behavior (above) — direct contradiction.
+- `lb_cool_clear` uses two mechanisms (erpc local clear + `{lb_cool_purge}` broadcast) with undefined ordering vs racing ingress re-publish; spec one path or state the race outcome.
+- Part 0.2 "replay forbidden" vs the 2 s quota heartbeat re-publishing the same (key, window) — call it re-publish, not replay, to keep the invariant literal.
+
+**4. Missing first-ship requirements**
+- `fleet_cert_gen.sh` is referenced but not listed as a deliverable gate item (SAN byte assertion, README revocation block).
+- Definition of `/stats` fleet-command result shape for all-error fan-out; counter for lease dual-hold detection.
+
+**5. Design notes** — the advisory-only quota v1 (observability, pick never consults it) is the right call and honestly bounded; F.3's residual-trust disclosure is unusually honest and correctly makes the cert the real boundary; window-boundary acceptance (current ∪ previous) is sound.
+
+**6. Top 5 edits** (1) rewrite F.2/F.7 lease failover to a tick-based holder TTL, not nodedown; (2) add first-seen tombstone retention ≥ 2×TTL to B2; (3) pin latch-vs-cap precedence and "evaluation" cadence in B2; (4) make `lb_cool_clear` single-path; (5) add cert-gen script + all-error fan-out shape to the gate checklist.

@@ -1,0 +1,26 @@
+**1. Verdict: GO WITH FIXES** — all rev-9 folds (residual trust, advisory quota, erpc try/catch, cache_put guards, purge signal, lease duty) are present and coherent; what remains is cache_put's breach of the spec's own advisory boundary (consumed, untested in the gate), quota /metrics cardinality, and purge-signal validation.
+
+**2. Critical risks**
+- **cache_put is not advisory.** Every other payload lands in mirrors and only influences picks alongside local evidence — a decision-cache HIT short-circuits local adjudication outright. The "local request-path evidence always wins" invariant is inapplicable: a hit means no local evaluation ever runs. The JudgeModel guard covers generation lag on the judge, but **Tier is trusted unguarded** — a sender with skewed tier config steers tier selection fleet-wide for ≤300 s. "Blast radius = duplicate judge calls" understates a wrong-tier entry.
+- **B2 cache_put has no gate step.** F.6 covers quota only; miss-publish, receive-hit, judge-mismatch drop, 4096 cap, and replay-bounded-±TTL are all unasserted E2E.
+- **/metrics cardinality:** exporting quota mirror rows per (sender, key, window) yields up to 8 192×3 series. Export aggregates; keep full rows in `/stats.fleet` only.
+- **`{lb_cool_purge, Target}` is absent from the ingress validation list** (tag/shape/sender ∈ peers ∧ ≠ self) and deletes EVERY sender's rows — the cheapest fleet-wide primitive for a stolen-key peer; it must be validated, counted, and audited.
+- **F.7 never exercises `config_reload_nudge`/`catalog_cache_flush`** (undef-skew eunit covers only the wrapper).
+
+**3. Contradictions / stale claims**
+- Architecture boundary ("ONLY advisory… local evidence always wins") vs cache_put being consumed on the request path.
+- F.1 claims every enum target is "exported, audited, idempotent," but nothing verifies reload/flush idempotency; peers cannot audit erpc executions they can't distinguish from any other erpc (disclose: audits live only on the issuing node).
+- Part C's `mirrors` list says `cool|lat` only — B2's quota/cache mirror surface in `/stats.fleet` is undocumented there.
+
+**4. Missing first-ship**
+- TF-F.8 for cache_put; purge ingress rules; /metrics cardinality bound; F.7 smoke of the two untested commands.
+
+**5. Architecture notes**
+Lease design is sound for v1 (deterministic lowest-name, zero traffic, dual-hold harmless while duty is observability-only — must be re-audited before phase 4). Quota advisory-only correctly resolves per-node Slice-Q semantics; WindowId bucket-drop at rollover is acceptable advisory loss. erpc contract (raises, caught per-class, partial-success-is-success) matches OTP reality.
+
+**6. Top 5 edits**
+1. Amend the boundary statement: cache_put is a consumed, TTL-bounded override; add a tier-consistency guard (or honestly restate tier-skew blast radius).
+2. Add TF-F.8: cache_put miss→hit across nodes, judge-mismatch drop, cap, replay ≤ +1 TTL.
+3. Add `{lb_cool_purge, Target}` to ingress validation + `fleet_bad_ingress` + audit.
+4. /metrics: aggregate quota gauges only.
+5. F.7: one audited call each for `config_reload_nudge`, `catalog_cache_flush`.

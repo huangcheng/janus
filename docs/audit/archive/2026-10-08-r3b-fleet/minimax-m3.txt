@@ -1,0 +1,28 @@
+1. **Verdict: GO WITH FIXES (not ratifiable yet).** The local-wins/TTL architecture is coherent, but TLS identity, authorization, replay/quorum semantics, and WAN tests remain blockers.
+
+2. **Critical risks**
+- **TLS:** The spec pins an unproven OTP behavior: `inet_tls_dist` normally matches the host part; full `janus@host` dNSNames are not DNS SANs and may fail client verification. `verify_fun` is inbound membership, not node-name binding. Require explicit client checks and DNS/IP/wrong-SAN handshake tests.
+- **Authorization/RCE:** Reusing the read-only token for `lb_cool_clear`/reload makes stats readers control principals. The enum closes mapping, not authorization. Use a separate capability/role, typed arguments, and partial/all-failure status; cookie+cert peers retain arbitrary `erpc` under F.3.
+- **Replay/quorum/cache:** Upsert writes `now+ttl` on every payload, so stale replay can keep cooldown/latency rows alive indefinitely, contradicting Part 0.2. `cache_put` repeats the 300-second refresh hole and changes picks. `SenderNode` is only a payload claim; one peer can forge multiple quorum identities. Require sequence/episode refresh rules, bounded replay, sender binding, and cache policy fingerprints.
+- **Quota/WAN:** Advisory-only correctly removes merge ambiguity. `WindowId=floor(epoch/...)` is wall-clock-derived and needs a Part 0.3 exception; skew can mislabel rows. Up to 8,192 keys at two seconds is roughly 4,096 messages/s/sender; source/reset/range, batching, jitter, caps, and backpressure are unspecified.
+- **Lease/gate:** `pg` is eventual, so partitions create dual holders; current blast radius is observability only, but phase 4 has no fencing/term. F.7 should test pause as timeout (stop for `noconnection`); F.6 needs deterministic quota/logical-expiry E2E fixtures, not eunit alone.
+
+3. **Contradictions or stale claims**
+
+F.4/F.7 disagree on the pause error class. “At most one TTL” is not enforced by TTL-reset upsert. Clarify “byte-identical” as route/upstream behavior; `/stats.fleet` differs. Part C does not define the quota/cache row schema or truncation required by F.6; ingress authorization for `lb_cool_purge` is also unspecified.
+
+4. **Missing first-ship requirements**
+
+Verify OTP-27 `epmd_module` callback arity/return shapes, especially `register_node`; validate TLS/cert deployment plumbing and idle-versus-cookie boot behavior; define quota ownership/rollover and cache-table ownership; test outbound impersonation, unauthorized/unknown commands, cache propagation/mismatch/replay, local-result count, and all `erpc` errors/exits (`undef` included). Save durable E2E logs/PASS artifacts.
+
+5. **Architecture/design notes**
+
+Static, non-transitive membership plus eventual `pg` suits self-expiring hints only. Bound outbound queues, treat claimed senders as untrusted, and keep the lease non-authoritative until fencing exists.
+
+6. **Top 5 concrete edits**
+
+1. Prove the SAN/SNI policy; map host/IP SANs and add explicit client checks.  
+2. Separate command auth; define local inclusion, schema, actor audit, and failure semantics.  
+3. Define cache provenance/keying, immutable expiry/refresh bounds, policy fingerprint, local precedence, and cleanup.  
+4. Define quota source/window/validation, batching/jitter/rate/backpressure; amend Part 0.3.  
+5. Seed all nodes; fix F.6/F.7 TTL/pause/drop-rejoin assertions; define fencing before phase-4 lease use.

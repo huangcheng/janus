@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — rev-10 folds are present and coherent; remaining gaps are bounded hygiene (stale fields, one missing clamp, first_seen sweep, execution-order omission), none architectural.
+
+**2. Critical risks (new parts):**
+- *cache_put `first_seen` unbounded:* the per-sender entry cap (4 096) bounds live rows, but `first_seen` records for expired hashes are never swept — a churning peer leaks memory. Tie `first_seen` expiry to `first_seen + 2×TTL` and reap it in the 30 s sweeper.
+- *`Target` is not byte-clamped:* ingress clamps `AgentKeyId` (≤128 B) and `Hash` (64-hex) but not `Target` in `lb_cool`/`lb_lat`/`lb_recovered`/`lb_cool_purge`. A compromised peer can push oversized binaries into ETS. F.3 residual-trust softens this (cert-holders already own arbitrary-exec), but defense-in-depth is the spec's own frame — clamp it.
+- *Quota 2 s cadence:* top-32 + ≥50 % filter + upsert-per-(sender,key,window) bounds load; advisory-only ⇒ zero pick-path exposure. Sound.
+- *erpc enum:* registry + `function_exported` precheck + local arg validation closes the HTTP surface; `undef`/`timeout`/`noconnection` classes correctly mapped and eunit-driven. Note: the precheck is LOCAL, so the issuing node must be current during rolling deploys.
+- *Lease:* lowest-node-name is deterministic; dual-hold window ≤ net_ticktime+5 s; v1 duty is observability-only ⇒ blast radius ~0. Sound.
+
+**3. Contradictions / stale claims:**
+- Goal still reads "(phase 3) quota counters" — the rev-10 fold claims it was scrubbed; it was not.
+- F.2 reports the lease twice: `{holder, expires_in_ms}` then `{holder, next_check_in_ms}`; Part C also uses stale `expires_in_ms`. Normalize to `next_check_in_ms`.
+- Execution order "F.5 → recreate → F.1 → F.2 → F.3 → F.4" omits F.6/F.7/F.8.
+- `catalog_cache_flush` MFA is unpinned in the registry ("the pure local idempotent cache clears" is not a callable target).
+
+**4. Missing first-ship requirements:**
+- Connector-loop backoff cap (a long WAN partition re-dials unbounded).
+- Confirm `janus-auto` actually exposes the exported decision-cache write API rev-10 mandates.
+- Target clamp + `first_seen` sweep (above).
+
+**5. Architecture/design notes:**
+- TTL / local-wins / last-resort / row-caps are consistently inherited by B2 payloads; quota-as-advisory-only is the right call given per-node Slice-Q semantics.
+- pg S1 resolution is solid (scope pinned, 2-arity, self-excluded).
+- The :8090 read-only → idempotent-command boundary change is correctly flagged for operator sign-off.
+
+**6. Top 5 concrete edits:**
+1. Purge stale `expires_in_ms` (F.2, Part C) and Goal "(phase 3)".
+2. Add `Target` to ingress byte clamps.
+3. Bound/sweep cache_put `first_seen` at `first_seen + 2×TTL`.
+4. Extend execution order to …→ F.4 → F.6 → F.7 → F.8.
+5. Pin `catalog_cache_flush` MFA; state connector-loop max backoff.

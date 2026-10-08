@@ -1,0 +1,29 @@
+**1. Verdict: GO WITH FIXES** — round-2 folds are materially present, but the erpc exception contract is wrong as written and two rev-10 "applied" claims are contradicted by the body text.
+
+**2. Critical risks (new parts)**
+- **erpc error shape is mis-specified.** `erpc:call/5` raises `error:{erpc,timeout}` / `error:{erpc,noconnection}` — the documented wrapper `catch C:R -> {error,C,R}` yields `{error, error, {erpc, timeout}}`, never `{error, timeout}`. F.7's paused-peer assertion (`{error, timeout}`) and the "common classes: undef/noconnection/timeout" line will fail exactly as pinned. (`undef` does arrive as `error:undef` — that one is right.)
+- **cache_put replay bound is leaky.** `expires_at ≤ first_seen + 2×TTL` doesn't say *which* TTL: a replay carrying a larger `TTLms` extends the entry past two original lifetimes. Bind must be `first_seen + 2×TTL_from_first_message`, and the `first_seen` table's own GC is unspecified (unbounded growth across Hashes).
+- **`function_exported` precheck is local and lies twice:** (a) module not yet loaded on a fresh node → false negative; (b) says nothing about the peer (version skew is only caught by remote `undef` — which is fine, but then the precheck buys little and costs the false-negative case).
+- **Quota mirror cap ambiguity:** rev 10 header says aggregate 8 192/sender across ALL mirrors; Part B and B2 bodies each say "row cap 8 192/sender" per table. Enforcement differs 3×.
+- F.6/F.7 gate is testable; F.7's paused-peer slot is the one assertion that will red against real erpc until the shape is fixed.
+
+**3. Contradictions / stale claims**
+- Rev 10 header claims the goal was "scrubbed of '(phase 3)' wording" — the Goal paragraph still reads "(phase 3) quota counters and judge decision-cache entries".
+- Lease field rename is half-applied: F.2 contains *both* `{holder, expires_in_ms}` and `{holder, next_check_in_ms}`; Part C still says `expires_in_ms`.
+- Part C duplicates itself: `/metrics` gains fleet counters in two separate bullets; `/stats.fleet` content is specified twice with different field sets.
+- F.1 "registry pins exact M:F:A per name" but only `config_reload_nudge`'s MFA is named; `catalog_cache_flush` and `lb_cool_clear` presumably need *new* exported functions (janus_lb exports no cool-clear today) — not stated.
+
+**4. Missing first-ship requirements**
+- "Top-32 hottest keys" — hotness metric undefined (used? ratio? rate?).
+- F.1 command audit ring (last 20) is volatile; fine, but say so.
+- No statement on whether `JANUS_FLEET_PEERS` includes self (verify_fun init state and `net_kernel:allow` both consume it — self-inclusion changes handshake behavior).
+
+**5. Architecture notes**
+Advisory-only quota + never-shed-last + local-wins keeps the fleet unforkable; the lease having zero v1 duties makes its split-brain cosmetic — good sequencing. The honest F.3 residual-trust paragraph is the right call. Nodedown purge exempting cache_put is consistent.
+
+**6. Top 5 edits**
+1. Rewrite erpc wrapper contract as `try erpc:call(...) catch error:{erpc,R} -> {error,R}; C:R -> {error,C,R} end`; fix F.7 paused-peer expectation to `{error, timeout}` *via* that normalization, eunit-drive all three shapes.
+2. cache_put: store `(first_seen, first_ttl)` per (sender, Hash); enforce `expires_at ≤ first_seen + 2×first_ttl`; sweep first_seen rows when the cache entry expires.
+3. Scrub "(phase 3)" from Goal; delete `expires_in_ms` from F.2 and Part C (keep `next_check_in_ms`); merge the duplicated Part C bullets.
+4. Name exact M:F:A for `catalog_cache_flush` and `lb_cool_clear` (new exported janus_lb/janus_catalog APIs); replace the local `function_exported` precheck with `code:ensure_loaded` + export check, or drop it and rely on remote `undef`.
+5. Pick per-mirror **or** aggregate 8 192/sender cap, state it once in Part B ingress; define "hottest" (e.g., highest `Used/Limit` ratio this cycle); state whether the peers list includes self.

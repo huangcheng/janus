@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — the rev-9 folds landed coherently, but cache_put's replay bound is unenforced as specified, F.7's pause/noconnection mechanics contradict F.4's own pause semantics, and the pg-scope ownership claim is false under the stated supervision.
+
+## 2. Critical risks (new parts)
+
+- **cache_put replay bound is not real.** Idempotent-upsert keyed by Hash with receiver-clock TTL means continuous replay of one captured payload extends the entry *indefinitely*; "at most one TTL" requires an explicit ingress rule: drop the put if an unexpired local entry for Hash already exists. Missing.
+- **cache_put blast radius misstated.** A poisoned entry doesn't cause "duplicate upstream judge calls" — it *misroutes live agent traffic to the wrong tier* for ≤ 300 s. The cert boundary and JudgeModel-match mitigate, but the consequence statement is wrong and undersells the risk.
+- **F.7 contradicts F.4's pause semantics.** Spec itself proves `docker pause` leaves TCP ESTABLISHED and nodedown does not fire in-window. So a *paused* peer gives erpc `{error, timeout}` (5 s call timeout), not `{error, noconnection}` as F.7 asserts; and lease failover on pause needs ~net_ticktime (60 s) + 5 s, i.e. a ≥ 65 s gate step — fine, but must be stated. Use `docker stop` for the noconnection slot.
+- **pg scope ownership.** `pg:start(janus_fleet_pg)` in `janus_fleet:init/1` links the scope to the gen_server; when the Part 0.12 tripwire parks it, the scope dies too — so "/stats reports `status` and `nodes` independently (the pg scope outlives a parked janus_fleet)" is false. Scope must be supervisor/sibling-owned or the claim dropped.
+- **Quota egress storm budget unstated.** 2 s heartbeat × hot keys × 2 peers: ingress cap (8 192/sender) bounds storage, not publish rate. Max publishes per tick / batching unspecified.
+
+## 3. Contradictions / stale claims
+
+- Part 0.8e "local success clears BOTH mirror tables" vs `{lb_recovered}` "never touches the latency mirror" — two mechanisms (local sweep cast vs fleet retraction) but the text reads as one; needs one disambiguating sentence.
+- `lease.expires_in_ms` is meaningless for a deterministic lowest-member "lease" (no grant, no expiry) — report `holder` only.
+- Quota rows from a rolled-over WindowId linger to TTL inflating `mirror_sizes` — cosmetic, but gate assertions on sizes will flake.
+
+## 4. Missing first-ship requirements
+
+cache_put anti-replay rule; pg scope relocation; F.7 stop-vs-pause fix; quota egress budget + publisher owner (who reads Slice-Q ETS); fleet-command endpoint rate limit (token auth reused, but it now triggers fleet-wide effects); `config_reload_nudge` local execution stated.
+
+## 5. Design notes
+
+Advisory-only quota is the right call — per-node budgets make merging undefined. Lease as observability-only avoids phase-4 commitments prematurely. erpc wrapper try/catch + local enum validation is correct erpc semantics.
+
+## 6. Top 5 edits
+
+1. B2: add "ingress drops cache_put when an unexpired entry for Hash exists" and rewrite the blast-radius sentence (wrong-tier routing ≤ 300 s).
+2. Part A: start `janus_fleet_pg` in `janus_fleet_sup` (or a permanent sibling), or delete the scope-outlives claim.
+3. F.7: `docker stop` for the noconnection assertion; pause only for lease failover with an explicit ≥ 65 s budget.
+4. B2: state quota egress cap (e.g. ≤ N keys per 2 s tick, batch into one cast per peer) and the publishing owner.
+5. Reconcile Part 0.8e vs `{lb_recovered}` in one sentence; drop `expires_in_ms` from the lease report.

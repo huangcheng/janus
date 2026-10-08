@@ -1,0 +1,30 @@
+**Verdict:** GO WITH FIXES — all rev-10 folds verified present and coherent (replay bound in 0.2, WindowId rule, registry/timeouts, clamps, purge scope, TF-F.8); ship is blocked only on shape-pinning gaps in B2/F mechanics.
+
+**Critical risks**
+- *Quota gossip:* observability-only is sound and storm-bounded (top-32/≥50%/8192 cap). But "accept current OR previous WindowId" is only correct when WindowSec ≫ skew — add a floor (≥10 s) or boundary acceptance is wrong for tiny windows. Local counter source module unnamed.
+- *cache_put:* `expires_at ≤ first_seen + 2×TTL` isn't enforceable as written — whose TTL, where first_seen lives, when GC'd (4096 cap bounds it, but storage is unstated). Poison blast radius is wrong-tier routing ≤300 s, not just duplicate judge calls — disclose next to F.3.
+- *erpc enum:* closed only at the HTTP layer (F.3 honest), but the registry M:F:A table is entirely unnamed (reload? flush? clear?) — closure is unverifiable until named. Wrapper returns `{error,C,R}` while prose reports `{error,timeout}`; a wrong catch pattern turns a down peer into a handler crash. Pin exact erpc exception terms first.
+- *Lease dual-hold:* benign in v1 (observability-only), converges by lowest-name. F.7's pause step needs ≥ net_ticktime (~60 s) — budget gate duration.
+- *WAN reality:* Part 0.1 "never blocks on distribution" is too strong — dist flow control suspends senders when a peer's buffer fills (paused peer: TCP alive, never drains). Fix is structural: remote casts must issue from `janus_fleet`'s own process, never inline in the `janus_lb` hook caller. Also state whether `erpc:call` auto-dials (if not, commands report `noconnection` until the connector redials).
+- *Gate timing:* F.4 unpause must land inside the ~60 s tick timeout or "resumes in place" fails.
+
+**Contradictions / stale claims**
+1. Part C `lease {holder, expires_in_ms}` vs F.2 `{holder, next_check_in_ms}`.
+2. Goal still tags quota/cache "(phase 3)" though B2 is first-ship.
+3. Rev-10 header claims "writes via an exported janus-auto API" — B2 body never states it.
+4. Part 0.1 eunit list omits quota WindowId acceptance, cache_put hash/replay validation, erpc wrapper.
+5. "Mirrors bounded by row caps (≤ peers × targets)" holds only if ingress pattern-validates Target; clamps pin AgentKeyId/Hash but not Target — junk targets inflate /stats and the sweeper.
+6. `function_exported` precheck: local or per-peer? Unspecified.
+
+**Missing first-ship**
+Named MFA registry (+ `janus_lb:clear_cool/1` export); audit sink for commands ("audited locally" is not a mechanism); quota counter source; first_seen storage/GC; /stats mirror display cap.
+
+**Architecture notes**
+Fan-out from the owner process is the single most important structural pin. Lease-as-observability is right; keep field names stable for phase 4. Claimed-name ≠ cert-SAN stays disclosed residual (0.6 + F.3) — keep that wording.
+
+**Top 5 edits**
+1. Fix lease field (Part C → `next_check_in_ms`); scrub "(phase 3)" from the Goal.
+2. Pin publish path: hooks are local casts; remote casts only from `janus_fleet`'s process; state residual backpressure.
+3. Enumerate the F.1 registry (M:F:A, arg shapes, timeouts); normalize wrapper to `{error, Reason}` with real erpc terms; drive F.7 eunit on them.
+4. Pin ingress Target pattern + /stats row cap; add quota/cache_put/erpc-wrapper to the 0.1 eunit-first list; define first_seen storage.
+5. Name the audit sink, quota counter source, erpc dial behavior; add WindowSec ≥ 10 guard to the boundary rule.

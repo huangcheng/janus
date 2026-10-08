@@ -1,0 +1,36 @@
+**1. Verdict:** GO WITH FIXES — the round-1 folds (advisory-only quota, erpc raise contract, purge signal, residual-trust disclosure) all landed coherently, but B2/F carry five fixable defects, none architectural.
+
+**2. Critical risks**
+
+- **cache_put blast radius misstated.** A poisoned entry makes receivers serve a *wrong tier decision* for ≤300 s per hash — that is wrong routing, not "duplicate upstream judge calls" (which describes eviction, not poisoning). Bounded by the cert boundary, but the disclosure is wrong where an auditor will check it.
+- **Quota publish rate is unbounded.** Row caps bound storage, not rate: N keys ≥50% ⇒ N casts/2 s per node. No bound on the hot set, no batching. On a burst of near-limit keys this becomes a message storm in violation of Part 0.4 spirit. Cap the published set (top-N by usage %) or batch rows per message.
+- **Watcher/coalescer state location unspecified.** If hysteresis state lives in `janus_fleet`, `do_note_latency/3` becomes a per-request gen_server cast — a hot mailbox under load. Pin: state in ETS, evaluated inline in `janus_lb`; cast only on actual publish.
+- **erpc catch list is brittle.** `undef` is `error:undef`; timeouts/downs surface across `error`/`exit` classes depending on OTP version and failure point (`nodedown` mid-send). Wrapper must catch all `C:R` and map, not name three reasons.
+- **F.6 gate is flaky as written.** "Byte-identical pick behavior vs a knob-off control run" fails on any EWMA/randomness nondeterminism. Replace with a differential scenario: key visibly >50% in gw2's quota mirror while gw2 picks for that same key — assert unchanged routing. That would catch a regression where pick *does* consult the mirror.
+- **Lease dual-hold:** blast radius is zero in v1 (observability duty only) — correctly defused; just keep the "dual `fleet_lease_holder`=1 during partition" note in the metrics doc so alerts aren't built on uniqueness.
+
+**3. Contradictions / stale claims**
+
+- Part C mirror dump shape `[{Target, SenderNode, cool|lat, ...}]` predates B2; quota (keyed by AgentKeyId) and cache_put (by Hash) rows don't fit it.
+- Part B ingress says "clamp ttl_ms ≤ 30 000" generically while B2 needs ≤300 s for cache_put — ingress must branch per payload type *before* clamping; state the per-type clamp table.
+- F.1 names `janus_config:reload/0` and an unspecified `catalog_cache_flush` MFA — neither existence nor arity is verified; an `undef`-everywhere first ship would technically "succeed" per partial-success rules and hide the bug.
+
+**4. Missing first-ship requirements**
+
+- Exact tuple shapes for `lb_cool_purge`/`quota`/`cache_put` in the ingress validation list (+ eunit fixtures).
+- Verified MFA table for all four commands.
+- :8090 handler timeout > 5 s erpc fan-out budget.
+- Audit-ring owner that survives a parked `janus_fleet`.
+
+**5. Architecture notes**
+
+- pg/epmd/-connect_all assumptions hold; `port_please` noport for non-peers conveniently also blocks erpc implicit dials outside the fleet — state that.
+- F.6/F.7 gate times: lease-move step takes ≤ net_ticktime+5 s ≈ 65 s; budget it explicitly.
+
+**6. Top 5 edits**
+
+1. Fix cache_put blast-radius text (wrong tier ≤300 s, not duplicate calls).
+2. Bound/batch quota publishes (top-N or multi-row message).
+3. Catch-all `try/catch C:R` in the erpc wrapper + per-command verified MFA table.
+4. Update Part C mirror shape and Part B clamp order for B2 payload types.
+5. Rewrite F.6(b) as the differential mirror-present-but-pick-unchanged assertion; pin coalescer state in ETS.
