@@ -12,6 +12,7 @@
 
 -export([
     start/0,
+    start_link/0,
     stop/0,
     register_node/2,
     register_node/3,
@@ -28,8 +29,14 @@
 -define(PORT_PLEASE_TIMEOUT, 5000).
 
 %% No-op process: the kernel only needs start/stop to succeed.
+%% OTP 27 net_sup calls start_link/0 on -epmd_module; older docs said start/0.
 start() ->
     {ok, spawn(fun idle/0)}.
+
+start_link() ->
+    {ok, Pid} = start(),
+    true = link(Pid),
+    {ok, Pid}.
 
 idle() ->
     receive
@@ -96,19 +103,34 @@ dist_port() ->
             ?DEFAULT_DIST_PORT
     end.
 
-%% Is the dialed node one of the configured static peers? Accept the
-%% full node name in atom or list form; the entrypoint-rendered peer
-%% list is the single source (exact-string host matching).
+%% Is the dialed node one of the configured static peers?
+%%
+%% OTP may call port_please/2 with:
+%%   - full long name as Name (`'janus@host.example'`, Host ignored), or
+%%   - alive name + hostname string, or
+%%   - alive name + **IP tuple** after DNS (inet_tls_dist setup path).
+%% Peers are stored as full long names; IP hosts cannot rebuild the
+%% DNS host part, so fall back to matching the alive name prefix.
 configured_peer(Name, Host) ->
     NodeStr = to_list(Name),
-    HostStr = to_list(Host),
-    Candidate =
-        case string:split(NodeStr, "@") of
-            [_Alive, _Host] -> NodeStr;
-            [Alive] when Alive =/= [] -> Alive ++ "@" ++ HostStr;
-            _ -> ""
-        end,
-    Candidate =/= "" andalso lists:member(Candidate, peer_strings()).
+    case string:split(NodeStr, "@") of
+        [Alive, HostPart] when Alive =/= [], HostPart =/= [] ->
+            lists:member(NodeStr, peer_strings());
+        [Alive] when Alive =/= [] ->
+            case host_to_list(Host) of
+                "" ->
+                    peer_has_alive(Alive);
+                HostStr ->
+                    Candidate = Alive ++ "@" ++ HostStr,
+                    lists:member(Candidate, peer_strings()) orelse peer_has_alive(Alive)
+            end;
+        _ ->
+            false
+    end.
+
+peer_has_alive(Alive) ->
+    Prefix = Alive ++ "@",
+    lists:any(fun(P) -> lists:prefix(Prefix, P) end, peer_strings()).
 
 peer_strings() ->
     case os:getenv("JANUS_FLEET_PEERS") of
@@ -122,3 +144,15 @@ to_list(A) when is_atom(A) -> atom_to_list(A);
 to_list(L) when is_list(L) -> L;
 to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(_) -> "".
+
+%% Hostname forms for candidate rebuild. IP tuples return "" so the
+%% caller matches on alive-name prefix instead of inventing IP long names.
+host_to_list(Host) when is_list(Host) -> Host;
+host_to_list(Host) when is_atom(Host) -> atom_to_list(Host);
+host_to_list(Host) when is_binary(Host) -> binary_to_list(Host);
+host_to_list({A, B, C, D}) when is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
+    "";
+host_to_list(T) when is_tuple(T), tuple_size(T) =:= 8 ->
+    "";
+host_to_list(_) ->
+    "".

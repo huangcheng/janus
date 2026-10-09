@@ -42,6 +42,12 @@ verify(_OtpCert, _Event, State) ->
 %% hands to verify_fun ('OTPCertificate'); extraction is structural so
 %% both otp and plain der-decoded shapes work.
 -spec san_dns_names(term()) -> [binary()].
+san_dns_names(Der) when is_binary(Der) ->
+    try
+        san_dns_names(public_key:pkix_decode_cert(Der, otp))
+    catch
+        _:_ -> []
+    end;
 san_dns_names(Cert) when tuple_size(Cert) >= 2 ->
     Tbs = element(2, Cert),
     case element_size(Tbs) >= 11 of
@@ -53,6 +59,7 @@ san_dns_names(Cert) when tuple_size(Cert) >= 2 ->
     end;
 san_dns_names(_) ->
     [].
+
 
 element_size(T) when is_tuple(T) -> tuple_size(T);
 element_size(_) -> 0.
