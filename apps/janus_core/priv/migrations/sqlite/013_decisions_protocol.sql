@@ -7,7 +7,7 @@
 -- (usage_events -> provider_keys -> model_routes -> provider_models
 -- -> providers), never dropping a table another live table still
 -- references. The migration runner wraps this script in its own
--- BEGIN IMMEDIATE; no explicit transaction statements here.
+-- BEGIN IMMEDIATE - no explicit transaction statements here (never put semicolons in migration comments: the runner splits statements on them).
 
 CREATE TABLE providers_013 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
