@@ -4,7 +4,7 @@
 %%%-------------------------------------------------------------------
 -module(janus_providers_anthropic).
 
--export([messages/3, messages/4, anthropic_version/0]).
+-export([messages/3, messages/4, anthropic_version/0, prepare/3]).
 
 -define(DEFAULT_VERSION, <<"2023-06-01">>).
 
@@ -14,6 +14,28 @@ anthropic_version() ->
         false -> ?DEFAULT_VERSION;
         "" -> ?DEFAULT_VERSION;
         Val -> list_to_binary(Val)
+    end.
+
+%% Build self-contained job fields for remote dispatch (no gun I/O).
+-spec prepare(map(), map(), boolean()) ->
+    {ok, #{
+        url := binary(),
+        method := post,
+        headers := [{binary(), binary()}],
+        body := binary()
+    }}
+    | {error, term()}.
+prepare(Route, ReqMap, Stream) when is_map(Route), is_map(ReqMap), is_boolean(Stream) ->
+    case resolve_upstream(Route, ReqMap, Stream) of
+        {ok, Target, Headers, OutBody} ->
+            {ok, #{
+                url => janus_providers_http:target_url(Target),
+                method => post,
+                headers => Headers,
+                body => OutBody
+            }};
+        {error, _} = Err ->
+            Err
     end.
 
 -spec messages(map(), binary(), map()) ->

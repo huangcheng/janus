@@ -11,7 +11,9 @@
     responses/4,
     decisions/3,
     decisions/4,
-    user_agent/0
+    user_agent/0,
+    %% Master→worker job material (url/headers/body) without gun I/O.
+    prepare/4
 ]).
 %% Exported for eunit (pure forward-shape helpers, no side effects).
 -export([decisions_out_map/2, decisions_headers/1]).
@@ -28,6 +30,51 @@
 -spec user_agent() -> binary().
 user_agent() ->
     janus_providers_http:user_agent().
+
+%% Build self-contained job fields for remote dispatch (same material
+%% chat_completions/responses/decisions would send via gun).
+-spec prepare(chat_completions | responses | decisions, map(), map(), boolean()) ->
+    {ok, #{
+        url := binary(),
+        method := post,
+        headers := [{binary(), binary()}],
+        body := binary()
+    }}
+    | {error, term()}.
+prepare(chat_completions, Route, ReqMap, Stream) when is_map(Route), is_map(ReqMap) ->
+    materialize(Route, ReqMap, <<"/chat/completions">>, Stream);
+prepare(responses, Route, ReqMap, Stream) when is_map(Route), is_map(ReqMap) ->
+    ReqMap1 =
+        case maps:get(<<"store">>, ReqMap, undefined) of
+            undefined -> ReqMap#{<<"store">> => false};
+            _ -> ReqMap
+        end,
+    materialize(Route, ReqMap1, <<"/responses">>, Stream);
+prepare(decisions, Route, ReqMap, _Stream) when is_map(Route), is_map(ReqMap) ->
+    case resolve_decisions(Route, ReqMap) of
+        {ok, Target, Headers, OutBody} ->
+            {ok, #{
+                url => janus_providers_http:target_url(Target),
+                method => post,
+                headers => Headers,
+                body => OutBody
+            }};
+        {error, _} = Err ->
+            Err
+    end.
+
+materialize(Route, ReqMap, PathSuffix, Stream) ->
+    case resolve_upstream(Route, ReqMap, PathSuffix, Stream) of
+        {ok, Target, Headers, OutBody} ->
+            {ok, #{
+                url => janus_providers_http:target_url(Target),
+                method => post,
+                headers => Headers,
+                body => OutBody
+            }};
+        {error, _} = Err ->
+            Err
+    end.
 
 %% Legacy: always non-stream.
 -spec chat_completions(map(), binary(), map()) ->

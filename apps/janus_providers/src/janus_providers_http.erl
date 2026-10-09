@@ -8,6 +8,7 @@
     user_agent/0,
     parse_base/1,
     join_path/2,
+    target_url/1,
     decrypt_key/1,
     post/3,
     post/6,
@@ -79,6 +80,34 @@ join_path(Base, Suffix) ->
                 end
         end,
     <<B/binary, Suffix/binary>>.
+
+%% Rebuild an absolute URL from a gun target map (worker job payload).
+-spec target_url(#{host := string(), port := inet:port_number(), path := binary(), tls := boolean()}) ->
+    binary().
+target_url(#{host := Host, port := Port, path := Path, tls := Tls}) ->
+    Scheme =
+        case Tls of
+            true -> <<"https">>;
+            false -> <<"http">>
+        end,
+    HostBin = iolist_to_binary(Host),
+    PathBin =
+        case Path of
+            <<>> -> <<"/">>;
+            _ -> Path
+        end,
+    DefaultPort =
+        case Tls of
+            true -> 443;
+            false -> 80
+        end,
+    case Port of
+        DefaultPort ->
+            <<Scheme/binary, "://", HostBin/binary, PathBin/binary>>;
+        _ ->
+            PortBin = integer_to_binary(Port),
+            <<Scheme/binary, "://", HostBin/binary, ":", PortBin/binary, PathBin/binary>>
+    end.
 
 -spec decrypt_key(map()) -> {ok, binary()} | {error, term()}.
 decrypt_key(#{secret_ref := {_KeyId, Cipher}}) when is_binary(Cipher) ->

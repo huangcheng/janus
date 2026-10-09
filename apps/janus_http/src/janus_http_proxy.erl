@@ -48,6 +48,9 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_usage_ctx),
     erase(janus_usage_head),
     erase(janus_usage_tail),
+    erase(janus_dead_jobs),
+    erase(janus_usage_outcome),
+    erase(janus_worker_done_usage),
     erase(janus_req_model),
     erase(janus_sse_state),
     erase(janus_sse_tracked),
@@ -733,9 +736,12 @@ translate_result(ClientProto, ProviderProto, Route, Result, Req, State) ->
 
 upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
     T0 = erlang:monotonic_time(millisecond),
+    Stream = janus_http_worker_client:normalize_want_stream(WantStream),
+    Local = fun() -> call_adapter(ProviderProto, Route, Body, Map, #{stream => Stream}) end,
     Result =
         try
-            call_adapter(ProviderProto, Route, Body, Map, #{stream => WantStream})
+            %% Master→worker seam (W2.1): pick / ack / relay, else Local.
+            janus_http_worker_client:call(ProviderProto, Route, Body, Map, Stream, Local)
         catch
             Class:CatchReason:Stack ->
                 logger:error(#{
@@ -1201,6 +1207,16 @@ handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate
     _ = track_proxied(500, Route, #{}),
     _ = release_route_inflight(Route),
     reply_err(ClientProto, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
+handle_upstream(ClientProto, _ProviderProto, {error, worker_lost}, Route, _Translate, Req, State) ->
+    %% In-flight worker death (N9): abort, no retry; usage outcome via W2.4.
+    _ = track_proxied(502, Route, #{}),
+    _ = release_route_inflight(Route),
+    logger:warning(#{
+        what => janus_proxy_worker_lost,
+        provider => route_provider_name(Route),
+        model => route_model_name(Route)
+    }),
+    reply_err(ClientProto, Req, State, 502, <<"worker_lost">>, <<"upstream worker lost">>);
 handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate, Req, State) ->
     Status = error_http_status(Reason),
     _ = track_proxied(Status, Route, #{}),
@@ -1219,9 +1235,10 @@ handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate,
         model => route_model_name(Route)
     }),
     {Code, Msg} =
-        case Status of
-            504 -> {<<"upstream_timeout">>, <<"upstream first-byte timeout">>};
-            503 -> {<<"upstream_error">>, <<"upstream request failed">>};
+        case {Status, Reason} of
+            {504, _} -> {<<"upstream_timeout">>, <<"upstream first-byte timeout">>};
+            {503, _} -> {<<"upstream_error">>, <<"upstream request failed">>};
+            {_, {worker_error, _}} -> {<<"worker_upstream_error">>, <<"upstream worker error">>};
             _ -> {<<"upstream_error">>, <<"upstream request failed">>}
         end,
     reply_err(ClientProto, Req, State, Status, Code, Msg).
@@ -1229,6 +1246,10 @@ handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate,
 %% TTFB (gun await of the response headers) is 504; a disabled provider
 %% is 503; everything else that never produced headers is 502.
 error_http_status(provider_disabled) -> 503;
+error_http_status(worker_lost) -> 502;
+error_http_status({worker_error, timeout}) -> 504;
+error_http_status({worker_error, _}) -> 502;
+error_http_status({worker_http_status, _}) -> 502;
 error_http_status({await, timeout}) -> 504;
 error_http_status({await, {timeout, _}}) -> 504;
 error_http_status(_) -> 502.
