@@ -94,10 +94,12 @@ handle_info({'DOWN', Mon, process, _Pid, Reason}, State) ->
         shutdown ->
             ok;
         _ ->
+            JobRef = maps:get(Mon, State#state.mons, undefined),
             logger:warning(#{
                 what => janus_worker_session_down,
                 reason => Reason,
-                monitor => Mon
+                monitor => Mon,
+                job_ref => JobRef
             })
     end,
     {noreply, do_session_down(Mon, State)};

@@ -16,6 +16,7 @@
 -define(PDICT_JOB, janus_worker_job_ref).
 -define(PDICT_MASTER, janus_worker_master).
 -define(PDICT_MASTER_MON, janus_worker_master_mon).
+-define(PDICT_WORKER, janus_worker_http_pid).
 
 -spec run(binary(), pid(), map()) -> ok.
 run(JobRef, MasterSessionPid, Fields) when
@@ -55,13 +56,18 @@ run(JobRef, MasterSessionPid, Fields) when
             }),
             emit_error(internal, <<"session crashed">>)
     after
+        case get(?PDICT_WORKER) of
+            undefined -> ok;
+            WPid when is_pid(WPid) -> exit(WPid, kill)
+        end,
         _ = erlang:cancel_timer(TRef),
         demonitor(MasterMon, [flush]),
         erase(?PDICT_JOB),
         erase(?PDICT_MASTER),
         erase(?PDICT_MASTER_MON),
         erase(?PDICT_CREDITS),
-        erase(?PDICT_SEQ)
+        erase(?PDICT_SEQ),
+        erase(?PDICT_WORKER)
     end,
     ok.
 
@@ -78,6 +84,7 @@ run_unary(#{method := Method, url := Url, headers := Headers, body := Body0} = _
                 Result = unary_http(Method, Target, Headers, Body),
                 Self ! {http_result, self(), Result}
             end),
+            put(?PDICT_WORKER, HttpPid),
             wait_unary(HttpPid, HttpMon);
         {error, Reason} ->
             throw({gun_error, connect, fmt_bin(Reason)})
@@ -148,12 +155,15 @@ run_stream(#{url := Url, headers := Headers, body := Body0} = _Fields) ->
             {DrainPid, DrainMon} = spawn_monitor(fun() ->
                 stream_worker(Self, Target, Headers, Body)
             end),
+            put(?PDICT_WORKER, DrainPid),
             wait_stream(DrainPid, DrainMon);
         {error, Reason} ->
             throw({gun_error, connect, fmt_bin(Reason)})
     end.
 
 stream_worker(Session, Target, Headers, Body) ->
+    %% Exit if the session dies while we wait for continue/stop.
+    SessionMon = monitor(process, Session),
     case janus_providers_http:post_stream(Target, Headers, Body) of
         {ok, Status, _RespHeaders, Drain} when is_function(Drain, 1) ->
             Session ! {stream_open, self(), Status},
@@ -165,6 +175,8 @@ stream_worker(Session, Target, Headers, Body) ->
                             {stream_continue, Session} ->
                                 ok;
                             {stream_stop, Session} ->
+                                throw(stopped);
+                            {'DOWN', SessionMon, process, Session, _} ->
                                 throw(stopped)
                         end
                     end)
@@ -172,8 +184,10 @@ stream_worker(Session, Target, Headers, Body) ->
                     throw:stopped ->
                         {error, cancelled}
                 end,
+            demonitor(SessionMon, [flush]),
             Session ! {stream_drain_done, self(), Result};
         {error, Reason} ->
+            demonitor(SessionMon, [flush]),
             Session ! {stream_open_error, self(), Reason}
     end.
 
