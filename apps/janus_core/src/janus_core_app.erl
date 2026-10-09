@@ -9,6 +9,14 @@ start(_StartType, _StartArgs) ->
     %% its child list (spec Part 0.1): the child-list condition reads
     %% the env var directly, hook-path knob checks read only the PT key.
     ok = janus_fleet:init_knob(),
+    case janus_role:resolve() of
+        {error, Reason} ->
+            {error, {bad_role, Reason}};
+        {ok, _Role} ->
+            start_supervised()
+    end.
+
+start_supervised() ->
     case janus_core_sup:start_link() of
         {ok, _Pid} = Ok ->
             %% Quota ETS before any Cowboy request (Slice Q).
