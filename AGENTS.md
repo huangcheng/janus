@@ -5,9 +5,42 @@ Erlang/OTP LLM gateway (data plane). Its management plane lives in the
 feature work touches both. All comments, docs, and commit messages in
 English. Respond in the user's language (Chinese → Chinese).
 
+## Why Erlang (operator lock — 2026-10-09)
+
+OTP was chosen so we can run a **master / worker** cluster:
+
+- **Master** (front door) accepts the client, owns DB/catalog/LB pick,
+  builds the upstream job, streams bytes back to the client.
+- **Worker** runs provider I/O and sends **chunks as messages** back to
+  the master immediately (streams are not one-shot RPC returns).
+- **Local fallback:** if the worker pool is empty, dispatch fails, or
+  pre-stream ack misses the deadline, the master executes upstream
+  itself (single-node and “cluster shrank to the door” share this path).
+- Catalog/keys live on the **master only**; workers do not poll Postgres.
+  Optional **provider-affinity** dispatch prefers workers by region or
+  `providers.affinity_node`.
+- Dist does **not** move TCP `accept` across hosts. Supervisors stay
+  **local**; cross-node awareness is `nodedown` + process monitors.
+- **Video** (`janus_m_video` / `/v1/videos`) stays **master-local** on
+  first ship — no worker dispatch for video jobs.
+
+Target design:
+`docs/superpowers/specs/2026-10-09-master-worker-otp-dispatch-design.md`.
+
+**Boot roles:** unset or `JANUS_ROLE=master` → master; `JANUS_ROLE=worker`
+requires `JANUS_MASTER_NODE`. Unknown role refuses boot. Workers skip agent
+`:8080`; `docker-entrypoint.sh` wires inet_tls dist to the master (see
+`skills/fleet-node-ops/SKILL.md`).
+
+**Legacy (transitional):** `janus_fleet` signal bus (cool/latency mirrors
+across **full** gateways) is not the long-term capacity model. Peers joined
+only via signal-fleet **never** enter `janus_worker_pool` without worker
+hello. Do not extend signal-fleet as “the” cluster story; keep it runnable
+until cutover. `JANUS_FLEET_ENABLED` is separate from worker dist.
+
 ## Layout
 
-- `apps/janus` — root release app
+- `apps/janus` — root release app (`JANUS_ROLE=master|worker`)
 - `apps/janus_core` — DB (epgsql/esqlite via `janus_db_conn`), ETS catalog
   (`janus_catalog`), LB (`janus_lb`), usage writer (`janus_usage`), seed
 - `apps/janus_http` — Cowboy listeners (:8080 agent API, :8090 read-only
@@ -83,8 +116,13 @@ English. Respond in the user's language (Chinese → Chinese).
 
 ## Architecture invariants
 
-- **Pure gateway**: no business logic beyond routing/LB/adjudication on
-  the data plane; management logic belongs in the dashboard repo.
+- **Master / worker (target):** public entry and catalog on master;
+  workers are execution-only over OTP dist; empty pool ⇒ **local fallback**
+  on master (not 503-by-default). In-flight worker loss ⇒ abort
+  `worker_lost` (no retry). See §Why Erlang and the master-worker spec.
+- **Pure gateway**: no business logic beyond routing/LB/adjudication
+  (and job dispatch to workers) on the data plane; management logic
+  belongs in the dashboard repo. Workers must stay thinner than masters.
 - **Standard protocols only**: the data plane speaks OpenAI
   Chat/Responses, Anthropic Messages, and the OpenAI-standard modality
   endpoint shapes (/v1/images/generations, /v1/audio/speech,
@@ -92,11 +130,12 @@ English. Respond in the user's language (Chinese → Chinese).
   (operator decision 2026-10-07) — a provider without standard-shaped
   endpoints does not ride the gateway. One grandfathered exception:
   the minimax T2I translator; the category is frozen.
-- Config flows dashboard → shared Postgres → generation bump → gateways
-  poll & hot-reload (never edit `sys.config` by hand on servers; the
+- Config flows dashboard → Postgres on the **master** → generation bump
+  → master hot-reload (never edit `sys.config` by hand on servers; the
   `settings` table overrides it via `janus_config:distribute_settings`
   → persistent_term — direct PT writes, NOT gen_server casts: consumers
-  may not be started yet at boot).
+  may not be started yet at boot). Workers do **not** poll provider/key
+  catalog; job messages carry what they need.
 - Settings/cross-process values that must survive start order go through
   persistent_term, not name-registered casts.
 - Catalog is ETS rebuilt from DB; `enabled` columns are SMALLINT 0/1 —
@@ -141,4 +180,9 @@ English. Respond in the user's language (Chinese → Chinese).
   modality gateway). `docs/audit/SYNTHESIS.md` + archive hold the
   multi-model audit rounds behind them; `tools/` holds the provider
   probe/capture scripts (read keys from the operator temp env file,
-  never committed).
+  never committed). Target cluster:
+  `docs/superpowers/specs/2026-10-09-master-worker-otp-dispatch-design.md`.
+  Worker join / undrain / redacted dry-run:
+  `skills/fleet-node-ops/SKILL.md` (transitional signal-fleet steps
+  included; never dashboard scrape APIs for join automation). Dashboard
+  Nodes = observation only.
