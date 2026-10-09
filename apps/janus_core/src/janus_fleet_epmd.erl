@@ -155,8 +155,10 @@ peer_resolves_to(Alive, IP) ->
     ).
 
 resolves_to(DnsHost, IP) ->
-    case inet:getaddr(DnsHost, family(IP)) of
-        {ok, IP} -> true;
+    %% getaddrs: multi-A/AAAA hosts must not false-negative when the
+    %% dialed IP is one of several RRs (getaddr returns only one).
+    case inet:getaddrs(DnsHost, family(IP)) of
+        {ok, IPs} -> lists:member(IP, IPs);
         _ -> false
     end.
 
