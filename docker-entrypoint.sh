@@ -168,6 +168,7 @@ extendedKeyUsage=serverAuth,clientAuth
   # ({option,server_only,fail_if_no_peer_cert}) and aborts the handshake.
   # Prefer tlsv1.2 for dist: OTP 27 inet_tls_dist + verify_fun has hit
   # case_clause on {unknown, State} under tlsv1.3 in dual-node hello.
+  # TODO(dist-tls13): re-enable tlsv1.3 when that OTP path is fixed/verified.
   cat > "$OPTFILE" <<CONF
 [{server, [{verify, verify_peer},
            {fail_if_no_peer_cert, true},

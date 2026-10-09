@@ -34,9 +34,8 @@ start() ->
     {ok, spawn(fun idle/0)}.
 
 start_link() ->
-    {ok, Pid} = start(),
-    true = link(Pid),
-    {ok, Pid}.
+    %% Atomic spawn+link — avoids the spawn/link race if idle exits early.
+    {ok, spawn_link(fun idle/0)}.
 
 idle() ->
     receive
@@ -109,34 +108,60 @@ dist_port() ->
 %%   - full long name as Name (`'janus@host.example'`, Host ignored), or
 %%   - alive name + hostname string, or
 %%   - alive name + **IP tuple** after DNS (inet_tls_dist setup path).
-%% Peers are stored as full long names; IP hosts cannot rebuild the
-%% DNS host part, so fall back to matching the alive name prefix.
+%% Peers are stored as full long names. When Host is an IP, match by
+%% resolving each peer's DNS host and comparing addresses — never by
+%% alive-name prefix alone (that would admit janus@evil given janus@good).
 configured_peer(Name, Host) ->
     NodeStr = to_list(Name),
     case string:split(NodeStr, "@") of
         [Alive, HostPart] when Alive =/= [], HostPart =/= [] ->
-            %% Exact long-name match; if the host part is an IP (DNS
-            %% already resolved into the node name), allow alive-name
-            %% prefix against DNS-configured peers — not for DNS hosts.
-            lists:member(NodeStr, peer_strings()) orelse
-                (looks_like_ip(HostPart) andalso peer_has_alive(Alive));
+            case lists:member(NodeStr, peer_strings()) of
+                true ->
+                    true;
+                false ->
+                    case host_to_ip(HostPart) of
+                        {ok, IP} -> peer_resolves_to(Alive, IP);
+                        false -> false
+                    end
+            end;
         [Alive] when Alive =/= [] ->
-            case host_to_list(Host) of
-                "" ->
-                    %% Host was an IP tuple — match alive name only.
-                    peer_has_alive(Alive);
-                HostStr ->
-                    Candidate = Alive ++ "@" ++ HostStr,
-                    lists:member(Candidate, peer_strings()) orelse
-                        (looks_like_ip(HostStr) andalso peer_has_alive(Alive))
+            case host_to_ip(Host) of
+                {ok, IP} ->
+                    peer_resolves_to(Alive, IP);
+                false ->
+                    case host_to_list(Host) of
+                        "" ->
+                            false;
+                        HostStr ->
+                            lists:member(Alive ++ "@" ++ HostStr, peer_strings())
+                    end
             end;
         _ ->
             false
     end.
 
-peer_has_alive(Alive) ->
-    Prefix = Alive ++ "@",
-    lists:any(fun(P) -> lists:prefix(Prefix, P) end, peer_strings()).
+%% True when some peer `Alive@DnsHost` resolves to IP (inet or inet6).
+peer_resolves_to(Alive, IP) ->
+    lists:any(
+        fun(Peer) ->
+            case string:split(Peer, "@") of
+                [A, DnsHost] when A =:= Alive, DnsHost =/= [] ->
+                    resolves_to(DnsHost, IP);
+                _ ->
+                    false
+            end
+        end,
+        peer_strings()
+    ).
+
+resolves_to(DnsHost, IP) ->
+    case inet:getaddr(DnsHost, family(IP)) of
+        {ok, IP} -> true;
+        _ -> false
+    end.
+
+family({_, _, _, _}) -> inet;
+family(T) when is_tuple(T), tuple_size(T) =:= 8 -> inet6.
 
 peer_strings() ->
     case os:getenv("JANUS_FLEET_PEERS") of
@@ -151,22 +176,22 @@ to_list(L) when is_list(L) -> L;
 to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(_) -> "".
 
-%% Hostname forms for candidate rebuild. IP tuples return "" so the
-%% caller matches on alive-name prefix instead of inventing IP long names.
 host_to_list(Host) when is_list(Host) -> Host;
 host_to_list(Host) when is_atom(Host) -> atom_to_list(Host);
 host_to_list(Host) when is_binary(Host) -> binary_to_list(Host);
-host_to_list({A, B, C, D}) when is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
-    "";
-host_to_list(T) when is_tuple(T), tuple_size(T) =:= 8 ->
-    "";
-host_to_list(_) ->
-    "".
+host_to_list(_) -> "".
 
-looks_like_ip(Host) when is_list(Host) ->
-    case inet:parse_address(Host) of
-        {ok, _} -> true;
-        {error, _} -> false
-    end;
-looks_like_ip(_) ->
-    false.
+host_to_ip({A, B, C, D}) when is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
+    {ok, {A, B, C, D}};
+host_to_ip(T) when is_tuple(T), tuple_size(T) =:= 8 ->
+    {ok, T};
+host_to_ip(Host) ->
+    case host_to_list(Host) of
+        "" ->
+            false;
+        S ->
+            case inet:parse_address(S) of
+                {ok, IP} -> {ok, IP};
+                {error, _} -> false
+            end
+    end.
