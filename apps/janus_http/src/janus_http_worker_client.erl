@@ -11,11 +11,13 @@
 
 -export([
     call/6,
+    unary_post/5,
     normalize_want_stream/1,
     outcome_bin/1,
     map_worker_error/2,
     parse_affinity_node/1,
-    affinity_opts_from_provider/1
+    affinity_opts_from_provider/1,
+    video_path/1
 ]).
 
 %%--------------------------------------------------------------------
@@ -45,6 +47,29 @@ call(ProviderProto, Route, _Body, Map, WantStream0, LocalFun) when is_function(L
             end
     end.
 
+%% Modality image/TTS/ASR unary JSON POST (W2.2). Video paths stay local.
+-spec unary_post(map(), binary(), binary(), map(), fun(() -> term())) -> term().
+unary_post(Route, PathSuffix, Body, Opts, LocalFun) when
+    is_map(Route), is_binary(PathSuffix), is_binary(Body), is_map(Opts), is_function(LocalFun, 0)
+->
+    case should_dispatch() andalso not video_path(PathSuffix) of
+        false ->
+            LocalFun();
+        true ->
+            Affinity = affinity_opts(Route),
+            case safe_pick(Affinity) of
+                empty ->
+                    LocalFun();
+                {ok, WorkerNode} ->
+                    case prepare_unary_job(Route, PathSuffix, Body, Opts) of
+                        {error, _} = Err ->
+                            Err;
+                        {ok, Fields} ->
+                            dispatch(WorkerNode, Fields, false, LocalFun)
+                    end
+            end
+    end.
+
 %%--------------------------------------------------------------------
 %% Pure helpers (eunit)
 %%--------------------------------------------------------------------
@@ -54,6 +79,12 @@ normalize_want_stream(true) -> true;
 normalize_want_stream(false) -> false;
 normalize_want_stream(#{stream := S}) -> S =:= true;
 normalize_want_stream(_) -> false.
+
+%% Video stays master-local (first-ship); match /videos and /videos/...
+-spec video_path(binary()) -> boolean().
+video_path(<<"/videos">>) -> true;
+video_path(<<"/videos/", _/binary>>) -> true;
+video_path(_) -> false.
 
 -spec outcome_bin(ok | error | cancelled) -> binary().
 outcome_bin(ok) -> <<"completed">>;
@@ -172,6 +203,46 @@ finish_prepare({ok, #{url := Url, method := Method, headers := Headers, body := 
         protocol_meta => #{}
     },
     {ok, Fields}.
+
+%% Same resolve chain as janus_modality:upstream_post (no stream/model rewrite).
+prepare_unary_job(Route, PathSuffix, Body, Opts) ->
+    case janus_catalog:lookup_provider(maps:get(provider_id, Route)) of
+        {ok, #{base_url := BaseUrl0, enabled := true}} ->
+            case janus_providers_http:decrypt_key(maps:get(provider_key, Route, undefined)) of
+                {ok, Token} ->
+                    case janus_providers_http:parse_base(iolist_to_binary(BaseUrl0)) of
+                        {ok, Host, Port, BasePath, Tls} ->
+                            Path = janus_providers_http:join_path(BasePath, PathSuffix),
+                            Headers = [
+                                {<<"authorization">>, <<"Bearer ", Token/binary>>},
+                                {<<"content-type">>, <<"application/json">>},
+                                {<<"accept">>, <<"application/json">>},
+                                {<<"user-agent">>, janus_providers_http:user_agent()}
+                            ],
+                            Target = #{host => Host, port => Port, path => Path, tls => Tls},
+                            Timeout = maps:get(
+                                timeout_ms, Opts, janus_worker_wire:non_stream_timeout_ms()
+                            ),
+                            {ok, #{
+                                url => janus_providers_http:target_url(Target),
+                                method => post,
+                                headers => Headers,
+                                body => Body,
+                                stream => false,
+                                timeout_ms => Timeout,
+                                protocol_meta => #{}
+                            }};
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {ok, #{enabled := false}} ->
+            {error, provider_disabled};
+        error ->
+            {error, provider_not_found}
+    end.
 
 %%--------------------------------------------------------------------
 %% Send job / ack / relay

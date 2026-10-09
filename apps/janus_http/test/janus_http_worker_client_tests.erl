@@ -14,6 +14,12 @@ outcome_bin_test() ->
     ?assertEqual(<<"failed">>, janus_http_worker_client:outcome_bin(error)),
     ?assertEqual(<<"cancelled">>, janus_http_worker_client:outcome_bin(cancelled)).
 
+video_path_test() ->
+    ?assertEqual(true, janus_http_worker_client:video_path(<<"/videos">>)),
+    ?assertEqual(true, janus_http_worker_client:video_path(<<"/videos/abc">>)),
+    ?assertEqual(false, janus_http_worker_client:video_path(<<"/images/generations">>)),
+    ?assertEqual(false, janus_http_worker_client:video_path(<<"/chat/completions">>)).
+
 map_worker_error_test() ->
     ?assertEqual({error, {await, timeout}}, janus_http_worker_client:map_worker_error(timeout, <<"x">>)),
     ?assertEqual({error, {worker_error, connect}}, janus_http_worker_client:map_worker_error(connect, <<"x">>)),

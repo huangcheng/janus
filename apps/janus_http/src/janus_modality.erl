@@ -154,10 +154,23 @@ pick_route(ModelName) ->
 %% Generic upstream JSON POST — mirrors the chat adapter's resolve
 %% (LB-injected provider_key, base_url parse, path join, bearer auth)
 %% but injects NO stream key and NO model rewrite: the plugin owns the
-%% exact body. Binary passthrough replies ride upstream_post_raw.
+%% exact body. Image/TTS/ASR may ride a worker (W2.2); video paths stay
+%% master-local. Binary passthrough replies ride upstream_post_raw.
 -spec upstream_post(map(), binary(), map() | binary(), map()) ->
     {ok, pos_integer(), map(), binary()} | {error, term()}.
 upstream_post(Route, PathSuffix, ReqMapOrBody, Opts) when is_map(Route) ->
+    Body =
+        case ReqMapOrBody of
+            B when is_binary(B) -> B;
+            M -> thoas:encode(M)
+        end,
+    Local = fun() -> local_upstream_post(Route, PathSuffix, Body, Opts) end,
+    janus_http_worker_client:unary_post(Route, PathSuffix, Body, Opts, Local).
+
+upstream_post(Route, PathSuffix, ReqMapOrBody) ->
+    upstream_post(Route, PathSuffix, ReqMapOrBody, #{}).
+
+local_upstream_post(Route, PathSuffix, Body, Opts) when is_binary(Body) ->
     case janus_catalog:lookup_provider(maps:get(provider_id, Route)) of
         {ok, #{base_url := BaseUrl0, enabled := true}} ->
             case janus_providers_http:decrypt_key(maps:get(provider_key, Route, undefined)) of
@@ -167,11 +180,6 @@ upstream_post(Route, PathSuffix, ReqMapOrBody, Opts) when is_map(Route) ->
                     of
                         {ok, Host, Port, BasePath, Tls} ->
                             Path = janus_providers_http:join_path(BasePath, PathSuffix),
-                            Body =
-                                case ReqMapOrBody of
-                                    B when is_binary(B) -> B;
-                                    M -> thoas:encode(M)
-                                end,
                             Headers = [
                                 {<<"authorization">>, <<"Bearer ", Token/binary>>},
                                 {<<"content-type">>, <<"application/json">>},
@@ -179,7 +187,10 @@ upstream_post(Route, PathSuffix, ReqMapOrBody, Opts) when is_map(Route) ->
                                 {<<"user-agent">>, janus_providers_http:user_agent()}
                             ],
                             Target = #{
-                                host => Host, port => Port, path => Path, tls => Tls,
+                                host => Host,
+                                port => Port,
+                                path => Path,
+                                tls => Tls,
                                 timeout => maps:get(timeout_ms, Opts, ?DEFAULT_UPSTREAM_MS)
                             },
                             janus_providers_http:post(Target, Headers, Body);
@@ -194,9 +205,6 @@ upstream_post(Route, PathSuffix, ReqMapOrBody, Opts) when is_map(Route) ->
         error ->
             {error, provider_not_found}
     end.
-
-upstream_post(Route, PathSuffix, ReqMapOrBody) ->
-    upstream_post(Route, PathSuffix, ReqMapOrBody, #{}).
 
 reply_json(Req, State, Status, Map) ->
     Body = thoas:encode(Map),
