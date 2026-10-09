@@ -817,7 +817,8 @@ handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Rout
             %% Drain aborted from a dead client socket; the drain's
             %% after-clause already closed gun. No frames can be sent.
             finalize_quiet(ClientProto),
-            translate_track(502, Route, ClientProto),
+            note_usage_outcome(cancelled),
+            translate_track(499, Route, ClientProto),
             _ = release_route_inflight(Route),
             {ok, Req2, State};
         Class:Reason ->
@@ -829,6 +830,7 @@ handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Rout
                 reason => sanitize_upstream_error(Reason)
             }),
             finalize_quiet(ClientProto),
+            note_usage_outcome(error),
             translate_track(502, Route, ClientProto),
             _ = release_route_inflight(Route),
             {ok, Req2, State}
@@ -924,9 +926,11 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
             _ = note_key_success(Route),
             _ = note_route_success(Route);
         {error, invalid_request, _} ->
-            TrackStatus = 400;
+            TrackStatus = 400,
+            note_usage_outcome(error);
         {error, upstream, Msg} ->
             TrackStatus = 502,
+            note_usage_outcome(error),
             _ = note_provider_failure(Route, sanitize_upstream_error(Msg))
     end,
     %% Record BEFORE the final frame so a dying client can never cost
@@ -1120,9 +1124,19 @@ decisions_filter_headers(Headers) ->
 
 native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
     %% Mid-stream failure: record 502, not the already-sent 200.
-    _ = track_proxied(502, Route, stream_usage(ClientProto)),
+    %% Client disconnect uses 499 + cancelled (W2.4).
+    {TrackStatus, OutcomeKind} =
+        case Reason of
+            closed -> {499, cancelled};
+            _ -> {502, error}
+        end,
+    note_usage_outcome(OutcomeKind),
+    _ = track_proxied(TrackStatus, Route, stream_usage(ClientProto)),
     SafeReason = sanitize_upstream_error(Reason),
-    _ = note_provider_failure(Route, SafeReason),
+    case Reason of
+        closed -> ok;
+        _ -> _ = note_provider_failure(Route, SafeReason)
+    end,
     _ = release_route_inflight(Route),
     logger:warning(#{
         what => janus_proxy_stream_error,
@@ -1218,7 +1232,8 @@ handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate
     _ = release_route_inflight(Route),
     reply_err(ClientProto, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
 handle_upstream(ClientProto, _ProviderProto, {error, worker_lost}, Route, _Translate, Req, State) ->
-    %% In-flight worker death (N9): abort, no retry; usage outcome via W2.4.
+    %% In-flight worker death (N9): abort, no retry.
+    note_usage_outcome(error),
     _ = track_proxied(502, Route, #{}),
     _ = release_route_inflight(Route),
     logger:warning(#{
@@ -1229,6 +1244,7 @@ handle_upstream(ClientProto, _ProviderProto, {error, worker_lost}, Route, _Trans
     reply_err(ClientProto, Req, State, 502, <<"worker_lost">>, <<"upstream worker lost">>);
 handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate, Req, State) ->
     Status = error_http_status(Reason),
+    note_usage_outcome(error),
     _ = track_proxied(Status, Route, #{}),
     SafeReason = sanitize_upstream_error(Reason),
     case is_transient(Reason) of
@@ -1999,10 +2015,27 @@ do_track(Status, Route, Usage, Observe) ->
                 attempt => pd(janus_failover_attempt, 1),
                 request_ref => pd(janus_failover_ref, null),
                 is_terminal => true,
-                request_id => get(janus_request_id)
+                request_id => get(janus_request_id),
+                outcome => usage_outcome_or_null()
             });
         _ ->
             ok
+    end.
+
+%% Worker client / abort paths stash via janus_http_worker_client:outcome_bin/1.
+note_usage_outcome(Kind) when Kind =:= ok; Kind =:= error; Kind =:= cancelled ->
+    case get(janus_usage_outcome) of
+        B when is_binary(B) ->
+            ok;
+        _ ->
+            put(janus_usage_outcome, janus_http_worker_client:outcome_bin(Kind)),
+            ok
+    end.
+
+usage_outcome_or_null() ->
+    case get(janus_usage_outcome) of
+        B when is_binary(B) -> B;
+        _ -> null
     end.
 
 %% Ask OpenAI-compatible upstreams to always emit the terminal usage
