@@ -1,0 +1,33 @@
+# Audit: Scheduler v2 spec (rev 1)
+
+## 1. Verdict
+**GO WITH FIXES** — the degradation discipline and cost floor are sound, but tier-order interactions, the RTT snapshot contradiction, and GeoLite2 distribution must be resolved before ratification.
+
+## 2. Critical risks
+- **Tier composition prefers sick same-geo workers.** Tier 4 (geo narrow) runs before tier 5 (health demote); never-shed-all at tier 5 then *keeps* a sick same-geo worker even when healthy cross-geo candidates existed. Health demotion before geo (or an explicit "geo outranks health" statement + eunit) is required.
+- **Affinity pin outranks capacity.** Tier 2 runs before tier 3, so a pinned node at `inflight ≥ capacity` is selected anyway — silently contradicting "selection excludes workers at capacity" (Part A.4). Pick a precedence and state it.
+- **GeoLite2 redistribution.** Shipping the mmdb in the image is redistribution under MaxMind's EULA (needs license key, attribution, no public image). Unaddressed: CI (`janus-build:test`) builds offline with no key — Part A.1 as written is unbuildable in CI.
+- **DNS in catalog build.** `resolve_host(HostBin)` implies DNS per distinct host at `janus_catalog:build` — synchronous lookups can stall a generation bump. geo_cache helps only after first fill; first-build cost is unbounded. Make it async/best-effort.
+
+## 3. Contradictions or stale claims
+- **RTT join location.** Part B puts `rtt_to_target` in the snapshot Meta; Part C defers the per-provider join to pick time. Both can't hold with "one `ets:lookup` and iterate a plain list." Either the snapshot carries a per-node RTT map (republished on every sample — write amplification) or pick does a second ETS read (document it).
+- **Divergence quantities mismatch.** Worker self-reports *upstream* latency EWMA; master observes *end-to-end* job duration (dist transit + queue included). The 3×/2 min rule compares unlike quantities — dist jitter alone can trip `fleet_worker_report_mismatch_total`.
+- **Probe usage attribution.** Worker-executed probe jobs hit real providers with real keys; nothing says they are flagged internal / excluded from `usage_events` per-agent accounting. As written they pollute agent stats.
+- **"Old master ignores extra fields"** is asserted, not verified against the shipped hello decoder — confirm it actually merges maps before relying on it for rolling deploy.
+
+## 4. Missing first-ship requirements
+- mmdb acquisition path (license key at build, no commit, CI story); realistic reader scope (mmdb search tree + pointer/data sections is likely >300 LOC — pre-commit to the dep fallback criterion).
+- Probe job marker + usage attribution rule.
+- Pinned endpoint/counter names for 13.3/13.4 ("/stats/fleet (or new /stats/sched)" is a hedge; gate steps must assert against one named surface).
+- Explicit statement that capacity-exclusion → empty set → **local execution** (not a failure) — that's a behavior change the gate (13.5) depends on.
+- `sched_rtt_ms` label set: text says per worker×provider, label shows provider only — cardinality must be pinned.
+
+## 5. Architecture notes
+Selection purity, single-row atomic swap, TTL/unknown-last, and off-by-default costing are all consistent with shipped invariants. The design is otherwise shippable.
+
+## 6. Top 5 concrete edits
+1. Fix tier order: health demote before geo narrow, or declare geo>health explicitly + eunit; declare pin>capacity precedence.
+2. Pick one RTT read path (recommend pick-time second ETS read); update Part B/C and the "one lookup" claim.
+3. Add mmdb distribution section: build-time download via license key, never committed, `JANUS_SCHED_GEO` auto-off when absent; make catalog resolution async.
+4. Add probe job flag + usage exclusion rule; master must measure the *same* latency quantity the worker reports.
+5. Pin `/stats/sched` (or fleet) and exact metric names/labels; rewrite 13.3/13.4 assertions against them.

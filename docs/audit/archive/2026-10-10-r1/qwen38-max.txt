@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — sound tier design and degradation story, but default capacity semantics break the "identical to v1" claim, and two gate steps are unfalsifiable as written.
+
+**2. Critical risks**
+- **Capacity default = 1**: any worker with 1 inflight job becomes unselectable — changes v1 behavior while nominally default-off, and neutered old workers in mixed fleets. Unset must mean unlimited; clamp ≥1 only when operator-set.
+- **All-at-capacity ⇒ empty set**: no policy defined (local fallback? relax tier? needs a counter).
+- **TTL unenforced**: snapshot rebuilds only on mutation, so expired RTT rows persist — contradicts "expired ⇒ unknown" and "TTLs pre-filtered".
+- **Worker auto-geo has no data source**: no mechanism to learn its own egress IP; behind NAT it silently degrades to unknown.
+- **13.4 probe assertion can't see probes**: active probes fire only when passive is stale >5 min, but the step drives jobs first — `sched_rtt_ms` will be passive-sourced, proving nothing about probes.
+
+**3. Contradictions / stale claims**
+- Non-goal "no wire shape changes" vs A.3 adding `rtt_ms` to done/error.
+- Table name drift: `scheduler_v2` (Part 0.5) vs `sched_snapshot` (Part C); "one `ets:lookup`" vs a pick-time `sched_rtt` join; Meta's `rtt_to_target` is per-provider so must be a map; "RTT consulted at build time" vs "join deferred to pick time".
+- 13.3: mock providers are localhost ⇒ GeoIP unknown ⇒ auto-geo match counter can never increment; no fixture seam, and spec doesn't say whether legacy region_tag matches count.
+
+**4. Missing first-ship requirements**
+- mmdb provenance/licensing (GeoLite2 redistribution) and shipping to **worker** images too.
+- DNS timeout + async resolution so catalog publish never blocks.
+- Unknown health/EWMA must never be demoted (tier 5), else brand-new workers are never picked.
+- Even-count median rule; divergence ratio floor near zero; executor-node tag in dispatch logs (13.5 depends on it).
+- Probe listing choice, aggregate budget cap, and master-gating so probes don't spend money an old master discards.
+
+**5. Architecture/design notes**
+- Pure `select_v2` is right; pass `now_mono` via opts for expiry instead of embedding stale rows — stays pure.
+- Fold per-worker RTT maps into the single snapshot row to keep the atomic one-read claim true.
+- env-only config + ETS-only state fits the no-DB-writes invariant well.
+
+**6. Top 5 concrete edits**
+1. Capacity: unset ⇒ unlimited; define all-at-capacity ⇒ local fallback + `sched_capacity_exhausted_total`.
+2. Declare done/error maps additively extensible (or drop `rtt_ms` from them); unify table names; Meta `rtt_to_target` ⇒ `rtt_map`.
+3. Add ≤60 s periodic snapshot rebuild (or opts-carried `now_mono`) so TTL expiry is real.
+4. Specify worker egress-IP source (`JANUS_WORKER_PUBLIC_IP` or env) + mmdb licensing/shipping + DNS timeout.
+5. Make 13.3/13.4 falsifiable: count legacy-tag and auto-geo matches (or add a host→region fixture seam); split passive/active RTT metrics or add a test cadence env so 13.4 actually exercises probes.

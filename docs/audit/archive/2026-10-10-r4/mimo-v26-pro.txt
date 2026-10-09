@@ -1,0 +1,25 @@
+**1. Verdict:** GO WITH FIXES — rev 4's folds are present and coherent, but three residual contradictions (probe-vs-reserve, sched_rtt source flag, ack-miss reconcile membership) must be closed before implementation.
+
+**2. Critical risks**
+- **Probe/counter contradiction.** Part 0.6/B/C say affinity-pinned picks "increment but are never rolled back," yet probes "ride the affinity-pin path" AND "never touch the reserve counter (no increment, no decrement)". No seam is named (e.g., pick opt `reserve => false` threaded from the probe issuer). As written, the two rules conflict at the same code point.
+- **`sched_rtt` row shape can't implement cold-start-only.** `{Node, ProviderId, RttMs, ExpiresAtMono}` has no source field, so "probe overwrites only when no passive sample exists; passive always overwrites" is undecidable. Add a source tag or a separate probe-fill key, or drop the rule.
+- **Ack-miss reconcile ambiguity.** The reconcile "decrements the excess only" against `JobRef => Node`. If ack-missed jobs enter that tracked set, a silently dropped job leaks its slot until nodedown (the 30 s reconcile never settles it); if not, the reconcile over-releases. Pin membership + a max pending age.
+
+**3. Contradictions or stale claims**
+- "5-tuple Threshold/SetValue form" — the forbidden form `{Pos, Incr, Threshold, SetValue}` is a 4-tuple; fix the name in all three places.
+- done/error "VERIFIED maps" vs "if tuples are found at implementation, the fallback is…" — hedge contradicts the verification claim; keep one.
+- `/stats/sched` `rtt_ms` "64 most-recent" needs a pinned ordering key (`ExpiresAtMono`); `_other` aggregate semantics (sum/avg/count) unspecified on an assertion surface. `fleet_worker_report_mismatch_total` vs JSON `worker_report_mismatch_total` naming drift.
+
+**4. Missing first-ship requirements**
+- Gate 13.6: pin that the mock's slow key delays **before first byte** (TTFB, not total duration) — otherwise the TTFB EWMA never reaches 8 s and the gate fails for the wrong reason. Also pin fast-key TTFB bound (< 2.67 s so `3×fast < 8000`).
+- Never-shed-all case: do demoted-but-kept nodes still count in `health_demote_total`?
+
+**5. Architecture/design notes**
+- Tiers, purity ({Order, Decisions} + pick-emitted counters), exclude-self math (fires at N=2), single `update_counter` form, `janus_ets_heir` adopt cycle, five heir'd tables, clamp `0 =< x ≤ 600000` with 0.0 landing, GEO_TEST_HOSTS boot-check satisfaction, and masters-first/mmdb-before-env order are all correctly and executably specified. `resolve_host/1` returns `{ok, Region} | unknown` — normalize shape.
+
+**6. Top 5 concrete edits**
+1. Name the probe reserve-exemption opt and thread it through `pick/1` (and state that pinned non-probe picks still increment).
+2. Add a source discriminator to `sched_rtt` (or split probe-fill storage) to make cold-start-only real.
+3. Specify reconcile membership for ack-missed jobs + max pending age.
+4. In Part E/13.6: "mock delays 8 s before first chunk; fast-key TTFB < 2.67 s (asserted)".
+5. Fix "5-tuple"→"4-tuple", drop the tuple-fallback hedge, pin `rtt_ms` ordering key and `_other` semantics.

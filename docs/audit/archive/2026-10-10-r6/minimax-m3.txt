@@ -1,0 +1,24 @@
+**Verdict: GO WITH FIXES** — all rev-6 folds land coherently; residuals are naming-level and one envelope-direction ambiguity.
+
+**Critical risks**
+- **Probe envelope ambiguity** (Part 0.2 vs A.3 vs 0.10): `{sched, 2, {probe, JobSpec}}` is named as `dispatch_probe/2`'s cast envelope, yet A.3 says "the worker executes and reports like any job" and 0.10 says old-worker safety rests on "probe jobs are normal job shapes". If the envelope actually crosses to the worker, old workers' `handle_cast` catch-all silently drops probes — neither "normal job shape" nor "no new wire shape" can be true. The structural-exemption claim is ungrounded until this is reconciled.
+- **Post-adopt "bounded" is misnamed** (Part 0.5): `ets:delete_all_objects` zeros the counter while in-flight jobs continue. Pre-adopt completions are no-ops (Part 0.11), so new picks see counter=0 and a worker can accept beyond its capacity for the full duration of those streams — 10+ min for long responses. Should be labeled "windowed until in-flight drain" with the explicit reconciliation path (hello/undrain → tracked-map rebuild).
+
+**Contradictions / stale claims**
+- Part C opts paragraph cites "13.6's mid-run re-pinning works via catalog hot-reload", but 13.6 pins both providers ONCE at poisoning start — there is no mid-run re-pin in the gate. Either delete the example or add an explicit re-pin step.
+- A.4 calls the single-chunk/streaming TTFB bias "accepted and documented" but only mentions it in one line; non-streaming specialists could be unfairly demoted (full duration vs streaming TTFB) — needs a one-paragraph operator note.
+
+**Missing first-ship requirements**
+- No guard for `capacity == infinity` in the reserve loop: `Result > capacity` with `capacity` as the atom `infinity` raises `badarg` in guards. Spec must name the branch (skip the comparison entirely when `capacity =:= infinity`).
+- `health_ewma_ms` cardinality: per-node map, but no upper bound stated; workers are typically ≤ tens — confirm or pin.
+
+**Architecture / design notes**
+- Single-writer pin for `sched_rtt` (passive = done/error piggyback; probe = cold-start fill only) cleanly satisfies the cost-floor claim.
+- Exclude-self demotion is tight at N=2; the min-EWMA survivor invariant is a real safety property, not a hedge — state it at the gate header.
+
+**Top 5 concrete edits**
+1. Part 0.2 — add one sentence: "`{sched, 2, {probe, JobSpec}}` is the pool-internal trigger consumed by `dispatch_probe/2`'s own eligibility check, which then issues a normal pinned job with `internal => true`; the worker sees no new message type."
+2. Part 0.5 — replace "bounded transient over-admission" with "windowed until in-flight drain"; add: "in-flight jobs' decrements skip post-adopt; reconciliation arrives via the next hello/undrain that re-prunes `sched_workers`."
+3. Part C reserve loop — explicit infinity branch: "if `Capacity =:= infinity`, skip the `Result > Capacity` check (no atom comparison)."
+4. Part C opts — delete "13.6's mid-run re-pinning" example or add a step that exercises it; current gate has no such step.
+5. A.4 — expand the one-line caveat to 2 sentences: streaming TTFB dominates at chunk intervals ≥ 1; non-streaming fallback measures full duration and biases demotion against non-streaming specialists (per-modality health deferred to Part F).

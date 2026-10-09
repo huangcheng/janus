@@ -1,0 +1,63 @@
+# Scheduler v2 spec — rev 9 confirmation audit
+
+Audited: `F:\Janus\docs\audit\target.md` (rev 9). No tools called per the audit brief; all findings cite the body text.
+
+## Verdict: GO WITH FIXES — 5 residual seams + nits, zero architecture/math defects
+
+---
+
+## 1. Rev 9 fold presence — all verified in the body
+
+| Fold | Where it landed | State |
+|---|---|---|
+| `> infinity` total-order rationale (false, never badarg; skip = explicit intent) | Part 0.6 + Part C.3 | ✅ body, correct |
+| Missing `sched_workers` row ⇒ drained (refuse) | Part C step 3 | ✅ |
+| Exhaustion-reason = first non-ok in iteration order | Part C | ✅ (but see R1) |
+| Both flush paths advance `snapshot_gen` | Part C | ✅ |
+| `probe_skip_total` five reasons in metric AND JSON | Part C both | ✅ |
+| `dispatch_worker_total` JSON `"<node>/<provider>"` | Part C JSON | ✅ |
+| Probe recognition closed: same `{track,...}` cast, `Internal => true`, no increment; done handler recognizes via tracked flag; release/purge/reconcile skip decrement; tracked map = 4-tuple everywhere | Part 0.11 + Part C | ✅ (but see R2) |
+| `SampledAtMono` compare dropped; LAST-ARRIVAL-WINS + TTL; existence gate + handler serialization are the real protections | A.3 "HONEST semantics" | ✅ (but see R3) |
+| Register on WINNING candidate only | Part 0.11 + Part C | ✅ |
+| Demotion gate structural (`unknown` < 3 samples; gauge displays from sample 1) | A.4 | ✅ |
+| Heir adopt retries with backoff, resolves by `TableTag` | Part 0.5 | ✅ |
+| `sched_v => 2` in 0.10 enumeration; orphan window documented; FORCE never bypasses `sched_v` | 0.10 + 0.2 + 13.4b | ✅ |
+| Small pins (`rtt_dropped_total` split, JobRef master-created, probe key = entitlement-probe pick, plain 60 s keepalive, 13.4b ≤ 35 s poll, fresh-stack intro, drain asymmetry ≤ 250 ms, geo_disabled explicit-only, async locus = the ONE runtime `geo_enabled` writer, post-adopt full `sched_rtt` cold reset, G3 "capacity limits", 13.6 all-slow = GATE assertion) | Parts 0/B/C/D/E | ✅ all present |
+| Eunit additions (adopt→re-hello→pick, five skip reasons, pinned completion feeds EWMA, `internal` decode tolerance, probe done skipped via tracked flag "REACHABLE path") | Part E 4/7/8 | ✅ |
+
+Body/header drift from round 8 is gone — the folds are in the spec text, not just the changelog.
+
+## 2. Cross-part coherence — checked and holds
+
+- **Demotion math at N=2**: victim `demote_ms = max(5000, 3×fast)` < 8000 ⇒ demoted; fast's threshold = `max(5000, 3×8000)` = 24000 ⇒ survivor; 13.6's relational assertion is the same formula. Consistent across A.4 / B / E.
+- **Orphan window ↔ missing-row rule**: "missing row ⇒ drained" is exactly what darkens the fleet in the 0.10 orphan window (adopt prunes all rows, old workers never re-hello ⇒ every reserve-loop re-check refuses ⇒ local fallback). The two folds interlock correctly.
+- **Counter-neutrality end-to-end**: probes skip increment (dispatch_probe), decrement (release/purge/reconcile) — the track cast carrying `Internal` is what makes the done-handler and reconcile distinguishable. Consistent 0.11 ↔ C ↔ E.4.
+- **Naming rule**: every JSON key maps to its metric minus `sched_`; `fleet_worker_report_mismatch_total` exception applied in both metric list and JSON. Clean.
+- **v1-equivalence**: pin → (health off) → ungated region_tag comparator → `(inflight, name)` reproduces v1's tier order; 13.3a's `region_tag=eu` case exercises the `none` partition without breaking dispatch. Holds.
+- **13.6 determinism**: both providers pinned once at poisoning start, exactly 3+3 jobs, third provider unpinned by construction, quiesced traffic, relational assertion — falsifiable and host-speed robust. Holds (health-before-geo covers the third provider even if it carried a region_tag — but see N4).
+
+## 3. Residuals
+
+**R1 — unpinned drain-skip has no metric label (real gap).** Part C: "drain-skips of unpinned candidates label the exhaustion too" — but `dispatch_local_total` enumerates only `empty_pool|capacity|drained_pin|send_fail|ack_miss`, and Part 0.6 reserves `drained_pin` for the *pinned* case. Under the first-non-ok rule, an unpinned drain-skip ahead of a capacity refusal selects a label the vocabulary cannot express. Add a `drained` value or pin the mapping.
+
+**R2 — probe abort leaves a tracked entry with undefined disposal (real gap).** Part 0.2: abort ⇒ "clear the in-flight entry" — nothing about the `{track,...}` entry. It then ages out at the 10-min purge; Internal skips the *decrement* but the spec doesn't say the purge skips `sched_reserve_purged_total` for Internal, and the abort doesn't cast `{release, JobRef}`. Result: every forced-probe retry (13.4b budgets 100/hour) inflates `reserve_purged_total`. Either abort releases (idempotent, decrement-neutral) or purge must be specified counter-neutral *and* counter-silent for Internal.
+
+**R3 — E.6(c) keeps the compare semantics rev 9 deleted.** "never clobbers a newer `SampledAtMono` (write-time latest-wins)" is the compare-before-overwrite wording A.3 now calls vacuous. Under last-arrival-wins the assertion is just "probe fill writes only when no unexpired row exists". Reword; as written it re-teaches the dead rule.
+
+**R4 — probe in-flight map key story mismatch (minor).** Part 0.2: `{Node => JobRef}`; Part 0.11: "the in-flight map clears by JobRef". Either key by JobRef or state the reverse scan.
+
+**R5 — probe spend source unnamed (minor).** Probes "spend under the SEPARATE additive budget" while `janus_usage` filters internal jobs at insert. If the entitlement-probe budget meters usage rows, probes are free and the "separate budget" is unimplementable as written. Name the meter (dedicated counter vs usage-derived).
+
+## 4. Nits
+
+- N1: Part 0.6 writes `capacity = := infinity` (malformed); Part C has the correct `=:=`. An implementer copying 0.6 gets a syntax error.
+- N2: E.3 writes `select/2(S)` for a 2-arity function; say `select(Snapshot, Opts)` or `select/2(S, Opts)`.
+- N3: Part B step 4 says the comparator "is `provider_geo` from the persistent_term map" inside the *pure* function section — pick reads PT and passes the value in opts. Keep the purity wording exact.
+- N4: 13.6's third mock provider should explicitly carry **no** `region_tag`; the ungated legacy tier would narrow the verification pick otherwise (health-before-geo keeps today's answer correct, but the step should not depend on tier order).
+- N5: the worker's pool-pid monitor is not stated to re-arm after the post-adopt re-hello (new owner = new pid).
+- N6: `probe_skip{cadence}` does double duty (cadence + in-flight exclusion) — documented in 0.2, acceptable, but worth one word in the metric comment.
+- N7 (`prompt.md`, process only): the brief's closing line says "verify the rev-7 folds" while the enumerated folds are rev 9 / round 8.
+
+## 5. Bottom line
+
+The rev 9 folds are present, grep-consistent, and mutually coherent; the two closed-round-8 items (probe recognition, `SampledAtMono` honesty) are now executable as written. R1 and R2 are the only findings an implementer would hit as undefined behavior; both are enum/disposal pins, not design changes. With R1–R5 pinned (and N1 fixed), the `pi-audit GO` box in Part G can be ticked.

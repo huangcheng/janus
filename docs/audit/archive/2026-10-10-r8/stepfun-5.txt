@@ -1,0 +1,65 @@
+## Verdict
+
+**GO WITH FIXES** — consistent with the round-7→8 trajectory. I re-verified every rev-8 (and spot-checked rev-2–7) fold against the body text. The folds are present and the architecture/math remain sound; the residuals are now at the pinning level **plus one genuine enum defect that directly contradicts a rev-8 fold claim**. Nothing touches selection math, capacity ownership, demotion, or the probe cost floor.
+
+---
+
+## Findings (ranked)
+
+### F1 — DEFECT (mechanical): `probe_skip` reason enum is inconsistent in three places, and the pinned JSON surface is incomplete
+
+- **Part 0.2** (and the rev-8 fold header): `cap|cadence|fresh|drained|send_fail` — **5**.
+- **Part C** metrics line: `sched_probe_skip_total{reason= cap|cadence|fresh|drained}` — **4** (missing `send_fail`).
+- **Part C** `/stats/sched` JSON surface: `"probe_skip_total": {"cap": int, "cadence": int, "fresh": int}` — **3** (missing `drained` **and** `send_fail`).
+
+The rev-8 fold explicitly asserts *"the JSON key carries ALL five."* It does not. Since `/stats/sched` is the sole assertion surface, an implementer following the JSON spec builds a 3-key map and silently drops two reachable skip reasons (`drained` from `dispatch_probe/2`'s own drain re-check; `send_fail` from the send-fail/ack-miss abort). No current gate step asserts skip *counts* (13.4b asserts `probe_total`), so this is latent rather than test-breaking — but it violates the fold's own claim and the pinned-surface principle. **Fix: JSON + Part C metric → all five.**
+
+### F2 — MODERATE (coherence): internal-recognition mechanism doesn't match the probe flow
+
+Part 0.11 pins *"master-side internal recognition = the tracked entry's `Internal` flag (no wire change)."* But probes **bypass the reserve loop** (no `{track,…}` cast) and **return via the load cast** (A.3), so:
+- the done handler never sees a probe, and
+- the tracked-entry `Internal` flag is therefore **always `false`** in the reachable flow (pick only tracks normal jobs) — it is vestigial.
+
+The three-seam exclusion (rtt ingest / TTFB feed / worker passive EWMA) only *works* if the worker routes internal completions to the **load cast exclusively**. If a probe ever reported `done` "like any job," the master could not exclude it — there is no wire flag ("no wire change") and no tracked entry. A.3's phrase *"reports like any job"* is thus in tension with *"probe results return via the load cast,"* and eunit 6(b) ("an internal job's `done` carrying `rtt_ms` is SKIPPED") exercises a path that cannot occur in production (it would pass only via the drop-on-missing-tracked-entry path, not the `Internal` flag). **Fix: state that internal completions are routed to the load cast only (the authoritative exclusion), and reword the `Internal` flag as a defensive/forward-looking field; align eunit 6(b) to the reachable path.**
+
+### F3 — MINOR: Part C `> infinity` rationale is stale
+Part C still says *"when `capacity =:= infinity` the comparison is SKIPPED entirely: an atom-vs-number guard would badarg."* Rev-8 corrected the rationale (`number > infinity` is `false`, total order — never badarg; the skip is for explicit intent). The mechanism is retained but the inline justification in Part C was not folded.
+
+### F4 — MINOR: exhaustion-reason arbitration not in the body
+The fold claims *"first non-ok outcome in iteration order"* is pinned, but Part 0.6/C only enumerate the two terminal cases (`capacity` default; `drained_pin`). There is **no reason label for a non-pinned live-drain skip** (enum is `empty_pool|capacity|drained_pin|send_fail|ack_miss`), and defaulting such exhaustion to `capacity` is semantically off. Benign (local fallback serves the job) but a metric-semantics gap.
+
+### F5 — MINOR: "missing `sched_workers` row ⇒ drained" absent from the body
+Pinned in the fold header, but not stated in Part 0.6. It is the defensive default for the ≤250 ms TOCTOU and underpins the adopt-window safety narrative (empty `sched_workers` post-adopt ⇒ refuse ⇒ local fallback).
+
+### F6 — MINOR: several claimed eunit extensions are not in the enumerated eunit list
+- adopt → re-hello → snapshot rebuilt → pick dispatches again (eunit 4 stops at adopt/reset/prune);
+- probe-skip eunit enumerating all five reasons;
+- pinned-path completions feed the health EWMA (A.4 prose only; not in eunit 8(b));
+- `internal`-key tolerance on old **job-decode** clauses (Part 0.10 says "same eunit as hello keys," but eunit 7 names only hello-key and done/error-shape tolerance).
+
+### F7 — MINOR: dirty-flush advancing `snapshot_gen` not stated in Part C
+The fold and 13.2 rely on *both* flush paths advancing `snapshot_gen`; Part C ties "advances `sched_snapshot_gen`" only to the 30 s tick. (13.2's ≤35 s bounded wait is robust to either reading, so benign.)
+
+### F8 — MINOR: Part C `sched_geo_disabled_total` description omits "only when explicitly requested"
+Present in Part 0.1 and eunit 6; Part C says only "once per disable event."
+
+### Observation (not a defect) — provider-geo PT map "rebuild from build output (never merged)"
+Catalog build output carries `geo = unknown` (resolution is async), so every generation rebuild resets the PT map to unknown, wiping async-resolved geo until the fill re-runs (cheap via `geo_cache` TTL). Provider-geo can therefore flap to `unknown` across catalog rebuilds — within "degrades to v1" bounds, and auto-removal is preserved. Consider sourcing the rebuild from `build-output ∪ geo_cache` to keep resolved geo stable across generations.
+
+---
+
+## Confirmed solid (the skeptical dimensions)
+
+- **Purity/determinism**: `select_v2/2` → `{Order, Decisions}`; no counters/time/ETS writes; `demote_ms` precomputed in the builder; TTL filtering in the builder; pick emits metrics from Decisions.
+- **Capacity single-ownership**: one pinned form `{2,1},{Node,0}`; rollback `{2,-1},{Node,0}`; `infinity`-skip; no capacity tier in `select_v2`; probes structurally outside via `dispatch_probe/2`; `ets:update_counter` 5-tuple correctly forbidden.
+- **Demotion math**: exclude-self threshold `max(5000, 3×median(other *measured*))`, ≥1-other-measured-else-infinity, `is_number` guard closes the atom-ordering trap, seed-at-first-sample (`E1=x1`), executable at N=2, min-EWMA-survivor invariant holds.
+- **Probe cost floor**: master-issued (30 s tick self-cast), cluster hourly cap, cadence+jitter, ≤1 in-flight, separate additive sub-budget, default-off, `sched_v=>2` gate; no local fallback for internal jobs.
+- **Heir/adopt**: `janus_ets_heir` is a gen_server (not a supervisor), all five tables covered, adopt resets reserve + prunes + cold re-hello (60 s keepalive + pool-pid monitor).
+- **Mixed-version**: done/error are maps (additive `rtt_ms`), `{sched,2,_}` catch-all tolerance, optional hello keys, `internal` job-map key, masters-first order, tuple-fallback hedge.
+- **Gate 13.2–13.6**: falsifiable on the dual-node harness, asserts only `/stats/sched` + `/metrics`, MSYS-safe Python driver for concurrency, bounded waits, per-step fresh counters + within-step deltas, relational `victim_ewma > max(5000, 3×fast_ewma)` is host-robust (the 5000 floor binds for any sub-2.67 s fast TTFB on localhost).
+
+---
+
+## Bottom line
+
+Fold application is coherent except **F1** (the pinned JSON surface does not carry the finalized five skip reasons — fix before ratification, it's the assertion surface) and **F2** (the internal-recognition pin should be reworded to the load-cast-routing mechanism so an implementer isn't left asking how the done handler recognizes an untracked, wire-flag-less probe). F3–F8 are one-line pin/body alignments. Recommend folding F1–F5 into rev 9 and re-running a short confirmation round; the math and architecture need no further change.

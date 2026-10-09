@@ -1,0 +1,32 @@
+## 1. Verdict
+**GO WITH FIXES** — the fleet-distribution spec (rev 11) is technically sound and rollout-safe, but it ships with a wrong-prompt/wrong-spec mismatch on my side plus several un-scrubbed stale claims its own revision notes assert were fixed.
+
+## 2. Critical risks
+- **F.4 timing margin**: `docker pause` for "TTL + 2 heartbeat windows" (~40 s) sits close to `net_ticktime` 60 s; with jitter, a nodedown may fire in-window and invalidate the "TTL expiry is the mechanism" assertion, or conversely the "connection resumes in place" claim.
+- **erpc = full code execution (F.3)**: accepted and disclosed, but the only enforcement is the cert; a stolen node key is fleet-wide RCE. This deserves an explicit operator sign-off artifact, not just spec prose.
+- **pg 2-arity contract**: correctness rests entirely on `pg:get_members(janus_fleet_pg, janus_fleet)` being used everywhere; one stray 1-arity call silently reads the default scope (the mimo bug). Needs a grep-able convention or wrapper.
+- **Sweeper vs F.6(c)**: quota rows TTL at 6 s but are only *lazily* expired on read or at the 30 s sweep; "TTLs out within 6 s + sweeper" is not falsifiable as written.
+
+## 3. Contradictions or stale claims
+- **Prompt/spec mismatch (blocking for this audit)**: the audit brief describes Scheduler v2 (GeoIP, probes, gate steps 13.2–13.5, `e2e_mw_local.sh`) — none of that exists in `target.md`. Either the wrong spec was attached or the prompt is stale.
+- Rev 11 claims "stale expires_in_ms/(phase 3) wording scrubbed", yet the **Goal paragraph still says "(phase 3) quota counters…"**, and **F.2 + Part C still contain `lease {holder, expires_in_ms}`** alongside the renamed `next_check_in_ms` — the F.2 lease section literally reports both shapes in consecutive sentences.
+- Rev 11 pins gate order `F.5-F.1-F.2-F.3-F.4-F.6-F.8-F.7`, but Part D's "Execution order" line omits F.6/F.8/F.7.
+- F.7's body contains the F.6 single-listing comparison-binding sentence (misplaced fold residue).
+- Part C lists the `/metrics` counters twice (rev-8 duplication).
+- `lb_cool_clear` text says the command "broadcasts `{lb_cool_purge}`" ambiguously; rev 11's "originator only" rule is not folded into the F.1 body.
+
+## 4. Missing first-ship requirements
+- No eunit/gate assertion that **no 1-arity `pg:get_members/1`** call exists for the fleet group (the exact confirmed bug class).
+- F.6(b) "byte-identical" hit counts need deterministic LB among healthy listings (seeded mock or single-listing binding) stated *in F.6*, not leaked into F.7.
+- No max-pause-duration precondition in F.4 tying the window to `< net_ticktime`.
+- Connector 5-min retry cap: no statement on what re-arms retries after the cap (nodedown re-run vs manual).
+
+## 5. Architecture/design notes
+TTL-as-correctness / eager-delete-as-optimization, quorum ≥ 2 for latency shed, never-shed-last on both paths, and advisory-only quota are the right calls. The `verify_fun` never-rescue semantics + SAN=node-name recipe is clean and eunit-able. Keeping the lease duty-free in v1 is honest.
+
+## 6. Top 5 concrete edits
+1. Scrub Goal's "(phase 3)" and unify lease shape to `{holder, next_check_in_ms}` everywhere (F.2, Part C).
+2. Move the single-listing comparison-binding sentence from F.7 into F.6; rewrite F.6(c) as "expired on read ≤ 6 s; gone from `/stats` ≤ 6 s + one 30 s sweep".
+3. Fold "purge published once by originator" into F.1's `lb_cool_clear` body; align Part D execution-order string with the rev-11 pinned order.
+4. Add F.4 precondition: total pause duration must stay `< 60 s` (net_ticktime), with the wait budget stated numerically.
+5. Deduplicate Part C's `/metrics` bullets; add a F.1 eunit/gate assertion banning `pg:get_members/1` on the fleet group.

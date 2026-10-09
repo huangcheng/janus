@@ -1,0 +1,28 @@
+**1. Verdict: GO WITH FIXES** — rev 6's folds are present and coherent; the residuals are mechanical wording/spec-gap items, none invalidate the design.
+
+**2. Critical risks**
+- Probe freshness predicate ambiguity: targets require "no unexpired **passive** row", but `probe`-source rows are written cold-start-only and `skip{fresh}` "covers unexpired rows". If probe rows don't count as fresh, a pair with only probe data re-probes every ≥60 s (cadence) until the hourly cap or passive data lands — money for zero information. Must pick one predicate.
+- `sched_rtt` "latest SampledAtMono wins" under a `{Node,ProviderId}` key needs a read-compare-write pin; a late-arriving piggyback can silently clobber a newer row otherwise.
+
+**3. Contradictions / stale claims**
+- Part C metrics: `sched_geo_disabled_total` "(incremented ONCE at boot)" vs JSON spec "once per disable event — boot or async load failure".
+- "Requires ≥ 3 samples before the EWMA exists" (A.4) vs "seeds at the FIRST sample (E1 = x1)" — value computed at 1, *used* at 3 should be stated.
+- JSON naming rule (keys = metric names minus `sched_`) has no source metric for `health_ewma_ms`; `sched_health_ewma_ms` is absent from the Part C metric list.
+- Probe result discarded when a passive row landed mid-flight (cold-start-fill-only pin) — waste of a paid probe, currently unstated.
+
+**4. Missing first-ship requirements**
+- `dispatch_probe/2`'s own eligibility check can refuse a draining target, but `probe_skip_total{reason}` covers only `cap|cadence|fresh` — no reason for that skip.
+- Clamp locus (worker report build vs master ingest) never pinned; A.3 says "clamped per Part 0.3" without naming the side.
+- Everything else (NOTICE/GeoLite2 attribution, mmdb-before-env, deploy order, harness env wiring, MSYS-safe 13.5 driver, 30 s fail-loud budget) is present.
+
+**5. Architecture/design notes**
+- Tier order, purity (`{Order,Decisions}`, pick emits counters), single `update_counter` form, exclude-self demotion (executable at N=2, floor-binding correctly re-derived in 13.6), structural probe exemption, adopt reset via `ets:delete_all_objects`, and the three-seam `internal` contamination closure are all internally consistent.
+- The 13.6 arithmetic now checks out: victim threshold = max(5000, 3×fast) ≤ 7800 < 8000 = victim EWMA; the fast worker's own threshold (3×8000) never demotes it. Seeded EWMA makes three 8 s samples read 8000 deterministically.
+- Minor: pinned-path completions feeding the health EWMA is implied, not stated — 13.6 depends on it.
+
+**6. Top 5 concrete edits**
+1. Pin the probe freshness predicate to "no unexpired row (passive **or** probe)" — one sentence in Part 0.2 + A.3, matching `skip{fresh}`.
+2. Fix Part C: `sched_geo_disabled_total` = once per disable event (boot or async locus load failure).
+3. Add `sched_health_ewma_ms` gauge to Part C (or declare `health_ewma_ms` JSON-only, amending the naming rule).
+4. Pin `sched_rtt` write as compare-`SampledAtMono`-before-overwrite; pin clamp at master ingest.
+5. Add `probe_skip_total{reason=drained}` (or fold into `cadence`); rewrite A.4 as "value seeded at sample 1, admitted to selection at 3".

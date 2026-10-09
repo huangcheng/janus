@@ -1,0 +1,55 @@
+# Audit — `docs/audit/target.md` (Scheduler v2, rev 8)
+
+**Verdict: GO WITH FIXES.** All rev-8 folds are present except three that exist only in the fold header and never landed in the body (JSON skip enum, `Result > infinity` correction, missing-row=drained). Two seams are newly defective *by* the rev-8 amendments (SampledAtMono comparison is a no-op as pinned; probe/internal recognition contradicts the tracked-set register). None touch the tier order, the demotion math, or the capacity design — all are pin-level and fixable without architecture change.
+
+## Rev-8 fold verification
+
+Present and coherent: the single-statement target rule (Part 0.2) with passive-OR-probe freshness; in-flight workers excluded under `cadence`; issuance via 30 s tick self-cast consumed by `dispatch_probe/2`'s handle clause; eligibility = pick's primitives minus the counter; send-fail/ack-miss ⇒ abort + `probe_skip{send_fail}` + no internal local fallback; `sched_v => 2` probe-target gate; tracked-set register before upstream send with `Internal` flag and release casts; done-ingests-rtt-then-releases; post-adopt re-hello (60 s keepalive + pool-pid monitor); `SampledAtMono` = master ingest stamp (0.9 amended); rollback form `{2,-1}`; "measured" = ≥ 3 samples; `geo_disabled_total` explicit-request-only; 13.6 third unpinned provider + quiesce + exactly 3+3 + delta assertions + Python driver + ≥ 45 s budget; `{provider}` label on `dispatch_worker_total`; 13.4b cap headroom 100; TEST_HOSTS before DNS/mmdb; gauge cap removes evicted label sets; `geo_match{none}` partition; ungated worker-side piggyback; error completions write passive rows; knob-off rollback; Slice-Q internal filter (in Part D, oddly placed under Rollback); internal-key tolerance in 0.10; `last_attempt_mono`; clamp-down not counted in `rtt_dropped_total`.
+
+**Folds claimed but NOT in the body** (header/implementation drift):
+- *"the JSON key carries ALL five"* skip reasons — false, see D3.
+- *"Result > infinity rationale corrected"* — Part C still carries the **false badarg claim** it was supposed to replace, see D5.
+- *"missing sched_workers row ⇒ treated as drained"* — no body text states it, see D6.
+- *"probe-skip eunit enumerates all five reasons"* — no such eunit case in Part E (item 4 stops at counter-neutrality).
+- *"Eunit 4 extended: adopt → re-hello → snapshot rebuilt → pick dispatches again"* — Part E item 4 ends at adopt/reset/prune.
+- *"per-step fresh-stack baselines stated"* — only "fresh per-step counters" appears (13.3b, 13.6); the harness-restarts-stacks fact is never stated in Part E.
+
+## Defects (ranked)
+
+**D1 — Probe/internal recognition contradicts the tracked-set register (structural seam).** 0.11 pins "Master-side internal recognition = the tracked entry's `Internal` flag", but 0.2/0.11 register only *after a successful reserve counter increment*, and probes "BYPASS pick's reserve loop entirely (no increment, no decrement)" ⇒ probe jobs have **no tracked entry**. Consequences: (a) a probe's `done` falls into "no tracked entry ⇒ drop the sample" — which accidentally gives the right rtt-ingest behavior but for the wrong reason; (b) the **TTFB health-feed exclusion** and the **probe in-flight map clearing** ("cleared on probe done/error", 0.2) have no specified recognition path; (c) if probes *were* registered (`Internal=true` in the track cast exists for somebody), release/purge/reconcile would decrement counters probes never incremented — breaking the pinned counter-neutrality. Pin exactly one: probes stay untracked and recognition = probe in-flight map membership (`{Node => JobRef}`), with release/purge naturally no-op; **or** probes cast `{track,…,Internal=true}` and release/purge/reconcile skip the decrement for `Internal` entries. Also state whether non-probe internal jobs (entitlement probes?) ride the reserve loop — the `Internal` flag in the track cast is otherwise always `false`.
+
+**D2 — `SampledAtMono` write-time comparison is a no-op under master ingest stamps (newly introduced by the rev-8 amendment).** With stamps assigned at ingest in serialized pool handlers, the message being handled *always* has the maximal stamp, so "compare `SampledAtMono` before overwrite" never blocks anything. The claimed property — "protects against out-of-order DELIVERY (a late piggyback cannot clobber a newer row)" — is exactly what ingest stamps cannot deliver: a late-delivered older sample overwrites a newer one (last-arrival-wins). The probe-freshness case is actually protected by the *cold-start-fill-only* rule, not by the stamp. Fix: either drop the claim and pin the true semantics (last-arrival-wins, bounded by the 10 min TTL), or carry a worker-side per-(node, provider) sequence/send-stamp for a meaningful comparison. Also 0.9's "cross-node stamp comparison orders the display cap" is stale — all stamps are now master-side; no cross-node comparison exists.
+
+**D3 — Probe-skip enum not propagated to the pinned surfaces.** 0.2: `reason=cap|cadence|fresh|drained|send_fail` (5). Part C metrics list: `cap|cadence|fresh|drained` (4 — drops `send_fail`). Part C JSON: `{"cap","cadence","fresh"}` (3 — drops `drained`, `send_fail`). 13.4b/eunit assertions on five reasons are not expressible as written.
+
+**D4 — `dispatch_worker_total` label vs JSON key mismatch.** The metric gained `{node, provider}` "making per-provider assertions expressible", but the JSON is `"dispatch_worker_total": {"<node>": int, ...}` — node-only. 13.3b (`{cn-east, provider}` ≥ 1, `{us, provider}` = 0) and 13.6 (Δ`{fast, third-provider}` = 1) need the provider dimension on `/stats/sched`, or the steps must be pinned to `/metrics` explicitly. Suggest `"<node>/<provider>"` keys, as `rtt_ms` already uses.
+
+**D5 — `Result > infinity` correction never landed in the body.** Part C still reads "an atom-vs-number guard would badarg" — the rev-8 correction (Erlang `>` is total-ordered; `number > infinity` is `false`; the skip exists for explicit intent) exists only in the fold header. Body contradicts header.
+
+**D6 — Missing `sched_workers` row ⇒ drained rule absent from the body.** The reserve loop's live re-check (0.6, Part C step 3) never states missing-row semantics. This rule is load-bearing for the post-adopt window (snapshot rows survive in the heir'd table while all `sched_workers` rows are pruned). Add it to 0.6 + Part C + eunit item 4.
+
+**D7 — Exhaustion-reason rule unpinned in the body.** The fold pins "first non-ok outcome in iteration order; drained-pinned ⇒ `drained_pin`", but Part C only says `reason=capacity` generically and `drained_pin` for the single drained-pinned case. Mixed exhaustion (capacity-rollback then live-re-check skips) has no deterministic label — and the non-pinned drained-skip case labels nothing at all.
+
+**Medium:**
+- `sched_v => 2` missing from 0.10's additive hello enumeration ("new hello fields (`capacity`, `geo_region`)") — it's a third additive key needing the same old-master-drop verification + eunit shapes.
+- Heir adopt handshake race: the boot-path adopt request can reach `janus_ets_heir` before it has processed the old owner's `{'ETS-TRANSFER'}` (it learns the tid from that message). Pin a retry or resolve by the stable `TableTag`.
+- Demotion predicate `is_number(E) andalso E > demote_ms` lacks the ≥ 3-sample gate while the EWMA **value** seeds at sample 1 — a 1–2-sample worker is demotable unless the builder renders `observed_ewma_ms := unknown` below the admission threshold. Pin which, and pin what `health_ewma_ms` shows for sub-threshold workers.
+- "Both flush paths advance `snapshot_gen`" vs Part C attributing gen-advance to the 30 s tick only; 13.2's "dirty-flush ≤ 250 ms … both qualify" needs the dirty flush to advance gen.
+- Register-cast ordering wording: "IMMEDIATELY AFTER the counter increment" ignores the capacity check sitting between increment and success — overflow candidates must roll back **without** registering. State "after the increment, on the winning candidate only".
+
+**Minor:** `JobRef` shape/uniqueness never defined (idempotent release, purge age, and the `{{Node,ProviderId},…}` key all depend on it); issued-then-aborted probes count in both `probe_total` and `probe_skip_total{send_fail}` (pinned, but consumers should know); "keepalive hello … piggybacks the load-cast cadence" is ambiguous (does hello carry load info?); 13.6's "all-workers-slow variant" — gate step (budget/assertions) or prose? (only never-shed-all is explicitly excluded from the gate); sort key is the latest raw sample, not an EWMA — noisy but acceptable since RTT is preference-only, say so; "capacity weights" (G3) vs integer capacity.
+
+## Theme summary
+
+- **Tiers narrow only** ✅ — pin(narrow-to-one) → health exclude-with-never-shed-all → geo narrow-or-keep-all → re-rank; never widens; health-over-region_tag difference is pinned as deliberate.
+- **Purity/determinism** ✅ — `select_v2` clean, `{Order, Decisions}`, pick emits; `provider_geo` enters via opts (PT read stays in pick); `demote_ms` precomputed; no time in the pure function. Only nit: D5's stale rationale.
+- **Capacity single-ownership** ✅ — reserve loop only, one 4-arity `update_counter` form, forbidden threshold form correctly named (4-tuple, wraps), infinity-skip coherent apart from D5.
+- **Demotion math at N=2** ✅ — exclude-self `max(5000, 3×median(others))` is executable on the 2-node harness; 13.6's arithmetic (8000 vs 5000 floor) checks out with the E1=x1 seed; all-slow ⇒ no tripping (min-EWMA survivor) is mathematically sound. Guard gap: the missing measured-gate (above).
+- **Probe cost floors** ✅ — master-issued, default-off, separate additive budget, cap-before-pick, FORCE bounded, `internal` usage/Slice-Q filter; only the recognition seam (D1) is open. Note the prompt's "affinity-pinned routing" resolved to `dispatch_probe/2` direct pinned send — consistent with the reserve-loop exemption.
+- **Advisory load** ✅ — never a selector; divergence window, starvation limitation documented.
+- **Heir/adopt** ✅ mechanism real, five tables, GiftData; races noted above.
+- **Mixed-version** ✅ maps-additive + TEST ORDER + delivery-path eunit + masters-first (the `sched_v` gate correctly kills the cap-drain window), modulo the 0.10 enumeration gap.
+- **Gate falsifiability** ✅ — 13.2–13.6 all assert named keys on `/stats/sched` + `/metrics`; 13.6 is now genuinely deterministic (routing-deterministic sampling, quiesce, relational assertion, delta baselines); 13.5/13.6 concurrency uses the named MSYS-safe Python driver; budgets pinned. Blocked only by D3/D4 (assertions not expressible on the pinned surface as written).
+- **Windows/MSYS** ✅ — Python driver named where concurrency is needed; no shell-quoting-dependent assertions.
+
+The round-7 "infra-fail" (deepseek, empty output) needs no content verification. Once D1–D7 land as body text and the six missing fold items are folded in, this is implementation-ready.

@@ -1,0 +1,24 @@
+## Audit — Scheduler v2 rev 4
+
+**1. Verdict:** GO WITH FIXES — all seven rev-4 folds are present and mostly coherent, but three residual contradictions (ack-miss, probe/geo coupling, restart state) need closing before first ship.
+
+**2. Critical risks**
+- **Ack-miss double-path.** Part 0.1 and the metric `dispatch_local_total{reason=ack_miss}` still list ack miss as a local-fallback trigger, while 0.11 says "an ack miss means late, not absent" (job may be executing on the worker). Falling back locally then duplicates the job and the retained reservation over-admits. Pick one semantics.
+- **Probe target rule gates on "geo-known providers."** With geo off (default), the candidate set is empty ⇒ active probes never fire even with `JANUS_SCHED_PROBE=1`; 13.4b is unrun unless an earlier step left geo on. RTT cold-start silently dead.
+- **Restart breaks "reservation = source of truth."** The heir preserves `sched_reserve` counters but the tracked-job map (`JobRef => Node`) is pool gen_server state and is lost on owner restart. The 30 s reconcile would zero counters for jobs still running ⇒ under-admission. Not addressed.
+
+**3. Contradictions / stale claims**
+- ack-miss: local-fallback (0.1, metrics) vs pending-until-done (0.11).
+- `geo_cache` negative TTL 1 h vs "re-resolve ≤1/host/15 min" — the entry is still valid at 15 min; mechanism unspecified.
+- Probe "never touch the reserve counter" vs "affinity-pinned picks increment" — needs an explicit probe flag seam (unstated).
+- Clamp says "finite float"; an integer `0` from a worker would be dropped, contradicting "exactly-0.0 lands."
+
+**4. Missing first-ship requirements**
+- Master TTFB EWMA **α unpinned** (A.4); partial-sample behavior undefined (A.3 pins 0.25 only for worker RTT).
+- No metric for probe skips (cap/staleness) or reconcile corrections — ops blind spots.
+- 1-token probe's provider/model shape unspecified; `sched_probe_total` only counts, no failure counter.
+
+**5. Architecture/design notes**
+- Demotion has a **majority-slow blind spot**: N=3 with two 8 s + one fast ⇒ each slow worker's exclude-self median includes the other slow, threshold 3×4.25 s > 8 s ⇒ nobody demoted. Fine at N=2 (gate 13.6 valid), weaker as fleet grows. Document.
+- `update_counter/4` `{Node, 0}` default is correct; only rollback decrement lacks an explicit ≥0 clamp.
+- Tiers, purity, `{Order, Decisions}`, five-table heir, and `/

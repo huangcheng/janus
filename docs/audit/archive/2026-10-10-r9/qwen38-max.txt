@@ -1,0 +1,58 @@
+# Scheduler v2 spec (rev 9) — audit verdict
+
+**GO WITH FIXES.** Zero architecture, math, or testability objections. All rev-9 folds are grep-verifiably present in the BODY and coherent with their surroundings. Three residuals remain — one stale-clause contradiction (the same drift class rev 9 hunted), one missing clear-event, one missing enum label — plus two optional pins. All fixes are one-sentence.
+
+## Rev-9 fold verification (present + coherent)
+
+| Fold | Location | Status |
+|---|---|---|
+| `> infinity` total-order rationale (skip = explicit intent, `false` never badarg) | Part 0.6, Part C step 3 | ✅ both sites |
+| Missing `sched_workers` row ⇒ drained/refuse | Part C step 3 | ✅ |
+| Exhaustion reason = first non-ok outcome | Part C step 3 | ✅ (but see F3) |
+| BOTH flush paths advance `snapshot_gen` | Part C; 13.2 poll relies on it | ✅ |
+| Five `probe_skip` reasons in metric AND JSON | Part 0.2, Part C metrics, Part C JSON | ✅ identical enum |
+| `dispatch_worker_total` JSON keys `"<node>/<provider>"` | Part C JSON; metric has `{node, provider}` | ✅ |
+| Probe/internal recognition via SAME track cast, `Internal => true`, no increment; 4-tuple tracked map everywhere | Part 0.11, Part C, E.4 | ✅ no stale 2/3-tuple shapes left in body |
+| `SampledAtMono` compare dropped; last-arrival-wins + existence gate | A.3 HONEST paragraph, Part 0.9 | ✅ (but see F1 — one vestige in Part E) |
+| Register cast on winning candidate only | Part 0.11, Part C | ✅ |
+| Demotion gate structural (`observed_ewma_ms := unknown` < 3 samples; gauge displays from sample 1) | A.4, E.2 | ✅ |
+| Heir adopt retries with backoff by `TableTag` | Part 0.5 | ✅ |
+| `sched_v => 2` in 0.10; stale old-worker-probe sentence gone; DOCUMENTED ORPHAN WINDOW; FORCE never bypasses `sched_v` | Part 0.10, Part 0.2, 13.4b | ✅ Part D rollout no longer carries the dead sentence |
+| `rtt_dropped_total` JSON `{negative, non_finite}`; JobRef = master-created unique ref; probe key = entitlement-probe pick under separate budget; keepalive = plain hello; 13.4b ≤ 35 s poll; fresh per-step stacks; drain build/recheck asymmetry ≤ 250 ms; geo_disabled explicit-only; corrupt-file/async-load conditioned on explicit request; locus result = ONE runtime writer of `geo_enabled` PT; post-adopt reconcile deletes ALL `sched_rtt` rows; `handle_cast` wording; G3 "capacity limits"; 13.6 all-slow = gate Δ=0 assertion | various | ✅ each checked |
+| Part E additions (five skip reasons, probe done-with-`rtt_ms` skipped via tracked `Internal` = reachable path, adopt→re-hello→snapshot→pick, `internal` decode tolerance, pinned completion feeds EWMA) | E.4, E.6, E.7, E.8 | ✅ |
+
+Rev-7/8 lineage also spot-checked (enabled-only targets, `health_ewma_ms` surface, opts split, JSON naming rule, three-seam internal exclusion, EWMA seed `E1 = x1`, purge idempotency): all present, no regressions.
+
+## Findings (fixes)
+
+**F1 — E.6(c) contradicts the rev-9 `SampledAtMono` semantics (stale rev-7 clause).**
+A.3/Part 0.9 pin: compare-before-overwrite is vacuous, true rule = last-arrival-wins bounded by TTL, existence gate + handler serialization are the protections. But Part E item 6(c) still says: *"never clobbers a newer `SampledAtMono` (write-time latest-wins)"* — implying a compare guard the spec elsewhere declares a no-op. An implementer writing that eunit would re-introduce the dropped mechanism.
+Fix: rewrite 6(c) to assert the existence gate (probe result arriving after any unexpired row landed is discarded, wasting a paid probe) and that passive writes are last-arrival-wins with NO compare guard.
+
+**F2 — Purge does not clear the probe in-flight map.**
+Part 0.2 clear-list for `{Node => JobRef}`: done/error/nodedown/send-fail/ack-miss; Part 0.5 adds owner restart. The 10-min purge (Part 0.11) removes the tracked entry and skips the decrement for `Internal` — but never clears the in-flight map. A silently-lost probe (worker up, done never lands) leaves that node excluded from probe targets under `cadence` **permanently** until nodedown or pool restart — defeating the purge's purpose as the backstop for lost jobs.
+Fix: one line — purge (and any reconcile removal) of an `Internal` entry also clears the in-flight map by JobRef.
+
+**F3 — Unpinned live-drain exhaustion has no reason label.**
+Part C: exhaustion reason = first non-ok outcome; *"drain-skips of unpinned candidates label the exhaustion too."* But the enum — metric `sched_dispatch_local_total{reason=empty_pool|capacity|drained_pin|send_fail|ack_miss}` and the five JSON keys — has no value for an unpinned drain-skip (`drained_pin` is named for the pinned case in Part 0.6). The TOCTOU window is bounded and rare, but the label must exist when it fires.
+Fix: add `drained` to both the metric and JSON enums, or pin unpinned drain-skips to `drained_pin` explicitly.
+
+## Pins (recommended, not blocking)
+
+**P1 — 13.3b boot path with TEST_HOSTS and no mmdb.** "locus loads ASYNC at boot — only when geo was explicitly requested" reads unconditional on `JANUS_SCHED_GEO=1`; with no file (mmdb not in git/image, CI offline), a literal implementation attempts load → fails → auto-off → 13.3b's `geo_match_total{auto}` assertions die. Pin: *path unset/absent + non-empty TEST_HOSTS ⇒ boot OK, locus load SKIPPED entirely, geo serves injected hosts only, all other hosts unknown, no `geo_disabled_total`.*
+
+**P2 — two wording seams.** (a) Part 0.6 still says exhaustion ⇒ `reason=capacity` as shorthand; point it at Part C's first-non-ok rule to avoid a hardcoded label. (b) Part 0.11's reconcile *"treats counter-excess older than one flush interval as drift"* — the counter is a scalar with no timestamps; pin the executable rule (e.g., skip correction while any tracked entry's `ReservedAtMono` is within one flush interval). Harmless either way (corrective writes heal negatives; bounded softness is already in the accepted class), but it's currently not mechanical.
+
+## Dimension re-check
+
+- **Tiers narrow only / ordering:** dispatchable → affinity (absolute, `geo_source := none`) → health (never-shed-all) → geo (keep-match-or-keep-all, never widen) → sort. ✅
+- **Purity/determinism:** `select_v2/2 → {Order, Decisions}`, counters emitted by pick, no `os:time()`, TTL in builder, `demote_ms` precomputed. ✅
+- **Capacity single-owner:** only pick's reserve loop; one pinned `update_counter` form `{2,1}` / `{2,-1}` with Default tuple; 4-tuple UpdateOp forbidden; `infinity` skip explicit. ✅
+- **Demotion math at N=2:** exclude-self, per-candidate, `max(5000, 3×median(others))`, min-EWMA survivor invariant holds (3m ≥ m for m ≥ 0); 13.6 arithmetic checks out (3×8 s samples seed to exactly 8000; seeded-at-0 would read 4625). ✅
+- **Probe cost floor:** master-issued, off by default, separate additive hourly cap, usage/Slice-Q bypass at the one named `internal` filter, `sched_v` gate kills the cap-drain window. ✅ (Note: the audit prompt's "affinity-pinned routing" phrase predates rev 5; the body's `dispatch_probe/2` direct pinned send is authoritative.)
+- **Advisory load:** never a selector; mismatch counter; suppression starvation documented. ✅
+- **Heir/adopt:** real gen_server heir, retry-with-backoff adopt by TableTag, `delete_all_objects` reset, cold re-hello triggers (60 s keepalive + pool-pid monitor), immediate reconcile's all-`sched_rtt` delete stated as accepted cold reset. ✅
+- **Mixed-version:** additive map keys only, catch-all cast tolerance on the delivery path, orphan window documented, `internal` decode tolerance eunit'd. ✅
+- **Gate testability:** fresh per-step stacks, bounded ≤ 35 s polls, relational 13.6 assertion (host-speed robust), MSYS-safe driver reused, all assertions on the pinned `/stats/sched` surface. ✅ (subject to P1.)
+
+Tick the Part G `pi-audit GO` box once F1–F3 (and ideally P1) are folded.

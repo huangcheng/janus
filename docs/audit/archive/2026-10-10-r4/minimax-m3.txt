@@ -1,0 +1,26 @@
+**1. Verdict:** GO WITH FIXES — all 16 rev-4 folds present and mutually coherent; math/harness-falsifiability verified; only pin-worthy gaps remain.
+
+**2. Critical risks**
+- Probe-rtt finalization: Part A.3 names BOTH `done/error.rtt_ms` piggyback AND a load-cast carrying "probe results" feeding `sched_rtt`. Two writers on the same row need a single-writer pin or an idempotent-merge pin.
+- Affinity-pinned + live-drained at reserve time: Part B tier 2 handles drained-via-snapshot; Part C's live re-check (Part 0.6) would skip the only candidate. Spec doesn't pin the surface (fall to local-fallback `reason`? new label?). Pick one and label it.
+
+**3. Contradictions / stale claims**
+- `sched_geo_disabled_total`: "loud log + counter" never pins increment frequency — boot-time once vs per-dispatch.
+- `/stats/sched` `rtt_ms` "CAPPED 64 with `_other` aggregate": `_other`'s shape isn't pinned (count vs ms-sum vs max).
+
+**4. Missing first-ship requirements**
+- Heir gift-data: ETS-TRANSFER's `GiftData` is not pinned. The pool's adopt path needs a stable identifier (e.g., `{table_tag, heir_pid}`) to call `give_away` reliably across recreates.
+- `/stats/sched` schema versioning: pin `"schema_version": 1` so a future additive-key rev doesn't silently break the dashboard's JSON parser.
+- Reconcile arithmetic: "decrement EXCESS only" leaves per-node allocation unspecified when counter > tracked-job set. Document one of: largest-counter-first, round-robin, or any-allocation-summing-to-excess.
+
+**5. Architecture / design notes**
+- TTFB-EWMA single-chunk fallback bias accepted and matches the project's "documented mixed-mode bias" precedent — ship-able.
+- Probe-job cost-floor quadruple-binding (1-token + affinity-pin + counter-exempt + usage-filter + internal-flag) is correct and tight; cost-floor = zero at default-config is preserved.
+- Heir-via-`gen_server` picks up `{'ETS-TRANSFER', ...}` correctly; supervisor heir would silently drop — verified and right call.
+
+**6. Top 5 concrete edits**
+1. **Pin single-writer on `sched_rtt`** (Part A.3): "`done/error.rtt_ms` is the canonical writer; the load-cast's `probe_results` corroborate only when no fresh sample exists for the (worker, provider) pair."
+2. **Pin affinity-pinned + live-drained** (Part B.2 + C.3): "live-drain race on the pinned candidate ⇒ skip; list exhausted ⇒ `dispatch_local_total{reason=drained_pin}`; pin the new reason label."
+3. **Pin `sched_geo_disabled_total`** (Part D metrics): "incremented ONCE at boot when `JANUS_SCHED_GEO ≠ 1` and `JANUS_MMDB_PATH` is missing — boot-time count, not per-request."
+4. **Pin `/stats/sched` truncation shape** (Part C metrics): "`rtt_ms_other = {"count": int, "max_ms": float}` — count of overflow (node, provider) pairs and the highest observed ms among them."
+5. **Add `"schema_version": 1`** to the pinned JSON surface AND pin the heir `GiftData` shape (`{::atom(), ::pid()}`) so the boot-path adopt is identifier-stable across table recreates and the dashboard's JSON parser survives future additive keys.

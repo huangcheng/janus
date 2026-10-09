@@ -1,0 +1,27 @@
+**1. Verdict — GO WITH FIXES.** All rev-4 folds are present and coherent; two gate steps are unfalsifiable as written and three seams need pinning.
+
+**2. Critical risks**
+- **13.4b cannot pass**: probe targets require "geo-known providers", but 13.4b leaves geo off ⇒ no targets ⇒ `probe_total`=0. FORCE bypasses only cadence/staleness, not the absent/expired-RTT filter that 13.4's fresh samples empty. RTT probing has no geo dependency — the qualifier looks copied from the geo fill.
+- **13.6 is non-deterministic**: only the slow provider is pinned; unpinned fast jobs can land on the victim, and two fast samples pull its 8 s EWMA below the 5 000 floor ⇒ no demotion ⇒ flaky gate.
+- `janus_usage` filter `maps:get(internal, Job, false)` crashes if Job is a record/tuple at that seam.
+
+**3. Contradictions / stale claims**
+- "5-tuple Threshold/SetValue form" is a misnomer (it is the 4-tuple `{Pos,Incr,Threshold,SetValue}` UpdateOp); "wraps (silently pins)" conflates SetValue=0 with SetValue=Threshold.
+- Load cast "carries probe results" contradicts "probes report like any job"; pin done/error `rtt_ms` as the only `sched_rtt` feed.
+- "the pin explains the capacity exemption" is stale vs "probes never touch the counter at all".
+- 13.3a "(none)" needs a no-match comparator (region_tag unset + geo off, or `eu`); a "us provider" vs "us" worker emits `region_tag`.
+
+**4. Missing first-ship**
+- `health_demote_total` increment semantics unpinned (per pick vs per demoted node).
+- Rollback `{2,-1}` with Default `{Node,0}` re-creates a nodedown-deleted row at −1; negative `reserve_inflight` visible.
+- No immediate reconcile on heir adopt; orphan `sched_reserve`/`sched_workers` rows after master restart (no nodedown fires) pollute `reserve_inflight`; heir `give_away` badarg if the new owner died.
+
+**5. Architecture notes**
+Exclude-self demotion is executable at N=2; the `is_number` guard closes the atom-order trap; the pinned `update_counter` form is valid Erlang; the heir adopt cycle is sound; capacity single-ownership and ack-miss semantics are consistent; v1-equivalence and cost-floor claims are testable. Ratifiable modulo the fixes.
+
+**6. Top 5 edits**
+1. Part 0.2/13.4b: "geo-known providers" → catalog-known; FORCE also bypasses the absent/expired filter (or add a probe-only mock provider).
+2. 13.6: pin the fast provider's `affinity_node` to the healthy worker during poisoning.
+3. Part C: pin per-pick semantics for `sched_geo_match_total` / `sched_health_demote_total`.
+4. Rename the forbidden form (4-tuple UpdateOp); probe results arrive only via done/error `rtt_ms`.
+5. Reserve loop: rollback must not re-insert deleted rows; reconcile on adopt; prune rows for nodes absent from pool records.

@@ -1,0 +1,34 @@
+## Audit result — Scheduler v2 spec rev 9 (confirmation round)
+
+I re-verified every rev-9 fold against the body text (grep-equivalent read of the full document). **All folds are landed and internally coherent.** Spot-confirmations:
+
+- **Drifted folds in the BODY**: `> infinity` total-order rationale in Part 0.6 *and* Part C step 3; missing `sched_workers` row ⇒ drained/refuse (Part C); exhaustion-reason = first non-ok outcome (Part C); both flush paths advance `snapshot_gen` (Part C); five `probe_skip` reasons in metric *and* JSON; `dispatch_worker_total` JSON keys `"<node>/<provider>"`.
+- **Probe/internal recognition closed**: `dispatch_probe/2` registers via the same `{track, …}` cast with `Internal => true`, no increment (0.11); done handler recognizes via the tracked flag; release/purge/reconcile-excess skip the decrement; 4-tuple `JobRef => {Node, ReservedAtMono, ProviderId, Internal}` is consistent in 0.11 *and* Part C.
+- **`SampledAtMono`**: 0.9 is now master-ingest-stamp-only; no cross-node compare anywhere; A.3 states last-arrival-wins + existence gate. Vestige deleted.
+- **Structural demotion gate** (builder sets `observed_ewma_ms := unknown` < 3 samples; gauge displays from sample 1); **heir adopt retry/TableTag**; **`sched_v => 2`** in the 0.10 enumeration + orphan window; FORCE never bypasses `sched_v` (13.4b); `rtt_dropped_total` JSON `{negative, non_finite}`; JobRef master-created; entitlement-probe key under the separate budget; plain 60 s keepalive; ≤ 35 s polls (13.2/13.4b); fresh-per-step counters; ≤ 250 ms drain asymmetry; explicit-only `geo_disabled_total`; async locus = sole runtime writer of `geo_enabled`; post-adopt all-`sched_rtt` cold reset stated; `handle_cast` wording; G3 "capacity limits"; 13.6 all-slow as GATE assertion; all five eunit additions present in Part E (adopt→re-hello→snapshot→pick, five skip reasons, pinned-path EWMA, `internal` decode tolerance, probe done-with-`rtt_ms` skipped via the flag).
+
+**Math/purity re-checks**: EWMA seed `E1 = x1` (three 8000 s ⇒ 8000) holds; exclude-self threshold executable at N=2; min-EWMA survivor invariant is correct (the minimum candidate provably can't exceed 3× the others' median ⇒ all-slow Δ`health_demote_total` = 0 is guaranteed, and never-shed-all is indeed unreachable via the gate — the spec says so); tiers narrow-only; `select_v2` pure with pick emitting from Decisions; single pinned `update_counter` form; JSON↔metric naming rule and the `fleet_worker_report_mismatch_total` exception hold; the JSON surface covers all 15 metrics + 4 booleans + `schema_version` + `rtt_ms_other`.
+
+## Findings
+
+**F1 — Real gap (narrow): unpinned live-drain skip has no local-fallback reason label.** Part C commits that "drain-skips of unpinned candidates label the exhaustion too," but `sched_dispatch_local_total` / JSON `dispatch_local_total` only enumerate `empty_pool|capacity|drained_pin|send_fail|ack_miss`. Reachable via the acknowledged ≤ 250 ms build-vs-recheck window when the list then exhausts. Fix: add `drained` to the metric label set *and* the JSON keys (eunit 4 gains the case), or state unpinned drain-skips don't label. This is the only fold-level item I'd call unclosed.
+
+**F2 — Runnable-ness: three gate steps need two workers, text says "the EXISTING 2-node harness."** 13.3a, 13.3b, and 13.6 each require a victim *and* a healthy worker; "dual-node"/"2-node" reads as master + 1 worker, and 13.6/rev-4 explicitly claim no topology change. Either pin the extension (second worker compose service + join flow in the harness-wiring paragraph) or correct the wording. As written, 13.3a/13.3b/13.6 are not falsifiable on a 1-master + 1-worker stack.
+
+**F3 — Determinism: 13.3b races the async geo fill.** `provider_geo` publishes as `unknown` and fills asynchronously (A.1); any pick before the fill lands routes v1-style and could hit `us`, breaking the absolute `dispatch_worker_total{us, provider} = 0`. Also unpinned: that the 13.3b provider has **no legacy `region_tag`** — otherwise tier 4's comparator is `region_tag` and `geo_match_total{auto}` never fires. Fix: pin "provider without region_tag" + a settle barrier (drive until `geo_match_total{auto}` ≥ 1, then assert deltas).
+
+**F4 — Minor: 13.4/13.6 lack the bounded-poll/completion barrier 13.2/13.4b have.** 13.4 asserts `rtt_ms` presence after ≥ 3 jobs — pin "after completions / bounded ≤ 35 s poll"; 13.6's verification pick needs all 3 poisoning responses landed (3 TTFB samples) before it fires — the concurrency + ≥ 45 s budget implies it but doesn't pin it.
+
+**F5 — Wording residual: eunit 6(c)** says probe cold-start fill "never clobbers a newer `SampledAtMono` (write-time latest-wins)" — this resurrects the compare A.3/0.9 deleted as vacuous. The mechanism is the existence gate + handler serialization; reword to match.
+
+**F6 — Wording residual: Part 0.2** parenthetical "the old-pool catch-all drops+counts it" for the `{probe, JobSpec}` **self-cast** is vacuous (a self-cast cannot reach an old pool). The `{sched, 2, _}` tolerance matters for worker→master messages (load casts) in mixed-version windows; as written it misdirects the implementer.
+
+**F7 — Nit:** `sched_reserve_purged_total` semantics for `Internal` entries — purge removes the tracked entry with the decrement skipped, but whether the counter increments is unpinned (practically unreachable: probes are 1-token fast jobs).
+
+**F8 — Nit:** the probe hourly-cap counter's home (pool gen_server vs heir'd ETS) is unpinned; an owner crash-loop resets the budget. Default-off keeps the cost floor safe.
+
+**F9 — Nit:** the Part G checkbox claims every step asserts named keys "incl. `reserve_inflight`, `schema_version`" — no step asserts `schema_version`. Add it to 13.2 or soften the claim.
+
+## Verdict
+
+No architecture, math, or purity defects; all rev-9 folds verified landed and coherent; no newly-introduced defects beyond F1. **GO WITH FIXES** — the pi-audit GO box can be ticked once **F1** (reason-label gap), **F2** (harness topology pin), and **F3** (13.3b barrier + region_tag pin) are closed; F4–F9 are pin/wording cleanups that can land in the same edit batch.

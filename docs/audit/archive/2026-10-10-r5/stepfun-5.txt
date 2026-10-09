@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — all seven rev-5 folds are present and coherent; residuals are one testability gap, two stale/incorrect statements, and two unpinned details.
+
+**2. Critical risks**
+- **13.6's "fast TTFB < 2.67 s asserted" has no surface.** `/stats/sched` exposes no TTFB/EWMA gauge (`rtt_ms` is worker-reported full duration; logs are banned). As written the step is unfalsifiable.
+- **A.3 still says probes go "via the affinity-pin path"** — contradicts the `dispatch_probe/2` structural bypass (Part 0.2/C). An implementer could route probes through pick and increment reserves, breaking the "never touch the counter" invariant.
+- **Part D step 4 is misleading:** enabling `JANUS_WORKER_REGION` on one worker is NOT inert once any provider resolves to that region — the geo tier narrows to the declaring worker and concentrates all matching traffic on it (capacity/health mitigate, but it is a load spike).
+
+**3. Contradictions / stale claims**
+- A.3 affinity-pin wording vs. Part 0.2/C bypass (above).
+- 13.6 math: 3 × 2.67 s = 8.01 s > 8 000 ms victim EWMA — the stated inequality fails at the asserted bound. The 5 000 ms floor is the actually binding constraint; the assertion is decorative but wrong as written.
+- `sched_rtt` ETS keying never pinned: 6-tuple rows + "latest by SampledAtMono" + cold-start "no unexpired passive row" checks require a keyed lookup (`{Node, ProviderId}`) or an explicit ordering rule — gap.
+- Worker passive-RTT EWMA feed on ERROR completions unspecified (health EWMA excludes them; RTT path silent) — eunit/gate divergence risk.
+
+**4. Missing first-ship requirements**
+- A health-observation surface on `/stats/sched` (e.g. `health_ewma_ms` per node) — required by 13.6, valuable for ops.
+- Otherwise complete: mixed-version, heir/adopt, purge-age, clamp, usage filter, deploy order, NOTICE all present.
+
+**5. Architecture/design notes**
+- Purity, tier ordering (affinity > health > geo > sort), exclude-self demotion at N=2, single pinned `update_counter` form, ack-miss/purge lifecycle, and adopt-reset policy are internally consistent and coherent with corrective-write healing.
+- Structural probe exemption via `dispatch_probe/2` is the right call — keep A.3 aligned with it.
+- Narrowing + reserve loop interact safely: over-concentration sheds to local fallback; requests never fail.
+
+**6. Top 5 concrete edits**
+1. Add `"health_ewma_ms": {"<node>": float}` to `/stats/sched` (schema stays 1); rewrite 13.6's fast assertion against it.
+2. A.3: delete "via the affinity-pin path"; state "via `dispatch_probe/2` (direct pinned send, Part 0.2)".
+3. Part D step 4: rewrite — a declared region narrows matching traffic to that worker; declare all workers in a region before enabling, or keep capacity tight.
+4. Pin `sched_rtt` keyed `{Node, ProviderId}`, single row, latest `SampledAtMono` wins; state whether error completions feed the worker passive EWMA.
+5. 13.6: assert fast TTFB < 2 600 ms (or `3×fast_ewma < victim_ewma`); note the 5 000 ms floor binds.

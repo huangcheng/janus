@@ -1,0 +1,25 @@
+**1. Verdict: GO WITH FIXES** — the round-4 folds are substantively present and coherent; three small residual seams (probe-report contamination, purge-vs-late-done, clamp overflow) need pinning.
+
+**2. Critical risks**
+- **Probe completion leaks into canonical feeds.** A.3 says the probe "executes and reports like any job"; "like any job" includes the `done` `rtt_ms` piggyback (the pinned canonical PASSIVE writer) and the health TTFB feed. Only the *load-cast* probe result is pinned cold-start — nothing suppresses `rtt_ms`/TTFB on internal (probe) completions, violating "probe samples never enter passive EWMA" and polluting demotion with 1-token shapes.
+- **Purge-vs-late-done double decrement.** An ack-missed reservation purged at 10 min decrements once; if its `done` lands later (slow stream), an unconditional release decrements again → negative counter. Release must be keyed to tracked-set membership (purged ⇒ `done` decrements nothing). Not stated.
+- **Clamp overflow ambiguous**: `0 ≤ x ≤ 600000` — is `x > 600000` clamped down or dropped? Rev text says "drops negative/non-finite only".
+
+**3. Contradictions / stale claims**
+- A.3 still says probes are "dispatched to the target worker via the affinity-pin path (…the pin explains the capacity exemption)" — rev 5 claims that wording was deleted in favor of `dispatch_probe/2`. Direct contradiction.
+- Part C: "Opts (knob flags, **affinity**) come from persistent_term set at BOOT (env-only…)" contradicts Part B's per-request `affinity_node` and gate 13.6's runtime re-pinning of both providers mid-run (catalog hot-reload).
+
+**4. Missing first-ship requirements**
+- Pin that `dispatch_probe/2` itself performs the dispatchable/draining eligibility check (it bypasses the reserve loop's live re-check).
+- Specify probe jobs are excluded from the health TTFB EWMA (as from the passive EWMA).
+- Specify release semantics for completions of already-purged jobs.
+
+**5. Architecture/design notes**
+Tier ordering, exclude-self demotion (executable at N=2), `{Order, Decisions}` purity with pick-emitted metrics, single `update_counter` form + corrective-write clamp, adopt-resets-orphan policy, and 13.6's deterministic dual-pinning are sound and mutually consistent. `/stats/sched` schema is uniform (`schema_version`, `rtt_ms_other`, `drained_pin`, `fleet_` naming all agree). Harness realism (before-first-byte slow key, MSYS-safe driver) is properly addressed.
+
+**6. Top 5 edits**
+1. A.3: replace "affinity-pin path" with "via `janus_worker_pool:dispatch_probe/2` (reserve-loop-exempt)".
+2. Part 0.8/A.3: internal jobs carry no `rtt_ms` on done/error and never feed the health EWMA; eunit both.
+3. Part 0.11: "release decrements iff the job is still in the tracked set; post-purge `done` is a no-op" — add eunit case.
+4. Part 0.3: state `x > 600000` disposition (clamp to 600000 vs drop) and add the corresponding counter behavior.
+5. Part C: split the opts sentence — knob flags boot-time PT; `affinity_node`/`provider_id` per-request from catalog.

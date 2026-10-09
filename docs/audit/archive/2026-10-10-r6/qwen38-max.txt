@@ -1,0 +1,29 @@
+Audited `F:\Janus\docs\audit\target.md` (Scheduler v2 rev 6) against the rev-6 fold list.
+
+**1. Verdict:** GO WITH FIXES — all twelve rev-6 folds are present and internally coherent; the residuals are two ambiguities and three stale lines, none architectural.
+
+**2. Critical risks**
+- **FORCE vs `fresh` skip ambiguity breaks 13.4b.** Part 0.2 says `JANUS_SCHED_PROBE_FORCE` "bypasses cadence/staleness ONLY — never target eligibility." The target rule's single freshness predicate is "no unexpired passive row" (skip reason `fresh`). After 13.4 creates passive rows (10-min TTL), FORCE must bypass the fresh-skip or 13.4b can never issue a probe. "Staleness" implies it does, but the spec never says `fresh` is bypassed — reads as possibly "eligibility." Pin it.
+- **13.6 budget tightness.** 3 slow jobs × 8 s TTFB ≈ 24 s sequential; the ≥30 s budget plus fast-phase and unpinned pick leaves little margin. Poisoning sequential-vs-concurrent is unpinned.
+
+**3. Contradictions / stale claims**
+- Part C metrics line: "`sched_geo_disabled_total` (incremented ONCE at boot)" vs the JSON comment and fold ("once per disable EVENT — boot or async locus load failure"). The metrics bullet is stale.
+- 13.4b parenthetical says target = "catalog-known providers," dropping the rev-6 "AND ENABLED" from Part 0.2.
+- Part E.6 covers clamp drops/keeps-0.0 but omits the rev-6 "x > 600000 CLAMPED DOWN" case.
+
+**4. Missing first-ship requirements**
+- Explicit statement that FORCE bypasses the fresh/unexpired-row skip.
+- eunit for clamp-down (>600000) and for geo_disabled per-event increment.
+- Slow-key TTFB magnitude pinned in the mock contract (before-first-byte delay must be the mock's actual behavior, not just prose).
+
+**5. Architecture / design notes**
+- Exclude-self math verified at N=2: victim threshold = max(5000, 3×fast_ewma); fast_ewma<2600 ⇒ 3×2600=7800<8000 ⇒ victim demoted; healthy threshold=24000 ⇒ not symmetrically demoted. Min-EWMA survivor invariant holds (all-slow ⇒ no demotion), matching 13.6's all-slow variant.
+- `ets:update_counter(sched_reserve, Node, {2,1}, {Node,0})` is the correct 4-arity form; the negative-orphan race is real but bounded by the 30 s tick corrective write. EWMA seed-at-first-sample arithmetic (three 8000 ms ⇒ 8000; seeded-at-0 ⇒ 4625) is correct and 13.6 depends on it.
+- Cost floor preserved: `sched_rtt` rows accrue only from passive piggyback + probes; writing them regardless of `JANUS_SCHED_RTT` adds no upstream calls.
+
+**6. Top 5 concrete edits**
+1. Part 0.2: "FORCE bypasses cadence **and the fresh/unexpired-row skip**; never the hourly cap or dispatchable×enabled eligibility."
+2. Fix Part C metrics line to "`sched_geo_disabled_total` incremented once per disable EVENT."
+3. Add to E.6: clamp-down >600000 case; add geo_disabled per-event eunit.
+4. 13.4b: "target = catalog-known **AND ENABLED** providers."
+5. 13.6: pin poisoning as concurrent (or widen budget to ≥45 s) and pin the slow-key TTFB in the mock spec.

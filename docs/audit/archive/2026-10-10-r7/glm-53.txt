@@ -1,0 +1,53 @@
+# Audit — Scheduler v2 spec, rev 7 (target.md)
+
+**Verdict: GO WITH FIXES.** All 18 rev-7 folds are present and coherent; the architecture, demotion math, capacity single-ownership, and gate testability claims hold. Residuals are naming/pin level as claimed — with one seam that is more than a rename (Finding 1) but still bounded by mechanisms already in the spec.
+
+## Rev-7 fold verification (all present)
+
+| Fold | Location | Status |
+|---|---|---|
+| Probe envelope direction (pool-internal; worker sees normal job + `internal=>true`) | Part 0.2, A.3 | ✅ coherent with 0.10 |
+| Freshness counts probe rows ("no unexpired row, passive OR probe") | Part 0.2, A.3 cold-start fill | ⚠️ present but see Finding 2 |
+| `capacity =:= infinity` guard (skip comparison) | Part C step 3 | ✅ |
+| Adopt = cold re-hello; "windowed until in-flight drain" | Part 0.5 | ✅; rtt rows linger ≤ TTL for dead workers — bounded, fine |
+| Tracked map `JobRef => {Node, ReservedAtMono, ProviderId}` | Part 0.11, Part C | ✅ but see Finding 1 |
+| `sched_health_ewma_ms` / `sched_reserve_inflight` gauges; `sched_rtt_ms` 64-entry cap | Part C metrics + JSON | ✅ naming rule consistent across all keys |
+| Pinned path `geo_source := none` | Part B tier 2 | ✅ (see Note 11) |
+| `sched_rtt` write-time latest-wins; clamp at master ingest | A.3 | ⚠️ see Finding 6 |
+| 13.6 relational assertion, concurrent poisoning, ≥45 s, mock contract | Part E 13.6 | ✅ assertion exactly mirrors the exclude-self predicate; host-robust |
+| 13.2 bounded ≤35 s poll | Part E 13.2 | ✅ satisfiable via the 30 s tick alone |
+| 13.4 rtt presence knob-off; 13.4b "known AND ENABLED" | Part E | ✅ |
+| Stale lines (tracked shape, geo_disable per-event, no mid-run re-pin) | Part C | ✅ except Finding 3 |
+| Eunit additions (seam-1 skip, clamp-down, per-event disable, `{drained}`, starvation doc, in-flight map dies with pool, pin feeds EWMA, specialist bias note, cost floor ETS-only) | 0.2/0.3/0.8/A.3/A.4/C/E | ✅ enumerated (two coverage nits, Findings 9) |
+
+## Findings
+
+1. **Tracked-set registration/release seam is unnamed (the one above pure naming).** Pick is deliberately off the gen_server (G3), the send-fail release hook lives in `janus_http_worker_client`, yet the tracked set is pool gen_server state (Part C) — the spec never says how a successful reserve enters the set or how send-fail removes it. It must be async casts (e.g. `{sched, 2, {reserved, ...}}` / `{released, ...}`), which opens a register-vs-`done` race: if `done` beats the register cast, release is a no-op and the slot stays pinned until the 10-min purge. Bounded and self-healing, but the spec's own TOCTOU-honesty standard requires naming the casts and stating the ordering argument (register is sent before dispatch; `done` causally follows dispatch) plus the purge backstop. Keeping the set as pool state is load-bearing (adopt-reset semantics) — don't move it to ETS; name the seam.
+
+2. **Part 0.2 target-rule sentence self-contradicts.** The lead-in says "with NO UNEXPIRED **PASSIVE** ROW" and the parenthetical immediately says "no unexpired row (passive OR probe)". The stale word "PASSIVE" in the lead-in is exactly what rev 7 meant to delete — delete it.
+
+3. **JSON `probe_skip_total` omits `drained`** (Part C key list `{"cap","cadence","fresh"}`) while the metric vocabulary (Part 0.2, Part C metrics) is `cap|cadence|fresh|drained`. Add the key.
+
+4. **`sched_rtt_dropped_total` scope ambiguous.** The name covers drops (negative/non-finite, Part 0.3), but eunit 6 attaches "(bounded by `sched_rtt_dropped_total`)" to the clamp-**down** >600000 case, implying clamp-downs count too. Pin it — recommend a `reason=drop|clamp` label or an explicit sentence that clamp-down does not increment.
+
+5. **13.6 unpinned-pick provenance under-specified.** Both harness providers are pinned at poisoning start; "no mid-run re-pin" doesn't say how the unpinned pick arises (third catalog entry vs unpin via hot-reload — an unpin is still a mid-run catalog mutation). Pin one mechanism.
+
+6. **`SampledAtMono` stamper unstated.** Part 0.9 forbids cross-node timestamps, so the master must stamp at ingest — the write-time latest-wins compare is really arrival-order. Say so in one sentence; otherwise a reader may implement a worker-supplied stamp and reintroduce skew.
+
+7. **`geo_cache` re-resolve guard unnamed.** The rev-7 summary says "per-host monotonic timestamp guard"; A.1 pins only the rate (≤1/host/15 min). Negatives need a last-attempt field distinct from `resolved_at` — pin the field.
+
+8. **Minor, no code impact:** `{sched, 2, {probe, ...}}` reusing the wire-cast family for a master-internal self-trigger conflates two namespaces — harmless (old-master tolerance never applies to it), but one sentence saying so would prevent confusion; rollback wording "rebuilt/cleared at boot" (Part D) sits awkwardly against heir-persisted tables — rollback correctness rests on knob-off inertness, not clearing, so reword; `geo_match_total{none}` conflates pin-path picks with genuine no-match — fine as a pick partition, state it; error-path completions also write passive `rtt_ms` rows ("per completion" in A.3) — confirm intended, one sentence.
+
+9. **Test-coverage nits:** no eunit enumerates the four probe skip reasons (only counter-neutrality for `dispatch_probe/2`); 13.4b doesn't pin `JANUS_SCHED_PROBE_MAX_HOURLY` headroom — FORCE still consumes the cluster cap, so step retries can starve `probe_total` and flake the step.
+
+## Confirmed sound (spot checks)
+
+- v1-equivalence (eunit 3) holds: knobs off ⇒ health tier gated off, legacy `region_tag` ungated, `rtt_key := infinity` ⇒ exactly `(inflight, name)`; affinity absolute preserved.
+- Demotion math at N=2: exclude-self median = the other candidate's EWMA; 13.6's relational assertion `victim_ewma > max(5000, 3×fast_ewma)` is literally the predicate — falsifiable and host-speed robust (fails loud only if the fast worker genuinely reads ≥ 2.67 s, where non-demotion is correct behavior).
+- Counter discipline: single 4-arity `update_counter` form everywhere; forbidden wrap-form named; corrective-write negatives healed by the tick; probes structurally outside the loop in all three places (0.2, 0.7, C) — consistent.
+- Purge idempotency: post-purge `done` no-op via tracked-set membership; ack-miss pending; nodedown deletes — no path to a permanent negative or a pinned slot past 10 min.
+- Heir mechanics: `give_away` direction valid (heir owns after transfer), GiftData tag-stability, all five tables, adopt eunit present.
+- Cost floor: default config zero extra upstream calls; probes opt-in, capped, usage-filtered, and 13.4b asserts the usage delta is zero.
+- Mixed version: additive map keys + cast catch-all, with the one named risk (shipped pool may lack `handle_cast` entirely ⇒ cast would crash, not drop) already covered by the verify-first test-order rule and masters-first ordering.
+
+Fix Findings 1–7 (mechanical), fold Findings 8–9 as sentences, and the spec is ratifiable.

@@ -1,0 +1,27 @@
+**1. Verdict:** GO WITH FIXES — the rev-2 folds are present and largely coherent, but capacity-empty-set semantics contradict gate 13.5, and "self-report never enters selection" is literally false of the RTT path.
+
+**2. Critical risks**
+- Capacity fallback incoherence (see §3) — 13.5 is unfalsifiable as written.
+- `rtt_map` is worker-measured/self-reported (A.3 `rtt_ms` piggyback, EWMA α=0.25 on the worker), yet Part 0.3 states self-report "NEVER enters selection." The RTT sort key violates that sentence. The defensible claim is narrower: RTT is compared *worker-to-worker like-for-like* (all measure upstream-to-same-provider), never against master-observed end-to-end health. As written, the divergence rule's own rationale contradicts tier 6.
+- Pure `select_v2` cannot implement tier 3: it takes snapshot `capacity` + `inflight` (explicitly "sort hint only"), while Part 0.6/Part C make the live reservation counter the truth — which lives in `pick/1`, outside the pure function. The purity/determinism contract and the capacity tier describe two different code paths.
+
+**3. Contradictions or stale claims**
+- Part B tier 3 / Part 0.7: "all-at-capacity ⇒ filter IGNORED, never an empty dispatch, jobs keep flowing (v1 dispatched to least-inflight)" vs gate 13.5 asserting `sched_dispatch_local_total{reason=capacity} ≥ 1` and `dispatch_worker_total = 1` for the pair. If the filter is ignored, job 2 rides the worker (local counter 0, worker count 2); if it falls back locally, "never an empty dispatch" is false and `reason=capacity` is live. Pick one.
+- Part 0.6 reserve-then-rollback ("result > capacity ⇒ try next") ends in "next candidate" exhaustion with no defined outcome — overlaps the above.
+- Region_tag override ("outranks auto-geo… unchanged from v1") sits inside tier 5, which is gated by `geo_enabled`. Default-off bitwise-v1 then breaks existing region_tag deployments. Region_tag must be ungated (it is v1 behavior); only the auto-geo comparator is knob-gated.
+- Locus seam, async DNS fill, unknown-vs-unknown guard, precomputed `demote_ms`, one-row ETS swap, master-issued probes with cluster cap, env-only worker geo: all folds verified present and sound.
+
+**4. Missing first-ship requirements**
+- Probe jobs vs capacity/inflight: do internal probes consume reservation slots and the sort hint? Undefined; specify exempt (recommended) + assert in 13.4b.
+- `rtt_ms` validity clamp (accept only finite floats in e.g. 0…600000 ms) — bounds a lying worker's influence on sorting.
+- 13.5 driver: assert the *counter for the winning regime*, not today's guess.
+
+**5. Architecture/design notes**
+Move capacity enforcement wholly into `pick/1`'s reserve loop; let tier 3 of `select_v2` pre-drop only snapshot-certain over-capacity candidates as an optimization, documenting that the counter decides. Reword Part 0.3 as "self-report never enters health demotion."
+
+**6. Top 5 concrete edits**
+1. Reconcile tier 3 ↔ Part 0.7 ↔ 13.5 into one capacity-empty-set rule (prefer: empty ⇒ local fallback, `reason=capacity`; delete "never an empty dispatch").
+2. Delete/relocate pure tier-3 filter; document reserve loop as enforcement.
+3. Reword "self-report NEVER enters selection" → health-only; add `rtt_ms` clamp.
+4. Ungate legacy `region_tag` from `JANUS_SCHED_GEO`; add eunit (region_tag set, knobs off ≡ v1).
+5. Specify probe exemption from capacity + 13.4b assertion.

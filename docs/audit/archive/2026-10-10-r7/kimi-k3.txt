@@ -1,0 +1,35 @@
+# Audit — Scheduler v2 spec rev 7
+
+**Verdict: GO WITH FIXES.** All rev-7 folds are present and land where claimed; the demotion math, counter form, heir/adopt mechanics, and purity boundaries remain intact. Residuals are naming/pin/seam-coverage level — none touch architecture or math. Twelve items below, ordered by weight.
+
+## Fold verification (all confirmed present)
+
+- Probe envelope direction: Part 0.2 — `{sched,2,{probe,JobSpec}}` pool-internal; worker receives a normal pinned job with `internal => true` ✓
+- Freshness counts both row sources: Part 0.2 + A.3 cold-start fill ✓; FORCE bypasses cadence + fresh-skip only ✓
+- `Result > infinity` skip: Part C pick step 3 ✓
+- Adopt = cold re-hello; over-admission "windowed until in-flight drain": Part 0.5 ✓
+- Tracked map `JobRef => {Node, ReservedAtMono, ProviderId}`: Parts 0.11 + C ✓
+- Naming rule + `sched_health_ewma_ms`/`sched_reserve_inflight` gauges + 64-entry gauge cap: Part C ✓ (JSON↔metric mapping verified key-by-key, all consistent)
+- Pinned-path `geo_source := none`: Part B step 2 ✓
+- Write-time latest-wins + clamp at master ingest: Part A.3 ✓ (both ingest paths run inside the pool gen_server, so compare-then-write is serialized — the race claim is honest)
+- 13.6 relational assertion, concurrent poisoning, ≥45 s budget, mock contract: ✓ (arithmetic re-checked: E1=x1, three ~8000 ms samples ⇒ EWMA ≈ 8000 > max(5000, 3×sub-second) = 5000, binding constraint is the floor as stated)
+- 13.2 bounded ≤35 s poll ✓; 13.4 knob-off rtt_ms presence ✓; 13.4b "catalog-known AND ENABLED" ✓
+- Stale-line fixes (tracked-set shape, per-event geo_disabled, pins-once): ✓
+- Eunit additions (three-seam internal exclusion, clamp-down, seed rule, per-event geo_disabled): E.4/E.6/E.8 ✓; documented limitations (load-cast suppression, in-flight map dies with pool, non-streaming bias, ETS-only cost floor): Parts 0.3/0.2/A.4/C ✓
+
+## Residuals
+
+1. **Part 0.2 contradicts itself on the freshness predicate.** Headline text still reads "with NO UNEXPIRED PASSIVE ROW (single freshness predicate…)" while the parenthetical redefines it as "no unexpired row (passive OR probe)". The capitalized phrase is stale rev-6 text surviving the fold — A.3 already uses the correct form. Rewrite the sentence so the predicate appears once.
+2. **`/stats/sched` JSON omits `drained` from `probe_skip_total`.** The metric enum is `cap|cadence|fresh|drained` (Part 0.2) but the pinned JSON surface lists only `{"cap","cadence","fresh"}` (Part C). A drained skip is invisible on the assertion surface — add the key.
+3. **Old-worker tolerance of `internal => true` is unverified.** The rev-7 "worker sees NO new message type" safety claim rests on old workers ignoring an additive job-map key, but E.7 covers only hello shapes, done/error shapes, and the load cast. Add an eunit (old job-decode clause + map with `internal`) and a Part 0.10 sentence.
+4. **Probe cap burn during the masters-first window.** Probing a still-old worker returns no rtt/load data ⇒ the pair never gains an unexpired row ⇒ re-probed every cadence until the 10/hr cluster cap is spent, starving all other pairs (`probe_skip{cap}`). Part 0.10 acknowledges missing reports but not the cap drain. Document it, or suppress probing workers whose hello predates the feature.
+5. **`geo_disabled_total` fires on default config.** Part 0.1's first clause (knob unset + mmdb missing ⇒ auto-off + loud log + counter) increments the counter and logs loudly on every default boot — contradicting "default = no behavior change" and making E.6's "boot case" encode noise. Pin: counter/log only when geo was explicitly requested (knob=1 or TEST_HOSTS) and then disabled; silent when simply never enabled.
+6. **No skip reason for per-worker in-flight suppression.** "≤ 1 probe in flight per worker" has no `probe_skip_total` reason and no stated target-selection behavior (exclude worker silently? try next pair?). Pin one.
+7. **Ingest-before-release ordering unpinned.** The piggyback's `{{Node, ProviderId}}` row key needs ProviderId from the tracked map, but release removes the entry. Pin in Part 0.11/C: done handler ingests `rtt_ms` *then* releases; a post-purge done drops the sample (no ProviderId) — acceptable, document.
+8. **Slice-Q seam unpinned for probes.** The "separate additive sub-budget" claim implies internal jobs bypass Slice-Q per-node spend accounting on the worker, but no seam is named (unlike the reserve counter and `janus_usage`, which are). Pin or document the interaction.
+9. **Re-hello trigger post-adopt unverified.** The adopt path's correctness rests on "sticky sessions re-hello" while dist connections survive (no nodedown fires). Name the v1 mechanism that makes a worker re-hello when the pool owner dies but the node lives, and extend E.4 to assert `sched_workers`/pool-record repopulation post-adopt — E.4 currently covers tables and counter reset only.
+10. **Probe-skip eunit coverage not enumerated.** Part E has no case asserting `probe_skip_total` reasons — in particular `{drained}` via `dispatch_probe/2`'s own eligibility check. Add to E.4.
+11. **Runtime exception to "boot-time-only" opts unpinned.** The async locus load/failure flips geo availability at runtime ("selection ≡ v1 until the locus load succeeds"), but Part C pins knob flags as boot-time PT, restart to change. Pin that the async locus result is the one sanctioned runtime writer of the geo_enabled PT key.
+12. **Nits.** (a) 13.4 asserts `rtt_ms` presence with the knob off — pin explicitly that the worker-side piggyback is ungated (the knob is master-side only); currently only implied. (b) Pinned picks emit `sched_geo_match_total{none}` via `Decisions.geo_source := none`, inflating the none bucket with affinity traffic — semantically tolerable, worth one documenting sentence.
+
+None of these require restructuring: 1, 2, 5, 10 are surface/enum fixes; 3, 7, 8, 9, 11 are one-sentence pins plus (for 3, 9, 10) targeted eunit additions; 4 and 6 are behavior clarifications within the existing probe machinery.

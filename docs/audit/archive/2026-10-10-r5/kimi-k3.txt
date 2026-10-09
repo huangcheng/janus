@@ -1,0 +1,34 @@
+## 1. Verdict
+
+**GO WITH FIXES** — all rev-5 folds are present and coherent; residuals are one stale seam reference, one probe-freshness contradiction, and two lifecycle gaps (purge-age vs long streams, probe rows in `rtt_map`).
+
+## 2. Critical risks
+
+- **Purge age (10 min) vs long-lived streams.** A legitimate active stream older than 10 min is still in the tracked set; the purge removes it and decrements once, then `done` decrements again → negative counter (tick-healed) **and** a capacity slot freed while the job still runs → over-admission. Cowboy `idle_timeout=300s` bounds *idle* streams, not *active* ones. Purge must either skip entries still tracked as alive or the age must exceed a pinned max job duration.
+- **Probe-source rows and selection.** `sched_rtt` rows carry `Source :: passive|probe`, but the snapshot builder's `rtt_map` assembly never says whether probe-source rows feed the `rtt_key` sort. "Cold-start fill" implies they should (else the fill is gauge-only decoration), but unpinned → implementer coin-flip. Pin it.
+
+## 3. Contradictions or stale claims
+
+- **A.3 stale seam**: "dispatched to the target worker via the affinity-pin path (Part 0.2 — the pin explains the capacity exemption)" — rev 5 deleted exactly this wording; the seam is `dispatch_probe/2`. Part 0.2/0.7 are correct; A.3 is the orphan.
+- **Probe freshness double definition**: Part 0.2 states both "only when no passive sample in 5 min" AND target = "absent/expired RTT" (10-min TTL). A (worker,provider) with a 6–10-min-old passive row satisfies the first and fails the second; `sched_probe_skip_total{fresh}` vs target-eligibility is ambiguous in that window.
+- **`sched_geo_disabled_total` "ONCE at boot"** vs locus async load failure "auto-off + counter" happening post-boot — increment-once-per-disable-event, not once-ever.
+- Divergence/probe-cadence state "cleared on nodedown" (0.2/0.3) vs living in the pool gen_server — owner crash without nodedown also clears it; say so.
+
+## 4. Missing first-ship requirements
+
+- Owner-restart loss of the health-EWMA state (not among the five heir'd tables, not pool records) is undocumented — health verdicts silently reset on adopt; accept-and-document like the reserve reset.
+- Probe exemption means a capacity-1 worker runs 2 concurrent jobs (job + probe); capacity invariant wording ("bounds concurrent jobs") needs the probe carve-out stated in A.5, not only 0.7.
+
+## 5. Architecture/design notes
+
+- Single-writer pin + `SampledAtMono`-keyed gauge/cap is clean and eunit-able.
+- Corrective-write clamp with tick healing is honest about `update_counter` limits; orphan re-insert via Default tuple is correctly covered.
+- 13.6 is now genuinely deterministic; exclude-self math at N=2 verified against the pinned numbers (3×2.67s < 8000).
+
+## 6. Top 5 concrete edits
+
+1. A.3: replace "affinity-pin path" with `janus_worker_pool:dispatch_probe/2`.
+2. 0.2: unify probe freshness — one predicate (e.g., "no unexpired passive row"; drop the 5-min figure or make TTL=5 min).
+3. 0.11: purge only entries whose job is confirmed gone (or set purge age > pinned max job duration); document the long-stream case.
+4. C/A.3: pin that probe-source rows DO populate snapshot `rtt_map` until a passive row lands.
+5. 0.5: add health-EWMA/divergence/cadence state to the adopt-reset list; A.5: state the probe exemption from the capacity invariant.

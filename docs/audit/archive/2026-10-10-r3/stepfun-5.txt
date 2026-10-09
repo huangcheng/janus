@@ -1,0 +1,26 @@
+**1. Verdict:** GO WITH FIXES — round-2 folds are present and coherent (capacity single-owner, mixed-version, purity all check out), but one real over-admission bug at ack-miss plus two gate-falsifiability gaps remain.
+
+**2. Critical risks**
+- **Ack-miss over-release (Part 0.11/C):** "Failed dispatch (send error / ack miss) releases the reservation" is unsafe for ack-miss — a miss means the ack was late, not that the worker didn't run the job. Releasing while the worker executes over-admits past capacity and can drive a negative counter when the worker's `done` later decrements. This undercuts the capacity invariant the rev-3 fold just fixed.
+- **13.6 under-samples its own precondition:** "≥ 3 jobs ⇒ `health_demote_total` ≥ 1" cannot hold — demotion requires ≥ 3 samples *and* `demote_ms` needs ≥ 2 candidates with ≥ 3 samples. With 3 total jobs split 2/1, no EWMA exists; the step is flaky or vacuous.
+- **13.4b asserts a skip whose mechanism is unspecified:** "usage writer SKIPS internal-flagged jobs" never defines the flag field on the job/dispatch record or the writer's filter, so the zero-delta assertion isn't implementable.
+
+**3. Contradictions / stale claims**
+- Round-2 summary says "tier-6 sort input"; the spec numbers the `{rtt_key, inflight, name}` sort as **tier 5**. Cosmetic; fix the summary.
+- `geo_cache` negative TTL (1 h) with no re-resolve path pins a provider to `unknown` in the persistent_term map for up to 30 d (next flush) — stale-unknown window.
+- 13.5 relies on a mock "SLOW key" that is referenced but never specified as a harness change.
+
+**4. Missing first-ship requirements**
+- Deploy/skill runbook for mmdb **refresh rotation** (license-key expiry, refresh failure) — only initial placement is covered.
+- The reserve-loop live-drain re-check reads "pool ETS" — the table is never named.
+- `internal => true` flag path dispatch → usage writer (see above).
+
+**5. Architecture notes**
+Coherent and consistent elsewhere: tiers narrow-only (affinity→demotion→geo→sort never widens); `rtt_key := infinity` when off gives exact `(inflight, name)`; unknown-vs-unknown guard closes the geo false-match; `is_number` guard + `DemoteMs = infinity` (N<2) makes single-worker fleets health-inert by design; snapshot single-row atomic swap + heir + badarg/[] fallback; masters-first deploy is safe both directions; `GEO_TEST_HOSTS` satisfying explicit-1 makes 13.3b CI-runnable. Capacity semantics are single-specified across 0.7/B/C/metrics/13.5.
+
+**6. Top 5 concrete edits**
+1. **Part 0.11/C:** replace ack-miss release with send-fail-only release; ack-miss reservations stay pending until the worker's done/error or the 30 s tick; decrement must be idempotent and clamped (`max(0, …)`); document the resulting bounded transient over-admission.
+2. **13.6:** change to "≥ 6 jobs (≥ 3 per worker) ⇒ `health_demote_total` ≥ 1 AND fast worker wins subsequent picks."
+3. **Part 0.8/A.3:** name the internal flag field on the job record and the usage-writer filter clause; make 13.4b assert row-count delta = 0 against it.
+4. **A.1/C:** expired `geo_cache` rows ⇒ absent from `rtt_map`-equivalent join and dropped from the PT provider-geo map; add bounded re-resolve retry (capped, async) instead of flush-only recovery.
+5. **Part C:** name the pool-owned ETS table the reserve loop reads for the live drain check; align the round-2 summary "tier-6" with the spec's tier 5.

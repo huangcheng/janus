@@ -1,0 +1,1 @@
+deepseek: 3rd consecutive empty output (context limit at 1500-line targets; alive on short prompts). Recorded as infra-fail per fleet-saga precedent — 6 live models returned unanimous zero-architecture-objection verdicts.

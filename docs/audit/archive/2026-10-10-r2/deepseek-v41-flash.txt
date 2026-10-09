@@ -1,0 +1,31 @@
+1. **Verdict: GO WITH FIXES** — the rev-2 folds are mostly coherent, but capacity semantics, the health comparison, and gate 13.5 still contradict each other.
+
+2. **Critical risks**
+- **Health demotion is an Erlang trap.** `observed_ewma_ms > demote_ms` with `observed = unknown` (atom) is ALWAYS true (atom > number; `infinity < unknown`). New workers (<3 samples) get demoted, violating A.4/B.4. Needs `is_number(observed) andalso observed > demote_ms` or store `unknown := infinity`.
+- **Gate 13.5 contradicts tier 3.** Tier 3 says all-at-capacity ⇒ ignore filter, dispatch anyway + `sched_capacity_exhausted_total`. 13.5 asserts `sched_dispatch_local_total{reason=capacity} ≥ 1` and `worker_total = 1`. With capacity=1 and two jobs, tier 3 dispatches both to the worker (worker_total=2). One of the two is stale.
+- **Capacity has two owners.** B.3 (pure `select_v2`) needs live reservation counts, but Part C puts reserve-then-rollback in `pick`, and snapshot `inflight` is declared "sort hint only". `select_v2(snapshot, opts)` cannot see the counter — either tier 3 isn't pure, or it uses the hint it disclaims.
+- **Affinity vs Part 0.6.** Affinity is "absolute… ignoring capacity", so the live counter exceeds capacity while 0.6 calls it "the truth". Soft-cap needs to be stated or reservation suppressed under pin.
+- **Lock-free drain staleness.** Snapshot is a hint; a node draining between publish and pick still receives a job (v1's synchronous select could not). No re-check/lease specified.
+
+3. **Contradictions / stale claims**
+- `JANUS_SCHED_GEO=0` gating of tier 5 vs legacy `region_tag` staying v1-active — v1-equivalence eunit breaks if region_tag is gated.
+- "env-config only" vs Part C "persistent_term … hot-reload" (env doesn't reload).
+- 13.4b "usage rows carry no probe marker" — there is no marker column; assert row-count delta instead.
+
+4. **Missing first-ship requirements**
+- Worker region vocabulary is unconstrained; an operator using `us-west` never matches mapping output `us` (silent auto-geo miss).
+- No eunit against a real (tiny, committed) mmdb — injected lookups validate our mapping, not locus's field shape (subdivision API).
+- Probe spend can starve entitlement probes (shared per-provider budget).
+- Re-validation of drain/liveness at reservation time.
+
+5. **Architecture notes**
+- Reserve-then-rollback is sound, but needs a dispatch-time drain reject to close the lock-free staleness.
+- Precomputed `demote_ms` is deterministic but computed over the pre-narrow set; document that.
+- Validate locus subdivision/city support and Alpine/OTP-27 purity before ratifying.
+
+6. **Top 5 edits**
+1. Reconcile 13.5 with B.3: keep "ignore filter" (fix gate to `worker_total=2` + `sched_capacity_exhausted_total≥1`) or make exhaustion fall back locally.
+2. Guard demotion with `is_number/1`; eunit the new-worker never-demote case.
+3. Assign capacity to ONE place (pick's live loop); remove it from pure `select_v2`.
+4. State affinity's soft-cap effect on the counter (or suppress reservation).
+5. Add dispatch-time drain re-check + region-vocab validation + real-mmdb locus integration eunit.

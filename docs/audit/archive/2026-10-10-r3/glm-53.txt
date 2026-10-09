@@ -1,0 +1,24 @@
+**1. Verdict:** GO WITH FIXES — every round-2 fold is present and coherent (capacity single-ownership, soft-cap affinity, drain re-check, insert-default, ungated region_tag, is_number guard, probe exemptions, heir/deploy/test folds all check out); the residuals below are spec-precision defects, not architecture breaks.
+
+**2. Critical risks**
+- **Live drain re-check has no named storage.** Part C's reserve loop reads "pool ETS", but the Part 0.5 heir list covers only `sched_snapshot`/`sched_reserve`/`geo_cache`; worker records are described as gen_server state. As written the re-check either makes a gen_server call (violates "never a call on the pick path") or reads the ≤30 s-stale snapshot — reopening the exact staleness Part 0.12 claims closed.
+- **Gate 13.6 can't isolate one slow worker as written.** Jobs carry the provider key; with per-worker-global health, both workers serving the slow provider accumulate slow TTFB. Needs the slow provider's `affinity_node` pinned to the victim during the poisoning phase.
+
+**3. Contradictions or stale claims**
+- RTT clamp `0 < x` (Part 0.3/A.3) drops exactly-0.0 samples, while 13.4 anticipates "may round to zero" and asserts presence at "≥ 0.0" — mutually exclusive on the 0.0 edge.
+- Insert-default specified twice, divergently: `{Node, 0, [], 1}` (rev-3 header) vs `{Node, 2, 1, 0, 1}` (Part 0.6). Neither is a valid `ets:update_counter` shape, and the 5-tuple op form's Threshold/SetValue WRAPS (silently caps the counter) instead of refusing — the very trap this fold meant to close.
+- `sched_rtt` alone lacks a heir; losing it on owner restart is a safe v1 degradation, but the asymmetry vs the other three tables is unstated.
+
+**4. Missing first-ship requirements**
+- Pool-init adoption of heir-held tables: a restarted owner calling `ets:new` on the still-registered name badargs; adopt-if-exists vs create-with-heir must be specified.
+- `/stats/sched` `rtt_ms` gauge source ambiguous: worker EWMA via the storm-bounded load cast, or master-stored `sched_rtt` sample.
+
+**5. Architecture/design notes**
+Verified coherent: capacity semantics agree across 0.6/B/C/13.5; affinity soft cap consistent; ungated region_tag preserves v1 order (affinity → region → (inflight, name)); `is_number` guard correct (number < atom ⇒ `unknown` never demoted, `> infinity` false); never-shed-all; probe exemptions across 0.2/0.7/0.8; deploy order; cost floor; Slice-Q orthogonality. The drain re-check's check-then-increment TOCTOU is uneliminable but bounded and cooperative — document rather than claim "closed". 13.3a's `us-west` ∉ vocab trips the harmless typo warning; use `us` for clean gate logs.
+
+**6. Top 5 concrete edits**
+1. Name the pool-owned heir table the reserve loop reads for live draining (e.g. `sched_workers` rows `{Node, draining}`); add to Part 0.5's heir list and eunit 4.
+2. Pin one insert-default form — `ets:update_counter(sched_reserve, Node, {2, 1}, {Node, 0})` (4-arity Default tuple; no wrap semantics) — and delete both stale examples.
+3. Rewrite 13.6: pin the slow provider's `affinity_node` to the victim, ≥3 poisoning jobs, then assert the fast worker wins unpinned picks via `dispatch_worker_total` ordering.
+4. Align clamp and gate: either `0 =< x ≤ 600000` (drop non-finite/negative only) or assert `rtt_ms > 0.0` in 13.4.
+5. Specify pool-init table adoption (adopt existing named tables, else create with heir) and state the `sched_rtt` no-heir decision explicitly.

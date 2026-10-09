@@ -1,0 +1,33 @@
+# Spec Audit — Scheduler v2 (target.md, rev 1)
+
+## 1. Verdict
+**GO WITH FIXES** — the tier design and degradation discipline are sound, but the "default = v1" claim is falsified by the spec's own sort order, and the gate cannot exercise auto-geo as written.
+
+## 2. Critical risks
+- **Tier 6 breaks the default-off claim.** Passive RTT is always collected ("free" from real jobs). With `rtt_key` as the primary sort key, default config reorders workers vs v1's `(inflight, name)` — contradicting "selection identical to v1 (asserted by eunit + gate)" unless `JANUS_SCHED_GEO=0` also forces `rtt_key := unknown` for all candidates. Gating must be explicit.
+- **`done`/`error` piggyback is a mixed-version hazard.** Adding `rtt_ms` to *existing* job messages changes arity/shape; the spec only versions the new `{sched,2,_}` message. Old masters' fixed-arity clauses will crash or drop — make the piggyback an additive map field (or new tagged arity) and assert old-master coverage.
+- **Divergence rule compares unlike metrics.** Worker self-report is upstream-only latency; master observes full job duration (dist transit + chunk forwarding). Systematic overhead >3× on fast jobs ⇒ permanent false mismatch; `observed always wins` makes self-report dead weight and the counter noisy. Also: the 2-min divergence window needs state — where does it live?
+- **Auto worker geo is dead-on-arrival in docker.** Egress IP is private ⇒ `unknown`; the spec never says how a worker learns its egress IP (external HTTP/STUN call at boot — a new failure mode missing from Part 0). In practice `JANUS_WORKER_REGION` is the real mechanism; say so.
+- **13.3 can't falsify geo.** It sets provider `region_tag` — which *outranks* auto-geo — so it tests the legacy tier; mock provider hosts are private IPs ⇒ `provider_geo = unknown`; and one worker can't show narrowing ("selected, not excluded" passes vacuously).
+
+## 3. Contradictions / stale claims
+- Part C: "RTT map consulted at build time" vs "join deferred to pick-time" — pick one; snapshot Meta must carry a per-provider RTT map.
+- Part 0.1 says geo/RTT/load state is "TTL-bounded", but `geo_cache` is TTL ∞.
+- Gate "13.2 … pick returns local-fallback when pool empty (existing behavior assert)" — fine, but labeled under new numbering as if new.
+
+## 4. Missing first-ship requirements
+- GeoLite2 logistics: license-key-gated build-time download (CI secret), CC-BY attribution, update cadence/staleness; City DB is *required* (cn-* needs subdivisions — Country DB insufficient).
+- The city/subdivision → region tag mapping table is undefined.
+- Assertion that the old master's pool has a catch-all for unknown casts.
+
+## 5. Architecture/design notes
+- Single-row ETS swap is genuinely tear-free; ensure RTT/load ingest also triggers republish.
+- Median-based demote threshold is composition-dependent (geo narrowing shifts the median) — deterministic but document the interaction.
+- Purity of `select_v2` holds only if TTL pre-filtering stays in the builder — keep it there.
+
+## 6. Top 5 concrete edits
+1. State explicitly: `JANUS_SCHED_GEO=0` ⇒ `rtt_key` forced `unknown` ⇒ sort degrades to `(inflight, name)`; eunit asserts bitwise-identical selection to v1 under defaults.
+2. Redesign the `rtt_ms` piggyback as additive-map-safe; add an old-master compatibility eunit.
+3. Make divergence like-for-like (worker reports full job duration, or master compares against its own per-worker baseline); specify where the 2-min window lives.
+4. Rewrite 13.3: two workers with distinct `JANUS_WORKER_REGION`, and a test-only provider-geo override (or public-IP base_url) so auto-geo is actually exercised.
+5. Fix the Part C build-time/pick-time RTT contradiction; add GeoLite2 licensing/update/attribution and the subdivision→region mapping table to Part A.

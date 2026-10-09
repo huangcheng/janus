@@ -1,0 +1,30 @@
+## 1. Verdict
+GO WITH FIXES — all rev-2 folds are present, but the capacity fold ("never an empty dispatch … jobs keep flowing") collides with gate 13.5's expected local fallback, and G2 health has no dual-node gate step.
+
+## 2. Critical risks
+- **Capacity, three-way split**: tier 3 "all-at-capacity ⇒ ignore filter, jobs keep flowing" vs 13.5's `sched_dispatch_local_total{reason=capacity} ≥ 1` (one capacity-1 worker, two concurrent jobs). Ignoring the filter dispatches both to the worker; only rollback-exhaustion ⇒ local passes. Newly introduced by the rev-2 fold.
+- **Purity breach**: tier 3 filters on "live reservation" inside `select_v2`, contradicting Part 0.1 and the one-lookup pick; it must use snapshot inflight — the live counter is enforced only by reserve-then-rollback.
+- **Pin vs rollback**: tier 2's pin "ignores capacity … queues via normal inflight", yet rollback on a pinned sole candidate diverts to local; pin must bypass the cap check.
+- **Health signal**: EWMA is end-to-end duration (ack→done); streaming scales with workload, so busy workers look sick. Guards cover small fleets only; no decay/TTL.
+
+## 3. Contradictions / stale claims
+- "never an empty dispatch … v1 always dispatched to least-inflight" — stale rev-1 wording, incompatible with 13.5.
+- A.1 geo fill "marks the snapshot dirty", but provider geo is not in the worker-keyed snapshot; Part C pins opts to PT "set at boot/hot-reload" while geo fills async — unpinned.
+- RTT owner unpinned (per-job `rtt_ms` vs worker EWMA vs `sched_rtt` vs gauge); probe budget shared-with-entitlement vs additive unpinned.
+
+## 4. Missing first-ship requirements
+- No dual-node step for health demotion, never-shed-all, divergence, TTL, or reserve reconciliation. Add 13.6: `JANUS_SCHED_HEALTH=1`, one slowed worker, ≥3 jobs ⇒ `sched_health_demote_total ≥ 1`; all-slow ⇒ never-shed-all.
+- `/stats/sched` JSON keys unpinned though it is the assertion surface; `locus` rollout logistics (lock, hex cache, `_build` volume) absent.
+- Also unpinned: geo_cache re-resolve trigger, capacity parse failure, mmdb locale, probe `internal` flag.
+
+## 5. Architecture / design notes
+- Prefer master-observed TTFB over full duration for the health EWMA — workload-independent, still like-for-like.
+- Pin `select_v2` to return the ordered candidate list so rollback iterates without re-selecting.
+- 13.4b "no probe marker in usage rows" is vacuous — assert row-count delta; 13.5 needs a multi-second mock delay (flakiness).
+
+## 6. Top 5 concrete edits
+1. Rewrite Part B tier 3 / 0.7: filter on snapshot inflight; empty ⇒ counter + keep pre-capacity set; rollback is the sole hard cap; exhausted ⇒ local `reason=capacity`; delete the v1-least-inflight sentence.
+2. Tier 2: pinned dispatch bypasses the reservation cap (counter still incremented/released).
+3. Add gate 13.6 (health) and pin the `/stats/sched` JSON schema.
+4. Pin one RTT EWMA owner feeding `sched_rtt` + gauge; probe budget = separate additive sub-budget.
+5. Pin provider geo to a PT map `provider_id ⇒ geo` updated by the async fill; drop geo dirty-marking.

@@ -1,0 +1,121 @@
+# Audit — Scheduler v2 spec, rev 7
+
+## Verdict
+
+**No architectural or mathematical defects introduced in rev 7.** All 14 rev-7 folds are present in the spec body and each is functionally coherent with rev-6. There are 7 minor residuals (prose ambiguity, one overstated atomicity claim, two soft cross-reference gaps) — none block implementation. The spec remains GREEN with fixes.
+
+---
+
+## 1. Rev-7 fold verification
+
+| # | Fold | Where it lands | Status |
+|---|---|---|---|
+| 1 | Probe envelope DIRECTION — `{sched,2,{probe,_}}` pool-internal; worker sees normal pinned job + `internal=>true` | Part 0.2, 0.8, A.3 | ✓ coherent |
+| 2 | Probe freshness counts PROBE rows (`"no unexpired row (passive OR probe)"`) | Part 0.2 + clarifying clause | ⚠ present but prose-ambiguous in-line |
+| 3 | `Result > infinity` guard — comparison SKIPPED, not attempted | Part C step 3 | ✓ coherent |
+| 4 | Adopt = cold re-hello — `sched_reserve` reset, `sched_workers` pruned | Part 0.5 | ✓ coherent |
+| 5 | Tracked-map `{Node, ReservedAtMono, ProviderId}` — makes piggyback row key executable | Part 0.11, B input | ✓ coherent |
+| 6 | `sched_health_ewma_ms` / `sched_reserve_inflight` gauges + 64-entry `sched_rtt_ms` cap | Part C metrics list + JSON | ✓ coherent |
+| 7 | Pinned-path `Decisions.geo_source := none` | Part B step 2 | ✓ coherent |
+| 8 | `sched_rtt` write-time latest-wins via `SampledAtMono` compare | Part A.3, Part C | ⚠ "closes the race" claim overstated |
+| 9 | 13.6 relational `victim_ewma > max(5000, 3×fast_ewma)` via `health_ewma_ms` gauges | Part E 13.6 | ✓ coherent |
+| 10 | 13.2 deterministic snapshot_gen — one dispatch + ≤35 s bounded poll | Part E 13.2 | ✓ coherent |
+| 11 | 13.4 asserts `rtt_ms` presence with `JANUS_SCHED_RTT=off` (rows written regardless) | Part E 13.4 + A.3 | ✓ coherent |
+| 12 | 13.4b "catalog-known AND ENABLED" target rule | Part 0.2 | ✓ coherent |
+| 13 | Stale lines fixed (tracked-set shape, geo_disabled per-event, mid-run re-pin deleted) | Part 0.5/0.11, Part C, E 13.6 | ✓ coherent |
+| 14 | All 10 eunit additions enumerated | Part E.6 + cross-refs | ✓ coherent |
+
+All 7 prior-round seams (rev-2..rev-6) remain intact: `dispatch_probe/2` structural exemption (0.2), single pinned `ets:update_counter` form (C.3), `sched_workers` live drain re-check (C.3), exclude-self demotion at N=2 (A.4), `{Order, Decisions}` purity (B), 5-table heir coverage (0.5), cost floor ETS-only (C).
+
+---
+
+## 2. Residuals and newly-introduced defects
+
+### 2.1 `sched_rtt` write-time latest-wins is not atomic (rev-7 fold 8, overstated claim)
+
+**Spec wording** (Part A.3): "the WRITE compares `SampledAtMono` before overwriting (write-time latest-wins — a late piggyback cannot clobber a newer row; a probe result arriving after a passive row landed is discarded, wasting a paid probe, documented)."
+
+Fold summary in header: "closes the concurrent piggyback-vs-cold-start race".
+
+**Issue.** ETS has no native CAS for non-key fields. The described mechanism is `lookup → compare SampledAtMono → insert`, which is a non-atomic read-then-write. Two writers can both see no row (or the same older row) and both insert; only the last insert wins by ETS overwrite order — not by `SampledAtMono` order. The "closes" word is stronger than the mechanism delivers.
+
+**Practical impact.** Narrow: writers run inside serialised `handle_cast` / `handle_info` clauses of the pool gen_server, so contention is one-in-flight at a time per process. The race manifests only if a load-cast probe result and a piggyback `done` are mid-flight to different process states — unlikely under v1 traffic.
+
+**Recommend.** Soften to "best-effort latest-wins; serialised execution of pool handlers narrows the race to negligible" — or use `ets:update_element` with an in-Erlang-and-in-row sequence if you want stronger. Do not change the documented waste-of-paid-probe disposition.
+
+### 2.2 Adopt does not prune `sched_rtt` rows for absent nodes (rev-7 fold 4, gap)
+
+**Spec wording** (Part 0.5): adopt RESETS `sched_reserve` via `delete_all_objects` and PRUNES `sched_workers` for absent nodes — `sched_rtt` is not mentioned.
+
+**Issue.** Post-adopt, `sched_workers` is empty (no records yet) and `sched_rtt` retains rows for any worker that died AFTER the old owner crashed but BEFORE the new owner's nodedown handler ran. 10-min TTL bounds the window; `/stats/sched` `rtt_ms` reads by recency and the `rtt_ms_other` aggregate keeps JSON bounded.
+
+**Practical impact.** Brief stale-row window for workers that died during the master's outage (typically sub-second). No functional defect — bounded by TTL.
+
+**Recommend.** One-line addition to Part 0.5: "Adopt also prunes `sched_rtt` rows for nodes absent from pool records; rows whose node has no pool record AND no surviving entry in `sched_reserve` are removed." Or accept TTL as the bound and document explicitly.
+
+### 2.3 Prose ambiguity in the probe-target rule (rev-7 fold 2)
+
+**Spec wording** (Part 0.2): "the least-recently-probed (worker, provider) pair among dispatchable workers × catalog-known AND ENABLED providers with NO UNEXPIRED PASSIVE ROW (single freshness predicate — the 10-min row TTL is the bound; … freshness counts BOTH row sources — the predicate is 'no unexpired row (passive OR probe)'…)."
+
+The leading phrase "NO UNEXPIRED PASSIVE ROW" survives alongside the fold's clarification "no unexpired row (passive OR probe)". A naive reader could latch onto the capitalized legacy phrase and conclude the predicate ignores probe rows.
+
+**Recommend.** Re-flow to a single statement: "Target rule: least-recently-probed (worker, provider) among dispatchable workers × catalog-known-AND-ENABLED providers whose freshness predicate is 'no unexpired `sched_rtt` row' (BOTH passive AND probe rows count — the 10-min row TTL is the bound)." Removes the inline contradiction.
+
+### 2.4 `Result > infinity` guard rationale (rev-7 fold 3, fine print)
+
+**Spec wording** (Part C step 3): "an atom-vs-number guard comparison would badarg".
+
+**Note.** The badarg only fires inside a `case … of` guard or `if` guard — plain `>` between integer and atom evaluates in Erlang term order (atom > number) and returns `false` without raising. The skip is correct regardless; the rationale is only true under guard expressions. Worth tightening to "an atom-vs-number comparison inside a guard expression badargs; we skip to keep the hot path non-guard-pure."
+
+### 2.5 `dispatch_local_total{reason}` precedence on mixed exhaustions (minor)
+
+**Spec wording** (Part C step 3): "list exhausted ⇒ local fallback (`sched_dispatch_local_total{reason=capacity}`; a DRAINED pinned candidate ⇒ `reason=drained_pin}`)."
+
+**Gap.** If the loop hits a drained skip → capacity fail → drained skip sequence, what's the reason label on exhaustion? `capacity` wins under the current prose because it's the explicit clause for the "list exhausted" case, but `drained_pin` is only defined for the pinned-candidate-was-drained scenario. This rarely matters (the JSON consumer sees counts per reason anyway), but the spec doesn't fully enumerate the exhaustion-reason selection rules.
+
+**Recommend.** Add: "On list exhaustion, `reason` is the first non-`ok` outcome seen in iteration order; a drained-pinned entry found at re-check ⇒ `drained_pin` regardless of later candidates."
+
+### 2.6 `dispatch_probe/2` eligibility-check implementation is underspecified
+
+**Spec wording** (Part 0.2): "Probes BYPASS pick's reserve loop entirely … and `dispatch_probe/2` performs its OWN draining/dispatchable eligibility check."
+
+The structural exemption is fully pinned (no counter touch), but the call site — does it do a `sched_workers` lookup, a draining check, a dispatchable-worker lookup, an enabled-provider check — is not enumerated. Acceptable for a spec level (this is what eunit + gate 13.4b's FORCE-bypass tests will pin down), but the bullet could include "same primitives as pick's loop minus the counter; live `sched_workers` draining re-check + catalog build output enabled-flag".
+
+### 2.7 Probe-envelope wording muddles "envelope" vs "internal trigger"
+
+**Spec wording** (Part 0.2): "the envelope `{sched, 2, {probe, JobSpec}}` is POOL-INTERNAL (the master-side trigger consumed by `dispatch_probe/2`'s own logic)".
+
+"Envelope" suggests a network frame, but the immediate clarification says it's a master-internal trigger. The intent (no new worker-side message type) is unambiguous in context, and the old-master tolerance rule is correctly carried by the broader "`{sched, 2, _}` via cast ⇒ catch-all" claim in Part 0.10.
+
+**Recommend.** Rephrase: "probes are kicked via an internal self-cast `{sched, 2, {probe, JobSpec}}` consumed by the pool's own `dispatch_probe/2` handle_clause; old-pool catch-all drops+counts — same `{sched, 2, _}` tolerance rule as load."
+
+---
+
+## 3. Self-review checklist (Part G)
+
+| Item | Status |
+|---|---|
+| Every failure mode has a degradation path to v1 behavior | ✓ |
+| Cost floor: default config adds zero upstream calls | ✓ (A.3 / C note pinned) |
+| Selection pure; capacity single-ownership, single pinned `update_counter` form; atom-order trap closed | ✓ (B + C.3 + A.4 guard) |
+| Demotion math executable at N=2 (exclude-self) | ✓ |
+| Mixed-version safety VERIFIED + deploy order pinned | ✓ (0.10, D.1) |
+| Capacity semantics single-specified across Parts 0/B/C/metrics/gate 13.5; ack-miss over-release closed | ✓ |
+| Heir mechanics real — all five tables covered, `janus_ets_heir` gen_server in janus_core supervisor | ✓ |
+| Probes structurally outside the reserve loop; ack-miss pending + purge-age; adopt resets orphan counters | ✓ (with 2.2 noted) |
+| Tests enumerated: eunit-first + gate 13.2–13.6 with named `/stats/sched` assertions | ✓ |
+| Default config eunit-proven v1 (region-tagged fixtures) | ✓ |
+
+---
+
+## 4. Recommendation
+
+**GO WITH FIXES** (rev 7). Land the seven prose/atomicity tightenings in 2.1–2.7 as a single editorial pass before freeze — none change architecture or math. The spec is implementation-ready.
+
+Specific must-fix before implementation kickoff:
+
+1. (2.1) Soften "closes the race" to "best-effort latest-wins under serialised cast handlers".
+2. (2.3) Re-flow the freshness predicate to a single unambiguous statement.
+3. (2.5) Pin the exhaustion-reason selection rule.
+
+The rest are nice-to-have polish.

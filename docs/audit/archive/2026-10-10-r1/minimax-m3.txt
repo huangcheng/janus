@@ -1,0 +1,36 @@
+## Audit — Scheduler v2 spec
+
+**1. Verdict:** NO-GO — the mmdb reader decision, probe-budget scoping, and geo-cache TTL are not first-ship safe as written; ship-blockers are real but small.
+
+**2. Critical risks**
+
+- **mmdb "hand-rolled <300 lines OR dep".** GeoLite2-City parsing requires binary-tree section decoders, IPv4/IPv6, pointer chasing, multiple value types. Real readers are 1000+ lines; 300 is wishful. A wrong reader silently mis-tags providers → wrong workers preferred for years. Don't gamble.
+- **Probe budget is per-worker, not cluster-wide.** "≤ 1 in flight per worker×provider" with 60s cadence means N workers burn N probes/min/provider, exhausting the entitlement-probe budget and triggering upstream-side rate limits. Need an explicit cluster-wide cap.
+- **Geo cache TTL ∞.** CDN endpoints migrate; an outdated cache permanently pins selection to a dead region with no automatic detection. 30-day TTL + admin force-flush is the minimum.
+- **"Median of remaining candidates" at tier 5 is ambiguous.** If computed at pick-time, adding a healthy worker can change everyone else's `demote_ms` and break determinism. Must be precomputed into the snapshot.
+- **Gate 13.3 is unfalsifiable.** With one worker, "geo matched" = "the only worker got picked" — proves nothing about preference. Need a 2-worker variant to assert ranking, not just non-exclusion.
+
+**3. Contradictions / stale**
+
+- Part A.1: "reader is the default" while Part D says auto-off when mmdb missing — fine, but "300-line cap" is invented and unverified.
+- Part 0.3 introduces `fleet_worker_report_mismatch_total` without naming it in Part C's metrics list (only mentioned in C's metric enumeration). Add it.
+- Part B says "rtt_key ... unknown sorts last as infinity" but tier 6 is `{rtt_key, inflight, name}` — confirm `unknown` is encoded as `infinity` atom, not a tuple sentinel.
+
+**4. Missing first-ship**
+
+- MaxMind license sourcing: where does the .mmdb come from at build time? `MAXMIND_LICENSE_KEY` build arg + `NOTICE` attribution file. AGENTS.md forbids committing keys.
+- Concrete assertion surfaces for 13.5: name the log line / metric that distinguishes "local fallback" from "worker dispatch" — today vague.
+- Rollback doc: spell out "no DB writes, geo_cache rebuilt at boot" so `env off + recreate` is provable.
+- Gate step IDs (13.2–13.5) must be cross-checked against current `TEST-FLOWS.md` before this spec is merged — assume the file before claiming it.
+
+**5. Architecture / design**
+
+Read-path-on-ETS with gen_server-as-writer is the right call; preserves nodedown/monitor machinery. Cost floor (passive-only default) is correctly stated. Local fallback as universal blast-radius limit is sound. Self-vs-observed "observed wins" with 3×/2 min is reasonable; not exposing as knob is fine for v1.
+
+**6. Top 5 concrete edits**
+
+1. Drop the 300-line mmdb option. Commit to the `geolite2` hex dep unconditionally; document license + build-arg sourcing; refuse boot if `JANUS_SCHED_GEO=1` and mmdb absent.
+2. Part B tier 5: rewrite to "demote_ms precomputed at snapshot build = max(5000, 3 × median_eff_ewma_ms_of_snapshot)". Pin determinism.
+3. Part A.3: cap sum of in-flight active probes per provider across all workers ≤ existing entitlement-probe budget.
+4. Part A.1: geo_cache TTL = 30 d, plus `admin_geo_flush` reusing `janus_catalog:flush`; document manual flush path.
+5. Gate 13.3: add 13.3b with two workers pinned to different regions; assert `sched_geo_match_total{matched=provider_geo}` increments AND the cn-east worker wins the cn-east provider job over the us-pinned worker.

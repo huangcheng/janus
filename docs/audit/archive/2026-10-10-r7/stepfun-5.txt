@@ -1,0 +1,50 @@
+# Audit — Scheduler v2 spec rev 7 (`F:\Janus\docs\audit\target.md`)
+
+**Verdict: GO WITH FIXES.** All 13 rev-7 folds are present; architecture and math hold up (tiers narrow-only, exclude-self demotion executable at N=2, EWMA seed `E1 = x1` verified arithmetically, single pinned `update_counter` form, purity preserved, infinity guard correct). The residuals are seam/contract-level — but two go slightly beyond "naming" and should be closed before ratification.
+
+## Rev-7 fold verification
+
+| Fold | Status | Note |
+|---|---|---|
+| Probe envelope direction (pool-internal `{probe,_}`; worker gets normal job + `internal`) | ✅ Part 0.2, A.3 | "NORMAL pinned job" reintroduces the word rev 6 deleted — see R11 |
+| Freshness counts probe rows | ⚠ **Partially applied** | A.3 + eunit 6(c) correct, but Part 0.2's lead clause still reads "NO UNEXPIRED **PASSIVE** ROW (single freshness predicate" — self-contradictory within one sentence. See R1 |
+| FORCE scope (cadence + fresh-skip only) | ✅ Part 0.2, 13.4b | — |
+| `Result > infinity` comparison skipped | ✅ Part C | Correct; no badarg path |
+| Adopt = cold re-hello | ✅ Part 0.5 | Trigger mechanism unpinned — see R4 |
+| Tracked map `JobRef => {Node, ReservedAtMono, ProviderId}` | ✅ Part C, 0.11 | Makes `{{Node, ProviderId}, …}` row key executable |
+| Naming rule (health_ewma / reserve_inflight gauges; rtt gauge 64-cap) | ✅ Part C | JSON `probe_skip_total` missing `drained` — see R2 |
+| Pinned-path `geo_source := none` | ✅ Part B tier 2 | — |
+| `sched_rtt` write-time latest-wins, clamp at master ingest | ✅ A.3 | `SampledAtMono` semantics unpinned — see R8 |
+| 13.6 relational assertion, concurrent, ≥ 45 s, mock contract | ✅ Part E | Math sound (victim ≈ 8000 > max(5000, 3×fast)); isolation caveat — see R6 |
+| 13.2 bounded ≤ 35 s snapshot_gen poll | ✅ 13.2 | — |
+| 13.4 rtt presence with knob OFF; 13.4b "catalog-known AND ENABLED" | ✅ 13.4, 13.4b, 0.2 | — |
+| Stale lines fixed (Part C tracked-set, geo_disabled per-event, no mid-run re-pin) | ✅ all three verified | — |
+| Eunit additions | ⚠ mostly ✅ | Clamp-down/dropped-counter wording — see R7 |
+
+Prior rounds (rev 2–6): no regressions found. Spot-checked load-bearing folds — exclude-self threshold, one counter form, `{Order, Decisions}` purity, three-seam internal exclusion, purge idempotency, opts split, JSON naming rule — all intact.
+
+## Residuals
+
+**R1 (must-fix) — Part 0.2 target rule contradicts itself.** "with NO UNEXPIRED PASSIVE ROW (single freshness predicate…)" vs. "freshness counts BOTH row sources — … (passive OR probe)". An implementer reading the lead clause ships the rev-6 behavior (cap-exhaustion re-probing) that rev 7 explicitly closed. Delete "PASSIVE" and the "single" gloss.
+
+**R2 (must-fix) — JSON contract gap.** Metrics pin `sched_probe_skip_total{reason=cap|cadence|fresh|drained}` (Part 0.2, Part C) but the pinned `/stats/sched` surface lists `"probe_skip_total": {"cap", "cadence", "fresh"}` only. Add `"drained": int` — the eunit addition list asserts a reason the assertion surface can't show.
+
+**R3 (must-fix) — master-side recognition of internal completions is unpinned.** Seams 1–2 (skip `rtt_ms` at ingest; skip TTFB health feed) and clearing the in-flight probe map all require the master to know a given done/error is a probe. The spec pins only the worker-side journey ("the `internal` flag rides the job map to the worker"). Pin the mechanism: JobRef lookup in the pool's `{Node => JobRef}` in-flight map, or an additive `internal` key on done/error (compatible with the additive-keys envelope). Eunit 6(b) can't be written against an unnamed seam.
+
+**R4 (must-fix) — re-hello trigger after adopt is missing.** Rev 7 makes adopt prune ALL `sched_workers` rows, but nothing states what causes each idle worker to re-hello — the new owner has no records to ask from. Without a pinned trigger (worker-side periodic hello, or hello-on-send-failure), the fleet stays empty until workers restart, defeating the "dist connections survive" claim.
+
+**R5 (must-fix) — probe issuance trigger unnamed.** `dispatch_probe/2` consumes a pool-internal `{sched, 2, {probe, JobSpec}}`, but no timer/owner is pinned as its sender (presumably the 30 s tick). Gate 13.4b depends on it; name it.
+
+**R6 (should-fix) — 13.3b/13.6 attribution vs. unlabeled metrics.** `sched_dispatch_worker_total{node}` has no provider label, so "us 0 for that provider's jobs" (13.3b) and "the fast worker wins on the unpinned job" (13.6) require single-provider job-stream isolation that the steps don't pin. Worse for 13.6: **any** unpinned fast job landing on the victim during the poisoning window dilutes its EWMA — two ~300 ms samples after three 8 s ones read ≈ 4631 < the 5000 floor ⇒ demotion never fires. Pin: quiesce all traffic except the two pinned providers during the window (the relational assertion fails loud, but the step would be flaky-by-design without this).
+
+**R7–R12 (pin hygiene):**
+- **R7:** Eunit 6 says clamp-down > 600000 is "bounded by `sched_rtt_dropped_total`" — contradicts Part 0.3/rev 6 (clamp-down is *not* a drop; only negative/non-finite increment the counter).
+- **R8:** `SampledAtMono` is never defined as ingest-time vs. measurement-time; latest-wins and the 64-entry cap ordering depend on it.
+- **R9:** "≤ 1 probe in flight per worker" is not wired into the target-rule eligibility — a second probe can be issued to a worker with one in flight. Exclude in-flight workers (skip reason `cadence`?) or state it.
+- **R10:** Post-adopt, `sched_rtt` rows survive (only `sched_workers`/`sched_reserve` are pruned) while health-EWMA cold-resets — up to 10 min of pre-restart RTT alongside fresh health state. Document or prune.
+- **R11:** "NORMAL pinned job" — the word "pinned" reintroduces affinity-pin ambiguity; the bypass sentence saves it, but reword.
+- **R12:** Minor: "dropped+counted" for old-master `{sched, 2, _}` casts names no counter; 13.4/13.5 drain-to-0 assertions lack the bounded wait 13.2 pins; "concurrent piggyback-vs-cold-start race" is really out-of-order arrival (both writers are the pool gen_server — single-writer serialization already closes concurrency).
+
+## Bottom line
+
+No architecture or math defects; no prior-round regressions. Ratblock on **R1–R6** (two are spec-internal contradictions/gaps, four are unpinned seams that gate steps and mixed-restart behavior depend on), then the `[ ] pi-audit GO` box in Part G can be checked. R7–R12 are a wording/pin pass.

@@ -1,0 +1,27 @@
+**1. Verdict**
+GO WITH FIXES — all rev-5 folds are present and coherent, but the probe/internal-job boundary at the TTFB health EWMA and the `rtt_ms` piggyback is unseamed, silently violating two pinned invariants.
+
+**2. Critical risks**
+- Probe contamination: probes "report like any job" and done/error gain `rtt_ms` "per completion", so probe completions reach the canonical PASSIVE writer — violating the single-writer pin and "probe samples never enter passive EWMA". Workers also have no pinned way to identify probes ("normal job shapes") to keep them out of their own EWMA.
+- Health masking: nothing excludes internal/probe completions from the master TTFB EWMA; fast 1-token probes dilute a sick worker's EWMA and can suppress demotion (13.6 math assumes real-job TTFB only).
+
+**3. Contradictions / stale claims**
+- Part A.3 still says probes go "via the affinity-pin path … the pin explains the capacity exemption" — exactly the wording rev 5 deleted; pinned picks *do* increment the counter, so the explanation is wrong (the exemption is structural, `dispatch_probe/2`).
+- `rtt_ms_other` is absent from the `/stats/sched` exact-key list; its presence (always vs overflow-only) is unpinned while gates assert exact keys.
+
+**4. Missing first-ship requirements**
+- Internal-job exclusion pins at three seams (master rtt ingest, master TTFB feed, worker EWMA); `internal` must ride the job map to the worker.
+- `geo_disabled_total` semantics for a post-boot async locus load failure, and selection state until the async load completes.
+
+**5. Architecture/design notes**
+- Exclude-self 3×median structurally guarantees the min-EWMA survivor (threshold ≥ 3m > m), so never-shed-all is provably inert — correct as a defensive guard; the rev-5 rewording holds.
+- Corrective-write clamping + 30 s reconcile is acceptable; dead-node zero orphan rows linger harmlessly.
+- Snapshot-drained pin fans out while live-drained pin falls back locally — asymmetry bounded by ≤ 250 ms snapshot staleness, fine.
+- Default subdivision→tag rules are implementer-defined; gates don't depend on them (GEO_TEST_HOSTS), acceptable.
+
+**6. Top 5 concrete edits**
+1. Part 0.8/A.3: pin internal-job exclusion — done/error handler skips `rtt_ms` ingest and TTFB feed when the JobRef's record has `internal=true`; worker skips EWMA for internal jobs; carry `internal` on the wire.
+2. Replace A.3's probe sentence: "dispatched via `dispatch_probe/2` (Part 0.2); reserve-counter exemption is structural."
+3. Add `rtt_ms_other` to the `/stats/sched` exact keys; pin it always present (`{"count":0,"max_ms":0}` when no overflow).
+4. Part 0.1: `geo_disabled_total` increments once at boot or on async load failure; selection ≡ v1 until locus load succeeds.
+5. Eunit #8b: add a case — internal/probe completions excluded from the TTFB feed, production-shaped maps.

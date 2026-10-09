@@ -1,0 +1,30 @@
+# Round 9 audit — Scheduler v2 spec (rev 9)
+
+**Verdict: GO WITH FIXES.** All round-8 folds verified present in the body and mutually coherent; the internal-recognition mechanism closes cleanly end-to-end. Two residuals found — both wording/pin-level, and one of them is exactly the header/body drift class round 8 was fixing. No architecture, math, or testability objections.
+
+## Fold verification (all landed)
+
+- **Drifted folds, all in the BODY**: `> infinity` total-order rationale (Part 0.6 + Part C reserve loop, both sites); missing `sched_workers` row ⇒ drained/refuse (Part C step 3); exhaustion-reason = first non-ok in iteration order (Part C — but see Finding 2); both flush paths advance `snapshot_gen` (Part C); five probe-skip reasons in metric and JSON (Part C, both surfaces); `dispatch_worker_total` JSON keys `"<node>/<provider>"` (Part C JSON). ✓
+- **Internal recognition**: same `{track, ...}` cast with `Internal => true`, no increment, track decoupled from counter (Part 0.11); done handler recognizes via tracked flag; release/purge/reconcile-excess skip the decrement (0.11 + Part C); 4-tuple tracked shape consistent in 0.11 and Part C; in-flight map clears by JobRef. Counter-neutrality holds through every path including the lost-register case (reconcile heals counter excess; post-purge done is a no-op). ✓
+- **SampledAtMono compare dropped**: A.3 "HONEST semantics" carries last-arrival-wins + existence gate correctly — **except one surviving clause, Finding 1**.
+- **Winning-candidate-only register; structural demotion gate (`unknown` below 3 samples, gauge displays from sample 1); adopt retry/backoff via `TableTag`; `sched_v=>2` in 0.10 enumeration + orphan window + FORCE-never-bypasses-`sched_v` (13.4b); keepalive = plain hello; ≤35 s polls (13.2/13.4b); fresh-stack intro; ≤250 ms drain asymmetry; explicit-only `geo_disabled_total`; sanctioned PT writer; post-adopt full `sched_rtt` reset; G3 "capacity limits"; 13.6 all-workers-slow as gate assertion.** All present. ✓
+- **Part E additions**: adopt→re-hello→snapshot→pick (E.4); five skip reasons each (E.4); pinned completion feeds EWMA (E.8b); `internal` key decode tolerance (E.7); probe done-with-`rtt_ms` skipped via tracked flag (E.4). All present. ✓
+- **Math re-checked**: exclude-self threshold — the min-EWMA measured candidate provably never demotes (own value < 3×median(others) since median(others) ≥ own value), so never-shed-all is defensive-only, matching 13.6's "unreachable by construction" framing and E.2's synthetic case. 13.6 arithmetic (3×8000 ms seeded samples ⇒ EWMA 8000 > max(5000, 3×fast)) is deterministic. ✓
+
+## Findings
+
+**1. E.6(c) retains the vacated compare guard (must fix).** Part E.6 seam (c) still reads "never clobbers a newer `SampledAtMono` (write-time latest-wins)" — the rev-7 guard that rev 9 deleted as vacuous in A.3 (master ingest stamps + serialized handlers ⇒ the message being handled is always newest). As written the eunit re-introduces a mechanism the body dropped, and the test is unfalsifiable against the A.3 semantics. Fix: delete that clause; if a replacement assertion is wanted, assert the existence gate discards a late probe result after a passive row landed (the documented wasted-probe path).
+
+**2. Exhaustion-reason enum gap (must fix).** Part C's rule says "drain-skips of unpinned candidates label the exhaustion too", but `sched_dispatch_local_total{reason}` enumerates only `empty_pool|capacity|drained_pin|send_fail|ack_miss` (metric and JSON) — no plain `drained` value exists. The case is reachable (drain raced inside the ≤250 ms flush window, or a missing `sched_workers` row on an unpinned candidate, followed by capacity refusals). Fix: add a sixth reason `drained` (additive JSON key, still schema_version 1) or pin that unpinned live-drain skips label `drained_pin`.
+
+**Nits (optional, none blocking):**
+
+3. `sched_geo_disabled_total` counting "boot refusal" events is unobservable — a refused boot serves no `/stats/sched`. Keep the CRIT log as the refusal artifact; the counter's observable scope is the async-load-failure disable.
+4. Open-vocab JSON maps (`dispatch_worker_total`, `probe_total`, `rtt_ms`, `health_ewma_ms`) don't pin absent-key semantics; `reserve_inflight` does ("absent node = 0"). 13.3b's "`{us, provider}` = 0" assertion needs absent⇒0 pinned (or zero-rendering for known node×provider combos).
+5. E.7's "{load,_} dropped+counted by the old `handle_cast` catch-all" — post-implementation `{load,_}` is a known tag, so the honest eunit is an unknown-inner-tag `{sched, 2, _}` cast dropped+counted (exercises the same catch-all); reword.
+6. Master TTFB delivery channel is implied (done-time recognition via the tracked `Internal` flag ⇒ client reports JobRef + TTFB at completion) but never pinned the way the `rtt_ms` piggyback is — one sentence in A.4 would close it.
+7. Probe in-flight map `{Node => JobRef}` clears on done/error/nodedown/send-fail/ack-miss, but not on the 10-min tracked-set purge — a lost probe whose master-side client died silently blocks probes to that node until nodedown. Pin that the purge also clears a matching in-flight entry.
+
+## Summary
+
+Residuals 1–2 are text fixes, not design changes; the spec's own grep-verification passed everything except these two corners (E.6(c) and the reason-enum vs reason-rule pair). With those folded, the pi-audit GO box in Part G can be ticked from this round's perspective.

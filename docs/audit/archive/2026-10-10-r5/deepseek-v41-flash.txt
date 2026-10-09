@@ -1,0 +1,29 @@
+# Audit — Scheduler v2 (rev 5)
+
+**1. Verdict:** GO WITH FIXES — all 14 rev-5 folds are present and mostly coherent, but one stale wording (A.3) still contradicts the newly named `dispatch_probe/2` seam, plus a few minor residuals.
+
+**2. Critical risks**
+- **A.3 vs 0.2/0.6/C**: A.3 still says probes are "dispatched … via the affinity-pin path (the pin explains the capacity exemption)". Rev-5 explicitly deleted that wording; the seam is `dispatch_probe/2` (direct pinned send, bypasses reserve). Left as-is, an implementer could route probes through `pick`'s reserve loop, breaking the structural exemption. Fix A.3.
+- **Probe target under RTT-off**: 13.4b runs with geo off; target rule is "catalog-known providers with absent/expired RTT". The spec never pins whether `sched_rtt` PROBE rows are written when `JANUS_SCHED_RTT=0`. If RTT gating suppresses writes, the target rule has no eligible pair after the first probe. Pin it.
+- **Purge vs late `done` double-decrement**: purge at 10 min decrements once; a `done` at 11 min decrements again → negative until the 30 s reconcile heals. Bounded but the idempotency mechanism is unspecified (no release key).
+
+**3. Contradictions / stale claims**
+- A.3 "affinity-pin path" contradicts 0.2/0.6/C and the rev-5 fold claim of deletion. (Primary.)
+- Metric naming drift: Part C lists `sched_geo_disabled_total`; `/stats/sched` exposes `geo_disabled_total`. Cosmetic, but the checklist claims naming is pinned.
+- A.4 "≥ 3 samples before EWMA exists" vs 13.6 "≥ 3 TTFB samples" is consistent; the all-slow "no demotion" is correctly reframed as the min-EWMA invariant, and never-shed-all is synthetic-only — coherent.
+- `JANUS_SCHED_REGIONS` replaces vocab "wholesale", yet A.1 also promises a resolved-outside-vocab → `other`. Whether `other` is auto-appended after override is unstated.
+
+**4. Missing first-ship requirements**
+- Probe in-flight tracking (≤ 1/worker): no clearing seam named.
+- `reserve_inflight` JSON for a node with zero reservations (absent vs `0`).
+- Rollback eunit for `dispatch_probe/2` counter-neutrality (only the reserve-loop side is listed).
+
+**5. Architecture / design notes**
+Purity (`{Order, Decisions}`, pick emits metrics), single-owner capacity with the one pinned `update_counter` form, exclude-self demotion firing at N=2, the `janus_ets_heir` adopt cycle, and mixed-version map-key tolerance are all sound and executable. The ack-miss "late not absent" + purge-age policy is the right call.
+
+**6. Top 5 concrete edits**
+1. Replace A.3's "affinity-pin path" with `dispatch_probe/2` (direct pinned send).
+2. State explicitly that probe results write `sched_rtt` PROBE rows independent of `JANUS_SCHED_RTT`.
+3. Pin purge/late-`done` idempotency (release key or reconcile-before-decrement).
+4. Add probe in-flight tracking/clearing to 0.2 and eunit #4.
+5. State whether `other` is always appended to the vocab after `JANUS_SCHED_REGIONS` override.

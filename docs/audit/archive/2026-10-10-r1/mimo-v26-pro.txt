@@ -1,0 +1,32 @@
+**1. Verdict: GO WITH FIXES** — the tier design is sound and degrades to v1, but three internal contradictions (RTT placement, TTL clock, lock-free inflight) must be resolved before implementation.
+
+**2. Critical risks**
+- **Lock-free `pick/1` + capacity race (Part C vs B.4/6):** with the read path off the gen_server, two concurrent picks can both observe `inflight=0` on a capacity-1 worker and both dispatch. Inflight must be atomically reserved (`ets:update_counter`) inside the pick, not at the later gen_server ack — spec silent.
+- **RTT placement contradiction:** Part B puts `rtt_to_target` in snapshot Meta, but RTT is per (worker × provider) and Part C defers the per-provider join to pick-time. Snapshot can't hold per-target values; pick's "pure" opts assembly would need live ETS reads.
+- **TTL has no clock owner:** "TTLs pre-filtered by snapshot builder" but republish happens only on mutation, and pure `select_v2` forbids time. Idle cluster ⇒ expired RTT honored indefinitely. Need a periodic republish timer.
+- **mmdb reader risk:** 300 lines is optimistic once metadata parsing, pointer indirection, and the full type set are handled; recorded fixtures only cover decode paths you captured. Decide dep-vs-reader with a spike, not "at implementation start".
+- **GeoLite2 licensing:** shipping the mmdb in the image requires MaxMind account terms, attribution, and periodic refresh — none specified.
+
+**3. Contradictions / stale claims**
+- Non-goals say "no wire protocol job/chunk/credit changes", yet A.3 adds `rtt_ms` to done/error and `{sched,2,...}` messages. Say "additive optional fields" explicitly.
+- Tier 3 (capacity) precedes tier 4 (geo): a full same-geo worker yields `sched_geo_match_total{none}` — metric semantics undocumented.
+- `demote_ms = 3× median, min 5 s` ambiguous (max? clamp?) and degenerate at N<3.
+- Legacy `region_tag` "outranks auto-geo" — undefined when both set and conflicting.
+
+**4. Missing first-ship requirements**
+- City/country → tag mapping table (who decides cn-east vs cn-north?); `JANUS_SCHED_REGIONS` parse-error contract.
+- Observed-EWMA staleness fallback (idle worker ⇒ use self-report).
+- `sched_rtt` row cleanup on nodedown (pool clears "all state" — name the tables).
+- 13.5's "distinct node tags in logs" — assert via counters, not log scraping; two concurrent slow jobs need a Python driver in the MSYS harness.
+
+**5. Architecture/design notes**
+- Median-based demotion over ~2–4 workers is noise; prefer `max(3×median, 5s)` with explicit N guard.
+- Snapshot O(N) rebuild per mutation is fine; the mutation volume rises with RTT/load ingest — coalesce republish (dirty flag + 250 ms timer).
+- 60 MB mmdb COPY bloats the image; consider a separate volume/mount.
+
+**6. Top 5 edits**
+1. Fix RTT ownership: join at pick-time from `sched_rtt`; delete `rtt_to_target` from Meta.
+2. Specify atomic inflight reservation at pick + capacity check on the same step.
+3. Add periodic republish timer owning TTL expiry; restate determinism as "given snapshot+opts".
+4. Rewrite tier 5 threshold precisely (formula, N<3 behavior) and fix tier-3/4 metric semantics.
+5. Add GeoLite2 license/refresh section and the region-tag mapping table.

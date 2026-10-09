@@ -1,0 +1,25 @@
+# Audit — Scheduler v2 spec rev 9
+
+**Verdict: GO WITH FIXES.** All rev-9 folds verified present in the body (not just the header): the corrected `> infinity` total-order rationale appears in both 0.6 and Part C; missing-`sched_workers`-row ⇒ drained; first-non-ok exhaustion reason; both flush paths advance `snapshot_gen`; five probe-skip reasons in metric AND JSON; `"<node>/<provider>"` JSON keys; the 4-tuple tracked map `{Node, ReservedAtMono, ProviderId, Internal}` is consistent across 0.11 and Part C; probe track-cast with no increment and Internal-skip at release/purge/reconcile closes the recognition mechanism end-to-end; A.3 HONEST semantics (last-arrival-wins, TTL-bounded) replaced the vacuous compare; `sched_v => 2` enumeration + orphan window + FORCE-never-bypasses-`sched_v`; structural demotion gate (builder writes `unknown` < 3 samples, gauge displays from sample 1); heir retry/TableTag; plain-hello keepalive; bounded 13.4b poll; fresh-stack gate intro; 13.6 all-slow as gate assertion; Part E additions all landed. No architecture, math, or testability objections. Residuals below — none blocking.
+
+## Findings
+
+**F1 (real residual — body/test contradiction).** Part E.6(c) still says probe cold-start fill "never clobbers a newer `SampledAtMono` (write-time latest-wins)". Rev 9 deleted exactly this compare from A.3 as vacuous (all stamps are master ingest stamps, writes serialized — a "newer" stamp cannot exist at write time). The eunit as written tests an unconstructible condition. Reword E.6(c) to the A.3 semantics: probe fill writes only when no unexpired row exists (existence gate); a later-arriving passive row overwrites (last-arrival-wins).
+
+**F2 (minor coherence).** `sched_geo_disabled_total` is defined to increment on "boot refusal or async locus load failure". A refused boot never starts the node — no registry, no `/metrics`, the increment is unobservable dead code. The only observable disable event is the async locus load failure (auto-off). Reword: counter fires on the auto-off event; the refusal path is CRITICAL-log-only. (Part 0.1's "silent unless explicitly requested" rule is otherwise coherent.)
+
+**F3 (testability-relevant ambiguity, pre-existing but now load-bearing).** The boot-refusal clause reads absolutely: "`JANUS_SCHED_GEO=1` explicit with file ABSENT ⇒ boot REFUSES". Gate 13.3b sets `JANUS_SCHED_GEO=1` + `JANUS_SCHED_GEO_TEST_HOSTS` with no mmdb in the image — a literal implementation of 0.1 refuses the gate's own boot. The text says TEST_HOSTS "satisfies the explicit-1 check" (a counter/logging condition) but never says it *exempts the existence check*. Pin explicitly: a non-empty TEST_HOSTS satisfies the geo-data precondition, so the refusal rule does not fire.
+
+**F4 (latent trap introduced by the rev-9 header note).** "Non-probe internal jobs (none in v1) would ride the normal pick path." If one ever did, counter-neutrality breaks: the reserve loop increments, but release/purge/reconcile all skip the decrement keyed on `Internal` — a permanent slot leak healed only by nodedown. The mechanism's true invariant is *Internal ⇒ never incremented* (holds today only because probes are the sole Internal source and dispatch outside the loop). Pin that invariant in 0.11: any future internal job MUST dispatch via a counter-exempt path; the decrement-skip is not a general license.
+
+**F5 (micro-nits, optional).** (a) Missing-snapshot local fallback (Part C reader step 1) has no pinned `dispatch_local_total` reason label — presumably `empty_pool`; say so. (b) 13.4b's ≤ 35 s poll against a 30 s tick + probe RTT leaves ~5 s slack on a fresh stack — tight for loaded CI; consider ≤ 45 s, matching 13.6's budgeting style. (c) Probe send-fail abort should explicitly state the tracked entry is released (removal without decrement); currently only implied by the generic Internal-skip wording.
+
+## Confirmed sound (spot-checked, not re-litigated)
+
+- Register-before-done causal chain holds (track cast is in the pool mailbox before the upstream send occurs; done cannot overtake it).
+- 13.6 arithmetic with `E1 = x1`: victim = 8000 > max(5000, 3×fast) for any local-docker fast EWMA; all-slow variant correctly yields zero demotions under exclude-self (8000 < 24000).
+- Post-adopt safety chain is closed: adopt prunes all `sched_workers` rows ⇒ missing-row = drained ⇒ stale heir'd snapshot candidates all refuse ⇒ local fallback until keepalive re-hello rebuilds. Safe *because of* the missing-row rule — the two folds compose correctly.
+- Nodedown/release counter race is covered by the pinned corrective-write + tick-heal machinery.
+- v1-equivalence path intact: knobs off ⇒ health/geo tiers inert, region_tag ungated, sort = `(inflight, name)`.
+
+Tick the GO box once F1–F3 land (F4/F5 are one-sentence pins).

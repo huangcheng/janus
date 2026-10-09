@@ -1,0 +1,27 @@
+**1. Verdict:** GO WITH FIXES — every rev-4 fold is present and coherent; residuals are seam-naming and gate-wiring gaps, not design breaks.
+
+**2. Critical risks**
+- **Probe vs pinned-reserve contradiction**: Part B.2/0.6 say pinned picks increment the reserve counter (soft cap); Part 0.7/0.8/0.2 say probes never touch it yet "ride the affinity-pin path (a normal dispatch)". No named mechanism lets pick distinguish a probe pin from an operator pin — as written, probes increment or the exemption is unimplementable.
+- **Probe-target rule requires "geo-known providers"**: with `JANUS_SCHED_GEO=0` (or unresolved hosts) the target set is empty ⇒ probes silently never fire; 13.4b enables PROBE+FORCE but no geo/test-hosts ⇒ `probe_total ≥ 1` may be unfalsifiable.
+- **"Clamped ≥ 0" decrements**: `ets:update_counter` cannot clamp; needs a named corrective write (decrement → read → fix), non-atomic, tick-self-healing.
+
+**3. Contradictions or stale claims**
+- "Normal dispatch whose pin explains the capacity exemption" vs the symmetric no-touch exemption (risk 1).
+- `rtt_ms` "64 most-recent" cap needs recency, but `sched_rtt` rows carry only `ExpiresAtMono` — no sampled-at field.
+- 13.6's all-workers-slow variant claims to exercise never-shed-all; with exclude-self 3×median the minimum-EWMA candidate provably never demotes (`E_min > 3·median(others) ≥ 3·E_min` is impossible), so never-shed-all is unreachable — the assertion passes vacuously as no-demotion, for a different reason.
+- `JANUS_SCHED_REGIONS`: replace vs augment the default vocab is ambiguous (the example emits `cn`, outside the default set); worker-region validation source unresolved.
+
+**4. Missing first-ship requirements**
+- Probe dispatch seam: `pick` with `probe => true` skipping the reserve loop, or a dedicated dispatch function.
+- 13.4b geo wiring (or drop geo-known from the target rule).
+- `Decisions.demoted` semantics when never-shed-all suppresses exclusion (does the list populate? metric meaning).
+- `SampledAtMono` on `sched_rtt` rows (gauge recency + cap ordering).
+
+**5. Architecture/design notes** — Folds verified: exclude-self demotion executable at N=2 (13.6 math checks out: 8 s > max(5000, 3×fast)); single 4-arity `update_counter` form, 5-tuple forbidden; purity (`{Order, Decisions}`, pick emits counters); heir adopt cycle across all five tables; ack-miss pending + idempotent reconcile; `reserve_inflight` surface; capacity single-owner; masters-first deploy; in-vocab `us` worker. The minority-demote invariant is a safety strength — state it explicitly.
+
+**6. Top 5 concrete edits**
+1. Part 0.2/C: name the probe path — probe dispatch bypasses pick's reserve loop entirely (no increment, no decrement); delete "normal dispatch" wording.
+2. Part 0.2: drop "geo-known" from the probe-target rule (dispatchable workers × providers with absent/expired RTT), or wire `GEO_TEST_HOSTS` into 13.4b.
+3. Part A.3/C: add `SampledAtMono` to `sched_rtt` rows; the 64-cap and `sched_rtt_ms` gauge key off it.
+4. Part 0.11/C: specify the clamp as decrement + corrective write (documented non-atomic, healed by the 30 s tick).
+5. Part E 13.6: reword the all-slow variant as "no-demotion (min-EWMA survivor invariant)"; keep never-shed-all as defensive guard. Pin that `JANUS_SCHED_REGIONS` replaces the default vocabulary and worker regions validate against rule targets ∪ region_tag values.

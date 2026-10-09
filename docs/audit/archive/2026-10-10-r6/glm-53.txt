@@ -1,0 +1,28 @@
+# Audit — Scheduler v2 rev 6
+
+## 1. Verdict
+**GO WITH FIXES** — all 7/7 round-5 folds are present and coherent; residuals are two stale sentences, one eunit coverage gap, and two underspecified seams.
+
+## 2. Critical risks
+None blocking. The three-seam probe isolation, EWMA seeding (E1=x1), exclude-self demotion, purge idempotency, and 13.6 arithmetic (victim=8000 > max(5000, 3×fast<7800)) all check out internally.
+
+## 3. Contradictions or stale claims
+- **Part C tracked-set shape is stale**: it still says `JobRef => Node`; Part 0.11 (rev 6) pins `JobRef => {Node, ReservedAtMono}` (purge age needs it). Same map, two shapes.
+- **Part C metric annotation stale**: `sched_geo_disabled_total` "(incremented ONCE at boot)" vs Part 0.1 / rev-6 fold "once per disable event (boot OR async locus load failure)".
+- **dispatch_probe/2 wording conflates mechanisms**: "envelope … via cast; direct pinned send" — `gen_server:cast/2` to the pinned worker pid is one thing; pick one phrasing so the eunit pins the exact delivery path.
+
+## 4. Missing first-ship requirements
+- **Eunit seam-1 gap**: the fold claims "eunit covers all three seams"; item 8(b) covers TTFB exclusion and item 6 the passive-EWMA/cold-start side, but no enumerated case asserts an internal job's `done` carrying `rtt_ms` is skipped at master ingest.
+- **Provider attribution for `sched_rtt`**: rows are keyed `{Node, ProviderId}`, but the done/error piggyback carries only `rtt_ms`; the spec never pins where ProviderId comes from (tracked-map extension or piggyback key).
+
+## 5. Architecture/design notes
+- 13.6 is sound: pin (tier 2) is absolute and precedes health (tier 3), so poisoning pins survive health-ON; the unpinned pick demotes deterministically; the ≥30 s fail-loud budget is present.
+- Purge/late-done idempotency (release IFF still tracked) plus adopt's `delete_all_objects` makes the reserve counter monotone-recoverable at every lifecycle seam — no negative leak path remains.
+- Eunit 6's "probe sample does NOT enter passive EWMA (cold-start fill only)" mixes the worker-side EWMA skip with the master-side sched_rtt fill rule; split the sentence so each seam maps to one case.
+
+## 6. Top 5 concrete edits
+1. Part C: change tracked set to `JobRef => {Node, ReservedAtMono}` (align with Part 0.11).
+2. Part C: `sched_geo_disabled_total` → "once per disable event (boot or async load failure)".
+3. Eunit 6/8: add explicit case — internal job's done with `rtt_ms` ⇒ no passive `sched_rtt` write (seam 1).
+4. Part 0.2/A.3: pin dispatch_probe delivery as `gen_server:cast(PinnedWorkerPid, {sched,2,{probe,JobSpec}})`; delete "direct pinned send" duplication.
+5. A.3: pin ProviderId sourcing for the piggyback (e.g., tracked map becomes `JobRef => {Node, ReservedAtMono, ProviderId}`), so the `{{Node,ProviderId},…}` row key is executable.

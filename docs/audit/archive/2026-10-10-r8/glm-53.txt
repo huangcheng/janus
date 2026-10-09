@@ -1,0 +1,49 @@
+# Round-8 audit — Scheduler v2 spec (rev 8)
+
+**Verdict: GO WITH FIXES.** All round-7 folds are present and the architecture/math survives re-derivation. Findings are stale-line and seam-pin residuals — two of them sit on the **pinned `/stats/sched` JSON surface** and one is a factually false rationale that survived the fold claiming to fix it. Nothing touches selection order, purity, capacity ownership, or demotion math.
+
+## Fold verification (rev 8)
+
+Present and coherent: 0.2 target rule as ONE statement (both row kinds count; in-flight under `cadence`); probe issuance tick self-cast + old-pool tolerance; eligibility = pick's primitives minus counter; send-fail/ack-miss ⇒ abort + `probe_skip{send_fail}` + no local fallback for internal jobs; `sched_v => 2` marker non-target rule; tracked-set register/release casts with register-before-send causality (holds: the track cast precedes the dist dispatch, and done causally follows dispatch); post-adopt re-hello triggers (60 s keepalive + pool-pid monitor); `SampledAtMono` = master ingest stamp; rollback form `{2, -1}`; measured = ≥ 3 samples; `geo_disabled_total` explicit-only; all 13.6 pins (third unpinned provider, quiesce, exactly 3+3, deltas, MSYS Python driver, 45 s budget, cap headroom 100); reconcile deletes reserve+rtt for absent nodes; TEST_HOSTS before DNS/mmdb; gauge-cap eviction removes label sets; TEST-FLOWS.md listed in Part D; `geo_match{none}` partition; ungated worker-side `rtt_ms` piggyback; error completions write passive rows; knob-off-inertness rollback; Slice-Q bypass at the named filter; `internal`-key tolerance sentence in 0.10; `last_attempt_mono`.
+
+## Findings
+
+**F1 — Part C JSON cannot express the new `{provider}` label (surface defect, gate-adjacent).**
+Metric: `sched_dispatch_worker_total{node, provider}`. JSON: `"dispatch_worker_total": {"<node>": int, ...}` — node-keyed flat map. 13.3b asserts `{cn-east, provider} ≥ 1` / `{us, provider} = 0` and 13.6 asserts Δ`{fast, third-provider}` = 1 / Δ`{victim, third-provider}` = 0; the pinned JSON shape cannot carry these. Fix: pin the JSON as `"<node>/<provider>": int` (same flattening convention as `rtt_ms`), or pin those two gate assertions to `/metrics` explicitly.
+
+**F2 — `sched_probe_skip_total` enum is stale in Part C (two places).**
+Part 0.2 finalizes `cap|cadence|fresh|drained|send_fail`; Part C's metric list omits `send_fail` and Part C's JSON carries only `{"cap","cadence","fresh"}` — missing `drained` and `send_fail`, contradicting the fold's "the JSON key carries ALL five". Fix both lists.
+
+**F3 — The corrected `> infinity` rationale did not land; the false badarg claim survives.**
+Part C reserve loop still says "an atom-vs-number guard would badarg". Erlang term order is total: `N > infinity` is `false`, never badarg (this is exactly what the rev-8 fold says was corrected, 3-model concurrence). The skip is right (explicit intent); the justification is wrong and will mislead implementers into thinking it's crash-safety. Replace with the explicitness rationale from the fold header.
+
+**F4 — Tracked-set map shape omits `Internal`, but the narrative depends on it.**
+Track cast: `{track, JobRef, Node, ProviderId, ReservedAtMono, Internal}`; Part 0.11 and Part C both write the map as `JobRef => {Node, ReservedAtMono, ProviderId}` — no `Internal`. Yet master-side internal recognition ("the tracked entry's `Internal` flag") is the mechanism behind E.6(b) (internal done-with-`rtt_ms` skipped at ingest) and the usage/Slice-Q story. Pin the value as a 4-tuple in both places.
+
+**F5 — Fold-claimed pins absent from the body:**
+- Missing `sched_workers` row ⇒ treated as drained (refuse, safe direction) — nowhere stated; it matters in the post-adopt stale-snapshot window.
+- Exhaustion-reason rule ("first non-ok outcome in iteration order; drained-pinned ⇒ `drained_pin`") — 0.6/C cover the two pure cases but not mixed exhaustion (candidate A capacity-rollback + candidate B drained-skip).
+- The async locus load result as the ONE sanctioned runtime writer of the `geo_enabled` PT key — implied by 0.1, never pinned.
+- Both flush paths advance `snapshot_gen` — Part C attaches gen-advance to the 30 s tick sentence only; 13.2's ≤ 35 s wait leans on the dirty path qualifying too.
+
+**F6 — Fold-claimed eunit cases missing from the Part E enumeration:** adopt → re-hello → snapshot rebuilt → pick dispatches again (claimed as "Eunit 4 extended"; E.4 stops at the ETS-TRANSFER cycle); probe-skip eunit enumerating all five reasons; pinned-path completions DO feed the health EWMA; old-worker `internal` job-map-key tolerance (asserted in 0.10, absent from E.7). Part E is what test authoring follows — add all four.
+
+**F7 — Stale 0.10 sentence contradicts the `sched_v` marker rule.**
+"An upgraded master probing a still-old worker is safe (…reports just lack `rtt_ms` until it upgrades)" describes a scenario Part 0.2 now makes impossible (no marker ⇒ not a target). Reword or delete; while there, pin that `FORCE` never bypasses the `sched_v` filter either (its never-bypass list names only cap and dispatchable×enabled).
+
+**F8 — The write-time `SampledAtMono` guard is vacuous as specified; the claimed protection is misattributed.**
+With `SampledAtMono` = master ingest stamp and a single serialized writer (done/error/load handlers all in the pool), every processed write is by construction the newest stamp — the compare-before-overwrite is a no-op, and "a late piggyback cannot clobber a newer row" is wrong in direction (a late piggyback clobbers, benignly — passive is canonical). The real protections are (a) the probe cold-start existence gate (probe-after-passive is discarded via "no unexpired row", as the spec itself notes) and (b) handler serialization. Harmless mechanism; fix the sentence so nobody "strengthens" it with cross-node stamps later.
+
+## Verified sound (spot-checks re-derived)
+
+- Demotion math at N=2: victim threshold = max(5000, 3×median(fast)) = 5000 with sub-second fast TTFB; 8000 > 5000 fires; relational assertion `victim > max(5000, 3×fast)` matches the formula; all-slow variant ⇒ threshold 24000 ⇒ no demotion (survivor invariant holds).
+- EWMA seed arithmetic: three 8000 ms samples ⇒ 8000 exactly (seed-at-first); seeded-at-0 would read 4625 — the pin is load-bearing for 13.6.
+- Tier order/purity: pin > health > geo > sort; affinity emits `geo_source := none`; never-shed-all emits nothing; `is_number` guard; unknown-rtt = `infinity` sorts last; knob-off ⇒ literal v1 sort; counters only from pick via Decisions.
+- Probe economics: master-issued, structural counter exemption, five-reason visibility (once F2 lands), 1-token shape, usage + Slice-Q invisible, separate additive cap, marker rule closes cap-drain.
+- Heir/adopt: all five tables, `janus_ets_heir`, `delete_all_objects` reset, cold re-hello triggers, orphan-row reconcile; the implied all-`sched_rtt`-rows deletion at immediate post-adopt reconcile (pre-re-hello) is a cold reset in the accepted class — could be stated, not a defect.
+- Mixed version: maps-additive done/error, `{sched, 2, _}` cast + catch-all delivery eunit, hello/job-decode built-from-known-keys, deploy order, mmdb-before-env.
+- Windows/MSYS: Python driver named for 13.5/13.6, compose env threading, bounded polls (≤ 35 s / ≥ 45 s budgets), no log-scrape assertions.
+
+## Disposition
+
+Apply F1–F8 as a rev-9 editorial pass (all one-to-three-line pins; F1/F2 are the only ones touching an interface contract). After that the spec is, in my judgment, implementation-ready: no remaining architecture, math, or testability objections — the Part G `pi-audit GO` box can be ticked once these folds are applied.

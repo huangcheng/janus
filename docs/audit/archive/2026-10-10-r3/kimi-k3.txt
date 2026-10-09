@@ -1,0 +1,28 @@
+# Scheduler v2 Spec Audit (rev 3)
+
+## 1. Verdict
+**GO WITH FIXES** — rev-3 folds are all present and coherent (capacity single-owner, ungated region_tag, is_number guard, insert-default, map-shape resolution, boot-time env); remaining defects are concentrated in gate falsifiability (13.6 mechanics) and two unnamed seams.
+
+## 2. Critical risks
+- **Gate 13.6 may never demote.** `demote_ms = max(5000, 3×median)` sets a hard 5 s floor, but the slow mock key is specified only as "delays N seconds" with N unpinned. A 2–3 s slow key yields EWMA < 5000 ⇒ zero demotions ⇒ false FAIL. N must be pinned > max(5000, 3×fast-median) (e.g. 8 s), and the runtime cost (~3×N per gate run) documented.
+- **Sample accumulation on the slow worker is not guaranteed.** With an idle two-worker fleet, v1's `(inflight, name)` tiebreak sends every sequential job to the name-sorted winner. Unless the slow worker sorts first by node name (or jobs run concurrently), it never accumulates the ≥3 TTFB samples the demotion predicate requires. The gate must control node naming or concurrency — currently unspecified.
+- **`inflight drains to 0` (13.4, 13.5) has no assertion surface.** The pinned `/stats/sched` schema exposes no reservation/inflight keys; reservation is declared the inflight source of truth yet is invisible to the gate.
+
+## 3. Contradictions or stale claims
+- None blocking. Rev-3 wording ("worker-measured RTT IS the tier-6 sort input" vs "self-reported load never selects") is now internally consistent; 13.5's `dispatch_local_total{capacity}` matches the single-owner reserve loop; `other`-vs-`unknown` and deploy-order claims are consistent across Parts 0/D/E.
+
+## 4. Missing first-ship requirements
+- **Probe routing mechanism unnamed**: probes target a specific (worker, provider) but A.3/C never say whether they ride the affinity-pin path (which would also explain their capacity exemption) or a separate dispatch.
+- **Reconcile's "tracked job rows" owner unnamed** (Part 0.11/C): reservation is the counter, but drift correction needs a per-job record set — presumably pool gen_server state; say so.
+- **Harness plumbing**: per-worker `JANUS_WORKER_REGION`/`CAPACITY` and master knobs must be threaded through `e2e_mw_local.sh`/compose explicitly; rev 3 mentions env vars but not the harness wiring.
+- ETS heir = janus_core supervisor: supervisors silently drop unknown info messages (ETS-TRANSFER) — acceptable, but add a one-line verify note to eunit item 4.
+
+## 5. Architecture/design notes
+Capacity-in-reserve-loop with affinity soft-cap is the right call; pure `select_v2` + precomputed `demote_ms` keeps the equivalence claim executable. The scoped v1-equivalence (pure function, sampled read path) is honest. TTFB mixed-mode bias is documented and acceptable for v1.
+
+## 6. Top 5 concrete edits
+1. Pin slow-mock delay N > 5 s (recommend 8 s) in Part E 13.6 and note gate runtime cost.
+2. Specify slow-worker sample accumulation in 13.6 (node-name ordering or concurrent driver) so ≥3 TTFB samples land before asserting demotion.
+3. Add `reserve_inflight` per-node counts to the pinned `/stats/sched` schema; repoint 13.4/13.5 drain assertions there.
+4. Name probe routing (affinity-pin to target worker, reserve-exempt) in A.3 and probe job-row ownership for reconcile in C.
+5. Enumerate the `e2e_mw_local.sh` env wiring for per-worker region/capacity and master knobs in Part E.

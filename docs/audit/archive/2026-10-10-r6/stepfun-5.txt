@@ -1,0 +1,27 @@
+# Audit — Scheduler v2 SPEC (rev 6)
+
+## 1. Verdict
+**GO WITH FIXES** — all rev-6 folds verified present and coherent; residuals are mechanical, plus one real unbounded-cardinality gap in the metrics surface.
+
+## 2. Critical risks
+- **`sched_rtt_ms` gauge unbounded label cardinality**: gauge spec reads *every* `sched_rtt` row by `{node, provider}`, while `/stats/sched` caps at 64. Registry grows with providers × nodes — slow leak; violates the "label cardinality bounded" claim.
+- **Two seams asserted, not specified**: the master TTFB feed (first-chunk timestamp from `janus_http_worker_client`) and the `internal` flag round-trip on the `done`/`error` **report map** are load-bearing for all three contamination seams — a silent break makes 13.4b/13.6 fail confusingly.
+
+## 3. Contradictions / stale claims
+- Bounded-cardinality claim vs. uncapped gauge labels (above).
+- Adopt-reset pinned as `ets:delete_all_objects` *and* immediate reconcile (empty tracked set ⇒ reconcile also zeroes orphans) — redundant, not wrong; pick one wording.
+- Cost-floor claim holds only because `sched_rtt` rows are ETS-only; state it explicitly.
+
+## 4. Missing first-ship requirements
+- 13.6 poisoning depends on mid-run `affinity_node` re-pinning via catalog hot-reload — the harness must show that catalog-edit seam explicitly.
+- 13.2 `snapshot_gen` advance: the 30 s tick alone makes the gate step slow/nondeterministic; pin a dispatch-triggered dirty-flush or a bounded tick-wait.
+
+## 5. Architecture / design notes
+Selection purity, exclude-self demotion math (N=2 executable, `is_number` guard), single pinned `update_counter` form, `dispatch_probe/2` structural exemption, ETS-heir adopt cycle, mixed-version map-additive safety, and v1-equivalence under default-off all check out. Degradation paths are complete at every tier.
+
+## 6. Top 5 concrete edits
+1. Cap `sched_rtt_ms` gauge to the same 64-entry budget; overflow → `sched_rtt_ms_other{node}` (no provider label).
+2. Pin `internal` round-trip on report maps + eunit all three exclusions with production-shaped maps (verify the seam before merging the piggyback).
+3. Name the TTFB feed seam (worker-client first-chunk event → pool) + delivery eunit; assert 13.6 fast_ewma < 2600.
+4. 13.2 harness: deterministic `snapshot_gen` advance (dirty-flush or bounded ≤ 35 s wait).
+5. `geo_cache` negative re-resolve: enforce ≤ 1/host/15 min via a per-host monotonic timestamp guard (DNS-recovery storm bound).

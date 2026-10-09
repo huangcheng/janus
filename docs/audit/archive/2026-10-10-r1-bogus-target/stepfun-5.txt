@@ -1,0 +1,28 @@
+**1. Verdict** — GO WITH FIXES: the ephemeral-signal design is coherent and empirically pinned, but three defects (worker-dist coexistence, sender attribution on casts, lease failover bound) block ratification.
+
+**2. Critical risks**
+- **Worker-dist collision.** Master/worker dist already shipped over `inet_tls`. With `-start_epmd false` + `janus_fleet_epmd` answering `port_please` only for `JANUS_FLEET_PEERS`, workers can no longer resolve/dial the master — enabling the knob on any master regresses shipped worker hello/dispatch. The spec never addresses coexistence (separate port? epmd module serving worker names too?).
+- **Cast ingress has no sender.** `gen_server:cast` carries no caller; the payload shapes (`{lb_cool, Target, TTLms, Class}` …) omit `SenderNode`, yet Part 0.6(d) validates "claimed sender ∈ peers ∧ ≠ self" and every mirror row is keyed by sender. Unimplementable as written.
+- **Lease failover contradiction.** F.7 asserts a *paused* holder hands over "within net_ticktime + 5 s"; pause fires no `nodedown`, and rev 11 makes failover tick-based — but the lease TTL is never pinned, so the gate bound is unfalsifiable.
+
+**3. Contradictions / stale claims**
+- Brief-vs-attachment mismatch: the prompt audits a "Scheduler v2" (GeoIP, RTT probes, ETS-snapshot read path); the attachment is the fleet-distribution spec. mmdb/probe-floor/selection-tier checklist items have no counterpart; findings above address the attachment.
+- F.6(b)'s "control run, knob off" has no pinned node: by F.6, F.5's gw3 is already recreated fleet-on.
+
+**4. Missing first-ship**
+- Fleet/worker dist coexistence subsection + a gate step proving worker dispatch survives fleet-on.
+- Cookie rotation: rolling recreate ⇒ mixed-cookie window with silent zero coverage; needs a documented procedure + verification.
+- F.3 falsifiability: phase 2's single-probe "never hit" passes vacuously unless phase 1 proves a one-sender probe *does* hit the slow route.
+- Runbook/alert triggers for `fleet_bad_ingress_total` spikes and `signals_rx == 0` while knob on.
+
+**5. Architecture notes**
+- A SAN dNSName containing `@` is not a legal DNS name; commit the OTP-27 evidence for the claimed automatic client-side hostname check, or pin `customize_hostname_check`.
+- Advisory-only quota with no pick-path consultation correctly freezes behavior; lease duty creep in phase 4 should re-open audit.
+- F.3 residual trust is honestly stated — the cert + security group really is the only boundary.
+
+**6. Top 5 edits**
+1. Add "fleet dist vs worker dist" subsection (separate pinned port, or extend `janus_fleet_epmd` to serve worker names) + e2e step: fleet-on with dual-node worker dispatch green.
+2. Add `SenderNode` to every payload shape; pin ingress attribution to the validated claim.
+3. Pin the lease TTL (e.g. 15 s) and rewrite F.7 as "lease expires on tick; claim ≤ TTL + 5 s after pause".
+4. Add an F.3 phase-1 witness probe (slow route hit with one sender) before phase 2.
+5. Document cookie rotation, name the F.6(b) control node in the execution order, add counter alert thresholds to the runbook.

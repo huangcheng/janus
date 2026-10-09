@@ -1,0 +1,29 @@
+**Meta-finding (blocking):** `prompt.md` describes Scheduler v2 (GeoIP mmdb, passive-first RTT probes, capacity weights, 13.2–13.5 steps) — the attached `target.md` is the fleet-distribution spec rev 11. Wrong artifact pair; confirm no file swap before folding this round into the saga. Audit below covers the attached spec.
+
+**1. Verdict: GO WITH FIXES** — sound converged design, but rev-11 header claims several folds the body only half-applies.
+
+**2. Critical risks**
+- **Fold-application drift**: header declares convergence; body contradicts declared folds (§3). Implementers following the body will violate ratified folds — the exact failure the confirmation round exists to catch.
+- **Mirror-clear ambiguity**: Part B egress says `{lb_recovered}` retracts only the sender's cool row and "never touches the latency mirror"; Part 0.8(e)/consumption say a local success clears the target's rows in BOTH mirrors. Two distinct clears, unreconciled — and as written a single cooldown-clear edge (no EWMA min-samples test) wipes a ≥2-sender degraded quorum locally, bypassing hysteresis.
+
+**3. Contradictions / stale claims**
+- F.2 reports `/stats.fleet.lease` twice — `{holder, expires_in_ms}` then `{holder, next_check_in_ms}`; Part C also says `expires_in_ms`. Rev-10 rename not scrubbed despite rev-11 claim.
+- Part C mirrors enum is `cool|lat` only; F.6 asserts quota rows visible in `/stats.fleet`, and rev 11 claims "mirrors enum covers quota rows" — body never updated.
+- Goal still carries "(phase 3) quota counters…" — rev 11 claims scrubbed.
+- B2 quota: "current or previous WindowId is accepted" vs trailing "receivers … drop mismatches" — stale strict sentence.
+- 8 192 cap: rev 11 says AGGREGATE across all mirrors, stated once; Part B and B2 each restate 8 192/sender per mirror.
+
+**4. Missing first-ship requirements**
+- Shape of quota (and any cache_put) rows in `/stats.fleet` — undefined given the enum gap.
+- F.1 body never states self-exclusion/local direct execution for `fleet_status`; only the header fold does.
+- F.5(d) "same body modulo volatile fields" needs a field whitelist to be falsifiable.
+
+**5. Architecture/design notes**
+Tick-based lease failover and dual-publish bounds are consistent. F.6(c) "TTLs out within 6 s + sweeper" silently depends on `/stats` reads filtering expired rows (lazy expiry) — pin it. F.4 itself uses `docker pause` before "pause-based last" F.7 — benign (unpause + re-drive), note it. Docker-on-Windows host is fine: `/proc/net/tcp` checks run inside containers; `fleet_cert_gen.sh` needs openssl in the harness shell.
+
+**6. Top 5 concrete edits**
+1. Delete `expires_in_ms` from F.2 and Part C; `next_check_in_ms` everywhere.
+2. Extend Part C mirrors enum with `quota` (and decide cache_put visibility), matching F.6/F.8.
+3. Rewrite the local-success paragraph naming both mechanisms: broadcast `{lb_recovered}` = sender-scoped cool-row retraction on receivers; local edge = local mirror wipe — and reconcile with "never touches the latency mirror".
+4. Amend quota drop rule to "drop WindowIds outside {current, previous}".
+5. State the 8 192 cap once as aggregate across all mirrors; scrub "(phase 3)" from the Goal.

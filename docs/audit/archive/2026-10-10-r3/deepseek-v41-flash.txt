@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — round-2 folds are present and mostly coherent, but the health-demotion threshold is mathematically inert at N=2, making gate 13.6 unfalsifiable.
+
+**2. Critical risks**
+- `demote_ms = max(5000, 3×median)`, median taken over the *same* candidates being judged. With 2 candidates, median=(slow+fast)/2 ⇒ `demote_ms ≥ 1.5(slow+fast) > slow` always ⇒ the slow worker is NEVER demoted. 13.6 ("one slow, one fast") cannot pass; health is dead until ≥3 candidates (needs slow > 3×fast). Fix: compare against the MIN / median-of-others, and rewrite 13.6 with ≥3 workers.
+- Probe jobs "exempt from capacity reservation": the release hooks (done/error/worker_lost) must also skip the decrement, else counters go negative. Unspecified.
+- Part B Meta lists `inflight, draining, geo_region, rtt_map, observed_ewma_ms, demote_ms` but NOT `capacity` — yet pick's reserve loop needs it (A.5 claims it is in the snapshot). Add it.
+- `ets:update_counter` insert-default form is `{Pos,Incr,Default}` on a bare key; the `{Node,2,1,0,1}` example conflates an object tuple with a counter spec. Clarify.
+
+**3. Contradictions / stale claims**
+- "Self-report never selects" vs worker-measured RTT selecting (tier 6): reworded coherently, and `rtt_enabled=false ⇒ infinity` matches.
+- Region_tag ungated but now ranked *after* health demotion — documented deliberate v2 difference; default-off parity holds.
+- Masters-first ordering: an upgraded master may probe old workers pre-upgrade; probes default-off, but note it explicitly.
+- v1-equivalence is correctly scoped to the pure function with the sampling caveat.
+
+**4. Missing first-ship**
+- No named owner for the 250 ms dirty-flush timer vs the 30 s tick interaction.
+- `sched_rtt_ms{node,provider}` has no cardinality guard against an unbounded provider list.
+- No eunit for the `{sched,2,{load,_}}` cast shape (only the `{rtt,_}` fallback).
+
+**5. Architecture notes**
+- Single-owner capacity + pure `select_v2` + heir + insert-default + atomic single-row swap: sound. Divergence 3×/2 min pure: sound. TTFB mixed-mode bias accepted.
+
+**6. Top 5 concrete edits**
+1. Redefine `demote_ms` (exclude self / use min) and rebuild 13.6 with ≥3 workers.
+2. Add `capacity` to Part B Meta.
+3. Specify probe reservation-release skip.
+4. Correct the insert-default API example.
+5. Pin dirty-flush timer ownership; bound `sched_rtt_ms` cardinality.

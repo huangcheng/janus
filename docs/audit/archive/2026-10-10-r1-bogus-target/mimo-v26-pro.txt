@@ -1,0 +1,27 @@
+1. **Verdict: GO WITH FIXES** — the fleet-dist spec is coherent and falsifiable, but the audit prompt describes a different artifact (Scheduler v2 / GeoIP / mmdb / probe budgets) that does not exist in `target.md`; audit basis below is the actual spec (native Erlang distribution, Parts A/B/B2/C/D/F).
+
+2. **Critical risks**
+   - F.3 residual trust is correctly disclosed but under-mitigated: a stolen cert+cookie = fleet-wide RCE (`erpc`/`spawn` anything); the enum constrains only HTTP, the cert is the sole boundary. Acceptable for a 3-node fleet; ensure CA reissue runbook is executable, not just described.
+   - `janus_fleet_epmd` runs pre-`janus_fleet:init/1` via `os:getenv/1` — env-reading dist code is unfalsifiable at eunit time unless fixtures inject env; also erl_call ops die in fleet mode (documented, but any future script touching `bin/janus rpc` breaks).
+   - Quota mirror is "advisory-observability only" yet F.6(b) asserts byte-identical pick behavior — good, but this makes B2 v1 nearly value-free per its own cost (per-window churn, caps, tombstone GC).
+   - Timing fragility in gates: F.6(a) "row within ≤ 3 s" while the 80% edge-latch needs 2 consecutive evaluations on a 2 s cadence; F.3/F.4 need continuous multi-node traffic coordination in compose. All falsifiable, but expect flake unless windows are asserted as ranges.
+
+3. **Contradictions / stale claims**
+   - Prompt ↔ spec mismatch (see verdict).
+   - F.2 and Part C still print `lease {holder, expires_in_ms}` alongside `next_check_in_ms` — rev 11 claims this was scrubbed.
+   - Rev 11 says the 8 192/sender cap is AGGREGATE across mirrors "stated once", but Part B and B2 each restate "row cap 8 192/sender" per-mirror. Pick one.
+   - Part C `/stats.fleet.mirrors` enum shows `cool|lat` only, though rev 11 says the enum covers quota rows.
+
+4. **Missing first-ship requirements**
+   - New exports must be listed: `janus_lb:cool_clear/1`, `janus_config:reload/0`, `janus_catalog:flush/0`, `janus_fleet:status/0`, `janus_fleet_tls:verify/3`; `fleet_cert_gen.sh` referenced but not scoped (deliverables, perms, README block).
+   - Body spec for `first_seen` tombstone store location + GC (header says first_seen+2×TTL+60 s; body silent).
+   - `fleet_bad_ingress_total` dimensioned by drop reason? F.1 asserts counters per case; needs label or per-reason counters.
+
+5. **Architecture/design notes** — Quorum/TTL/local-wins discipline is sound and the never-shed-last rule mirrors `degraded_filter` consistently. pg as membership (scope-pinned, 2-arity) plus `net_kernel:allow` + SAN verify_fun is defense-in-depth done right. Lease v1 is observability-only — honestly scoped; keep phase-4 duty in a separate revision.
+
+6. **Top 5 edits**
+   1. Reconcile prompt vs spec (or re-run against the Scheduler v2 doc).
+   2. Delete `expires_in_ms` from F.2/Part C; keep `next_check_in_ms` only.
+   3. State the 8 192 cap once, unambiguously (aggregate vs per-mirror).
+   4. Add quota rows to the Part C mirrors enum.
+   5. Relax F.6(a) to a range (≤ 2 evaluations + 1 heartbeat) and add labeled drop-reason counters.

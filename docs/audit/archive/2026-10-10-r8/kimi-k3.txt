@@ -1,0 +1,45 @@
+# Audit — Scheduler v2 spec rev 8
+
+**Verdict: GO WITH FIXES.** Architecture, math, and purity hold. The rev-8 folds are mostly present and coherent, but the fold pass itself introduced/survives several concrete defects — two of which contradict the rev-8 header's own claims, and one of which makes a pinned seam unexecutable.
+
+## Major findings
+
+**M1. `probe_skip` enum drifted across three surfaces.**
+Part 0.2 has the finalized five: `cap|cadence|fresh|drained|send_fail` ✓. But Part C metrics still read `sched_probe_skip_total{reason=cap|cadence|fresh|drained}` (missing `send_fail`), and the pinned `/stats/sched` JSON reads `"probe_skip_total": {"cap","cadence","fresh"}` (missing `drained` AND `send_fail`). The rev-8 header explicitly claims "the JSON key carries ALL five" — the body does not. 13.4b's forced probes will exercise `send_fail`-class aborts; the surface can't show them.
+
+**M2. `dispatch_worker_total` JSON lost the `{provider}` label.**
+Part C metrics correctly show `sched_dispatch_worker_total{node, provider}` (rev-8), but the JSON surface still reads `"dispatch_worker_total": {"<node>": int, ...}`. Gate 13.3b asserts `{cn-east, provider} ≥ 1 and {us, provider} = 0` and 13.6 asserts Δ`{fast, third-provider}` = 1 — both unexpressible against the pinned JSON. Fix: `"<node>/<provider>"` keys, mirroring `rtt_ms`.
+
+**M3. Internal-recognition seam is unexecutable for the only internal jobs that exist.**
+Part 0.11/0.2 pin: "Master-side internal recognition = the tracked entry's `Internal` flag (no wire change)." But probes — the sole carriers of `internal => true` — are dispatched via `dispatch_probe/2`, which **structurally bypasses pick's reserve loop** and therefore never casts `{track, ...}` and never enters the tracked set. A probe's `done` carrying `rtt_ms` would find no tracked entry and, per the done handler ("ingests `rtt_ms` FIRST"), be ingested as a passive sample — violating the three-seam exclusion (A.3, E.6b). The recognition source for probes must be pinned: either the probe in-flight map (`{Node => JobRef}`, consulted before ingest) or a `dispatch_probe`-side track with `Internal=true`. As written, E.6b has no production mechanism to test.
+
+**M4. Tracked-map shape drops `Internal`.**
+The register cast carries it (`{track, JobRef, Node, ProviderId, ReservedAtMono, Internal}`), but both Part 0.11 and Part C store `JobRef => {Node, ReservedAtMono, ProviderId}` — three elements, no `Internal`. Even after M3 is fixed, the stored shape must be extended (or the flag dropped from the cast).
+
+**M5. The false `badarg` rationale survives in Part C.**
+Rev-8 corrected this ("Erlang `>` is total-ordered — `number > infinity` is `false`, never an error"), but the reserve loop in Part C still reads: "when `capacity =:= infinity` the comparison is SKIPPED entirely: **an atom-vs-number guard would badarg**". The skip is correct; the stated reason is the exact falsehood round 7 caught. Edit missed.
+
+## Minor findings
+
+6. **`sched_v => 2` hello marker** is named in 0.2 but absent from A.2's hello-field enumeration and 0.10's "new hello fields (`capacity`, `geo_region`)" list. Consequently 0.10's "an upgraded master probing a still-old worker is safe" sentence is now stale — with the marker gate, old workers are never targets; the sentence describes an unreachable scenario (harmless, but contradicts 0.2's rationale).
+7. **Missing-`sched_workers`-row ⇒ drained** (claimed in the rev-8 header) appears nowhere in 0.6 or Part C; the live re-check's absent-row behavior is unpinned.
+8. **Eunit gaps vs header claims**: E.4 lacks the "adopt → re-hello → snapshot rebuilt → pick dispatches again" extension; no eunit enumerates all five probe-skip reasons; the pinned-path-feeds-health-EWMA case is not enumerated in E.8.
+9. **Exhaustion-reason rule** ("first non-ok outcome in iteration order") is not in the body — only the two endpoint cases (`capacity`, `drained_pin`) are pinned; mixed drain+capacity iteration order is unspecified (label-only impact).
+10. **`snapshot_gen` advancement** is grammatically tied only to the 30 s tick in Part C; whether the 250 ms dirty-flush also advances it (header claims both) is ambiguous. 13.2's ≤ 35 s poll passes either way, but pin it.
+11. **`rtt_dropped_total` JSON** collapses to a bare int while its metric carries `{reason=negative|non_finite}` — inconsistent with peer counters that keep label subkeys (`geo_match_total`, `dispatch_local_total`).
+12. **Keepalive hello "piggybacks the load-cast cadence"** (0.5) vs the documented suppression rule (0.3: sent only when probes ran or EWMA moved >20%) — ambiguous whether the 60 s keepalive carries `{load, Info}` unconditionally, which would partially retire the documented starvation limitation.
+13. The "ONE sanctioned runtime writer of the `geo_enabled` PT key" pin exists only in substance (0.1 auto-off on async failure), not as a named rule.
+
+## Verified clean
+
+- Part 0.2 target rule is genuinely one statement, de-geo'd, passive+probe freshness, never-probed-as-oldest, in-flight excluded under `cadence`, `sched_v` cap-drain closure, no-local-fallback for internal jobs, abort+clear on send-fail/ack-miss ✓
+- Register-before-done causality is sound (track is enqueued to the pool mailbox before the upstream send; `done` causally follows the send — no inter-sender ordering hazard) ✓
+- Rollback decrement form `{2, -1}` pinned ✓; post-purge done no-op idempotency ✓; purge age ✓
+- SampledAtMono = master ingest stamp (0.9), best-effort latest-wins under serialized handlers (A.3) ✓
+- "Measured" = ≥3 samples on both sides of the exclude-self median; E1=x1 seed in A.3/A.4/E.8 ✓; 13.6 arithmetic (8000 > max(5000, 3×sub-second)) deterministic with dual pinning, third unpinned provider, quiesce, delta assertions, ≥45 s budget ✓
+- TEST_HOSTS before DNS/mmdb (A.1) ✓; reconcile deletes reserve+rtt for absent nodes (0.5) ✓; gauge cap removes evicted label sets ✓; `geo_disabled_total` explicit-request-only (0.1, E.6) ✓; TEST-FLOWS.md listed in Part D ✓; `none` partition documented ✓; piggyback ungated by the RTT knob; error completions write passive rows while EWMA feeds exclude them ✓; Slice-Q bypass at the named filter (D) ✓; `internal`-key tolerance eunit'd (0.10) ✓; `last_attempt_mono` guard field distinct from `resolved_at` (A.1) ✓
+- Gate steps 13.2–13.6 remain falsifiable on the dual-node harness with named keys only (modulo M1/M2 surfaces)
+
+## Required before ratification
+
+Fix M1–M5 (all one-to-three-sentence edits; M3 needs a named recognition seam), sweep minors 6–10 at minimum. None touch architecture or math — but M1, M2, and M5 are direct contradictions of the rev-8 fold claims, and M3 is a genuine mechanism hole, so this is not yet implementation-ready.

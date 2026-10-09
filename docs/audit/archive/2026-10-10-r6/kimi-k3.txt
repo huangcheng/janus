@@ -1,0 +1,31 @@
+## 1. Verdict
+
+**GO WITH FIXES** — all rev-6 folds verified present and coherent; residuals are one stale tracked-map shape in Part C plus two cosmetic seams.
+
+## 2. Critical risks
+
+None blocking. Probe cost, seed math, and clamp semantics are now fully pinned; the three-seam probe-contamination closure (A.3) is internally consistent with the single-writer pin (probe rows via load cast, cold-start fill only) and the "no unexpired passive row" target rule — probed pairs correctly stay eligible on the 60 s cadence until real traffic lands.
+
+## 3. Contradictions or stale claims
+
+- **Part C vs Part 0.11**: Part C still describes the tracked-job set as "`JobRef => Node`"; Part 0.11 pins `JobRef => {Node, ReservedAtMono}` (the timestamp is what makes the 10-min purge age executable). The one real stale seam this round.
+- **Gate 13.4 wording**: it conditions `rtt_ms` presence on `JANUS_SCHED_RTT=1`, but rev 6 writes rows regardless of the knob (sort-key gating only). Assertion still passes, wording is stale.
+- **13.6 victim bound**: asserts `victim_ewma > 5000`, but seed-at-first + 8 s pre-first-byte delay guarantees ≥ 8000, and the *binding* inequality is `victim > 3×fast` (8000 > 7800). `> 5000` alone would not prove demotion (e.g. victim 6000, fast 2600 ⇒ no demotion).
+
+## 4. Missing first-ship requirements
+
+Nothing structural. One documented-gap candidate: the load cast is suppressed unless probes ran or EWMA moved > 20 %, yet the mismatch rule needs both sides inside a 2-min window — a steady-state lying worker may never trip `fleet_worker_report_mismatch_total`. Acceptable for v1, but currently undocumented.
+
+## 5. Architecture/design notes
+
+- `dispatch_probe/2` structural exemption is now consistent across 0.2/0.7/A.3/E.4; no "affinity-pin path" residue found.
+- Adopt-reset (`delete_all_objects` + prune + cold health/cadence reset) is coherent; consider stating explicitly that the probe in-flight map also dies with pool state (it does — same state map — but 0.2 only lists nodedown).
+- EWMA seed verification math in the fold header is correct (0.75³-weighted ⇒ 4625 < 5000).
+
+## 6. Top 5 concrete edits
+
+1. Part C: change tracked-job map to `JobRef => {Node, ReservedAtMono}`.
+2. Gate 13.4: drop the knob precondition (or assert presence with RTT off, proving write-regardless).
+3. 13.6: assert `victim_ewma ≥ 8000` or state the `8000 > 3×fast` derivation.
+4. Part 0.3: document load-cast suppression vs the 2-min divergence window (starvation at steady state).
+5. Part 0.2: note probe in-flight map is pool state, cleared on owner restart like cadence state.

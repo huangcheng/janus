@@ -1,0 +1,31 @@
+**1. Verdict**
+GO WITH FIXES — the rev-2 folds are coherent, but the all-at-capacity outcome is defined twice with opposite behavior, and two tier-gating/boot details break their own claims.
+
+**2. Critical risks**
+- **Capacity contradiction.** Part B tier 3 / Part 0.7 say all-at-capacity ⇒ "capacity filter IGNORED … never an empty dispatch", but gate 13.5 and `sched_dispatch_local_total{reason=capacity}` assert the second concurrent job runs **locally**. Pick one: live reservation refused on every candidate ⇒ local fallback (capacity honored); "never empty" must mean "never 503/error", not "overload the worker".
+- **Purity break.** Tier 3 filters on "live reservation" inside `select_v2`, which Part 0.1 declares pure over `(snapshot, opts)`. Make tier 3 a snapshot hint; live enforcement belongs solely to reserve-then-rollback.
+- **Boot refusal vs gate 13.3b.** `JANUS_SCHED_GEO=1` with no mmdb ⇒ boot REFUSES (Part 0.1), yet 13.3b sets exactly that with only `JANUS_SCHED_GEO_TEST_HOSTS`. The seam must satisfy the explicit-1 boot check or the step can't run.
+- **`ets:update_counter` on a fresh node** raises badarg without an insert-default tuple (`{Node,0}` form) — reservation would crash on first pick after hello.
+
+**3. Contradictions / stale claims**
+- "geo/health tiers compiled but inert" under defaults vs v1 equivalence: legacy `region_tag` is **v1 behavior** and must stay active when `JANUS_SCHED_GEO=0`; tier 5 conflates the legacy sub-tier with auto-geo. As written, the bitwise-v1 eunit fails for region-tagged fixtures.
+- Tiers 4/5 never mention `health_enabled`/`geo_enabled` gating despite opts carrying them.
+- Snapshot table ownership unstated; if the pool gen_server owns it, a restart tears the table — "missing table ⇒ local fallback" then lasts until re-hellos, not just a window. Specify heir/supervisor-owned table.
+
+**4. Missing first-ship requirements**
+- Mock harness needs a **slow/delayed-response key** for 13.5 concurrency (only 200/503 keys exist).
+- Do probe jobs consume capacity reservations? State it.
+- Hello `capacity` parse/garbage handling (clamp rules for non-integers).
+- locus changes `rebar.lock` ⇒ image rebuild + `janus-ebin-otp27` volume recreation per build rules — call it out.
+
+**5. Architecture/design notes**
+- locus + injected-lookup eunit is the right seam; keeping mmdb out of git/image/CI is sound. `infinity` atom sorts after floats in Erlang term order — the sentinel is correct.
+- Reconcile-vs-pick race: 30 s tick must count tracked-job rows (reservation inserts the tracked row *before* incrementing), then set; a blind SET can swallow a concurrent increment.
+- Master-issued probes + hourly cluster cap + internal flag give a real cost floor; advisory-only self-report is consistently kept out of selection.
+
+**6. Top 5 edits**
+1. Rewrite tier 3/0.7: hint-filter in snapshot, live reserve decides, all-refused ⇒ local fallback `reason=capacity` + counter; delete "jobs keep flowing [to workers]" wording.
+2. Tier 4/5: add explicit `health_enabled`/`geo_enabled` gates; make legacy `region_tag` unconditional (v1 parity).
+3. Part 0.1: `JANUS_SCHED_GEO_TEST_HOSTS` satisfies the explicit-1 boot check (loud log).
+4. Part C: `update_counter` insert-default; snapshot table heir/ownership; reconcile ordering vs reservations.
+5. Part E/gate: document the mock slow-key addition and probe-vs-capacity interaction for 13.5.

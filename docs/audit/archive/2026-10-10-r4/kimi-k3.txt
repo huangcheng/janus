@@ -1,0 +1,25 @@
+**1. Verdict: GO WITH FIXES** — all rev-4 folds are present and internally coherent; two residuals (probe-target geo coupling breaks gate 13.4b; load-report message-class ambiguity) plus one underspecified health-input edge remain.
+
+**2. Critical risks**
+- **Probe target rule vs 13.4b (blocking).** Part 0.2 restricts probe targets to "dispatchable workers × **geo-known providers** with absent/expired RTT." Gate 13.4b enables only `JANUS_SCHED_PROBE=1` + `PROBE_FORCE=1`; geo is off, so every provider geo is `unknown`, the target set is empty, and `probe_total ≥ 1` is unsatisfiable. RTT is geo-independent — the geo-known condition is unmotivated. Either drop it or wire `JANUS_SCHED_GEO_TEST_HOSTS` into 13.4b.
+- **`{sched, 2, {load, _}}` message class.** Part 0.10/A.3 say "cast" but claim the old pool's **`handle_info` catch-all** drops it. A `gen_server:cast` lands in `handle_cast`; a raw `!` lands in `handle_info`. Old-master tolerance depends on which — pin the actual send mechanism and the matching catch-all, and eunit that exact path (the rev-4 "load-cast shape eunit" only covers the shape, not the delivery class).
+- **Error-path health samples unspecified.** Health EWMA falls back to full duration for single-chunk/non-streaming jobs, but 503/error completions have no first chunk. If fast errors feed the EWMA, a sick worker erroring quickly looks healthy; if they don't, an error-heavy worker starves its own sample count and is never demoted. State the rule.
+
+**3. Contradictions / stale claims**
+- None blocking. Rev-4 claims verified in-text: exclude-self demote math + 13.6 wiring, single `{2,1}`/`{Node,0}` counter form with the 5-tuple explicitly forbidden, `{Order, Decisions}` purity, `sched_workers` live re-check with bounded-TOCTOU wording, ack-miss pending semantics, symmetric probe counter exemption, five-table heir list, `0 =< x =< 600000` clamp aligned with 13.4's ≥0.0 assertion, `reserve_inflight` + 64-cap `rtt_ms` surface. All consistent.
+
+**4. Missing first-ship requirements**
+- NOTICE/attribution file for GeoLite2 is named in A.1 but not in the gate or rollout checklist — add a release checklist item.
+- `JANUS_SCHED_PROBE_FORCE` must be documented as bypassing cadence/staleness **but not** the target-eligibility rule, once that rule is fixed.
+
+**5. Architecture notes**
+- Ack-miss pending + reconcile-decrement-excess is sound; duplicate-execution on ack-miss remains inherited v1 behavior, correctly out of scope.
+- Pinned-pick soft cap + probe exemption are coherent; capacity single-ownership is clean.
+- Exclude-self threshold makes 13.6 genuinely falsifiable at N=2.
+
+**6. Top 5 concrete edits**
+1. Drop "geo-known" from the probe target rule (or add `GEO_TEST_HOSTS` to 13.4b).
+2. Pin `{sched, 2, _}` as raw message or cast; name the exact old-master catch-all clause.
+3. Specify whether error completions feed the TTFB health EWMA.
+4. Add NOTICE/mmdb-attribution step to the Part D rollout checklist.
+5. State that `PROBE_FORCE` bypasses cadence/staleness only, never target eligibility.

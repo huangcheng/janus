@@ -1,0 +1,26 @@
+**1. Verdict:** GO WITH FIXES — two spec-level defects make shipped behaviors impossible (health demotion in a 2-worker fleet; capacity counting as written); both are formula/API fixes, not design rework.
+
+**2. Critical risks**
+- **`demote_ms` self-inclusive median is unfalsifiable at 2 workers.** Median over *all* sampled candidates means with {fast f, slow s}: either threshold = 3(f+s)/2 and s > 1.5s is impossible, or the 5000 floor applies and s > 5000 contradicts f+s < 3333. Gate 13.6 (two workers) can never produce `health_demote_total ≥ 1`. Needs ≥3 workers or exclude-candidate-under-test median.
+- **Both quoted `ets:update_counter` shapes are wrong.** `{Node, 2, 1, 0, 1}` sets Threshold=0/SetValue=1 → counter pinned at 1 forever → capacity never enforced past 1 and refusals never fire. Correct insert-default form is `update_counter(Tab, Node, {2,1}, {Node,0})`.
+- **Heir without re-claim protocol:** on owner death tables pass to the heir; a restarted pool calling `ets:new(named_table)` on the same name crashes (badarg). Spec never says how tables are returned (`give_away`/adopt).
+
+**3. Contradictions / stale claims**
+- Rev-3 bullet says insert-default tuple `{Node, 0, [], 1}` (counter pos 4); Part 0.6 says `{Node, 2, 1, 0, 1}` (pos 2) — mutually inconsistent, both incorrect.
+- Purity breach: tiers 3/4 of "pure" `select_v2` reference incrementing `sched_health_demote_total` / `sched_geo_match_total{none}` — counters cannot live inside the pure function.
+- Part C reserve loop does a "live draining re-check (pool ETS)" but no ETS holding live worker flags is specified anywhere (pool records read as gen_server state elsewhere).
+
+**4. Missing first-ship requirements**
+- Table adoption on pool restart (heir → pool).
+- Name/shape of the live draining-flag ETS read by the lock-free loop.
+- Gate 13.6: worker count (3) and slow-key delay magnitude derived from the formula; "≥ 3 jobs" leaves zero margin for EWMA warm-up (needs ≥3 samples *then* more picks post-flush).
+
+**5. Architecture/design notes**
+Tier order is sound: affinity absolute, health-before-geo with never-shed-all, geo strictly narrowing, capacity single-owned by the reserve loop, local fallback as terminal sink. Additive-map wire story, probe budget isolation, advisory-only load, and deploy ordering are coherent.
+
+**6. Top 5 concrete edits**
+1. A.4/B.3: compute `demote_ms` from the median **excluding the candidate under test** (or mandate 3 workers in 13.6).
+2. Part 0.6/B/C: replace both shapes with `ets:update_counter(sched_reserve, Node, {2,1}, {Node,0})`; delete threshold variant.
+3. `select_v2` returns tier decisions; `pick` bumps `sched_geo_match_total` / `sched_health_demote_total`.
+4. Part C/0.5: specify heir hand-back (`ets:give_away`) on pool restart.
+5. Name the live-drain ETS; raise 13.6 job count and pin slow-key seconds from the demote formula.

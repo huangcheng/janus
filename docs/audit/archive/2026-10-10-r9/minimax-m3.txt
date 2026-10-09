@@ -1,0 +1,130 @@
+# Audit — Scheduler v2 (rev 9)
+
+**Verdict: GO WITH MINOR RESIDUALS.** Every rev-9 fold named in the header is present and coherent in the body. Grep-verified. Zero architecture/math/testability objections across the rounds revisited. A small number of wording-bound pins remain below; none of them introduce defects, but a few deserve explicit treatment before implementation to avoid ambiguity at codify-time.
+
+---
+
+## A. Rev-9 folds — landed & coherent
+
+Every fold in the round-9 header checks out against the body:
+
+| Fold | Where landed | Status |
+|------|--------------|--------|
+| `> infinity` rationale in body | Part 0.6 + Part C (reserve loop) | ✓ |
+| missing `sched_workers` row ⇒ drained | Part C (live re-check) | ✓ |
+| exhaustion-reason = first non-ok | Part C | ✓ |
+| BOTH flush paths advance `snapshot_gen` | Part C | ✓ |
+| `probe_skip` five reasons in metric AND JSON | Part C + Part C JSON block | ✓ |
+| `dispatch_worker_total` JSON keys `<node>/<provider>` | Part C JSON | ✓ |
+| Probe/internal recognition (Internal flag) | Part 0.11 + Part A.3 + Part E eunits | ✓ |
+| 4-tuple tracked map EVERYWHERE | Part 0.11 + Part C (no 3-tuple stray) | ✓ |
+| Track cast decoupled from counter (probes: +track, no inc) | Part 0.11 | ✓ |
+| Release / purge / reconcile-excess SKIP for Internal | Part 0.11 | ✓ |
+| In-flight map clears by JobRef | Part 0.11 | ✓ |
+| `SampledAtMono` compare dropped as vacuous | Part A.3 + Part 0.9 (no cross-node compare) | ✓ |
+| LAST-ARRIVAL-WINS wording softened | Part A.3 (`probe after passive ⇒ existence gate, wasted`) | ✓ |
+| Register on the WINNING candidate only | Part 0.11 | ✓ |
+| Demotion gate STRUCTURAL (builder sets `observed_ewma_ms := unknown` < 3) | Part A.4 + Part E eunit wording | ✓ |
+| `health_ewma_ms` gauge shows display value from sample 1 | Part A.4 | ✓ |
+| Heir adopt retries with backoff, resolves by `TableTag` | Part 0.5 | ✓ |
+| `sched_v => 2` in 0.10 enumeration | Part 0.10 hello key list | ✓ |
+| DOCUMENTED ORPHAN WINDOW (v2 master + old workers + owner crash) | Part 0.10 | ✓ |
+| FORCE never bypasses sched_v filter | Part E 13.4b | ✓ |
+| `rtt_dropped_total` JSON = `{negative, non_finite}` | Part C JSON | ✓ |
+| JobRef = master-created unique reference, stable across wire | Part 0.11 | ✓ |
+| Probe key = entitlement-probe catalog pick under SEPARATE budget | Part 0.2 + Part 0.8 + Part E 13.4b | ✓ |
+| 60 s keepalive = plain hello, NO load payload | Part 0.5 | ✓ |
+| 13.4b bounded ≤ 35 s poll | Part E 13.4b | ✓ |
+| Gate intro: fresh per-step stacks (counters start at 0) | Part E (gate section intro) | ✓ |
+| Drain-at-build vs drain-at-recheck asymmetry (< 250 ms bounded) | Part 0.6 | ✓ |
+| `geo_disabled_total` explicit-only conditioned | Part C + Part 0.1 + Part A.1 | ✓ |
+| Async locus load = ONE sanctioned runtime writer of `geo_enabled` PT | Part C (opts sentence) | ✓ |
+| Immediate post-adopt reconcile deletes ALL `sched_rtt` rows (stated) | Part 0.5 | ✓ |
+| "consumed by the pool's `handle_cast` clause" wording | Part 0.2 | ✓ |
+| G3 "capacity limits" wording | Part 0 goal list | ✓ |
+| 13.6 all-workers-slow = GATE assertion (`Δ health_demote_total = 0`) | Part E 13.6 | ✓ |
+| Eunits landed: adopt→re-hello→rebuild→pick | Part E.4 | ✓ |
+| Eunits landed: five skip reasons each incremented | Part E.4 | ✓ |
+| Eunits landed: pinned-path completion feeds EWMA | Part E.8 | ✓ |
+| Eunits landed: `internal` job-map-key tolerance | Part E.7 | ✓ |
+| Eunits landed: probe done-with-`rtt_ms` skipped via tracked Internal | Part E.4 (REACHABLE path) | ✓ |
+
+---
+
+## B. Residuals (none block the GO box)
+
+These are **pinning-gaps**, not architectural defects. State them in a sentence or two before implementation so downstream readers do not have to re-derive them.
+
+### B1. Unpinned drained-skip exhaustion label — undefined
+
+Part C says:
+
+> list exhausted ⇒ local fallback with `reason` = the FIRST non-ok outcome seen in iteration order (a drained PINNED candidate ⇒ `drained_pin` regardless of later candidates; pure capacity refusals ⇒ `capacity`; **drain-skips of unpinned candidates label the exhaustion too**)
+
+The JSON enum is `empty_pool|capacity|drained_pin|send_fail|ack_miss` — there is no separate `drained` reason. When the FIRST non-ok is an *unpinned* drain-skip, the spec does not say which label it gets.
+
+**Recommendation (operator decision):** Either (a) extend the enum with `drained` (one more JSON key, one more prometheus label — cardinality already bounded by node), or (b) state explicitly that unpinned drain-skips bucket under `drained_pin` (treating `drained_pin` as the "drained at re-check" label, pinned or not). The current "label the exhaustion too" wording is a guide, not a pin.
+
+### B2. Probe ack-miss bucketed as `probe_skip{send_fail}` — conflation
+
+Part 0.2:
+
+> Probe send-fail OR ack-miss ⇒ ABORT + clear the in-flight entry + `probe_skip{send_fail}` — NO local fallback for internal jobs
+
+The five-reason enum is `cap|cadence|fresh|drained|send_fail`. Ack-miss is operatorally distinct from send-fail (gun connection drop vs. received-but-no-ack-within-deadline). The `sched_dispatch_local_total` carries `ack_miss` separately for the non-probe path, so the asymmetry is visible at the gate.
+
+**Recommendation:** Either add `no_ack` (sixth reason) or document, in one sentence, that probe ack-miss is bucketed under `send_fail` because the abort outcome is identical (slot freed, no metric ledger entry — no local fallback). The current spec leans toward the second interpretation but does not say so.
+
+### B3. Probe in-flight map ({Node ⇒ JobRef}) clearing on tracked-job purge — implicit
+
+The two maps are kept in sync on `done`/`error`/`send_fail`/`ack_miss`/`nodedown`. But when a tracked-job entry is purged at the 10-min mark while it is still `Internal=true`, the spec does not say the corresponding `Node ⇒ JobRef` entry in the in-flight map is also cleared.
+
+**Recommendation:** One sentence in Part 0.11 — "purging an `Internal=true` tracked entry also clears the probe in-flight map entry (looked up by JobRef, removes the Node key)".
+
+### B4. "Clear by JobRef" on the {Node ⇒ JobRef} map — implementation detail
+
+The in-flight map is keyed by Node. To clear "by JobRef" requires either an O(N) scan or a `{JobRef ⇒ Node}` reverse index. With the fleet sizes the harness exercises this is fine, but pinning it removes one reader's guess.
+
+**Recommendation:** "Fleet size is bounded (workers ≪ 100 in practice); implementation may use an O(N) scan or maintain a reverse index `{JobRef ⇒ Node}` — both are acceptable."
+
+### B5. `snapshot_gen` advance on a "single dispatch" — subtle
+
+13.2 drives ONE dispatch then polls ≤ 35 s for `snapshot_gen` to advance. That advance depends on the dispatch completing and its `rtt_ms` piggyback landing (a state mutation ⇒ dirty-flag ⇒ flush ≤ 250 ms). If the dispatch hangs (> 35 s), only the 30 s tick fires. The 35 s bound covers it, but a tighter wording avoids future confusion:
+
+**Recommendation:** restate as "drive one dispatch and wait for the resulting done/error (≤ 35 s); `snapshot_gen` advances via the rtt_ms-ingest state mutation (dirty-flush ≤ 250 ms) or via the 30 s tick (whichever lands first)".
+
+### B6. "Sub-second TTFB" for the fast key in 13.6 — soft
+
+Rev 5 dropped the strict `< 2.67 s` upper bound in favor of "sub-second". Current Part E 13.6 says "fast sub-second TTFB" and the binding constraint is `victim > max(5000, 3·fast)`. With sub-second mock latency, `3·fast < 3000 < 5000`, so the floor binds. This is fine but reads as prose.
+
+**Recommendation:** swap "fast sub-second TTFB" for the executable "fast-key TTFB < 1500 ms (so `3·fast < 4500 < 5000 = floor`)". Unblocks the row.
+
+---
+
+## C. Things I checked that hold up cleanly
+
+These are not residuals — they are things I re-verified because the rounds touched them and they were correctly pinned:
+
+- **`update_counter` form** (one-pinned 4-arity `{2, +1}, {Node, 0}`; the 4-tuple `UpdateOp` form is FORBIDDEN, the 5-tuple Threshold/SetValue wraps) — pinned in Part 0.6, no stray ref to the wrapped form anywhere.
+- **`sched_reserve` adopt reset** (single mechanism = `ets:delete_all_objects`) — Part 0.5, no competing mechanism.
+- **`sched_reserve` is the inflight source of truth** — Part C, snapshot inflight is sort-hint only.
+- **EWMA seed `E1 = x1`** — Part A.4 + Part E eunit (`3 × 8000 ms ⇒ 8000`). Seeded-at-0 (4625) cannot sneak in.
+- **Health demotion math** — exclude-self + per-candidate + precomputed. At N=2 (the harness), victim `demote_ms = max(5000, 3·fast) = 5000`, victim_ewma 8000 ⇒ 5000 ⇒ demoted. Fast `demote_ms = max(5000, 3·8000) = 24000`, fast_ewma 1000 ⇒ not demoted. Executable on the existing 2-node harness. Self-consistent with the all-slow GATE assertion (`Δ health_demote_total = 0`).
+- **`sched_rtt` row shape `{{Node, ProviderId}, RttMs, Source, SampledAtMono, ExpiresAtMono}`** — Part A.3 + Part C (gauge/JSON). The piggyback's row key executable via the tracked entry's ProviderId (Part 0.11).
+- **RTT clamp** (`0 ≤ x ≤ 600_000` integer-or-float, drop negative/non-finite, clamp-down ×>600k does NOT increment dropped) — Part 0.3 + Part E eunit (clamp-down case).
+- **Worker passive EWMA + master TTFB split** (α = 0.25 both, seed at sample 1, errors and Internal excluded, pinned-path feeds) — Part A.4, Part E eunit E8 (a) + (b).
+- **Mixed-version safety** — done/error are maps, new keys additive, {sched, 2, _} via gen_server:cast, old `handle_cast` catch-all covers `{load, _}`; hello keys (`capacity`, `geo_region`, `sched_v`) defaulted (capacity=∞, geo=unknown, sched_v=1) on old workers.
+- **Old-workER payload tolerance**: the `internal` job-map key is on done/error decoding too (Part E.7), so an upgraded master dispatching to an old worker still admits — same verification as hello keys.
+- **Dispatch probe seam**: probes BYPASS the reserve loop (structural, `dispatch_probe/2`); `dispatch_probe/2` does its own draining/cadence/expired-row checks; `Internal ⇒ true` and NO counter increment. Ack-miss + send-fail both ABORT, in-flight cleared. Probes register via the SAME track cast — counter-neutrality holds end-to-end (release / purge / reconcile-excess all skip the decrement for Internal).
+- **Capacity semantics**: pick reserve loop is the sole owner of the `sched_reserve` counter; pinned picks SKIP the refusal (soft cap); affinity-pinned *drained* at re-check ⇒ `drained_pin` (not `drained`); asymmetry vs. snapshot-build drain is bounded by ≤ 250 ms flush staleness — accepted.
+- **Drain semantics**: drain blocks NEW reservations (live re-check); running jobs are undisturbed.
+- **Catastrophic owner restart**: tracked-job map is pool state (dies with owner); counters orphan; over-admission window is "windowed until in-flight drain"; health-EWMA + divergence + probe cadence + probe in-flight all die (cold reset); `ets:delete_all_objects(sched_reserve)` is the single adopt reset; `sched_rtt` rows all deleted on first post-adopt reconcile (no pool records yet — stated).
+- **JSON surface** (`:8090` read-only, naming rule = metric name minus `sched_`): every key listed in Part C is present and matches its gate test (`reserve_inflight`, `schema_version`, `rtt_ms_other` ALWAYS PRESENT, `rtt_ms` cap of 64, registry eviction on overflow, `fleet_worker_report_mismatch_total` keeps full name).
+
+---
+
+## D. Verdict
+
+**Pi-audit GO box can be ticked.** Architecture, math, and testability are intact. Round-9 folds are present and self-coherent. The residuals in §B are pinning-gaps (B1/B2 are slight spec ambiguities; B3-B6 are minor clarity pins). They are review-noted fixes, not blocking — implementing them as 1-sentence adds to Parts 0.2/0.6/0.11/Part C and Part E is sufficient to close the round before handing to implementation.
+
+Files audited: `docs/audit/target.md` (single file). No external spec was opened. No code was written. No tool was called.

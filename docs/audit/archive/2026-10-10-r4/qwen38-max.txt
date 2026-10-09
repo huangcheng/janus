@@ -1,0 +1,27 @@
+**1. Verdict**
+GO WITH FIXES — all rev-4 folds are present and coherent; residuals are two mechanical contradictions (probe path vs reserve exemption; ack-miss reconcile claim) and three small pinning gaps.
+
+**2. Critical risks**
+- **Ack-miss reservations can stick permanently.** The ack-miss job stays in the tracked set (`JobRef => Node`); reconcile only decrements *excess over tracked jobs*. If a live worker silently loses a job, there is no excess, the counter stays pinned until `nodedown` — a capacity-1 worker permanently loses its slot. The 0.11 claim "settled by done/error **or the 30 s reconcile**" is false for this case. Needs a purge timeout (e.g., 2× ack deadline or hard job TTL): remove tracked entry, decrement once, count it.
+
+**3. Contradictions / stale claims**
+- **Probe vs reserve counter:** 0.2/0.8 say probes "ride the affinity-pin path" yet "never touch the reserve counter (no increment, no decrement)". But 0.6 says affinity-pinned picks **increment** (never rolled back). A normal pinned dispatch increments — the exemption only holds if probe dispatch *bypasses the reserve loop* (direct pinned send). Pick one and align all three sections.
+- 0.11 stale claim as above.
+- EWMA α pinned only for worker passive RTT (0.25); **master TTFB EWMA α is unspecified** (A.4, E.8b).
+
+**4. Missing first-ship requirements**
+- Clamp mechanics: the 5-tuple Threshold/SetValue form is forbidden, so reconcile's "clamped ≥ 0" decrement needs a pinned mechanism (read counter → conditional `ets:update_element`), with the bounded race noted.
+- A metric/`/stats/sched` key for purged ack-miss reservations if purge is added.
+- PT provider-geo map lifecycle on catalog flush/trim (stale `provider_id` cleanup) — A.1 covers generation re-check but not removal.
+
+**5. Architecture/design notes**
+- Exclude-self math verifies at N=2: victim ~8 s vs fast EWMA → threshold `max(5000, 3×fast) = 5000 < 8000` ⇒ demoted; all-slow pair yields 24000 > 8000 ⇒ no self-demotion, never-shed-all intact.
+- The pinned `update_counter(sched_reserve, Node, {2,1}, {Node,0})` form is valid OTP (insert-default, no badarg).
+- 13.6 testability detail: during the poisoning phase, *unpinned* fast-provider jobs split by least-inflight; the fast worker is not guaranteed ≥ 3 TTFB samples. Pin the fast worker too (or spell out the routing) in the harness step.
+
+**6. Top 5 concrete edits**
+1. Resolve probe/reserve contradiction: probe dispatch bypasses the reserve loop (direct pinned send), or increment like a pinned pick — fix 0.2/0.6/0.8 to agree.
+2. Add tracked-job purge: ack-miss entry older than N×ack-deadline ⇒ decrement once + remove + `sched_reserve_purged_total`; amend 0.11 wording.
+3. Pin master TTFB EWMA α (suggest 0.25) in A.4 and eunit E.8b.
+4. Pin the clamp-decrement implementation (read + `update_element`) for reconcile.
+5. Spell out 13.6 phase routing (victim pinned slow; fast worker guaranteed ≥ 3 samples) and PT geo-map cleanup on catalog flush.

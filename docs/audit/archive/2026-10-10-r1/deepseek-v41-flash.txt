@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the tier model and pure-selection design are sound, but capacity defaulting, RTT freshness, and gate coverage as written break the "identical to v1" promise and leave G1 untested.
+
+## 2. Critical risks
+- **Capacity default = 1 silently changes v1.** v1 allowed unbounded per-worker inflight (least-inflight). Clamping to 1 excludes any worker running one job → contradicts "default config selection identical to v1" and can empty the set. Default must be `infinity`/large; capacity is opt-in.
+- **`rtt_to_target` in snapshot Meta vs "join deferred to pick-time"** (Part B vs Part C) is an internal contradiction. A per-worker snapshot cannot hold a per-provider value.
+- **RTT TTL never expires.** TTLs are "pre-filtered by the snapshot builder", but the snapshot only republishes on mutation — an idle fleet keeps stale RTT forever, defeating Part 0.4. Needs a periodic tick (or pass `now` as an opt; still pure).
+- **Tier 5 demotion is inert for <3 candidates.** Median of 2 can never be exceeded by 3×. Exactly the small-fleet case it targets. Compare to min/absolute floor instead.
+- **mmdb reader risk.** 300-line hand-rolled mmdb (search tree, data-section pointers, IPv4-mapped IPv6, metadata) is optimistic; plus 60 MB in-image, GeoLite2 license key at build and attribution are unaddressed. Decide dep-vs-reader before implementation, not during.
+
+## 3. Contradictions / stale claims
+- "No changes to wire job/chunk/credit shapes" vs adding `rtt_ms` to `done`/`error` — that is a wire change; old masters may reject it.
+- Probe "rides existing per-provider probe budget" — that budget is master-side; worker probes need their own accounting, and there is **no aggregate cap across providers** (W×P fan-out).
+- Part 0.4 "expired ⇒ unknown" vs Part B "TTLs pre-filtered by builder".
+
+## 4. Missing first-ship requirements
+- Never-shed-all guard for **tier 3** (all-at-capacity ⇒ define local fallback explicitly).
+- RTT sampling on error paths (503 mock in 13.4).
+- `now`-as-opt TTL, or a re-publish tick.
+- `/stats/sched` shape; GeoLite2 license/attribution + build-time fetch.
+- Tier-5 absolute floor (e.g. `max(median×3, 5s)` only when ≥3 candidates).
+
+## 5. Architecture / design notes
+Pure `select_v2/2` + single-object ETS swap is genuinely atomic (one `ets:insert` object = no torn list). Keep it. Move `rtt_to_target` out of Meta into opts. Note that a worker at capacity → empty candidate set → local fallback is a *behavior change* from v1's "always dispatch".
+
+## 6. Top 5 concrete edits
+1. Capacity default `infinity`; capacity exclusion explicitly falls back to local with a counter.
+2. Remove `rtt_to_target` from Meta; join at pick time from a `now`-stamped RTT map (pass `now` in opts).
+3. Add a 30 s snapshot re-publish tick so TTLs actually expire.
+4. Rewrite gate 13.3 to exercise **real GeoIP**: host mock providers on resolvable/public-mapped addresses, or assert mmdb resolution separately; current localhost plan yields `undefined` and only re-tests legacy `region_tag`.
+5. Fix tier-5 threshold to `max(3×median, 5s)` and require ≥3 candidates; state probe budget is worker-local with a global cap.

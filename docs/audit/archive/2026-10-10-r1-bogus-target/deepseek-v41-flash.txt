@@ -1,0 +1,26 @@
+1. **Verdict:** NO-GO for the prompt as written — the attached `target.md` is the fleet-distribution spec, not the Scheduler-v2 (GeoIP/RTT/ETS-snapshot) spec the prompt audits; judged on its own terms it is GO WITH FIXES.
+
+2. **Critical risks**
+- Spec/prompt mismatch: every audit axis the prompt names (offline mmdb reader vs dep, probe cost floors, self-report vs observed divergence, ETS swap atomicity, 13.2–13.5 dual-node falsifiability) is absent from `target.md`. The Scheduler-v2 document is not attached, so those questions are unanswerable here.
+- erpc residual trust (F.3): a stolen fleet cert ⇒ arbitrary remote code execution on peers. Correctly disclosed, but :8090 flips read-only → command-bearing; needs explicit operator sign-off before ship.
+- `verify_fun` never-rescue is the sole inbound identity gate; any event mishandled as `{valid,_}` rescues path validation. eunit-first is mandatory, not optional.
+
+3. **Contradictions / stale claims**
+- F.2 says the lease reports `{holder, expires_in_ms}`, then two clauses later `{holder, next_check_in_ms}`; Part C repeats `expires_in_ms`. Rev-11 header claims this wording was scrubbed — it was not.
+- Part D body pins order F.5→…→F.4; rev-11 header pins F.5-F.1-F.2-F.3-F.4-F.6-F.8-F.7. Body is stale.
+- Rev-11 header asserts a connector 5-min retry cap, cache_put `first_seen` tombstone GC, pinned M:F:A + timeouts, and fleet_status-executes-locally; the body contains none of these.
+
+4. **Missing first-ship requirements**
+- The four header-only items above must land in the body — they are the enforceable contract.
+- No `-kernel net_ticktime` value in the vm.args rendering block, though the heartbeat bound is hoisted.
+- `fleet_cert_gen.sh` / cert-gen step is absent from the Part D rollout checklist body.
+
+5. **Architecture notes**
+Sound: TLS-only, EPMD-less dist via a static `epmd_module`; pg scope/group pinned to 2-arity; `transient` containment (Part 0.12) is correct OTP; TTL-on-receiver-monotonic is the right partition answer. The dominant residual is F.3, stated honestly.
+
+6. **Top 5 concrete edits**
+1. Reconcile lease fields — delete every `expires_in_ms`, keep `next_check_in_ms`.
+2. Fold all four rev-11 header promises into Parts A/B/F bodies.
+3. Fix Part D execution order to match the header.
+4. Add the `net_ticktime` line + value to the rendered vm.args.
+5. Add operator sign-off + cert-gen to the rollout checklist, and confirm the correct spec is attached.

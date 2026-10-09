@@ -1,0 +1,35 @@
+## 1. Verdict
+
+**GO WITH FIXES** — the round-1 folds are present and coherent, but capacity-overflow semantics contradict gate 13.5, and the pure-selection/reservation split is under-specified where it matters most.
+
+## 2. Critical risks
+
+- **Capacity overflow contradiction.** Part 0.7 + tier 3: all-at-capacity ⇒ filter IGNORED, job dispatches to a worker anyway ("never an empty dispatch"). Gate 13.5: capacity=1, two concurrent jobs ⇒ `sched_dispatch_worker_total` = 1 **and** `sched_dispatch_local_total{reason=capacity}` ≥ 1 — i.e., the overflow job goes LOCAL. These cannot both be true for a single-worker fleet. The counter `reason=capacity` only exists for the gate's semantics; tier 3's semantics would make it unreachable.
+- **Purity vs live reservation.** `select_v2` is declared pure over `(snapshot, opts)`, but tier 3 drops candidates on **live reservation ≥ capacity**, which is explicitly NOT in the snapshot (Part C: snapshot inflight is a sort hint only). Either reservations become a function input or tier 3 actually executes inside pick's reserve-then-rollback loop — the spec currently puts it in both places.
+- **Affinity pin vs reservation.** Tier 2 ignores capacity, but pick still increments `sched_reserve`; a pinned node can exceed capacity, then tier 3 drops it for *unpinned* picks and the 30s reconcile fights the counter. Rollback-skip for pinned picks is unstated.
+- **v1-equivalence is fixture-only.** Runtime picks sort on snapshot inflight (stale ≤250ms/30s), whereas v1 read serialized gen_server state. "Bitwise v1" holds for the pure function, not under concurrent live dispatch — the rollout claim should be scoped accordingly.
+
+## 3. Contradictions / stale claims
+
+- region_tag "unchanged from v1 semantics": true only w.r.t. auto-geo. With health on, tier 4 demotion now outranks region_tag (v1 ranked region_tag above load). Default-off saves bitwise equivalence, but the sentence overclaims.
+- "Opts come from persistent_term (set at boot/hot-reload)" vs Part D "env-config only". Env can't hot-reload; pick one.
+- Probe latency vs passive EWMA: a 1-token probe's upstream duration is not like-for-like with real jobs; whether probe samples enter the passive EWMA is unstated — mixing skews RTT ranking.
+
+## 4. Missing first-ship requirements
+
+- Deploy ordering: `JANUS_SCHED_GEO=1` refuses boot without the mmdb — deploy script must place the file **before** flipping the env; Part D rollout doesn't state this.
+- Probe cadence state owner (per worker×provider last-probe timestamps) is unnamed — presumably pool gen_server; say so, including nodedown behavior.
+- Master-observed EWMA granularity: per-worker global, so a worker slow on one provider is demoted for all — acceptable, but undocumented.
+- `geo_cache` described as "persistent ETS" with no named owner/heir; same for `sched_snapshot` heir (restart window is handled by badarg fallback, but a heir would close it).
+
+## 5. Architecture/design notes
+
+Health-before-geo, precomputed `demote_ms`, `infinity` rtt_key, master-issued probes with cluster cap, and additive-only wire changes are all sound. The locus wrapper seam (injected lookups, boot self-test, master-only DB) is the right call.
+
+## 6. Top 5 concrete edits
+
+1. Decide capacity-overflow semantics (ignore-filter-dispatch vs local-fallback) and align tier 3, Part 0.7, the `reason=capacity` counter, and gate 13.5.
+2. State where tier 3 executes: pass `reservations :: #{Node => Count}` into `select_v2` as an explicit input, or move exclusion into pick; define pinned-pick reservation (increment, no rollback).
+3. Exclude probe samples from the passive EWMA (or justify mixing); keep probe results on the coalesced load cast only.
+4. Fix the hot-reload sentence (env-only, restart required) and add mmdb-before-env deploy ordering to Part D.
+5. Document EWMA scope (per-worker global), name the probe-cadence and `geo_cache` owners, and soften "unchanged v1 semantics" for region_tag under health-on.

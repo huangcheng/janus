@@ -1,0 +1,98 @@
+# Audit — Scheduler v2 (rev 8)
+
+Overall: rev 7 folds are mostly landed, but several seams aren't fully reflected in the body. None touch architecture or math; implementation readiness still holds with the residuals closed.
+
+## Residual defects (fold claims not fully applied to spec body)
+
+**R1. `sched_probe_skip_total` reasons — Part C / Part D under-enumerate**
+Rev 7 fold statement: "the JSON key carries ALL five" + `cap|cadence|fresh|drained|send_fail`.
+- Part 0.2 lists 5 reasons.
+- **Part C metric line**: `sched_probe_skip_total{reason=cap|cadence|fresh}` — only 3.
+- **Part D JSON**: `"probe_skip_total": {"cap": int, "cadence": int, "fresh": int}` — only 3 keys.
+
+Fix Part C metric definition and Part D JSON to list all five (`cap`, `cadence`, `fresh`, `drained`, `send_fail`).
+
+**R2. snapshot_gen advance statement incomplete**
+Fold: "BOTH flush paths (dirty-flush and tick) advance `snapshot_gen`."
+- Part C: 30 s tick advances `sched_snapshot_gen` is stated; the 250 ms dirty-flush is not bound to snapshot_gen advance.
+
+Add to Part C: dirty-flush republish also advances `sched_snapshot_gen`.
+
+**R3. Missing `sched_workers` row not pinned in Part 0.6**
+Fold: "missing `sched_workers` row ⇒ treated as drained (refuse — safe direction)."
+- Part 0.6 only specifies "live draining flag from `sched_workers`" — does not state what a missing row means.
+
+Add one sentence to Part 0.6: missing row ⇒ treated as drained (refuse).
+
+**R4. Exhaustion-reason rule not pinned in body**
+Fold: "exhaustion-reason rule pinned (first non-ok outcome in iteration order; drained-pinned ⇒ `drained_pin`)."
+- Part 0.6 lists the rules but doesn't say *which* reason wins when multiple non-ok outcomes accumulate in iteration order.
+
+Add to Part 0.6: the first non-ok reason encountered in sorted-order iteration is the label written to `sched_dispatch_local_total{reason}`.
+
+## Eunit gaps (fold-claimed coverage not visible in Part E list)
+
+**E1. Eunit 4 re-hello extension not explicit**
+Fold: "Eunit 4 extended: adopt → re-hello → snapshot rebuilt → pick dispatches again."
+- Part E 4 covers the adopt cycle (kill owner → heir → new owner adopts; counter reset; orphan prune). It does NOT explicitly cover the worker re-hello arrival post-admit → snapshot republish → pick returns a worker.
+
+Extend eunit 4 with: simulate worker re-hello after owner death; verify `sched_workers` row appears, snapshot rebuilds, `pick/1` returns the new node.
+
+**E2. Probe-skip all-5-reasons eunit case not enumerated**
+Fold: "probe-skip eunit enumerates all five reasons."
+- Part E 6 covers the snapshot builder seams but does not list a dedicated case for each `sched_probe_skip_total{reason=...}` increment path.
+
+Add eunit cases covering each reason increment: `cap`, `cadence`, `fresh`, `drained`, `send_fail` (with `send_fail` covering both transport and ack-miss abort).
+
+**E3. Pinned-path health EWMA feed eunit case not explicit**
+Fold: "pinned-path completions DO feed the health EWMA (eunit case)."
+- Part E 8 covers worker passive-RTT EWMA and master TTFB EWMA feed excluding errors/internal. It does not assert a pinned-path completion updates the EWMA (a pinned pick is a real job, so it should).
+
+Add to eunit 8: an affinity-pinned completion updates the worker's `observed_ewma_ms` (via the snapshot) just like an unpinned completion.
+
+## Minor / phrasing
+
+**M1. `sched_geo_disabled_total` "explicit-only" nuance missing from Part C**
+- Part 0.1 captures the "ONLY when explicitly requested" rule (knob=1 or TEST_HOSTS set, then disabled).
+- Part C metric description says only "incremented once per DISABLE EVENT — boot or async locus load failure" — no explicit-only condition.
+
+Add parenthetical to Part C: "silent on default boots (counter increments ONLY when geo was explicitly requested via `JANUS_SCHED_GEO=1` or `JANUS_SCHED_GEO_TEST_HOSTS`)."
+
+**M2. Per-step fresh-stack baselines not stated for all gate steps**
+Fold: "per-step fresh-stack baselines stated (the harness restarts stacks between steps)."
+- Part E 13.3b mentions "fresh per-step counters"; 13.6 uses DELTA assertions on fresh counters (implicitly).
+- 13.2/13.4/13.5 do not explicitly state fresh-stack baselines. Assertions like `dispatch_worker_total{node=worker}` ≥ 3 (13.4), `dispatch_worker_total` = 1 (13.5) and `capacity_exhausted_total ≥ 1` require a clean stack to be falsifiable.
+
+Add a Part E header note (or per-step "fresh stack" line on 13.2/13.4/13.5) so the per-step reset is unambiguous.
+
+**M3. Rollback wording overstates**
+Part D: "rollback rests on KNOB-OFF INERTNESS (heir-persisted tables may carry stale rows; with the knobs off nothing reads them)."
+- `sched_snapshot` and `sched_reserve` are still read by `pick/1` regardless of knobs. Stale rows in those tables are bounded by snapshot republish (≤ 30 s) and counter reconciliation, not by knob-off.
+
+Reword to: "with the knobs off, the knob-dependent tables (`sched_rtt`, `geo_cache`) are written but not consulted by selection; `sched_snapshot`/`sched_reserve` remain live but their state converges on the next dirty-flush / tick."
+
+**M4. `probe_skip{send_fail}` conflates transport send-fail with ack-miss**
+Part 0.2 explicitly says "send-fail OR ack-miss ⇒ ABORT + ... `probe_skip{send_fail}`". By-design, but a single label for two distinct abort modes is awkward telemetry.
+
+Optional polish: split the label set to `{send_fail, ack_miss}` (or document the conflation as intentional in a comment).
+
+## Sanity checks that PASSED
+
+- Single counter form pinned everywhere (`{2, ±1}, {Node, 0}` Default tuple).
+- Pure function purity (`select_v2` returns `{Order, Decisions}`; metrics emitted by pick).
+- Capacity single-ownership in pick's reserve loop.
+- Heir mechanics (5 tables + `janus_ets_heir` gen_server adopting via `ets:give_away`).
+- Mixed-version safety (done/error maps + additive keys; `{sched, 2, _}` cast tolerance; deploy order masters→workers).
+- EWMA seed rule (`E1 = x1`); 4625-vs-8000 eunit assertion coherent.
+- Demote-ms math (exclude-self at N=2; `max(5000, 3 × median_others)`; `is_number` guard).
+- Tracked-set seam shape (`{Node, ReservedAtMono, ProviderId}`).
+- Decision schema (`geo_source` ∈ `region_tag|auto|none`; `demoted` lists real exclusions).
+- JSON naming rule (metric minus `sched_` prefix; `fleet_worker_report_mismatch_total` excluded).
+- Probe envelope direction (pool-internal cast; worker sees normal pinned job with `internal => true`).
+- `SampledAtMono` = master ingest stamp (best-effort latest-wins).
+- 13.6 third unpinned provider; quarantine window; 3+3 jobs; relational assertion (`victim > max(5000, 3·fast)`).
+- 13.4b cap headroom (`MAX_HOURLY=100`); 13.4 RTT knob OFF presence proof.
+
+## Net
+
+Implementation-ready pending the four residual closures (R1–R4) and three eunit additions (E1–E3). After those, the rev-8 fold summary's "all findings one-sentence pins / implementation-ready" claim holds end-to-end.

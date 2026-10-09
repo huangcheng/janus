@@ -1,0 +1,32 @@
+**1. Verdict:** GO WITH FIXES — tier design and degradation story are sound, but default-on capacity, the unknown-geo equality bug, and a 13.3 that tests the legacy path instead of GeoIP must be fixed before ratification.
+
+**2. Critical risks**
+- **Default capacity=1 is not a no-op.** Hello-without-capacity ⇒ 1, so a single busy (or pinned) worker at inflight≥1 is excluded and jobs bypass to local; v1 stacks on the worker. This breaks the "selection identical to v1 when geo/probe off" rollout claim and the eunit/gate assertion resting on it. Also unreconciled with the existing credit window that may already bound per-worker in-flight.
+- **`geo_region =:= provider_geo` matches unknown=unknown** (Erlang atom equality). Part 0.1 promises unknown matches nothing; as written the geo tier fires on no data. Needs an explicit unknown guard.
+- **Probe budget amplification:** probes run per worker×provider; "rides existing per-provider budget" but no master-side coordination is specified — W workers can each spend a full per-provider budget. Needs a master-issued quota/token.
+- **Divergence rule compares incomparable durations:** observed = full job wall time (includes slow-client streaming) vs worker self-report = upstream-only EWMA ⇒ structural false mismatches and wrong demotions. Specify observed as upstream-attributed (e.g., time-to-first-chunk).
+- **13.3 cannot falsify G1:** docker mock hosts resolve to private IPs ⇒ geo unknown ⇒ auto tier inert; the step as written exercises the legacy `region_tag` override only.
+
+**3. Contradictions / stale claims**
+- Part 0.3 (self-report advisory; observed wins only after >3× for 2 min) vs Part B tier 5 ("observed preferred") — if observed always wins, self-report and the mismatch counter are dead code.
+- Snapshot table named `scheduler_v2` (Part 0.5) vs `sched_snapshot` (Part C).
+- "GeoIP DB read-only at boot into ETS" — mmdb is random-access; you pread the file and cache results, not load it into ETS.
+- Rollout "identical to v1" contradicted by always-on capacity (risk 1).
+
+**4. Missing first-ship requirements**
+- Dockerfile: 60MB mmdb must be fetched at build (MaxMind key as build secret) or stored outside git — committing to `priv/` violates the no-binary-junk rule; test stage and CI eunit need it or recorded fixtures.
+- Worker egress-IP discovery unspecified: `resolve_host/1` takes a hostname, but the worker needs its public egress IP (echo call? dist-socket peer?).
+- Reader must tolerate a missing ETS table (gen_server restart window) ⇒ empty ⇒ local fallback.
+- New metrics registered in the prometheus registry; new env vars documented in `skills/fleet-node-ops/SKILL.md`.
+
+**5. Architecture/design notes**
+- Master-side GeoIP of a provider hostname measures the master's DNS vantage — anycast CDN edges resolve near the resolver, not the origin. Geo can be confidently wrong; RTT is the truthful signal, geo a coarse hint at best.
+- A histogram of a smoothed EWMA (`sched_rtt_ms`) is near-meaningless; a gauge suits it.
+- Pin-before-capacity makes a pinned worker at capacity fall back to local — decide whether pin is absolute (queue) or yields, and document.
+
+**6. Top 5 concrete edits**
+1. Guard the geo tier: apply only when provider and candidate geo are both known; add an unknown-vs-unknown eunit case.
+2. Default capacity to unbounded for hello-without-capacity; make capacity opt-in; restate the v1-identical rollout claim and reconcile with credits.
+3. Rewrite 13.3 to inject geo via `geo_cache` (or a recorded-fixture host) so it falsifies auto-geo; 13.4 asserts `rtt ≥ 0` with float ms (sub-ms mock latency rounds to 0).
+4. Define observed EWMA as upstream-attributed duration; resolve the 0.3-vs-B contradiction; add a master-side probe quota.
+5. Unify the snapshot table name; state reader tolerance of a missing table; add the mmdb build fetch and egress-IP discovery to the first-ship checklist.

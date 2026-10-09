@@ -1,0 +1,34 @@
+**Scope note:** prompt.md describes a "Scheduler v2 / GeoIP mmdb / steps 13.2–13.5" spec, but the attached `target.md` is the **fleet distribution spec (rev 11)**. I audited the attached document; the mmdb/tier/ETS-swap checklist items have no counterpart in it.
+
+**1. Verdict:** GO WITH FIXES — the failure-mode discipline and pinned mechanics are unusually thorough, but one invariant contradiction (local-wins on the cool path), one gate-continuity hole (F.3), and total silence on coexistence with the already-shipped master/worker dist block a FINAL ratification.
+
+**2. Critical risks**
+- **F.3 continuity is self-contradictory.** Once gw1's local `degraded_filter` sheds the slow route, gw1 stops sampling it, so "senders keep sampling → EWMA stays fresh → heartbeats continue" is false; Part 0.8(f) ("heartbeat stops") says the opposite of what F.3 needs. Verdict/heartbeat persistence across `?EWMA_STALE_MS` is undefined → the quorum gate may be unfalsifiable.
+- **Master/worker dist collision.** `proto_dist`, `-start_epmd false`, `port_please` (noport for non-peer hosts), `net_kernel:allow`, and SAN-in-peer-set are node-global. A worker dialing a fleet-mode master fails all four. The spec never mentions master/worker.
+- **`first_seen` tombstones unbounded.** Rev-11 fold promises GC at `first_seen + 2×TTL + 60 s`, but Part B2 specifies no table, cap, or sweeper; a peer streaming unique hashes grows it without bound (4 096 cap covers entries only).
+
+**3. Contradictions / stale claims**
+- Prompt describes a different spec (Scheduler v2) than attached.
+- Goal still says "(phase 3) quota…"; Part C lease still `{holder, expires_in_ms}` while F.2 carries both `expires_in_ms` and `next_check_in_ms` — the rev-11 "scrubbed" claim is false.
+- Rev 11: `lb_cool_purge` published once by originator; F.1 body reads as if every peer broadcasts it.
+- Rev 11: mirrors enum covers quota; Part C mirrors shape says `cool|lat` only.
+- F.6 body: "control run with fleet knob off" — at F.6 the whole cluster is fleet-on; rev-11's "pre-recreate measurement" contradicts it.
+- Part 0.1 "local fresh evidence strictly wins on BOTH paths" vs Part B cool consult, which has no local-fresh exception (only never-shed-last).
+- 8 192 cap: rev 11 says aggregate across mirrors; Part B/B2 read per-table.
+
+**4. Missing first-ship requirements**
+- Master/worker coexistence section (unify PKI/allow-list/epmd, or declare gateways worker-less and gate-assert it).
+- One consolidated closed ingress-shape enum (`lb_cool`, `lb_recovered`, `lb_lat`, `quota`, `cache_put`, `lb_cool_purge`) for eunit.
+- Flag which MFAs are NEW (`cool_clear/1` is; `janus_config:reload/0`, `janus_catalog:flush/0` unconfirmed).
+- F.5 must pin the comparison drive below the ≥50 % quota filter, else quota gossip breaks `signals_rx == 0`.
+- Attacker-cert fixture containers for F.1(a)–(c) in the harness.
+
+**5. Architecture/design notes**
+- Advisory-only quota, sender-fixed verdicts, ingress-bounded signals, min-node-name lease, and `transient` containment are all sound. Single-sender remote cool is the sharpest advisory; acceptable with the 30 s cap + last-resort rule — but 0.1's wording must match. 1 s `fleet_status` timeout across three clouds is tight; make it configurable.
+
+**6. Top 5 edits**
+1. Add "Coexistence with master/worker dist" (or worker-less declaration + gate).
+2. Rewrite F.3: pin degraded-verdict/heartbeat behavior across stale EWMA; reconcile 0.8(f); specify the mock latency band.
+3. Consolidate the ingress enum; purge-once-by-originator; mirrors enum incl. quota; state the 8 192 cap once as aggregate.
+4. Scrub stale text: Goal "(phase 3)", lease `expires_in_ms`, F.6 "knob-off control".
+5. Specify tombstone storage, per-sender cap, and sweeper for `cache_put` `first_seen`.

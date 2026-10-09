@@ -1,0 +1,81 @@
+# Audit — Scheduler v2 spec, rev 7 (round 7)
+
+Verdict up front: **7/7 GO WITH FIXES.** All 13 rev-7 folds are present and coherent; the residuals are one missing JSON key, one stale clause, one unpinned failure disposition (probes), and one load-bearing assumption (post-adopt re-hello) that needs a named seam + eunit. No architecture or math defects found.
+
+---
+
+## 1. Rev-7 fold verification (all present)
+
+| Fold | Present | Where |
+|---|---|---|
+| Probe envelope direction (pool-internal; worker sees normal pinned job) | ✅ | Part 0.2, A.3; no stale "affinity-pin path" wording anywhere |
+| Freshness counts passive OR probe rows | ✅* | Part 0.2, A.3 cold-start fill — *but see F1 (stale clause in same sentence) |
+| FORCE bypasses cadence+fresh-skip only | ✅ | Part 0.2 |
+| `Result > infinity` — comparison skipped when `capacity =:= infinity` | ✅ | Part C reserve loop (rationale inaccurate — see F7) |
+| Adopt = cold re-hello; over-admission "windowed until in-flight drain" | ✅ | Part 0.5 — see F4 for the assumption it rests on |
+| Tracked map `{Node, ReservedAtMono, ProviderId}` | ✅ | Part 0.11, Part C |
+| `sched_health_ewma_ms` / `sched_reserve_inflight` gauges; `sched_rtt_ms` 64-cap | ✅ | Part C metrics + JSON |
+| Pinned path `geo_source := none` | ✅ | Part B tier 2 |
+| `sched_rtt` write-time latest-wins; clamp at master ingest | ✅ | A.3, eunit 6(c) |
+| 13.6 relational assertion, concurrent poisoning, ≥45 s, mock contract | ✅ | Part E 13.6; arithmetic re-verified (three 8 s samples, seed E1=x1 ⇒ EWMA 8000; seeded-at-0 would read 4625 — rev-6 rationale arithmetic is correct) |
+| 13.2 bounded ≤35 s poll | ✅ | Part E 13.2 |
+| 13.4 rtt presence with knob OFF; 13.4b enabled-only | ✅ | Part E |
+| Eunit additions (internal-done skip, clamp-down, geo_disabled per-event, probe_skip{drained}, load-cast suppression note, etc.) | ✅ | Parts 0.2/0.3/A.4/C/E |
+
+Rev-3–6 folds all still intact (exclude-self math, single `update_counter` form, `{Order, Decisions}` purity, three-seam internal exclusion, purge idempotency, JSON naming rule). The forbidden 4-element UpdateOp, term-order traps (`infinity` after floats; `unknown > 5000` closed by `is_number`), and the 4-arity `update_counter(sched_reserve, Node, {2,1}, {Node,0})` form are all stated correctly for OTP 27.
+
+---
+
+## 2. Findings
+
+### F1 — Stale clause contradicts itself inside Part 0.2 (mechanical)
+Part 0.2 target rule: *"…with **NO UNEXPIRED PASSIVE ROW** (single freshness predicate — …; freshness counts BOTH row sources — the predicate is 'no unexpired row (passive OR probe)'…)"*. The leading phrase is rev-6 wording contradicting its own parenthetical; an implementer could code either reading. **Fix:** delete the "PASSIVE" qualifier from the lead phrase.
+
+### F2 — JSON `probe_skip_total` missing `drained` (schema gap)
+Metric: `sched_probe_skip_total{reason=cap|cadence|fresh|drained}` (Part 0.2, rev-7 fold). JSON surface (Part C): `{"cap": int, "cadence": int, "fresh": int}` — no `drained` key, and no other surface for it. The pinned assertion surface must carry every reason. **Fix:** add `"drained": int` to the JSON block.
+
+### F3 — Probe send-fail / ack-miss disposition unpinned (real gap, medium)
+`dispatch_probe/2` pins its own draining/dispatchable check, but not what happens when the pinned send fails or the ack misses:
+- If it reuses the `janus_http_worker_client` seam as-is, ack-miss triggers **local fallback execution of the probe on the master** — a real (if 1-token) upstream call that measures nothing useful and contradicts "master-issued probes measure the worker path".
+- The in-flight probe map is cleared only on *"probe done/error/nodedown"* (Part 0.2). A send-failed probe leaves `{Node => JobRef}` stuck until nodedown or owner restart, blocking all further probes to that worker (≤1-in-flight rule).
+
+**Fix:** pin in Part 0.2: probe send-fail AND ack-miss ⇒ abort, clear the in-flight entry, count (`probe_skip{send_fail}` or fold into an existing reason), **no local fallback for internal jobs**. Add the matching eunit line (also covers the F12 gap: no eunit currently exercises `probe_skip{drained}` or send-fail).
+
+### F4 — Post-adopt recovery rests on an unnamed re-hello mechanism (verify-at-implementation, high)
+Adopt prunes ALL `sched_workers` rows because the new owner has no pool records, so *"every worker must RE-HELLO post-adopt (dist connections survive; sticky sessions re-hello)"*. If the shipped hello is connect-time-only, a pool-owner restart empties the pool **until workers are restarted** — every pick falls back locally. The spec asserts the re-hello exists but never names the shipping seam (heartbeat interval / sticky keepalive module).
+**Fix:** (a) verify + name the re-hello trigger at implementation start (like the done/error map-shape verification); (b) extend eunit 4's adopt cycle: adopt → worker re-hello → snapshot rebuilt → pick dispatches again. Currently no test covers dispatchability recovery after adopt.
+
+### F5 — Live re-check behavior on a MISSING `sched_workers` row unpinned (small)
+Matters in the ≤250 ms post-adopt stale-snapshot window (snapshot lists candidates; `sched_workers` is already empty). **Fix:** one sentence — missing row ⇒ treat as drained/refuse (safe direction).
+
+### F6 — Orphan `sched_reserve` rows for dead nodes (cosmetic, small)
+Rollback racing nodedown re-inserts `{Node, 0}` via the Default tuple; the corrective write heals it to 0, but the row then lingers until rejoin or next adopt (no further nodedown will delete it). **Fix:** pin the 30 s reconcile to also delete `sched_reserve` rows for nodes absent from pool records.
+
+### F7 — Inaccurate badarg rationale (cosmetic)
+The fold's justification — *"an atom-vs-number guard comparison would badarg"* — is wrong: in Erlang term order `Number > infinity` simply evaluates `false` (numbers < atoms), in guards and expressions alike; no badarg occurs. The pinned behavior (skip the comparison when `capacity =:= infinity`) is still correct and belt-and-braces (it also prevents `false`-by-term-order accidentally meaning "infinity never trips" for the wrong reason). **Fix:** reword the rationale; keep the skip.
+
+### F8 — `SampledAtMono` provenance implied, not pinned (one sentence)
+Wire shape (done/error carry only `rtt_ms`) forces the master to stamp `SampledAtMono` at ingest — which is the only sane choice, since per-VM monotonic clocks are incomparable across nodes (Part 0.9). State it explicitly so nobody adds a worker-side timestamp key later. Also note the fold's "closes the concurrent piggyback-vs-cold-start race" is really about *out-of-order delivery*, since all writes serialize in the pool gen_server (single-writer pin holds).
+
+### F9 — `JANUS_SCHED_GEO_TEST_HOSTS` resolution seam not named (small)
+Part 0.1 pins the boot-check effect; Part A.1 (`janus_geo:resolve_host`) never says the test-host map is consulted *before* DNS/mmdb. Gate 13.3b depends on it. **Fix:** name the seam in A.1.
+
+### F10 — Gauge cap mechanism (implementation note)
+`sched_rtt_ms` capped to 64 label sets: Prometheus client registries keep label sets until explicitly deleted, so the cap requires deleting evicted label sets, not just stopping writes. One clause in Part C.
+
+### F11 — Doc hygiene (mechanical)
+- TF-13.2–13.6 additions imply a `../janus-dashboard/docs/TEST-FLOWS.md` update (AGENTS.md: the gate "grows with TEST-FLOWS.md"); not listed in Part D.
+- `geo_match_total{none}` conflates "pinned pick" with "no geo comparator" (pinned picks emit `none`). Harmless for the ≥-style gate assertions; one clarifying sentence suffices.
+
+---
+
+## 3. Cross-checks that passed (spot-list)
+
+- Demotion math at N=2 re-derived: victim threshold `max(5000, 3×fast_ewma)`; three 8 s samples with E1=x1 seeding ⇒ 8000; fast worker's own threshold `max(5000, 3×8000)` ⇒ not demoted; all-slow N=3 ⇒ no demotion (min-EWMA survivor). 13.6's relational assertion is exactly the demotion predicate — host-speed-robust as claimed, and honestly fails loud if the host makes fast-TTFB > 2.67 s.
+- Purity: `select_v2` reads only snapshot+opts; all counters emitted by `pick` from `Decisions`; probe counter-neutrality is structural (`dispatch_probe/2` outside the reserve loop).
+- Cost floor holds: default config = passive piggyback into ETS only; probes off; geo off ⇒ zero extra upstream calls.
+- Mixed-version: additive map keys on done/error (maps verified shipped), `{sched,2,_}` via cast → old-master `handle_cast` catch-all, old workers ignore `internal`/`capacity`/`geo_region`, test order pins verification before the piggyback is written.
+- Heir mechanics: `janus_ets_heir` (not a supervisor), all five tables, GiftData `{TableTag, Owner}`, adopt reset via `delete_all_objects` — consistent end to end.
+- JSON↔metric naming rule holds for every key checked (`snapshot_gen`, `geo_disabled_total`, `rtt_dropped_total`, `reserve_purged_total`, full-name `fleet_worker_report_mismatch_total`) — except F2.
+
+**Clear to proceed to rev 8** with F1–F5 closed (F3 pinned, F4 verified+eunited) and F6–F11 folded as mechanical edits.

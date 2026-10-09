@@ -1,0 +1,33 @@
+# Scheduler v2 — audit (rev 3)
+
+## 1. Verdict
+**GO WITH FIXES** — rev 3 cleanly lands all 22 round-2 folds (capacity single-owned in pick; pinned soft-cap; live drain re-check; insert-default reserve; region_tag ungated; is_number demotion guard; GEO_TEST_HOSTS test seam; TTFB-EWMA health; probe cold-start-only; sched-table heir; deploy order pinned; pure-function v1-equivalence scoped; boot-time env; `/stats/sched` schema). Two small residuals and one undefined seam remain.
+
+## 2. Critical risks
+- **heir list incomplete.** Part C explicitly lists `sched_snapshot, sched_reserve, geo_cache` as heir-protected; Part A.3 specifies `sched_rtt` (TTL 10 min, expirable) without a heir or any defense against pool-gen_server restart. A pool restart loses warm-TTFB EWMA across the cluster — defeats G1/G2 prematurely.
+- **probe-target algorithm undefined.** Spec caps hourly rate and per-worker cadence but never pins *which* provider is probed (round-robin? per (worker,provider) round? least-recently-RTT-expired?). Gate 13.4b only asserts `probe_total ≥ 1`, so an N=1 fleet trivially passes — leaves a real production behavior decision to the implementer.
+- **live-drain ETS table unnamed.** Reserve loop does `live draining re-check` (Part B.6/C.3) but the target table is described as "pool ETS" generically; no `sched_node_state` (or equivalent) name is pinned, so mixed-version safety and the heir assumption can't be asserted.
+
+## 3. Contradictions / stale
+- `/stats/sched` schema lists `rtt_ms` as a flat per-`(node,provider)` map; with N workers × M providers this is unbounded cardinality on the pinned assertion surface. Compare to bounded `geo_match_total{region_tag|auto|none}` labels — inconsistent intent.
+- E.8 conflates worker-side passive RTT EWMA (A.3, α=0.25) with master-side TTFB EWMA (A.4, single α choice not pinned to 0.25). One test, two EWMA feeds, no separation.
+- Worker-region vocab warning references "∉ any region_tag" — no source-of-truth named for the configured `region_tag` list (provider records? PT map? static config?). The warning needs that source to compare against.
+
+## 4. Missing first-ship requirements
+- `sched_rtt` heir (or explicitly: no-heir, accept cold rebuild).
+- Recorded locus-return fixture path (`apps/janus_core/test/fixtures/<x>.eterm` per AGENTS fixture rule).
+- Probe-target selection ordering.
+- Live-draining ETS table name.
+- Per-worker `rtt_ms` cardinality cap on `/stats/sched`.
+
+## 5. Architecture notes
+Single-owner capacity, never-shed-all, affinity soft-cap, mixed-version map-key additivity, and pure-function v1-equivalence are coherent and consistent with AGENTS architecture invariants. Async locus load + image/volume rebuild rule honors the Erlang build gate. Default-off preserves cost floor cleanly. The read-path-sampling softness for v1 equivalence is honestly scoped to the pure function — not a defect.
+
+## 6. Top 5 concrete edits
+1. **Part C**: add `sched_rtt` to the heir list (janus_core supervisor) or explicitly inherit the existing `sched_snapshot` rebuild-on-start and document cold loss.
+2. **Part C / D.1**: pin live draining ETS name (e.g., `sched_node_state`) and the probe-target selection rule (per-worker least-recent-probed `(worker,provider)` with hourly cap).
+3. **Part C `/stats/sched`**: cap `rtt_ms` (top-N by EWMA recency, or `_other` bucket) to bound label cardinality on the pinned assertion surface; state the cap.
+4. **Part E.8**: split into two eunits — `worker_rtt_ewma_alpha` (synthetic upstream latencies) and `master_ttfb_ewma_alpha` (dispatch-ack → first-chunk feed, single-chunk fallback path) — no conflation.
+5. **Part A.2 typo-aid + Part B tier 4**: pin the source for the worker's region-tag vocabulary the warning compares against (PT map `janus_catalog:region_tags/0` or hello-aggregated set) so the warn/fuzzy logic is verifiable in eunit.
+
+**Residual risks** (not blocking GO): metric cardinality, region-tag source pinning, EWMA test split — all eunit/gate-fixable; ship with the listed edits.

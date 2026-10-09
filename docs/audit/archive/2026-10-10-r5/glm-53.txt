@@ -1,0 +1,34 @@
+# Spec audit — Scheduler v2 rev 5
+
+## 1. Verdict
+
+**GO WITH FIXES** — all rev-5 folds are present and coherent except one stale contradiction (A.3 probe routing) and one unpinned arithmetic convention (EWMA seed) that silently decides whether gate 13.6 can pass.
+
+## 2. Critical risks
+
+- **EWMA initialization unpinned.** 13.6's claim "victim EWMA ≈ 8 s" holds only if the EWMA seeds at the first sample. Seeded at 0, three 8000 ms samples yield α=0.25 EWMA = 4625 ms < the 5000 ms floor ⇒ **no demotion, gate 13.6 fails deterministically**. A.4/eunit #8 never state the convention; the whole poisoning arithmetic depends on it.
+- **A.3 still routes probes through pick.** Part 0.2 pins `dispatch_probe/2` bypassing the reserve loop, but A.3 says probes go "via the affinity-pin path (Part 0.2 — the pin explains the capacity exemption)" — the exact wording rev 5 deleted. An implementer following A.3 reintroduces the counter ambiguity.
+- **`sched_rtt` row shape collides.** The flat 6-tuple `{WorkerNode, ProviderId, ...}` with default keypos 1 keys on node only — multiple providers per node overwrite each other. Needs a pinned tuple key `{{Node, ProviderId}, ...}` or explicit keypos.
+
+## 3. Contradictions or stale claims
+
+- A.3 "affinity-pin path" vs Part 0.2 `dispatch_probe/2` (above).
+- "CATALOG-KNOWN providers" (0.2) doesn't exclude disabled providers — probing them spends money for zero selection benefit.
+- Purge age needs `ReservedAtMono`, but the tracked map is typed `JobRef => Node` (0.11/C) — no timestamp to age against.
+- "Least-recently-probed" is undefined for never-probed (worker, provider) pairs — must treat absent as oldest.
+
+## 4. Missing first-ship requirements
+
+EWMA seed convention; `sched_rtt` key shape; probe eligibility = enabled providers; timestamped tracked-job entries. All mechanical, none architectural.
+
+## 5. Architecture/design notes
+
+Verified sound: exclude-self demotion math (min-EWMA survivor invariant holds: median(others) ≥ E_min ⇒ min never shed); single `update_counter` form + corrective-write clamp; ack-miss pending + purge; adopt-reset policy; five heir'd tables; single-writer RTT pin with `SampledAtMono`; mixed-version delivery-path eunit; `drained_pin`; `/stats/sched` v1 surface; de-geo'd probe targets (13.4b runs geo-off); per-pick metric semantics; 13.3a/13.5 falsifiable as written. 13.6's `3×fast < 8000 < victim` holds given the seed fix and fast TTFB < 2.67 s assertion.
+
+## 6. Top 5 concrete edits
+
+1. A.4 + eunit #8: pin "EWMA seeds at the first sample"; add an eunit case asserting three identical 8000 ms samples ⇒ EWMA = 8000.
+2. A.3: replace "via the affinity-pin path" with "via `janus_worker_pool:dispatch_probe/2` (bypasses the reserve loop — Part 0.2)".
+3. A.3/0.2: write the row as `{{Node, ProviderId}, RttMs, Source, SampledAtMono, ExpiresAtMono}`.
+4. 0.2: "catalog-known" → "catalog-known **and enabled** providers"; never-probed pairs sort as oldest.
+5. 0.11/C: tracked map becomes `JobRef => {Node, ReservedAtMono}` to make the 10-min purge age executable.

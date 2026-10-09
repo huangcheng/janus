@@ -1,0 +1,33 @@
+**1. Verdict: GO WITH FIXES** — rev 2 is coherent; one mixed-version contradiction, one capacity-reservation gap, and rollout wording need closing before ratification.
+
+**2. Critical risks**
+- **Wire-shape contradiction (Part 0.10):** "old fixed-arity tuple clauses untouched" is incompatible with "done/error maps gain an optional `rtt_ms` key" unless shipped done/error are already maps. If tuples, the piggyback cannot be additive; if maps, "untouched" is false. State the rev-base wire shape; commit to one path (map-additive OR tuple-extension with version negotiation).
+- **Capacity=infinity reservation unspecified:** A.5 + Part C require `ets:update_counter`, which cannot store `infinity`. An explicit "infinity ⇒ skip `update_counter`, no reservation row, no rollback" rule is missing; without it, an implementer may write `infinity+1` and crash.
+- **Probe-channel deploy-ordering trap:** A.3 ships probe results in the new `{sched, 2, _}` cast; Part 0.10 says old masters drop+count it. Upgraded worker → still-old master ⇒ probe data lost until master upgrades. Mandate deploy order masters→workers.
+
+**3. Contradictions / stale claims**
+- Part D rollout claims "geo is preference-only"; B tier 5 is a hard narrow-when-applicable filter, not a tilt. Rewrite: "geo ON, no same-geo workers ⇒ v1-equivalent; geo ON with same-geo workers ⇒ narrowing executes".
+- "Reservation IS the inflight source of truth" (Part C) clashes with snapshot still carrying `inflight` for sort. Clarify snapshot-inflight is a sort-hint sample, never authoritative.
+- A.4 "even N averages the two middles" — pin the exact formula; `statistics-median` semantics on duplicates must be explicit (no `erlang:statistics/1` shortcut).
+- Part 0.10 says `rtt_ms` is "additive-map-only" while simultaneously describing "old fixed-arity tuple clauses" — same root contradiction as risk #1.
+
+**4. Missing first-ship requirements**
+- Slice-Q per-node quota vs capacity interaction is silent — declare orthogonal, both retained.
+- Drain + reservation: does drain block new reservations, only new picks, or neither? State it.
+- Missing `candidates` row (table present, row absent) — Part C covers missing-table `badarg`, not missing-row.
+- EWMA α=0.25 has no eunit case (pure-math).
+- `sched_snapshot_gen` is named in metrics but not asserted in any eunit/gate step.
+- Stateful modules in this codebase are eunit-tested live (`janus_usage` precedent); Part E eunit #5 implies live `janus_worker_pool` — call that out so the gate isn't reinvented as eunit-mock.
+
+**5. Architecture / design notes**
+- Per-host (not per-provider) geo cache is right for multi-base_url providers; keep.
+- Persistent_term for opts is correct; no gen_server on hot path. Good.
+- `sched_rtt_ms` GAUGE of EWMA (not histogram) is appropriate for smoothed single-value reporting.
+- `other` as a known-but-unmapped region must match B tier 5 if provider_geo is also `other` — spell out explicitly so implementers don't conflate `other` and `unknown`.
+
+**6. Top 5 concrete edits**
+1. Resolve the done/error wire-shape contradiction: commit to map-additive and delete "old fixed-arity tuple clauses untouched", OR define tuple-extension with explicit version negotiation.
+2. Add explicit "infinity ⇒ skip `update_counter`, no reservation row, no rollback" to Part C.
+3. Rewrite rollout: replace "geo is preference-only" with the narrow-or-v1-equivalent truth.
+4. Mandate masters→workers deploy order + eunit: old-master receives new-worker `{sched,2,{load,_}}` ⇒ dropped+counted, no `sched_rtt` write.
+5. Add eunit cases: missing `candidates` row ⇒ local fallback; EWMA α=0.25 pure-math; Slice-Q/capacity orthogonality; `sched_snapshot_gen` advances on republish.

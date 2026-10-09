@@ -1,0 +1,27 @@
+## 1. Verdict: GO WITH FIXES — rev 2 folds are all present and mostly coherent, but the capacity-exhaustion behavior is specified three inconsistent ways, and the affinity pin contradicts the reservation counter it must ride on.
+
+## 2. Critical risks
+- **Capacity exhaustion is tri-specified.** Part 0.7 / B.3 / fold summary: all-at-capacity ⇒ filter ignored ⇒ job still dispatches to the worker. Metrics + gate 13.5: `sched_dispatch_local_total{reason=capacity}` ≥ 1 with one capacity-1 worker and two concurrent jobs — i.e., live reserve refusal ⇒ local fallback. Both cannot hold for 13.5's exact scenario; whichever ships, one assertion surface is wrong.
+- **Affinity pin vs reserve loop.** B.2 says a pinned worker at capacity "queues the job", but Part 0.6's `update_counter` (reserve-then-rollback, `> capacity` ⇒ next candidate) would reject the only candidate. The pick loop needs an explicit pinned-bypass branch or the pin claim is unimplementable.
+- **No falsifiable gate step for the health tier** (G2) — eunit-only, violating the spec's own no-log-scraping discipline.
+
+## 3. Contradictions or stale claims
+- B.3 filters on "live reservation" inside `select_v2`, which is declared pure and sees only snapshot-sampled inflight (Part C). Purity break as written.
+- Part 0.3 "self-reported … NEVER a selection input" vs `rtt_map` built from worker-reported `rtt_ms` driving the tier-6 sort. The trust split (load advisory; network RTT worker-owned) is sound but the wording contradicts itself.
+- "Never an empty dispatch" vs local fallback `reason=capacity` — local execution isn't dispatch; reword.
+
+## 4. Missing first-ship requirements
+- Gate/eunit for the boot paths: `JANUS_SCHED_GEO=1` + absent/corrupt mmdb ⇒ refusal; auto-off ⇒ `sched_geo_disabled_total`.
+- Deploy-script step (mmdb placement/license key) has no verification in the gate.
+- Name where `janus_http_worker_client` gains reserve/release hooks (send_fail/ack_miss release lives there).
+
+## 5. Architecture/design notes
+- Locus choice, single-row snapshot swap, dirty-flag + 30 s tick, master-issued capped probes, unknown-vs-unknown guard, and v1-equivalence eunit are all sound and falsifiable. Prefer `locus` async load at boot so the explicit-1 refusal path doesn't parse 60 MB synchronously.
+- A lying worker can win geo/RTT preference via fabricated `rtt_ms`; acceptable (preference-only), but state it.
+
+## 6. Top 5 concrete edits
+1. Pick ONE capacity-exhaustion behavior (recommend: reserve-loop exhaustion ⇒ release + local fallback `reason=capacity`, matching 13.5); rewrite Part 0.7/B.3/fold and the eunit matrix to match.
+2. Add the affinity-bypass branch to the reserve loop spec (pinned pick skips capacity reservation).
+3. Rename B.3 to "sampled reservation" (snapshot copy); live enforcement lives solely in pick's reserve loop.
+4. Reword Part 0.3 to "self-reported *load* never selects; worker-measured RTT is the tier-6 input by design."
+5. Add a health-tier test seam + gate step 13.6 (inject slow done timings), plus the mmdb boot-refusal/auto-off assertions.

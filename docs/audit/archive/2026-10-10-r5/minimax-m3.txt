@@ -1,0 +1,27 @@
+## Verdict
+**GO WITH FIXES** — rev 5 closes the five round-4 contradictions; residuals are mechanical spec-gaps, no architectural defects.
+
+## Critical risks
+None new. All five round-4 risks are mitigated: probe seam named (`dispatch_probe/2`, structurally outside reserve loop); single-writer pin for `sched_rtt` (passive piggyback canonical, probe cold-start fill only); ack-miss pending + 10-min purge (`sched_reserve_purged_total`); adopt resets `sched_reserve` + prunes orphans (bounded over-admission documented); clamp is corrective write (decrement→read→fix). Demotion math executes at N=2; pinned counter form (`{Node, 0}` default, `{2, 1}` UpdateOp) is the only legal call.
+
+## Contradictions / stale claims
+- None found. rev-3/4 folds are preserved (exclude-self demote_ms, sched_workers drain re-check, janus_ets_heir with all five tables, EWMA split, `{sched,2,_}` via cast ⇒ handle_cast catch-all). Mixed-version shape (map `rtt_ms`) and probe-budget separation (additive, never starves entitlement-probes) are coherent.
+- `/stats/sched` schema_version=1, `fleet_worker_report_mismatch_total`, `rtt_ms_other={count,max_ms}`, `drained_pin` label, `reserve_inflight` per-node map all present.
+- `sched_geo_disabled_total` once-at-boot + `JANUS_SCHED_REGIONS` vocab-replace + PT-map rebuild on generation all present and aligned with 13.3b boot check.
+
+## Missing first-ship requirements
+- Gate 13.6 step budget (~24 s of slow TTFB + harness wiring) needs an explicit timeout-budget line item in `e2e_mw_local.sh` to fail loudly rather than hang.
+- Probe message envelope for `dispatch_probe/2` is unnamed (no `{sched, 2, {probe, _}}` shape pinned); implementation has to invent.
+- `/stats/sched rtt_ms` reads from `sched_rtt` directly (not from the snapshot's `rtt_map`); the gauge can surface an expired sample until the 30 s tick purges — read-side TTL filter not specified.
+
+## Architecture / design notes
+- Snapshot/router split is clean: pool owns timers, monitors, reconciliation; pick is the only capacity mutator; `select_v2` is genuinely pure (counters emitted from `Decisions`). Probes structurally outside the reserve loop (dispatch seam, no flag inside pick) — robust.
+- Probe-target rule correctly de-geo'd; 13.4b runs with geo off. Single-writer pin keeps `rtt_ms` from corrupting the passive EWMA.
+- Owner-restart adopt policy is real (heir holds tables, adopt resets+prunes+reconciles); bounded softness accepted.
+
+## Top 5 concrete edits
+1. **Name the probe envelope**: add `dispatch_probe/2` body shape (e.g. `{sched, 2, {probe, JobSpec}}`) and the matching `handle_cast` clause — no shape invention at impl time.
+2. **Filter `sched_rtt` reads by `ExpiresAtMono`**: `rtt_ms` map and `sched_rtt_ms` gauge must drop expired samples at read time, not only on the 30 s tick.
+3. **Pin adopt-RESET semantics**: state whether `sched_reserve` is `ets:delete_all_objects` then re-inserted per node on demand, or `update_counter` per known node to `{Node, 0}` — single choice.
+4. **Bound the 13.6 timeout**: document the per-step wall-clock (≥ 24 s slow TTFB) and the harness-level fail-loud assertion in `e2e_mw_local.sh`.
+5. **Clarify "dispatchable" in probe target rule**: state explicitly "worker configured to serve provider X" — currently `dispatchable` carries two senses (draining-flag for pick, provider-pair for probes).

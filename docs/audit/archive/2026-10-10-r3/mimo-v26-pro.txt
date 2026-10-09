@@ -1,0 +1,27 @@
+**1. Verdict: GO WITH FIXES** — folds are present and coherent, but the health tier cannot fire as specified (median math + 13.6 sample floor), and two smaller residual defects remain.
+
+**2. Critical risks**
+- `demote_ms = max(5000, 3×median)` with exactly 2 measured candidates never demotes: median=(a+b)/2 ⇒ 3×median = 1.5(a+b) > max always. Since demotion needs ≥2 candidates with ≥3 samples, G2 is dead for a 2-worker fleet — which is exactly gate 13.6's topology.
+- 13.6 (≥3 jobs) can't reach "≥3 samples on ≥2 workers" either; even with 3+ candidates, the step is unrunnable as written. 13.6 needs a job count that yields 3 samples per worker plus ≥3 workers, or a test seam (`JANUS_SCHED_DEMOTE_MS`).
+- HEIR: after `{'ETS-TRANSFER'}` the supervisor owns `sched_snapshot`/`sched_reserve`/`geo_cache`; if tables are `protected`, the restarted pool cannot republish, and nothing transfers ownership back. Specify `public` (or request/ack retransfer at pool init) and heir message handling.
+- 13.4 asserts `rtt_ms` presence "value ≥ 0.0 — may round to zero", but the clamp drops x ≤ 0 ⇒ zeroed samples never land, entry absent, step red.
+
+**3. Contradictions or stale claims**
+- Part 0.6 `ets:update_counter(sched_reserve, {Node, 2, 1, 0, 1})` is not the insert-default form; the contract is the 4-tuple `{Key, Pos, Incr, Default}` (`{Node, 2, 1, 0}`). Garbled vs Part C.
+- Clamp `0 < x ≤ 600000` vs 13.4 "≥ 0.0" (above).
+- `sched_rtt_ms` GAUGE is "smoothed EWMA" while `sched_rtt` stores per-sample TTL rows; the smoothing owner (worker EWMA vs master) is unstated.
+
+**4. Missing first-ship requirements**
+- No counter for clamped/dropped RTT samples (misreporting observability ends at the clamp).
+- No stated `pick` behavior when pinned node is at/over soft cap and dispatch then fails (release path on pinned send-fail/ack-miss should be named explicitly in the release-seam paragraph).
+- Reserved-row garbage beyond nodedown (e.g. reconcile deleting a row for a live node) unspecified.
+
+**5. Architecture/design notes**
+- Everything else checks: capacity single-owner in pick's reserve loop, `select_v2` counter-free, region_tag ungated, is_number guard, probe cold-start-only + additive budget + capacity exemption, map-shaped done/error with named tuple fallback, deploy order, `/stats/sched` schema pinned, live-pool eunit precedent. Tier narrowing semantics (affinity > health > geo > rtt/inflight sort) are sound.
+
+**6. Top 5 concrete edits**
+1. Redefine demotion against the per-candidate baseline (e.g. `E > max(5000, 3×median of other measured candidates)` or min-relative), or require ≥3 measured candidates — pick one and make 13.6's topology satisfy it.
+2. Rewrite 13.6: worker count + job count that provably yield ≥3 samples per worker; add `JANUS_SCHED_DEMOTE_MS` test seam if not.
+3. Fix the insert-default tuple to `{Node, 2, 1, 0}` everywhere; drop the stray 5th element.
+4. Reconcile clamp and 13.4: assert presence-or-`rtt_dropped_total` increment; add that counter to metrics and `/stats/sched`.
+5. Pin HEIR semantics: table access level, ownership reclaim at pool init, `{'ETS-TRANSFER'}` handling, badarg fallback window.

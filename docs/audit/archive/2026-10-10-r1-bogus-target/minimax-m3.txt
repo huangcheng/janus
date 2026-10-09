@@ -1,0 +1,25 @@
+**Stop — file mismatch.**
+
+The attached `target.md` is **not** a Scheduler v2 spec. It is **"Native Erlang Distribution for the Janus Fleet — SPEC (rev 11 — FINAL)"** (Parts 0/A/B/B2/F/C/D/E) — about `inet_tls` dist, pg fleet membership, LB cooldown/latency/quota/cache_put mirrors, and the erpc command channel. It contains **no** of the Scheduler v2 markers the prompt asks me to check:
+
+| Prompt asks for | In target.md? |
+|---|---|
+| GeoIP / mmdb / maxmind reader | no |
+| Worker self-reported geo + load EWMA | no |
+| Passive-first RTT + budgeted active probes | no |
+| Capacity weights / health demotion / never-shed-all | no (closest is LB `degraded_filter` ≠ worker-select) |
+| ETS-snapshot read path / swap atomicity | no |
+| Gate steps 13.2–13.5 / dual-node harness additions | no (gate is TF-F.1–F.8) |
+| Scheduler v2 tiers (affinity → region → least-inflight) | already shipped per prompt preamble; not in this spec |
+| Master/worker dispatch interplay | spec only references Part 0 prose; no Scheduler code contract |
+
+So I cannot honestly issue a GO / GO WITH FIXES / NO-GO verdict on Scheduler v2 — the spec to audit was not attached.
+
+**What I *can* say in one sentence about what's attached:** target.md is a distribution/fleet spec, not a worker-selection spec; auditing it against Scheduler v2 criteria would be fabricating an audit.
+
+**Next step — pick one:**
+
+1. Attach the actual Scheduler v2 spec (path under `docs/superpowers/specs/` or `docs/audit/`) and I will audit against the exact checklist in the prompt (selection-order narrowing, determinism, mmdb-reader risk, probe floors, self-report-vs-observed rule, ETS swap atomicity, mixed-version safety, 13.2–13.5 falsifiability in `e2e_mw_local.sh`).
+2. If you actually want a skeptic audit of the **fleet spec** (rev 11) itself, say so and I'll run it against the same six-section format (verdict / critical risks / contradictions / missing / design notes / top 5 edits) — the prompt's many criteria don't apply, but plenty of others do (residual-trust disclosure coherence, F.7 timeout semantics vs `noconnection`, lease duty drift between rev 9/10/11, quota gossip being truly dead on the pick path, pg `janus_fleet_pg` scope clarity, mixed-version `{janus_fleet,1,_}` coverage of new `cache_put`/`lb_cool_purge` shapes).
+
+Confirm which spec to audit and I'll deliver under 450 words.

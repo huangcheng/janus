@@ -1,0 +1,25 @@
+## 1. Verdict
+**GO WITH FIXES** — all rev-6 folds are present and coherent; residuals are naming/race/test-bound nits, none block first ship.
+
+## 2. Critical risks
+- **Affinity-pin geo metric undefined.** Part B pins the node "ONLY, ignoring health/geo tiers," but `Decisions.geo_source` has no value on that path. Part C says pick emits `sched_geo_match_total` "with that pick's source" every pick — so the pinned path either emits an undefined source or must be special-cased. Pin `geo_source := none` (or explicitly suppress the emit) and assert it.
+- **Probe freshness predicate ignores probe rows.** Target rule = "no unexpired *passive* row," yet probe results write PROBE rows. A never-passively-sampled pair therefore stays "unfresh" forever, re-probed until the 10/hour cap is spent on the same pairs. Bounded, but wasteful; add a probe-source cooldown or count probe rows toward freshness.
+- **`sched_rtt` single-writer race.** The load-cast probe writer checks "no unexpired passive row exists," then inserts unconditionally; a concurrent passive `done` row can be overwritten despite "latest `SampledAtMono` wins." Guard the write (compare timestamps) or accept explicitly.
+
+## 3. Contradictions / stale claims
+- **Naming rule violation:** JSON includes `reserve_inflight`, but Part C lists no `sched_reserve_inflight` metric — the "JSON key = metric minus `sched_`" rule is broken for that key. Add the gauge or carve the exception.
+- **Adopt prune overreach:** Part 0.5 says adopt "prunes `sched_workers` rows for nodes absent from pool records," but at init the new owner has *no* records, so all rows are pruned. State plainly that every worker must re-hello post-adopt (cold reset), or prune against `sched_reserve`/heir survivors instead.
+
+## 4. Missing first-ship requirements
+- No metric backing `reserve_inflight` (JSON-only) — breaks the pinned naming rule.
+- 13.6's `fast_ewma < 2600` is a wall-clock-dependent assertion; on a slow CI host it can fail spuriously. Replace with a relational assertion (`3×fast_ewma < victim_ewma`) plus the fail-loud timeout.
+
+## 5. Architecture / design notes
+Tiers narrow only (dispatchable → pin → health → geo → sort) — correct. Purity is clean (`{Order, Decisions}`, counters in pick). Exclude-self `demote_ms` is executable at N=2; seed-at-first-sample pins the 8000 ms arithmetic. Capacity single-ownership and the pinned 4-arity `update_counter` form are sound (`> infinity` never refuses — good). Mixed-version and heir mechanics are real. No DB writes; cost floor holds.
+
+## 6. Top 5 concrete edits
+1. Define `Decisions.geo_source` on the affinity-pin path and assert `sched_geo_match_total` there.
+2. Make probe-source rows count toward freshness (or add a probe cooldown) so the hourly cap isn't recycled on the same pairs.
+3. Add `sched_reserve_inflight` gauge (or drop the naming claim for that key).
+4. Enforce latest-`SampledAtMono`-wins at write time in the probe cold-start fill.
+5. Relax 13.6 to a relational assertion; document the adopt-time full `sched_workers` re-hello.
