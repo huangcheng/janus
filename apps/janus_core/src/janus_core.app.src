@@ -7,7 +7,8 @@
         janus_lb,
         janus_model_sync,
         janus_usage,
-        janus_worker_pool
+        janus_worker_pool,
+        janus_worker_dispatch
     ]},
     {mod, {janus_core_app, []}},
     {applications, [

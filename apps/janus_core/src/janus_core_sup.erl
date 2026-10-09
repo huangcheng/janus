@@ -27,26 +27,17 @@ master_children() ->
         ] ++ master_worker_pool_children() ++ fleet_children().
 
 %% Worker: gun + dispatch only — no Postgres/catalog poll (spec §3.2).
-%% janus_worker_dispatch wired in W1.
 worker_children() ->
-    worker_dispatch_children().
-
-worker_dispatch_children() ->
-    case code:ensure_loaded(janus_worker_dispatch) of
-        {module, janus_worker_dispatch} ->
-            [
-                #{
-                    id => janus_worker_dispatch,
-                    start => {janus_worker_dispatch, start_link, []},
-                    restart => permanent,
-                    shutdown => 5000,
-                    type => worker,
-                    modules => [janus_worker_dispatch]
-                }
-            ];
-        {error, _} ->
-            []
-    end.
+    [
+        #{
+            id => janus_worker_dispatch,
+            start => {janus_worker_dispatch, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [janus_worker_dispatch]
+        }
+    ].
 
 master_worker_pool_children() ->
     case code:ensure_loaded(janus_worker_pool) of
