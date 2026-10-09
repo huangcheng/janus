@@ -1,7 +1,14 @@
 {application, janus_core, [
     {description, "Janus core: DB adapter, ETS config cache, LB"},
     {vsn, "0.1.0"},
-    {registered, [janus_core_sup, janus_config, janus_lb, janus_model_sync, janus_usage]},
+    {registered, [
+        janus_core_sup,
+        janus_config,
+        janus_lb,
+        janus_model_sync,
+        janus_usage,
+        janus_worker_pool
+    ]},
     {mod, {janus_core_app, []}},
     {applications, [
         kernel,

@@ -24,7 +24,7 @@ master_children() ->
             usage_child(),
             config_child(),
             model_sync_child()
-        ] ++ fleet_children() ++ master_worker_pool_children().
+        ] ++ master_worker_pool_children() ++ fleet_children().
 
 %% Worker: gun + dispatch only — no Postgres/catalog poll (spec §3.2).
 %% janus_worker_dispatch wired in W1.
