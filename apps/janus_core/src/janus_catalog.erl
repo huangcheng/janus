@@ -11,7 +11,8 @@
 %%% #{models => [#{id, name, enabled}],
 %%%   model_routes => [#{model_id, provider_id, upstream_model_id,
 %%%                      weight, priority, enabled}],
-%%%   providers => [#{id, name, base_url, protocol, enabled}],
+%%%   providers => [#{id, name, base_url, protocol, enabled,
+%%%                   region_tag, affinity_node}],
 %%%   provider_keys => [#{id, provider_id, secret_ciphertext, key_id,
 %%%                       weight, enabled}],
 %%%   api_keys => [#{id, prefix, key_hash, enabled, rpm_limit, tpm_limit, daily_token_limit}],
@@ -525,7 +526,9 @@ insert_providers(Tid, Rows) ->
                 name => row_get(Row, name),
                 base_url => row_get(Row, base_url),
                 protocol => row_get(Row, protocol),
-                enabled => truthy(row_get(Row, enabled, true))
+                enabled => truthy(row_get(Row, enabled, true)),
+                region_tag => row_get(Row, region_tag),
+                affinity_node => row_get(Row, affinity_node)
             },
             ets:insert(Tid, {Id, Meta})
         end,

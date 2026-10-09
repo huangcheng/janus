@@ -211,9 +211,12 @@ do_fetch_catalog(#state{mod = M, conn = C}) ->
                 "FROM model_routes ORDER BY model_id, priority, provider_id"
             >>,
             [model_id, provider_id, upstream_model_id, weight, priority, enabled]},
-        {providers, <<"SELECT id, name, base_url, protocol, enabled FROM providers ORDER BY id">>, [
-                id, name, base_url, protocol, enabled
-            ]},
+        {providers,
+            <<
+                "SELECT id, name, base_url, protocol, enabled, region_tag, affinity_node "
+                "FROM providers ORDER BY id"
+            >>,
+            [id, name, base_url, protocol, enabled, region_tag, affinity_node]},
         {provider_keys,
             <<
                 "SELECT id, provider_id, secret_ciphertext, key_id, weight, enabled "

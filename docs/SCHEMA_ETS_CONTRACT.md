@@ -11,7 +11,8 @@
 - `config_meta` — `config_generation BIGINT NOT NULL` (single row, CAS target)
 - `api_keys` — `id`, `prefix`, `key_hash`, `enabled`, `created_at`, `rpm_limit` (nullable INT, mig 014), `tpm_limit` (nullable INT, mig 014), `daily_token_limit` (nullable, mig 014); NULL = unlimited
 - `api_key_models` — `api_key_id`, `model_id` (allowlist join)
-- `providers` — `id`, `name`, `base_url`, `protocol` (`openai_chat`|`anthropic_messages`|`openai_responses`|`openai_decisions`), `enabled`
+- `providers` — `id`, `name`, `base_url`, `protocol` (`openai_chat`|`anthropic_messages`|`openai_responses`|`openai_decisions`), `enabled`, `region_tag` (nullable TEXT, mig 015), `affinity_node` (nullable TEXT, mig 015)
+- `worker_sticky_drained` — `node_name` (PK), `drained_at` (mig 016; master-only ops table — sticky-only drain marker per worker node)
 - `provider_keys` — `id`, `provider_id`, `secret_ciphertext`, `key_id`, `weight`, `enabled`
 - `models` — `id`, `name` (agent-facing model id), `enabled`
 - `model_routes` — `model_id`, `provider_id`, `upstream_model_id` (nullable alias), `weight`, `priority`, `enabled`
