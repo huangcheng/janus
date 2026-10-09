@@ -185,11 +185,17 @@ gauge_val(Fun, Default, What) ->
         _ -> Default
     end.
 
-%% Master: live hello'd non-draining pool size. Worker / absent pool → 0.
+%% Master: live hello'd non-draining pool size. Worker / absent role or
+%% pool → 0 (no gen_server:call, no scrape warning spam).
 workers_available_gauge() ->
     case safe_role() of
         master ->
-            gauge_val(fun janus_worker_pool:available/0, 0, workers_available);
+            case whereis(janus_worker_pool) of
+                undefined ->
+                    0;
+                _ ->
+                    gauge_val(fun janus_worker_pool:available/0, 0, workers_available)
+            end;
         _ ->
             0
     end.
@@ -198,10 +204,8 @@ safe_role() ->
     try
         janus_role:get()
     catch
-        _:_ ->
-            %% Boot / non-gateway scrape: treat as master so an empty
-            %% pool still reports 0 rather than omitting the series.
-            master
+        error:_ ->
+            undefined
     end.
 
 bool01(true) -> 1;
