@@ -5,3 +5,5 @@ vm.args text eol=lf
 *.app.src text eol=lf
 rebar.config text eol=lf
 rebar.lock text eol=lf
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
