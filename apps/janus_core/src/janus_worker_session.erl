@@ -4,6 +4,9 @@
 %%% `janus_providers_http` (`post/3`, `post_stream/3`, `get/3`), and
 %%% relays chunk/done/error. Stream jobs credit-gate chunks (seq from 0);
 %%% non-stream jobs emit a single `janus_done` with the full body.
+%%%
+%%% Stream drain runs in a child process so cancel/timeout can
+%%% `exit(Pid, kill)` even while gun:await is blocked.
 -module(janus_worker_session).
 
 -export([run/3]).
@@ -85,6 +88,8 @@ unary_http(get, Target, Headers, _Body) ->
     %% overall wall clock is still enforced by the session timer.
     janus_providers_http:get(Target, Headers, janus_worker_wire:non_stream_timeout_ms());
 unary_http(post, Target, Headers, Body) ->
+    %% post/3 uses fixed gun TTFB/body budgets; session timer is the
+    %% job-level wall clock (may kill the HTTP worker early).
     janus_providers_http:post(Target, Headers, Body);
 unary_http(Method, _Target, _Headers, _Body) ->
     {error, {unsupported_method, Method}}.
@@ -93,34 +98,35 @@ wait_unary(HttpPid, HttpMon) ->
     receive
         {http_result, HttpPid, {ok, Status, _RespHeaders, RespBody}} ->
             demonitor(HttpMon, [flush]),
+            ensure_clear_control(),
             emit_done(Status, RespBody);
         {http_result, HttpPid, {error, Reason}} ->
             demonitor(HttpMon, [flush]),
             {Code, Msg} = map_gun_error(Reason),
             throw({gun_error, Code, Msg});
         job_timeout ->
-            exit(HttpPid, kill),
-            flush_http(HttpMon, HttpPid),
+            kill_worker(HttpPid, HttpMon),
             throw(timeout);
         {janus_cancel, JobRef} ->
             case get(?PDICT_JOB) of
                 JobRef ->
-                    exit(HttpPid, kill),
-                    flush_http(HttpMon, HttpPid),
+                    kill_worker(HttpPid, HttpMon),
                     throw(cancelled);
                 _ ->
                     wait_unary(HttpPid, HttpMon)
             end;
-        {'DOWN', Mon, process, _Pid, _Reason} ->
+        {'DOWN', Mon, process, _Pid, Reason} ->
             case get(?PDICT_MASTER_MON) of
                 Mon ->
-                    exit(HttpPid, kill),
-                    flush_http(HttpMon, HttpPid),
+                    kill_worker(HttpPid, HttpMon),
                     throw(master_down);
                 _ ->
                     case Mon of
                         HttpMon ->
-                            throw({gun_error, internal, <<"http worker died">>});
+                            throw(
+                                {gun_error, internal,
+                                    <<"http worker died: ", (fmt_bin(Reason))/binary>>}
+                            );
                         _ ->
                             wait_unary(HttpPid, HttpMon)
                     end
@@ -130,42 +136,151 @@ wait_unary(HttpPid, HttpMon) ->
             wait_unary(HttpPid, HttpMon)
     end.
 
-flush_http(HttpMon, HttpPid) ->
-    demonitor(HttpMon, [flush]),
-    receive
-        {http_result, HttpPid, _} -> ok
-    after 0 ->
-        ok
-    end.
-
 %%%===================================================================
-%%% Stream
+%%% Stream — drain in a child so session can kill on cancel/timeout
 %%%===================================================================
 
 run_stream(#{url := Url, headers := Headers, body := Body0} = _Fields) ->
     Body = iolist_to_binary(Body0),
     case target_from_url(Url) of
         {ok, Target} ->
-            case janus_providers_http:post_stream(Target, Headers, Body) of
-                {ok, Status, _RespHeaders, Drain} when is_function(Drain, 1) ->
-                    case Drain(fun(Chunk) -> on_chunk(Chunk) end) of
-                        ok ->
-                            drain_control_mailbox(),
-                            emit_done(Status, undefined);
-                        {error, Reason} ->
-                            {Code, Msg} = map_gun_error(Reason),
-                            throw({gun_error, Code, Msg})
-                    end;
-                {error, Reason} ->
-                    {Code, Msg} = map_gun_error(Reason),
-                    throw({gun_error, Code, Msg})
-            end;
+            Self = self(),
+            {DrainPid, DrainMon} = spawn_monitor(fun() ->
+                stream_worker(Self, Target, Headers, Body)
+            end),
+            wait_stream(DrainPid, DrainMon);
         {error, Reason} ->
             throw({gun_error, connect, fmt_bin(Reason)})
     end.
 
-on_chunk(Bin) when is_binary(Bin) ->
-    await_credit_then_send(Bin).
+stream_worker(Session, Target, Headers, Body) ->
+    case janus_providers_http:post_stream(Target, Headers, Body) of
+        {ok, Status, _RespHeaders, Drain} when is_function(Drain, 1) ->
+            Session ! {stream_open, self(), Status},
+            Result =
+                try
+                    Drain(fun(Chunk) ->
+                        Session ! {stream_chunk, self(), Chunk},
+                        receive
+                            {stream_continue, Session} ->
+                                ok;
+                            {stream_stop, Session} ->
+                                throw(stopped)
+                        end
+                    end)
+                catch
+                    throw:stopped ->
+                        {error, cancelled}
+                end,
+            Session ! {stream_drain_done, self(), Result};
+        {error, Reason} ->
+            Session ! {stream_open_error, self(), Reason}
+    end.
+
+wait_stream(DrainPid, DrainMon) ->
+    receive
+        {stream_open, DrainPid, Status} ->
+            wait_stream_body(DrainPid, DrainMon, Status);
+        {stream_open_error, DrainPid, Reason} ->
+            demonitor(DrainMon, [flush]),
+            {Code, Msg} = map_gun_error(Reason),
+            throw({gun_error, Code, Msg});
+        job_timeout ->
+            kill_worker(DrainPid, DrainMon),
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef ->
+                    kill_worker(DrainPid, DrainMon),
+                    throw(cancelled);
+                _ ->
+                    wait_stream(DrainPid, DrainMon)
+            end;
+        {'DOWN', Mon, process, _Pid, Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon ->
+                    kill_worker(DrainPid, DrainMon),
+                    throw(master_down);
+                _ ->
+                    case Mon of
+                        DrainMon ->
+                            throw(
+                                {gun_error, internal,
+                                    <<"stream worker died: ", (fmt_bin(Reason))/binary>>}
+                            );
+                        _ ->
+                            wait_stream(DrainPid, DrainMon)
+                    end
+            end;
+        {janus_credit, JobRef, N} when is_integer(N), N > 0 ->
+            case get(?PDICT_JOB) of
+                JobRef -> put(?PDICT_CREDITS, get(?PDICT_CREDITS) + N);
+                _ -> ok
+            end,
+            wait_stream(DrainPid, DrainMon)
+    end.
+
+wait_stream_body(DrainPid, DrainMon, Status) ->
+    receive
+        {stream_chunk, DrainPid, Bin} when is_binary(Bin) ->
+            try
+                await_credit_then_send(Bin)
+            catch
+                throw:Stop ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(Stop)
+            end,
+            DrainPid ! {stream_continue, self()},
+            wait_stream_body(DrainPid, DrainMon, Status);
+        {stream_drain_done, DrainPid, ok} ->
+            demonitor(DrainMon, [flush]),
+            ensure_clear_control(),
+            emit_done(Status, undefined);
+        {stream_drain_done, DrainPid, {error, cancelled}} ->
+            demonitor(DrainMon, [flush]),
+            throw(cancelled);
+        {stream_drain_done, DrainPid, {error, Reason}} ->
+            demonitor(DrainMon, [flush]),
+            {Code, Msg} = map_gun_error(Reason),
+            throw({gun_error, Code, Msg});
+        job_timeout ->
+            DrainPid ! {stream_stop, self()},
+            kill_worker(DrainPid, DrainMon),
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(cancelled);
+                _ ->
+                    wait_stream_body(DrainPid, DrainMon, Status)
+            end;
+        {'DOWN', Mon, process, _Pid, Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(master_down);
+                _ ->
+                    case Mon of
+                        DrainMon ->
+                            throw(
+                                {gun_error, internal,
+                                    <<"stream worker died: ", (fmt_bin(Reason))/binary>>}
+                            );
+                        _ ->
+                            wait_stream_body(DrainPid, DrainMon, Status)
+                    end
+            end;
+        {janus_credit, JobRef, N} when is_integer(N), N > 0 ->
+            case get(?PDICT_JOB) of
+                JobRef -> put(?PDICT_CREDITS, get(?PDICT_CREDITS) + N);
+                _ -> ok
+            end,
+            wait_stream_body(DrainPid, DrainMon, Status)
+    end.
 
 await_credit_then_send(Bin) ->
     case get(?PDICT_CREDITS) of
@@ -202,24 +317,40 @@ await_credit_then_send(Bin) ->
             end
     end.
 
-%% After DrainFun returns, surface cancel/timeout/DOWN that arrived while
-%% blocked in gun:await (credit path already handled them).
-drain_control_mailbox() ->
+kill_worker(Pid, Mon) ->
+    exit(Pid, kill),
+    demonitor(Mon, [flush]),
+    flush_worker_msgs(Pid).
+
+flush_worker_msgs(Pid) ->
+    receive
+        {http_result, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_open, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_open_error, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_chunk, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_drain_done, Pid, _} -> flush_worker_msgs(Pid);
+        {'DOWN', _Mon, process, Pid, _} -> flush_worker_msgs(Pid)
+    after 0 ->
+        ok
+    end.
+
+%% Reject late cancel/timeout/DOWN before emitting done.
+ensure_clear_control() ->
     receive
         job_timeout ->
             throw(timeout);
         {janus_cancel, JobRef} ->
             case get(?PDICT_JOB) of
                 JobRef -> throw(cancelled);
-                _ -> drain_control_mailbox()
+                _ -> ensure_clear_control()
             end;
         {'DOWN', Mon, process, _Pid, _Reason} ->
             case get(?PDICT_MASTER_MON) of
                 Mon -> throw(master_down);
-                _ -> drain_control_mailbox()
+                _ -> ensure_clear_control()
             end;
         {janus_credit, _JobRef, _N} ->
-            drain_control_mailbox()
+            ensure_clear_control()
     after 0 ->
         ok
     end.
@@ -298,6 +429,8 @@ map_gun_error({unsupported_method, Method}) ->
     {internal, fmt_bin({unsupported_method, Method})};
 map_gun_error(timeout) ->
     {timeout, <<"timeout">>};
+map_gun_error(cancelled) ->
+    {internal, <<"cancelled">>};
 map_gun_error(Reason) ->
     {internal, fmt_bin(Reason)}.
 

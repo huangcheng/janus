@@ -19,6 +19,7 @@
 ]).
 
 -define(SERVER, ?MODULE).
+%% BINDING: fixed 1s hello retry (spec pinned numerics; no backoff).
 -define(HELLO_RETRY_MS, 1000).
 
 -record(state, {
@@ -53,7 +54,7 @@ init([]) ->
     case master_node_from_env() of
         {ok, MasterNode} ->
             Region = region_from_env(),
-            _ = maybe_monitor_nodes(),
+            ok = maybe_monitor_nodes(),
             State0 = #state{
                 master_node = MasterNode,
                 region = Region,
@@ -86,7 +87,19 @@ handle_info({janus_job, JobRef, MasterSessionPid, Fields}, State) ->
     {noreply, do_job(JobRef, MasterSessionPid, Fields, State)};
 handle_info({janus_cancel, JobRef}, State) when is_binary(JobRef) ->
     {noreply, do_cancel(JobRef, State)};
-handle_info({'DOWN', Mon, process, _Pid, _Reason}, State) ->
+handle_info({'DOWN', Mon, process, _Pid, Reason}, State) ->
+    case Reason of
+        normal ->
+            ok;
+        shutdown ->
+            ok;
+        _ ->
+            logger:warning(#{
+                what => janus_worker_session_down,
+                reason => Reason,
+                monitor => Mon
+            })
+    end,
     {noreply, do_session_down(Mon, State)};
 handle_info({nodedown, Node}, #state{master_node = Node} = State) ->
     {noreply, master_lost(State)};
@@ -99,8 +112,14 @@ handle_info({nodeup, Node, _Info}, #state{master_node = Node} = State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, State) ->
+terminate(_Reason, #state{jobs = Jobs} = State) ->
     cancel_hello_timer(State),
+    maps:foreach(
+        fun(_JobRef, Pid) ->
+            exit(Pid, shutdown)
+        end,
+        Jobs
+    ),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -113,10 +132,15 @@ code_change(_OldVsn, State, _Extra) ->
 do_hello_tick(#state{hello = Hello} = State) when Hello =:= acked; Hello =:= nacked ->
     State;
 do_hello_tick(#state{master_node = MasterNode, region = Region} = State) ->
-    _ = net_kernel:connect_node(MasterNode),
-    Msg = janus_worker_wire:hello(self(), node(), #{region => Region}),
-    {janus_worker_pool, MasterNode} ! Msg,
-    arm_hello(State#state{hello = helloing}).
+    case catch net_kernel:connect_node(MasterNode) of
+        true ->
+            Msg = janus_worker_wire:hello(self(), node(), #{region => Region}),
+            {janus_worker_pool, MasterNode} ! Msg,
+            arm_hello(State#state{hello = helloing});
+        _Other ->
+            %% Not connected yet — retry without wasting a hello send.
+            arm_hello(State#state{hello = connecting})
+    end.
 
 hello_acked(State) ->
     State1 = cancel_hello_timer(State),
@@ -163,6 +187,10 @@ do_job(JobRef, MasterSessionPid, Fields, #state{jobs = Jobs} = State) when
 ->
     case maps:is_key(JobRef, Jobs) of
         true ->
+            logger:debug(#{
+                what => janus_worker_dispatch_duplicate_job,
+                job_ref => JobRef
+            }),
             State;
         false ->
             case janus_worker_wire:validate({janus_job, JobRef, MasterSessionPid, Fields}) of
@@ -238,6 +266,9 @@ region_from_env() ->
 
 maybe_monitor_nodes() ->
     case net_kernel:monitor_nodes(true) of
-        ok -> ok;
-        {error, _} = Err -> Err
+        ok ->
+            ok;
+        {error, Reason} ->
+            logger:warning(#{what => janus_worker_dispatch_monitor_nodes, reason => Reason}),
+            ok
     end.
