@@ -24,7 +24,12 @@ master_children() ->
             usage_child(),
             config_child(),
             model_sync_child()
-        ] ++ master_worker_pool_children() ++ fleet_children().
+        ] ++
+        %% Scheduler v2 (spec Part 0.5 / A.1): the ETS heir BEFORE the
+        %% worker pool (pool-owned tables create/adopt against it) and
+        %% janus_geo before the pool's picks read the PT provider map.
+        sched_v2_children() ++
+        master_worker_pool_children() ++ fleet_children().
 
 %% Worker: gun + dispatch only — no Postgres/catalog poll (spec §3.2).
 worker_children() ->
@@ -55,6 +60,31 @@ master_worker_pool_children() ->
         {error, _} ->
             []
     end.
+
+%% Scheduler v2 children (master-only: the mmdb and the geo fill are
+%% master-side; workers need NO mmdb, spec Part A.1). janus_geo's init
+%% REFUSES boot (CRITICAL + {stop, Reason}) on explicit JANUS_SCHED_GEO=1
+%% with a missing mmdb — the permanent restart exhausts supervisor
+%% intensity and stops the node, the spec's refuse-boot path.
+sched_v2_children() ->
+    [
+        #{
+            id => janus_ets_heir,
+            start => {janus_ets_heir, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [janus_ets_heir]
+        },
+        #{
+            id => janus_geo,
+            start => {janus_geo, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [janus_geo]
+        }
+    ].
 
 lb_child() ->
     #{

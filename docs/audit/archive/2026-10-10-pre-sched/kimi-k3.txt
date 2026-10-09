@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the rev-10/11 folds are present and coherent; remaining issues are one stale-claim contradiction, one wall-clock violation of the spec's own Part 0.3, and two operational ambiguities.
+
+## 2. Critical risks (new parts)
+- **Quota WindowId breaks Part 0.3.** `WindowId = floor(epoch_seconds / WindowSec)` is a wall-clock artifact on a channel that mandates "durations, never absolute timestamps." Cross-cloud NTP drift > WindowSec/2 makes receivers silently drop every row — observability-only, so no harm, but the "±s skew is immaterial" claim is asserted, not bounded. State an explicit clock-sync precondition.
+- **cache_put replay bound vs restart.** `first_seen` tombstones live in `janus_fleet` state/ETS; a restart wipes both mirrors and tombstones, resetting the 2×TTL bound. Harmless (entries die too), but say so — otherwise the bound looks stronger than it is.
+- **erpc enum closure is policy, not enforcement** — F.3 states this honestly; residual risk is accepted. Real risk is operational: `catalog_cache_flush`/`config_reload_nudge` fan-outs during a rolling deploy hit `undef` on old nodes by design — the audit log will show expected errors; ensure runbook says so or ops will chase phantom failures.
+- **Lease dual-hold.** Lowest-name + pg membership lag (≤ net_ticktime) means partitioned holders co-exist up to ~65 s. Fine for v1 observability; the "phase-4 readiness" claim overstates it — a video-sweep duty on this lease double-runs. Flag as a phase-4 prerequisite fix, not v1.
+
+## 3. Contradictions / stale claims
+- **Goal still says "(phase 3) quota counters and judge decision-cache"** — rev 10 claims this wording was scrubbed; it wasn't.
+- **F.2 and Part C each contain both** `lease {holder, expires_in_ms}` **and** `{holder, next_check_in_ms}` — duplicated, contradictory lines; the stale `expires_in_ms` survives in two places despite the rev-11 scrub claim.
+- **Part C mirror shape** lists `{Target, SenderNode, cool|lat, ...}` only; rev 11 claims the enum covers quota rows — the shape doesn't.
+- Gate order line in Part D names only F.5→F.1→…→F.4; rev 11's pinned order (F.5-F.1-F.2-F.3-F.4-F.6-F.8-F.7) isn't reflected, and "6b. F.8" numbering is odd.
+
+## 4. Missing first-ship requirements
+- **CA rotation window**: revocation = reissue CA + all certs, but `cacertfile` is singular — mixed-CA trust during rotation is unspecified; require a concatenated-CA overlap window.
+- **Connector post-cap behavior**: "retry caps at 5 min then log-only" — does retrying stop forever (permanent standalone until restart after a long peer outage) or continue at low frequency? Define it.
+- No eunit named for the WindowId current-or-previous bucket acceptance (boundary race is the subtle part).
+
+## 5. Architecture notes
+Local-wins, never-shed-last, and TTL-as-correctness are applied uniformly to B2/F; the F.6 byte-identical control run and F.7 paused-peer `timeout` assertion are well-formed (10 s command timeout ≪ 60 s tick, so `timeout` beats `noconnection`).
+
+## 6. Top 5 edits
+1. Delete "(phase 3)" from Goal; delete both stale `expires_in_ms` lease lines.
+2. Add explicit NTP/skew precondition for WindowId acceptance (or drop WindowId matching and key by sender-reported bucket age).
+3. Define connector behavior after the 5-min cap.
+4. Specify dual-CA overlap for rotation in the PKI section.
+5. Extend the Part C mirror shape to quota rows and sync Part D's order line to the pinned F.5…F.7 sequence.

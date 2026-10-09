@@ -7,6 +7,8 @@
         janus_lb,
         janus_model_sync,
         janus_usage,
+        janus_ets_heir,
+        janus_geo,
         janus_worker_pool,
         janus_worker_dispatch
     ]},
@@ -17,6 +19,7 @@
         epgsql,
         esqlite,
         thoas,
+        locus,
         crypto,
         inets,
         ssl,

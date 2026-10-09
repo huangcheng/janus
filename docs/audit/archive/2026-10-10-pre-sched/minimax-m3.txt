@@ -1,0 +1,32 @@
+## 1. Verdict — GO WITH FIXES
+
+The core cooldown/latency transport is coherent, but Part B2’s behavior-changing cache and unresolved rev-11/body mismatches block ratification.
+
+## 2. Critical risks
+
+- **`cache_put` directly changes adjudication**, contradicting the stated “advisory/local-wins” boundary. Judge-name equality does not prove tier/binding compatibility; a lagging honest peer can cache the wrong tier for 300 seconds. Include a local config-generation or tier-fingerprint check.
+- Replay arithmetic is sound only if `first_seen` survives cache eviction and writes are atomic; the body omits rev 11’s claimed `first_seen + 2×TTL + 60s` tombstone lifecycle.
+- **`WindowId` is epoch-derived** and reintroduces cross-cloud clock coupling despite Part 0.3. Either bound/alert clock skew or explicitly define mismatches as harmless advisory loss.
+- The HTTP command enum is genuinely closed; underlying MFA execution is not, as F.3 correctly admits. Add administrative rate/concurrency limits and explicit authorization tests.
+
+## 3. Contradictions or stale claims
+
+- Rev 11 says tick-based lease expiry; Part F has only deterministic membership and `nodedown + 5s`. Part F/C still report `expires_in_ms`, while F also says `next_check_in_ms`.
+- The goal still labels B2 “phase 3.” Rev 11 says the 8,192 cap is aggregate “stated once”; the body scopes it per ingress/table and omits the quota stats shape.
+- Starting `pg` inside `janus_fleet` does not pin its lifetime beyond a parked server.
+
+## 4. Missing first-ship requirements
+
+Atomic ETS `select_replace` upserts—delete+insert lets a concurrent picker observe absence. Strict type/range validation, exact producer APIs, independent pg-scope ownership, and strict cookie/port/node-name rendering are absent. Add a live OTP 27 TLS handshake test; beam inspection does not prove the `janus@host` dNSName/SNI recipe.
+
+## 5. Architecture/design notes
+
+Keep quota pick-independent and lease duty-free; a lease cannot safely gate writes without fencing. F.6 needs a defined knob-off control/recreate sequence and counter reset. F.7 needs an injectable erpc wrapper and observable fan-out count: paused-peer timeout takes 10 seconds, while lease failover requires over 65 seconds.
+
+## 6. Top 5 concrete edits
+
+1. Add cache generation/fingerprint validation and define the direct-cache/local-wins exception.
+2. Make every mirror/cache upsert atomic; specify tombstone GC.
+3. Rewrite lease timing, stats, and gate consistently—or implement real expiry/fencing.
+4. Define quota mirror JSON, cardinality, clock-skew policy, and aggregate caps.
+5. Add identity/negative-auth, F.6 control, and F.7 `undef`/`timeout`/`noconnection` artifacts.

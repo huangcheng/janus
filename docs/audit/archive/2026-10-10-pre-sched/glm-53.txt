@@ -1,0 +1,30 @@
+1. **Verdict: GO WITH FIXES** — the design has converged, but rev 11's fold list exists mostly in the changelog header, not the body; the document is unfinished, not the architecture.
+
+2. **Critical risks (new-parts focus)**
+   - **Header/body divergence (systemic):** ≥8 claimed rev-11 folds are absent from Parts A–F — `first_seen` tombstone GC, Target byte-clamp, `fleet_status` local-exec/no-erpc-to-self, `lb_cool_purge` originator-only, connector 5-min retry cap, Part C quota mirror rows, cert-gen on the rollout checklist, `expires_in_ms`/`(phase 3)` scrubs. An implementer following the body ships the pre-fold design; worst case: fan-out runs `lb_cool_clear` on every peer and each peer broadcasts the purge — N purges, violating ingress-bounded-once.
+   - **`janus_fleet:status/0` not pinned park-safe:** if it's a gen_server call, a parked `janus_fleet` (Part 0.12) makes `fleet_status` report `timeout` on that peer instead of honest standalone state — contradicting the /stats read-path discipline.
+   - **`janus_lb:cool_clear/1` ownership unpinned:** janus-auto got "exported API, never cross-owner raw ETS"; the janus_lb equivalent (call vs. public-table write, return value for audit) is not stated. Also only `fleet_status` is pinned to execute locally on the originator.
+   - **`first_seen` storage unspecified + GC absent from body:** sustained replay (one per 2×TTL window) keeps a cache entry alive indefinitely; the bound is per-epoch, not absolute — state this residual.
+   - **F.6(b) control run unpinned** (which node, measured when) — gate reproducibility risk.
+
+3. **Contradictions / stale claims**
+   - Goal still reads "(phase 3) quota counters and judge decision-cache" despite rev 10's scrub claim.
+   - F.2's paragraph says both `{holder, expires_in_ms}` and `{holder, next_check_in_ms}`; Part C repeats `expires_in_ms`.
+   - Part D prose execution order ends at F.4; the header pins 8 steps.
+   - "8 192/sender AGGREGATE across all mirrors" vs. per-mirror caps stated in B/B2.
+   - Part C `mirrors` enum is `cool|lat` only while F.6(a) asserts `/stats.fleet` quota rows.
+
+4. **Missing first-ship requirements**
+   - `fleet_commands_total{command, outcome}` outcome label enum (ok/partial/per-node error?).
+   - `first_seen` table owner, cap, and GC semantics in B2.
+   - /stats.fleet.mirrors render bound (row caps imply ~16k rows possible — cap or paginate the listing).
+
+5. **Architecture/design notes**
+   - Advisory-only quota, duty-less lease, disclosed RCE residual (F.3), and TTL-as-correctness are the right calls; Erlang-reality claims (pg scope sync, erpc raise semantics, `{port,P,6}`, `-connect_all false`) check out.
+
+6. **Top 5 concrete edits**
+   1. Apply every rev-11 header fold into the Parts A–F body; then re-verify each header claim line-by-line.
+   2. Pin `status/0` as PT/ETS-only (park-safe) and local execution for ALL four commands (direct call on originator + erpc to peers).
+   3. Pin `cool_clear/1` as a call into `janus_lb` (cross-owner discipline), define its return, and purge broadcast by originator only.
+   4. Specify `first_seen` ETS (owner, cap) + tombstone GC in B2; document the sustained-replay residual.
+   5. Reconcile lease field name (`next_check_in_ms` everywhere), Part C quota mirror enum, F.6 control procedure, and Part D execution order.

@@ -46,6 +46,9 @@
     api_keys/0,
     %% Fleet command F.1: pinned `catalog_cache_flush` MFA.
     flush/0,
+    %% Scheduler v2 geo fill seam (spec A.1): {ProviderId, Host} pairs
+    %% from a published providers table, consumed by janus_geo.
+    provider_hosts/1,
     %% Entitlement carrier (spec Part B)
     entitlement_denied/3,
     entitlement_codes/0
@@ -140,7 +143,35 @@ publish(Generation, Tabs) when is_integer(Generation), Generation >= 0, is_map(T
     Old = get(),
     persistent_term:put(?PT_KEY, #{generation => Generation, catalog => Tabs}),
     schedule_delete(Old),
+    %% Scheduler v2 geo fill kick (spec A.1): async, never blocks the
+    %% publish; janus_geo publishes nothing back into the catalog (it
+    %% owns the PT provider-geo map). Tolerant: janus_geo is a
+    %% master-side child and may not be running here (workers, eunit)
+    %% — the cast is dropped, never an error.
+    _ = (catch janus_geo:on_catalog_publish(Generation, provider_hosts(Tabs))),
     ok.
+
+%% {ProviderId, HostBin | undefined} from a published providers table
+%% (undefined = unparsable base_url — geo reads unknown). The janus_geo
+%% boot replay reuses this against the already-published catalog.
+-spec provider_hosts(catalog_tabs()) -> [{term(), binary() | undefined}].
+provider_hosts(Tabs) when is_map(Tabs) ->
+    case maps:get(providers, Tabs, undefined) of
+        undefined ->
+            [];
+        Tid ->
+            try
+                [
+                    {Id, janus_geo:host_from_base_url(maps:get(base_url, Meta, undefined))}
+                 || {Id, Meta} <- ets:tab2list(Tid),
+                    is_map(Meta)
+                ]
+            catch
+                _:_ -> []
+            end
+    end;
+provider_hosts(_) ->
+    [].
 
 -spec routes_for_model(model_id()) -> [map()].
 routes_for_model(ModelId) ->
@@ -370,6 +401,9 @@ flush() ->
         Class:Reason ->
             logger:warning(#{what => janus_catalog_flush_failed, class => Class, reason => Reason})
     end,
+    %% Scheduler v2 (spec A.1): manual flush clears geo_cache too — the
+    %% forced reload's publish re-kicks the fill against an empty cache.
+    _ = (catch janus_geo:flush()),
     %% Detached: the reload is a gen_server call with a 30 s DB budget
     %% and must never block the erpc executor.
     _ = spawn(fun() -> catch janus_config:reload() end),
