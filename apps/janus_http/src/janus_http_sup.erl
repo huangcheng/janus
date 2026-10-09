@@ -40,8 +40,37 @@ publish_agent_protocols() ->
     ok.
 
 init([]) ->
+    Role = janus_role:get(),
     ok = publish_agent_protocols(),
     Port = application:get_env(janus, http_port, 8080),
+    AdminPort = application:get_env(janus, admin_port, 8090),
+    AdminBind = bind("JANUS_ADMIN_BIND", admin_bind),
+    LogTail = log_tail_child(),
+    Children =
+        case Role of
+            worker -> worker_http_children(AdminPort, AdminBind, LogTail);
+            master -> master_http_children(Port, AdminPort, AdminBind, LogTail)
+        end,
+    {ok, {
+        #{strategy => one_for_one, intensity => 5, period => 10},
+        Children
+    }}.
+
+%% Worker: no public agent :8080 (spec §3.2). Optional loopback-only
+%% admin when JANUS_ADMIN_BIND / admin_bind is set explicitly.
+worker_http_children(AdminPort, AdminBind, LogTail) ->
+    logger:info(#{
+        what => janus_http_listen,
+        role => worker,
+        agent_port => skipped,
+        admin_port => admin_port_log(AdminPort, AdminBind)
+    }),
+    case admin_listener_child(AdminPort, AdminBind) of
+        undefined -> [LogTail];
+        AdminListener -> [LogTail, AdminListener]
+    end.
+
+master_http_children(Port, AdminPort, AdminBind, LogTail) ->
     Bind = bind("JANUS_HTTP_BIND", http_bind),
     AgentDispatch = [{Path, Handler, []} || {Path, Handler, _Proto} <- agent_routes()],
     Dispatch = cowboy_router:compile([
@@ -63,26 +92,7 @@ init([]) ->
             {"/v1/videos/[...]", janus_http_modality, [janus_m_video]}
         ]}
     ]),
-    %% Admin plane: read-only stats for the standalone dashboard to poll.
-    %% Token-authenticated (JANUS_STATS_TOKEN); no UI, no write API —
-    %% EXCEPT the closed-enum fleet command channel (native-distribution
-    %% spec F.1, operator sign-off): the exact path must precede the
-    %% /stats/[...] catch-all.
-    AdminPort = application:get_env(janus, admin_port, 8090),
-    AdminBind = bind("JANUS_ADMIN_BIND", admin_bind),
-    AdminDispatch = cowboy_router:compile([
-        {'_', [
-            {"/healthz", janus_http_health, []},
-            {"/stats", janus_gateway_stats, []},
-            {"/stats/fleet/command", janus_http_fleet, []},
-            {"/stats/[...]", janus_gateway_stats, []},
-            {"/metrics", janus_http_metrics, []}
-        ]}
-    ]),
-    %% idle_timeout must exceed the longest legitimate upstream wait
-    %% (reasoning models can compute for minutes before first byte) —
-    %% cowboy's 60s default kills the handler mid-call with a bare
-    %% connection reset (surfaced as a bodiless 502 behind a proxy).
+    AdminDispatch = admin_dispatch(),
     ProtocolOpts = #{
         env => #{dispatch => Dispatch},
         idle_timeout => 300_000
@@ -112,15 +122,28 @@ init([]) ->
         type => worker,
         modules => [cowboy]
     },
-    LogTail = #{
-        id => janus_log_tail,
-        start => {janus_log_tail, start_link, []},
-        restart => permanent,
-        shutdown => 5000,
-        type => worker,
-        modules => [janus_log_tail]
-    },
-    AdminListener = #{
+    AdminListener = admin_listener_spec(AdminPort, AdminBind, AdminProtocolOpts),
+    logger:info(#{
+        what => janus_http_listen,
+        role => master,
+        data_port => Port,
+        admin_port => AdminPort
+    }),
+    [AutoRouter, Listener, LogTail, AdminListener].
+
+admin_dispatch() ->
+    cowboy_router:compile([
+        {'_', [
+            {"/healthz", janus_http_health, []},
+            {"/stats", janus_gateway_stats, []},
+            {"/stats/fleet/command", janus_http_fleet, []},
+            {"/stats/[...]", janus_gateway_stats, []},
+            {"/metrics", janus_http_metrics, []}
+        ]}
+    ]).
+
+admin_listener_spec(AdminPort, AdminBind, AdminProtocolOpts) ->
+    #{
         id => janus_admin_listener,
         start =>
             {cowboy, start_clear, [
@@ -132,14 +155,31 @@ init([]) ->
         shutdown => 5000,
         type => worker,
         modules => [cowboy]
-    },
-    logger:info(#{
-        what => janus_http_listen, data_port => Port, admin_port => AdminPort
-    }),
-    {ok, {
-        #{strategy => one_for_one, intensity => 5, period => 10},
-        [AutoRouter, Listener, LogTail, AdminListener]
-    }}.
+    }.
+
+%% Explicit bind only — default (all interfaces) is skipped on workers.
+admin_listener_child(AdminPort, undefined) ->
+    undefined;
+admin_listener_child(AdminPort, AdminBind) ->
+    admin_listener_spec(AdminPort, AdminBind, #{
+        env => #{dispatch => admin_dispatch()},
+        idle_timeout => 300_000
+    }).
+
+admin_port_log(_AdminPort, undefined) ->
+    skipped;
+admin_port_log(AdminPort, _AdminBind) ->
+    AdminPort.
+
+log_tail_child() ->
+    #{
+        id => janus_log_tail,
+        start => {janus_log_tail, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_log_tail]
+    }.
 
 transport_opts(Port, undefined) ->
     [{port, Port}];

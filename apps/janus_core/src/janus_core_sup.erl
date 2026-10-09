@@ -9,53 +9,101 @@ start_link() ->
 
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
-    %% db_conn wired by integrator — start only when module is present.
-    %% db_conn → lb → config (config expects fetch_catalog / NOTIFY).
     Children =
-        db_conn_children() ++
+        case janus_role:get() of
+            worker -> worker_children();
+            master -> master_children()
+        end,
+    {ok, {SupFlags, Children}}.
+
+%% Master: DB, catalog poll, usage, optional fleet (spec §3.1).
+master_children() ->
+    db_conn_children() ++
+        [
+            lb_child(),
+            usage_child(),
+            config_child(),
+            model_sync_child()
+        ] ++ fleet_children() ++ master_worker_pool_children().
+
+%% Worker: gun + dispatch only — no Postgres/catalog poll (spec §3.2).
+%% janus_worker_dispatch wired in W1.
+worker_children() ->
+    worker_dispatch_children().
+
+worker_dispatch_children() ->
+    case code:ensure_loaded(janus_worker_dispatch) of
+        {module, janus_worker_dispatch} ->
             [
                 #{
-                    id => janus_lb,
-                    start => {janus_lb, start_link, []},
+                    id => janus_worker_dispatch,
+                    start => {janus_worker_dispatch, start_link, []},
                     restart => permanent,
                     shutdown => 5000,
                     type => worker,
-                    modules => [janus_lb]
-                },
-
-                %% Data-plane usage events (buffered writer + retention
-                %% sweep); 15s shutdown budget gives terminate/2 room to
-                %% flush a full buffer.
-                #{
-                    id => janus_usage,
-                    start => {janus_usage, start_link, []},
-                    restart => permanent,
-                    shutdown => 15000,
-                    type => worker,
-                    modules => [janus_usage]
-                },
-
-                #{
-                    id => janus_config,
-                    start => {janus_config, start_link, []},
-                    restart => permanent,
-                    shutdown => 5000,
-                    type => worker,
-                    modules => [janus_config]
-                },
-
-                %% Provider model-list sync (poll /models, upsert new
-                %% names as disabled rows; interval env-configurable).
-                #{
-                    id => janus_model_sync,
-                    start => {janus_model_sync, start_link, []},
-                    restart => permanent,
-                    shutdown => 5000,
-                    type => worker,
-                    modules => [janus_model_sync]
+                    modules => [janus_worker_dispatch]
                 }
-            ] ++ fleet_children(),
-    {ok, {SupFlags, Children}}.
+            ];
+        {error, _} ->
+            []
+    end.
+
+master_worker_pool_children() ->
+    case code:ensure_loaded(janus_worker_pool) of
+        {module, janus_worker_pool} ->
+            [
+                #{
+                    id => janus_worker_pool,
+                    start => {janus_worker_pool, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [janus_worker_pool]
+                }
+            ];
+        {error, _} ->
+            []
+    end.
+
+lb_child() ->
+    #{
+        id => janus_lb,
+        start => {janus_lb, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_lb]
+    }.
+
+usage_child() ->
+    #{
+        id => janus_usage,
+        start => {janus_usage, start_link, []},
+        restart => permanent,
+        shutdown => 15000,
+        type => worker,
+        modules => [janus_usage]
+    }.
+
+config_child() ->
+    #{
+        id => janus_config,
+        start => {janus_config, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_config]
+    }.
+
+model_sync_child() ->
+    #{
+        id => janus_model_sync,
+        start => {janus_model_sync, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_model_sync]
+    }.
 
 %% Fleet subtree (spec Part A / 0.12): present ONLY when the knob is
 %% on, registered TRANSIENT so a crash-looping fleet supervisor parks
