@@ -115,7 +115,9 @@ configured_peer(Name, Host) ->
     NodeStr = to_list(Name),
     case string:split(NodeStr, "@") of
         [Alive, HostPart] when Alive =/= [], HostPart =/= [] ->
-            lists:member(NodeStr, peer_strings());
+            %% Full long name may carry an IP host part after DNS; still
+            %% allow alive-name prefix match against DNS-configured peers.
+            lists:member(NodeStr, peer_strings()) orelse peer_has_alive(Alive);
         [Alive] when Alive =/= [] ->
             case host_to_list(Host) of
                 "" ->

@@ -104,6 +104,19 @@ peer_bin_list() {
   for _p in $1; do
     _p=$(printf '%s' "$_p" | tr -d ' \t\r\n')
     [ -z "$_p" ] && continue
+    # Reject chars that would break <<\"...\">> interpolation in the
+    # ssl_dist_optfile (operator-controlled env, but fail closed).
+    case "$_p" in
+      *[!A-Za-z0-9_.@-]*)
+        echo "janus: invalid JANUS_FLEET_PEERS entry '$_p' (allowed: A-Za-z0-9_.@-)" >&2
+        exit 1
+        ;;
+      *@*) ;;
+      *)
+        echo "janus: JANUS_FLEET_PEERS entry must be name@host, got '$_p'" >&2
+        exit 1
+        ;;
+    esac
     if [ -z "$_out" ]; then
       _out="<<\"$_p\">>"
     else
