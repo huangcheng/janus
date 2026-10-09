@@ -38,6 +38,7 @@
     fleet_mirror_rows => {gauge, <<"Rows currently held in fleet mirror tables.">>},
     usage_writer_buffered_rows => {gauge, <<"Usage writer buffered rows.">>},
     uptime_seconds => {gauge, <<"VM wall-clock uptime.">>},
+    workers_available => {gauge, <<"Dispatchable worker pool members (hello'd, non-draining).">>},
     build_info => {untyped, <<"Build/version info.">>}
 }).
 

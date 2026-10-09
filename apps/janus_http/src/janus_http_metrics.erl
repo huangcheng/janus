@@ -78,6 +78,7 @@ render(Req) ->
                 {lb_routes_cooling, gauge_val(fun janus_lb:cooling_count/0, 0, lb_cooling), #{}},
                 {usage_writer_buffered_rows, Buffered, #{}},
                 {uptime_seconds, WallMs div 1000, #{}},
+                {workers_available, workers_available_gauge(), #{}},
                 {build_info, 1, #{<<"version">> => Version}}
             ] ++ fleet_gauges(),
         Body = janus_metrics_render:render(Rows, Gauges),
@@ -182,6 +183,25 @@ gauge_val(Fun, Default, What) ->
         {ok, V} when is_boolean(V) -> V;
         {ok, V} when is_float(V) -> V;
         _ -> Default
+    end.
+
+%% Master: live hello'd non-draining pool size. Worker / absent pool → 0.
+workers_available_gauge() ->
+    case safe_role() of
+        master ->
+            gauge_val(fun janus_worker_pool:available/0, 0, workers_available);
+        _ ->
+            0
+    end.
+
+safe_role() ->
+    try
+        janus_role:get()
+    catch
+        _:_ ->
+            %% Boot / non-gateway scrape: treat as master so an empty
+            %% pool still reports 0 rather than omitting the series.
+            master
     end.
 
 bool01(true) -> 1;
