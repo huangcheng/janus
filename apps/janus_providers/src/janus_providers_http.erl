@@ -90,7 +90,7 @@ target_url(#{host := Host, port := Port, path := Path, tls := Tls}) ->
             true -> <<"https">>;
             false -> <<"http">>
         end,
-    HostBin = iolist_to_binary(Host),
+    HostBin = bracket_host(iolist_to_binary(Host)),
     PathBin =
         case Path of
             <<>> -> <<"/">>;
@@ -107,6 +107,17 @@ target_url(#{host := Host, port := Port, path := Path, tls := Tls}) ->
         _ ->
             PortBin = integer_to_binary(Port),
             <<Scheme/binary, "://", HostBin/binary, ":", PortBin/binary, PathBin/binary>>
+    end.
+
+%% RFC 3986 §3.2.2: IPv6 literals in URLs must be bracketed.
+bracket_host(Host) when is_binary(Host) ->
+    case {binary:match(Host, <<":">>), Host} of
+        {nomatch, _} ->
+            Host;
+        {_, <<$[, _/binary>>} ->
+            Host;
+        _ ->
+            <<$[, Host/binary, $]>>
     end.
 
 -spec decrypt_key(map()) -> {ok, binary()} | {error, term()}.

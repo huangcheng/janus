@@ -79,8 +79,8 @@ parse_affinity_node(Bin) when is_binary(Bin) ->
         binary_to_existing_atom(Bin, utf8)
     catch
         error:badarg ->
-            %% Operator-configured node name may not exist locally yet.
-            binary_to_atom(Bin, utf8)
+            %% Unknown atom → no affinity match; avoid permanent atom leak.
+            undefined
     end;
 parse_affinity_node(List) when is_list(List) ->
     parse_affinity_node(list_to_binary(List));
@@ -399,8 +399,13 @@ stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq) ->
                 true ->
                     ok;
                 false ->
-                    stash_done(Done, ok),
                     Status = maps:get(status, Done, 200),
+                    OkOrErr =
+                        case Status >= 400 of
+                            true -> error;
+                            false -> ok
+                        end,
+                    stash_done(Done, OkOrErr),
                     case Status >= 400 of
                         true ->
                             {error, {worker_http_status, Status}};

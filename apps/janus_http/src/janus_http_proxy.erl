@@ -799,7 +799,17 @@ handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Rout
         Drain(fun(Chunk) -> translate_chunk(ClientProto, ProviderProto, Chunk, Req2) end)
     of
         ok ->
-            finish_translate_stream(ClientProto, Route, Req2, State, normal)
+            finish_translate_stream(ClientProto, Route, Req2, State, normal);
+        {error, DrainReason} ->
+            %% Remote Drain (and gun) may return {error,_}; must still
+            %% finalize + fin (OCR: bare try_clause left clients hanging).
+            finish_translate_stream(
+                ClientProto,
+                Route,
+                Req2,
+                State,
+                {error, upstream, sanitize_upstream_error(DrainReason)}
+            )
     catch
         throw:{janus_translate, Kind, Msg} ->
             finish_translate_stream(ClientProto, Route, Req2, State, {error, Kind, Msg});
@@ -1582,6 +1592,14 @@ failover_classify(Route, {ok, Status, _H, Body}) when Status >= 400, Status < 50
                     {retryable, unclassified}
             end
     end;
+%% Worker mesh failures are terminal (N9: no in-flight retry / no
+%% key-failover on worker_lost or worker-emitted transport errors).
+failover_classify(_Route, {error, worker_lost}) ->
+    terminal;
+failover_classify(_Route, {error, {worker_error, _}}) ->
+    terminal;
+failover_classify(_Route, {error, {worker_http_status, _}}) ->
+    terminal;
 failover_classify(_Route, {error, _Reason}) ->
     %% Transport errors behave like 5xx: retryable within the budget.
     {retryable, null};

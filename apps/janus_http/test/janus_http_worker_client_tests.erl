@@ -23,6 +23,11 @@ affinity_node_parse_test() ->
     ?assertEqual(undefined, janus_http_worker_client:parse_affinity_node(undefined)),
     ?assertEqual(undefined, janus_http_worker_client:parse_affinity_node(null)),
     ?assertEqual(undefined, janus_http_worker_client:parse_affinity_node(<<>>)),
+    %% Unknown node name must not create atoms.
+    ?assertEqual(
+        undefined,
+        janus_http_worker_client:parse_affinity_node(<<"no_such_node@nowhere.example">>)
+    ),
     Node = node(),
     Bin = atom_to_binary(Node, utf8),
     ?assertEqual(Node, janus_http_worker_client:parse_affinity_node(Bin)).
