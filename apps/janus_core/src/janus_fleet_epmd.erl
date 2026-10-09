@@ -115,16 +115,20 @@ configured_peer(Name, Host) ->
     NodeStr = to_list(Name),
     case string:split(NodeStr, "@") of
         [Alive, HostPart] when Alive =/= [], HostPart =/= [] ->
-            %% Full long name may carry an IP host part after DNS; still
-            %% allow alive-name prefix match against DNS-configured peers.
-            lists:member(NodeStr, peer_strings()) orelse peer_has_alive(Alive);
+            %% Exact long-name match; if the host part is an IP (DNS
+            %% already resolved into the node name), allow alive-name
+            %% prefix against DNS-configured peers — not for DNS hosts.
+            lists:member(NodeStr, peer_strings()) orelse
+                (looks_like_ip(HostPart) andalso peer_has_alive(Alive));
         [Alive] when Alive =/= [] ->
             case host_to_list(Host) of
                 "" ->
+                    %% Host was an IP tuple — match alive name only.
                     peer_has_alive(Alive);
                 HostStr ->
                     Candidate = Alive ++ "@" ++ HostStr,
-                    lists:member(Candidate, peer_strings()) orelse peer_has_alive(Alive)
+                    lists:member(Candidate, peer_strings()) orelse
+                        (looks_like_ip(HostStr) andalso peer_has_alive(Alive))
             end;
         _ ->
             false
@@ -158,3 +162,11 @@ host_to_list(T) when is_tuple(T), tuple_size(T) =:= 8 ->
     "";
 host_to_list(_) ->
     "".
+
+looks_like_ip(Host) when is_list(Host) ->
+    case inet:parse_address(Host) of
+        {ok, _} -> true;
+        {error, _} -> false
+    end;
+looks_like_ip(_) ->
+    false.
