@@ -29,8 +29,6 @@
     endpoint_for/1
 ]).
 
--define(DEFAULT_UPSTREAM_MS, 120_000).
-
 %%--------------------------------------------------------------------
 %% Entry (called by janus_http_modality:init/2)
 %%--------------------------------------------------------------------
@@ -171,39 +169,26 @@ upstream_post(Route, PathSuffix, ReqMapOrBody) ->
     upstream_post(Route, PathSuffix, ReqMapOrBody, #{}).
 
 local_upstream_post(Route, PathSuffix, Body, Opts) when is_binary(Body) ->
-    case janus_catalog:lookup_provider(maps:get(provider_id, Route)) of
-        {ok, #{base_url := BaseUrl0, enabled := true}} ->
-            case janus_providers_http:decrypt_key(maps:get(provider_key, Route, undefined)) of
-                {ok, Token} ->
-                    case
-                        janus_providers_http:parse_base(iolist_to_binary(BaseUrl0))
-                    of
-                        {ok, Host, Port, BasePath, Tls} ->
-                            Path = janus_providers_http:join_path(BasePath, PathSuffix),
-                            Headers = [
-                                {<<"authorization">>, <<"Bearer ", Token/binary>>},
-                                {<<"content-type">>, <<"application/json">>},
-                                {<<"accept">>, <<"application/json">>},
-                                {<<"user-agent">>, janus_providers_http:user_agent()}
-                            ],
-                            Target = #{
-                                host => Host,
-                                port => Port,
-                                path => Path,
-                                tls => Tls,
-                                timeout => maps:get(timeout_ms, Opts, ?DEFAULT_UPSTREAM_MS)
-                            },
-                            janus_providers_http:post(Target, Headers, Body);
-                        {error, _} = Err ->
-                            Err
-                    end;
-                {error, _} = Err ->
-                    Err
-            end;
-        {ok, #{enabled := false}} ->
-            {error, provider_disabled};
-        error ->
-            {error, provider_not_found}
+    case janus_http_worker_client:resolve_unary_upstream(Route, PathSuffix, Body, Opts) of
+        {ok, #{
+            host := Host,
+            port := Port,
+            path := Path,
+            tls := Tls,
+            headers := Headers,
+            body := BodyBin,
+            timeout_ms := Timeout
+        }} ->
+            Target = #{
+                host => Host,
+                port => Port,
+                path => Path,
+                tls => Tls,
+                timeout => Timeout
+            },
+            janus_providers_http:post(Target, Headers, BodyBin);
+        {error, _} = Err ->
+            Err
     end.
 
 reply_json(Req, State, Status, Map) ->

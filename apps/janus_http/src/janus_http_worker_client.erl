@@ -12,6 +12,7 @@
 -export([
     call/6,
     unary_post/5,
+    resolve_unary_upstream/4,
     normalize_want_stream/1,
     outcome_bin/1,
     map_worker_error/2,
@@ -204,8 +205,21 @@ finish_prepare({ok, #{url := Url, method := Method, headers := Headers, body := 
     },
     {ok, Fields}.
 
-%% Same resolve chain as janus_modality:upstream_post (no stream/model rewrite).
-prepare_unary_job(Route, PathSuffix, Body, Opts) ->
+%% Shared resolve for modality unary (local post + worker job). No stream/model rewrite.
+-spec resolve_unary_upstream(map(), binary(), binary(), map()) ->
+    {ok, #{
+        host := string(),
+        port := inet:port_number(),
+        path := binary(),
+        tls := boolean(),
+        headers := [{binary(), binary()}],
+        body := binary(),
+        timeout_ms := pos_integer()
+    }}
+    | {error, term()}.
+resolve_unary_upstream(Route, PathSuffix, Body, Opts) when
+    is_map(Route), is_binary(PathSuffix), is_binary(Body), is_map(Opts)
+->
     case janus_catalog:lookup_provider(maps:get(provider_id, Route)) of
         {ok, #{base_url := BaseUrl0, enabled := true}} ->
             case janus_providers_http:decrypt_key(maps:get(provider_key, Route, undefined)) of
@@ -219,18 +233,17 @@ prepare_unary_job(Route, PathSuffix, Body, Opts) ->
                                 {<<"accept">>, <<"application/json">>},
                                 {<<"user-agent">>, janus_providers_http:user_agent()}
                             ],
-                            Target = #{host => Host, port => Port, path => Path, tls => Tls},
                             Timeout = maps:get(
                                 timeout_ms, Opts, janus_worker_wire:non_stream_timeout_ms()
                             ),
                             {ok, #{
-                                url => janus_providers_http:target_url(Target),
-                                method => post,
+                                host => Host,
+                                port => Port,
+                                path => Path,
+                                tls => Tls,
                                 headers => Headers,
                                 body => Body,
-                                stream => false,
-                                timeout_ms => Timeout,
-                                protocol_meta => #{}
+                                timeout_ms => Timeout
                             }};
                         {error, _} = Err ->
                             Err
@@ -242,6 +255,31 @@ prepare_unary_job(Route, PathSuffix, Body, Opts) ->
             {error, provider_disabled};
         error ->
             {error, provider_not_found}
+    end.
+
+prepare_unary_job(Route, PathSuffix, Body, Opts) ->
+    case resolve_unary_upstream(Route, PathSuffix, Body, Opts) of
+        {error, _} = Err ->
+            Err;
+        {ok, #{
+            host := Host,
+            port := Port,
+            path := Path,
+            tls := Tls,
+            headers := Headers,
+            body := BodyBin,
+            timeout_ms := Timeout
+        }} ->
+            Target = #{host => Host, port => Port, path => Path, tls => Tls},
+            {ok, #{
+                url => janus_providers_http:target_url(Target),
+                method => post,
+                headers => Headers,
+                body => BodyBin,
+                stream => false,
+                timeout_ms => Timeout,
+                protocol_meta => #{}
+            }}
     end.
 
 %%--------------------------------------------------------------------

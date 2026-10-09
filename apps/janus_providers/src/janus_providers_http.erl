@@ -132,6 +132,11 @@ decrypt_key(_) ->
 -spec post(string(), inet:port_number(), binary(), boolean(), [{binary(), binary()}], binary()) ->
     {ok, pos_integer(), map(), binary()} | {error, term()}.
 post(Host, Port, Path, Tls, Headers, Body) when is_list(Host), is_integer(Port) ->
+    post_timeout(Host, Port, Path, Tls, Headers, Body, ?TTFB_MS).
+
+post_timeout(Host, Port, Path, Tls, Headers, Body, TimeoutMs) when
+    is_list(Host), is_integer(Port), is_integer(TimeoutMs), TimeoutMs > 0
+->
     Transport =
         case Tls of
             true -> tls;
@@ -148,11 +153,11 @@ post(Host, Port, Path, Tls, Headers, Body) when is_list(Host), is_integer(Port) 
                 case gun:await_up(Conn, ?CONNECT_MS) of
                     {ok, _} ->
                         Stream = gun:post(Conn, Path, Headers, Body),
-                        case gun:await(Conn, Stream, ?TTFB_MS) of
+                        case gun:await(Conn, Stream, TimeoutMs) of
                             {response, fin, Status, RespHeaders} ->
                                 {ok, Status, headers_map(RespHeaders), <<>>};
                             {response, nofin, Status, RespHeaders} ->
-                                case collect_body(Conn, Stream, <<>>) of
+                                case collect_body(Conn, Stream, TimeoutMs, <<>>) of
                                     {ok, RespBody} ->
                                         {ok, Status, headers_map(RespHeaders), RespBody};
                                     {error, _} = Err ->
@@ -174,10 +179,17 @@ post(Host, Port, Path, Tls, Headers, Body) when is_list(Host), is_integer(Port) 
     end.
 
 %% Compatibility arity used by adapters that pack opts.
+%% Optional `timeout` (ms) overrides the default TTFB/body await budget
+%% so modality local posts match worker `timeout_ms` (W2.2 OCR).
 -spec post(map(), [{binary(), binary()}], binary()) ->
     {ok, pos_integer(), map(), binary()} | {error, term()}.
-post(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Body) ->
-    post(Host, Port, Path, Tls, Headers, Body).
+post(#{host := Host, port := Port, path := Path, tls := Tls} = Target, Headers, Body) ->
+    Timeout =
+        case maps:get(timeout, Target, ?TTFB_MS) of
+            T when is_integer(T), T > 0 -> T;
+            _ -> ?TTFB_MS
+        end,
+    post_timeout(Host, Port, Path, Tls, Headers, Body, Timeout).
 
 %% Minimal GET (video job polls, spec M3.1): post/6's connection
 %% logic with method GET and no body. The timeout applies to BOTH the
