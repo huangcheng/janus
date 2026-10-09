@@ -141,8 +141,14 @@ apply_nodedown(Pool, Node) when is_map(Pool), is_atom(Node) ->
 
 -spec apply_undrain(map(), node()) -> map().
 apply_undrain(Pool, Node) when is_map(Pool), is_atom(Node) ->
+    %% Clear sticky and drop any mid-drain member so the next hello
+    %% creates a fresh non-draining entry (not "ack but stay draining").
     Sticky0 = maps:get(sticky, Pool),
-    Pool#{sticky => maps:remove(Node, Sticky0)}.
+    Members0 = maps:get(members, Pool),
+    Pool#{
+        sticky => maps:remove(Node, Sticky0),
+        members => maps:remove(Node, Members0)
+    }.
 
 -spec apply_inflight(map(), node(), 1 | -1) -> {map(), boolean()}.
 apply_inflight(Pool, Node, Delta) when
@@ -321,8 +327,17 @@ do_hello(From, Node, Meta, #state{pool = Pool} = State) ->
         ack ->
             From ! janus_worker_wire:hello_ack(Node);
         {nack, Reason} ->
-            {ok, Nack} = janus_worker_wire:hello_nack(Node, Reason),
-            From ! Nack
+            case janus_worker_wire:hello_nack(Node, Reason) of
+                {ok, Nack} ->
+                    From ! Nack;
+                {error, WireErr} ->
+                    logger:error(#{
+                        what => janus_worker_pool_hello_nack_failed,
+                        node => Node,
+                        reason => Reason,
+                        wire => WireErr
+                    })
+            end
     end,
     State#state{pool = Pool1}.
 
@@ -413,10 +428,26 @@ maybe_monitor_nodes() ->
 load_sticky() ->
     case q(<<"SELECT node_name FROM worker_sticky_drained">>, []) of
         {ok, Rows} ->
-            [row_node(R) || R <- Rows];
+            lists:filtermap(
+                fun(R) ->
+                    case row_node(R) of
+                        {ok, Node} ->
+                            {true, Node};
+                        {error, Bad} ->
+                            logger:error(#{
+                                what => janus_worker_pool_sticky_bad_row,
+                                row => Bad
+                            }),
+                            false
+                    end
+                end,
+                Rows
+            );
         {error, Reason} ->
-            logger:warning(#{what => janus_worker_pool_sticky_load_failed, reason => Reason}),
-            []
+            %% Empty sticky on failure would re-admit drained workers —
+            %% refuse boot and let the supervisor retry (spec §3.4).
+            logger:error(#{what => janus_worker_pool_sticky_load_failed, reason => Reason}),
+            error({sticky_load_failed, Reason})
     end.
 
 sticky_insert(Node) ->
@@ -462,12 +493,25 @@ row_node([Name]) ->
     row_node(Name);
 row_node({Name}) ->
     row_node(Name);
-row_node(Name) when is_binary(Name) ->
-    binary_to_atom(Name, utf8);
-row_node(Name) when is_list(Name) ->
-    list_to_atom(Name);
 row_node(Name) when is_atom(Name) ->
-    Name.
+    {ok, Name};
+row_node(Name) when is_binary(Name) ->
+    parse_node_name(Name);
+row_node(Name) when is_list(Name) ->
+    parse_node_name(list_to_binary(Name));
+row_node(Other) ->
+    {error, Other}.
+
+%% Bound atom creation: Erlang long names look like name@host; reject
+%% empty / oversized / @-less TEXT before binary_to_atom.
+parse_node_name(Bin) when is_binary(Bin) ->
+    Size = byte_size(Bin),
+    case Size > 0 andalso Size =< 255 andalso binary:match(Bin, <<"@">>) =/= nomatch of
+        true ->
+            {ok, binary_to_atom(Bin, utf8)};
+        false ->
+            {error, Bin}
+    end.
 
 q(Sql, Params) ->
     try

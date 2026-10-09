@@ -114,6 +114,22 @@ undrain_clears_sticky_requires_rehello_test() ->
     ),
     ?assertEqual(1, janus_worker_pool:available(P2)).
 
+undrain_mid_drain_allows_rehello_test() ->
+    P0 = janus_worker_pool:new_pool([]),
+    {ack, P1} = janus_worker_pool:apply_hello(
+        P0, ?A, #{role => worker, vsn => 1, region => undefined}
+    ),
+    {P2, false} = janus_worker_pool:apply_inflight(P1, ?A, 1),
+    {P3, false} = janus_worker_pool:apply_drain(P2, ?A),
+    ?assertEqual(true, janus_worker_pool:is_draining(P3, ?A)),
+    P4 = janus_worker_pool:apply_undrain(P3, ?A),
+    ?assertEqual(false, janus_worker_pool:is_member(P4, ?A)),
+    {ack, P5} = janus_worker_pool:apply_hello(
+        P4, ?A, #{role => worker, vsn => 1, region => undefined}
+    ),
+    ?assertEqual(false, janus_worker_pool:is_draining(P5, ?A)),
+    ?assertEqual(1, janus_worker_pool:available(P5)).
+
 least_inflight_name_tiebreak_test() ->
     P0 = janus_worker_pool:new_pool([]),
     {ack, P1} = janus_worker_pool:apply_hello(
@@ -155,11 +171,13 @@ affinity_region_prefers_match_test() ->
     {ack, P2} = janus_worker_pool:apply_hello(
         P1, ?B, #{role => worker, vsn => 1, region => <<"west">>}
     ),
-    {P3, false} = bump_inflight(P2, ?A, 3),
-    %% Region match prefers B even though A would lose on least-inflight alone.
+    %% B has higher inflight; without region filter A would win.
+    {P3, false} = bump_inflight(P2, ?B, 5),
+    ?assertEqual({ok, ?A}, janus_worker_pool:select(P3, #{})),
+    %% Region match prefers B despite higher inflight.
     ?assertEqual({ok, ?B}, janus_worker_pool:select(P3, #{region_tag => <<"west">>})),
-    %% Unknown region → fall through; least inflight is B (0 vs 3).
-    ?assertEqual({ok, ?B}, janus_worker_pool:select(P3, #{region_tag => <<"mars">>})).
+    %% Unknown region → fall through to least-inflight (A).
+    ?assertEqual({ok, ?A}, janus_worker_pool:select(P3, #{region_tag => <<"mars">>})).
 
 affinity_node_draining_falls_through_test() ->
     P0 = janus_worker_pool:new_pool([]),
@@ -178,8 +196,9 @@ empty_pool_select_test() ->
     ?assertEqual(0, janus_worker_pool:available(P0)).
 
 %% Apply note_inflight(+1) N times (API only allows ±1).
+%% Precondition: node is not draining (StartIdle flag ignored).
 bump_inflight(Pool, _Node, 0) ->
     {Pool, false};
 bump_inflight(Pool, Node, N) when N > 0 ->
-    {Pool1, false} = janus_worker_pool:apply_inflight(Pool, Node, 1),
+    {Pool1, _} = janus_worker_pool:apply_inflight(Pool, Node, 1),
     bump_inflight(Pool1, Node, N - 1).
