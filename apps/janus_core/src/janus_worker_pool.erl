@@ -22,6 +22,13 @@
 %%%   last-arrival-wins.</li>
 %%% </ul>
 %%%
+%%% Probe machinery (Task B2, spec Part 0.2/0.8): the 30 s tick
+%%% self-casts `{sched, 2, {probe, JobSpec}}` (pool-internal) when
+%%% `JANUS_SCHED_PROBE=1`; `dispatch_probe/2` sends a NORMAL pinned job
+%%% carrying the additive `internal => true` map key straight to the
+%%% target worker's `janus_worker_dispatch` (no pick, no reserve
+%%% counter). Ack-miss/send-fail aborts — never local fallback.
+%%%
 %%% Selection is PURE (`select_v2/2`); pick emits the metrics from its
 %%% Decisions. Counters are owner-local in `sched_counters` (tolerant
 %%% bump pattern) and surfaced via {@link sched_stats/0}.
@@ -73,6 +80,15 @@
     advance_divergence/4
 ]).
 
+%% Probe machinery (spec Part 0.2/0.8 — Task B2).
+-export([
+    probe_enabled/0,
+    probe_force/0,
+    probe_candidates/0,
+    dispatch_probe/2,
+    build_probe_job/1
+]).
+
 -export([
     init/1,
     handle_call/3,
@@ -106,6 +122,15 @@
 -define(EWMA_MIN_SAMPLES, 3).
 -define(DEMOTE_FLOOR_MS, 5000).
 -define(DEMOTE_FACTOR, 3).
+%% Probes (spec Part 0.2/0.8): cadence per (worker, provider) >= 60 s
+%% with +-20 % jitter; cluster-wide cap over a rolling 1 h window.
+-define(PROBE_CADENCE_MS, 60_000).
+-define(PROBE_HOUR_MS, 3_600_000).
+-define(PROBE_MAX_HOURLY_DEFAULT, 10).
+%% Injection seam for probe PROVIDER candidates (eunit / future ops):
+%% rows {ProviderId, CandidateMap}; empty in production => the catalog
+%% path runs. NOT heir'd — injection is ephemeral by design.
+-define(PROBE_CAND, sched_probe_candidates).
 -define(DIVERGENCE_RATIO, 3.0).
 -define(DIVERGENCE_FLOOR_MS, 100).
 -define(DIVERGENCE_WINDOW_MS, 120_000).
@@ -134,6 +159,21 @@
     divergence = #{} :: map(),
     %% Node => last advisory load report (ops display only).
     load = #{} :: map(),
+    %% Probe machinery (spec Part 0.2/0.8 — pool state, cleared on
+    %% nodedown / owner restart):
+    %% Node => JobRef — the in-flight probe map (the spec-pinned shape:
+    %% structurally <= 1 probe in flight per worker).
+    probe_inflight = #{} :: #{node() => binary()},
+    %% JobRef => {Node, ProviderId, SentAtMono, Acked} — dispatch
+    %% details for the ack/done/error/abort handlers.
+    probe_sent = #{} :: #{binary() => {node(), term(), integer(), boolean()}},
+    %% {Node, ProviderId} => SentAtMono — last-probed timestamps (the
+    %% cadence + least-recently-probed source; never-probed pairs sort
+    %% as OLDEST via key absence).
+    probe_last = #{} :: map(),
+    %% Issued-probe send timestamps (newest first) — the rolling 1 h
+    %% cluster-wide cap window.
+    probe_issued = [] :: [integer()],
     dirty = false :: boolean(),
     flush_tref = undefined :: reference() | undefined,
     tick_tref = undefined :: reference() | undefined,
@@ -255,6 +295,13 @@ reserve_loop([Node | Rest], Snapshot, Opts, JobRef, FirstReason) ->
             OverCapacity = not Pinned andalso Capacity =/= infinity andalso Count > Capacity,
             case OverCapacity of
                 false ->
+                    %% dispatch_worker_total{node, provider} (spec Part
+                    %% C): counted ONLY when the pick carries provider
+                    %% context — pick callers without provider_id
+                    %% (generic picks) are skipped rather than counted
+                    %% under a noisy `"<node>/"` key; only the http
+                    %% client passes provider_id today.
+                    ok = maybe_bump_dispatch_worker(Node, maps:get(provider_id, Opts, undefined)),
                     _ = gen_server:cast(?SERVER, {sched, 2, {track, JobRef, Node,
                         maps:get(provider_id, Opts, undefined), now_mono(), false}}),
                     {ok, Node};
@@ -307,6 +354,13 @@ emit_pick_metrics(#{geo_source := Source, demoted := Demoted}) ->
     ok = bump({geo_match, Source}),
     lists:foreach(fun(_Node) -> ok = bump(health_demote) end, Demoted).
 
+%% dispatch_worker_total{node, provider}: skipped when the pick carries
+%% no provider context (see reserve_loop).
+maybe_bump_dispatch_worker(_Node, undefined) ->
+    ok;
+maybe_bump_dispatch_worker(Node, ProviderId) ->
+    ok = bump({dispatch_worker, Node, ProviderId}).
+
 local_fallback(Reason) ->
     ok = bump({dispatch_local, Reason}),
     empty.
@@ -319,11 +373,20 @@ log_pick_fault(Class, Reason) ->
     }),
     ok.
 
-%% @doc Boot knob flags (spec Part C): `#{rtt => boolean(),
-%% health => boolean()}`. Read once at boot into persistent_term.
--spec knobs() -> #{rtt => boolean(), health => boolean()}.
+%% @doc Boot knob flags (spec Part C/D): `#{rtt => boolean(), health =>
+%% boolean(), probe => boolean(), probe_max_hourly => non_neg_integer(),
+%% probe_force => boolean()}`. Read once at boot into persistent_term.
+%% GEO lives in `janus_geo` (its own PT key); the /stats/sched view
+%% merges `geo_enabled` in (see {@link sched_stats/0}).
+-spec knobs() -> map().
 knobs() ->
-    pt_read(?PT_KNOBS, #{rtt => false, health => false}).
+    pt_read(?PT_KNOBS, #{
+        rtt => false,
+        health => false,
+        probe => false,
+        probe_max_hourly => ?PROBE_MAX_HOURLY_DEFAULT,
+        probe_force => false
+    }).
 
 -spec rtt_enabled() -> boolean().
 rtt_enabled() ->
@@ -333,15 +396,49 @@ rtt_enabled() ->
 health_enabled() ->
     maps:get(health, knobs(), false).
 
+%% @doc Probes are MONEY (spec Part 0.8): OFF by default; the knob also
+%% gates the `{sched, 2, {probe, _}}` cast clause itself so a stray
+%% external cast can never spend the budget with the knob off.
+-spec probe_enabled() -> boolean().
+probe_enabled() ->
+    maps:get(probe, knobs(), false).
+
+%% @doc Test-only `JANUS_SCHED_PROBE_FORCE`: bypasses cadence AND the
+%% fresh/unexpired-row skip — never the hourly cap, the dispatchable x
+%% enabled eligibility, or the `sched_v` filter (spec Part 0.2). Loud
+%% warning at boot; never in prod.
+-spec probe_force() -> boolean().
+probe_force() ->
+    maps:get(probe_force, knobs(), false).
+
+probe_max_hourly() ->
+    maps:get(probe_max_hourly, knobs(), ?PROBE_MAX_HOURLY_DEFAULT).
+
 %% @doc All scheduler counters (owner-local `sched_counters` ETS —
 %% `janus_metrics` lives in the janus_http app, unreachable from
 %% janus_core without inverting the dependency; janus_geo's tolerant
 %% local-counter precedent). Keys mirror the spec metric names minus
 %% the `sched_` prefix; labeled metrics use `{Name, Label}` keys
-%% (`fleet_worker_report_mismatch` keeps its full name). B2's
-%% /stats/sched endpoint renders this map.
+%% (`fleet_worker_report_mismatch` keeps its full name).
+%%
+%% Task B2: the map ALSO carries the non-counter /stats/sched sources —
+%% `knobs` (knob view incl. `geo_enabled`), `health_ewma` (the raw
+%% DISPLAY value from sample 1, spec A.4), `rtt_rows` and
+%% `reserve_rows` (raw public-table reads) — so the /stats/sched
+%% handler is one call and the JSON assembly stays pure. Served by a
+%% gen_server call for an atomic state view; falls back to a
+%% degraded ETS-only assembly when the pool is down (tables are
+%% public; health_ewma reads empty).
 -spec sched_stats() -> map().
 sched_stats() ->
+    try
+        gen_server:call(?SERVER, sched_stats, 1000)
+    catch
+        _:_ ->
+            degraded_sched_stats()
+    end.
+
+degraded_sched_stats() ->
     try
         maps:from_list(ets:tab2list(?COUNTERS))
     catch
@@ -852,6 +949,10 @@ handle_call({pick_sync, Opts}, _From, #state{pool = Pool} = State) ->
     {reply, select(Pool, Opts), State};
 handle_call(available, _From, #state{pool = Pool} = State) ->
     {reply, available(Pool), State};
+handle_call(sched_stats, _From, State) ->
+    %% Atomic /stats/sched source view (see sched_stats/0): counters +
+    %% knobs + display EWMA + raw public-table rows.
+    {reply, sched_stats_map(State), State};
 handle_call({undrain, Node}, _From, #state{pool = Pool} = State) ->
     ok = sticky_delete(Node),
     Pool1 = apply_undrain(Pool, Node),
@@ -923,6 +1024,15 @@ handle_cast({sched, 2, {load, Node, Info}}, State) when is_atom(Node) ->
     %% Advisory load (spec Part 0.3): ops display + divergence window
     %% only — NEVER a selection input.
     {noreply, do_load(Node, Info, State)};
+handle_cast({sched, 2, {probe, _JobSpec}}, State) ->
+    %% Pool-INTERNAL probe trigger (spec Part 0.2): the 30 s tick
+    %% self-casts this; consumed here behind dispatch_probe/2. The knob
+    %% is re-checked (probes are money — a stray external cast with the
+    %% knob off is a silent no-op, never a spend).
+    case probe_enabled() of
+        true -> {noreply, do_probe(State)};
+        false -> {noreply, State}
+    end;
 handle_cast({sched, 2, Unknown}, State) ->
     %% Unknown `{sched, 2, _}` inner tag (a newer worker's load/probe
     %% cast against this master): dropped + counted.
@@ -941,8 +1051,67 @@ handle_info(sched_tick, State) ->
     %% 30 s periodic tick (spec Part C): republishes UNCONDITIONALLY
     %% (TTL expiry + reserve reconciliation are real on an idle fleet)
     %% and runs maintenance. BOTH flush paths advance snapshot_gen.
+    %% Probe eligibility is evaluated when the probe knob is on (spec
+    %% Part 0.2): the tick self-casts {sched, 2, {probe, JobSpec}} —
+    %% a POOL-INTERNAL trigger consumed by the handle_cast clause
+    %% behind dispatch_probe/2 (the message class exists exactly as
+    %% pinned; an old pool would drop+count it via the catch-all).
     State1 = reconcile(now_mono(), State),
-    {noreply, arm_tick(republish(State1))};
+    State2 = maybe_kick_probe(republish(State1)),
+    {noreply, arm_tick(State2)};
+handle_info({janus_job_ack, JobRef, WorkerSessionPid}, State) when is_pid(WorkerSessionPid) ->
+    %% Probe ack (the pool is the master session ONLY for internal
+    %% probes; agent jobs ack to their own session processes). The ack
+    %% deadline timer keeps running — {probe_ack_timeout, JobRef}
+    %% re-validates the Acked flag, so no timer bookkeeping is needed.
+    {noreply, probe_ack(JobRef, State)};
+handle_info({probe_ack_timeout, JobRef}, State) ->
+    %% Ack-miss ABORT (spec Part 0.2): defensive cancel to the worker
+    %% dispatch, tracked entry removed WITHOUT decrement (the Internal
+    %% skip — probes never incremented), in-flight cleared,
+    %% probe_skip{send_fail}. NO local fallback for internal jobs — a
+    %% master-side probe execution measures nothing.
+    case maps:find(JobRef, State#state.probe_sent) of
+        {ok, {Node, _ProviderId, _SentAt, false}} ->
+            ok = probe_cancel(Node, JobRef),
+            ok = bump({probe_skip, send_fail}),
+            logger:warning(#{
+                what => janus_sched_probe_ack_timeout,
+                node => Node,
+                job_ref => binary:encode_hex(JobRef)
+            }),
+            {noreply, probe_clear(JobRef, Node, State)};
+        _ ->
+            %% Acked in time, already completed, or post-abort: no-op.
+            {noreply, State}
+    end;
+handle_info({janus_done, JobRef, _DoneFields}, State) ->
+    %% Probe completion (internal jobs report like any job — spec
+    %% A.3). RTT = master-measured elapsed since dispatch send (a
+    %% cold-start stand-in; Task C adds the worker-measured value via
+    %% the load cast). probe_total{provider} counts the ATTEMPTED
+    %% probe that completed.
+    case maps:find(JobRef, State#state.probe_sent) of
+        {ok, {Node, ProviderId, SentAt, _Acked}} ->
+            Elapsed = max(0, now_mono() - SentAt),
+            ok = write_probe_rtt(Node, ProviderId, Elapsed),
+            ok = bump({probe, ProviderId}),
+            {noreply, mark_dirty(probe_clear(JobRef, Node, State))};
+        error ->
+            %% Not a probe (agent jobs never report to the pool) or a
+            %% post-abort late done: dropped.
+            {noreply, State}
+    end;
+handle_info({janus_error, JobRef, _Err}, State) ->
+    %% Probe error completion: clear maps, count the attempted probe,
+    %% NO rtt row (spec Part 0.2 — an errored probe wrote nothing).
+    case maps:find(JobRef, State#state.probe_sent) of
+        {ok, {Node, ProviderId, _SentAt, _Acked}} ->
+            ok = bump({probe, ProviderId}),
+            {noreply, probe_clear(JobRef, Node, State)};
+        error ->
+            {noreply, State}
+    end;
 handle_info({'ETS-TRANSFER', Tab, _FromPid, _GiftData}, State) ->
     %% Always delivered by janus_ets_heir:adopt/1 (OTP semantics); the
     %% authoritative hand-back was the adopt reply.
@@ -1046,8 +1215,9 @@ do_nodedown(Node, #state{pool = Pool} = State) ->
     Pool1 = apply_nodedown(Pool, Node),
     %% Clear ALL scheduler state for the node (spec Part 0.4): pool
     %% records + sched_workers row + reserve row + rtt rows +
-    %% divergence window. Tracked entries for a dead node never
-    %% complete — removing them makes late releases no-ops (the
+    %% divergence window + probe-cadence state and the probe in-flight
+    %% map (Part 0.2/0.5 clear-list). Tracked entries for a dead node
+    %% never complete — removing them makes late releases no-ops (the
     %% counter row is gone; no decrement, no Default-tuple
     %% resurrection). Health-EWMA state is NOT cleared here (the spec
     %% clear-list keeps it; owner restart clears it — pool state).
@@ -1062,7 +1232,14 @@ do_nodedown(Node, #state{pool = Pool} = State) ->
             pool = Pool1,
             tracked = Tracked1,
             divergence = maps:remove(Node, State#state.divergence),
-            load = maps:remove(Node, State#state.load)
+            load = maps:remove(Node, State#state.load),
+            probe_inflight = maps:remove(Node, State#state.probe_inflight),
+            probe_sent = maps:filter(
+                fun(_JobRef, {N, _, _, _}) -> N =/= Node end, State#state.probe_sent
+            ),
+            probe_last = maps:filter(
+                fun({N, _ProviderId}, _At) -> N =/= Node end, State#state.probe_last
+            )
         })
     ).
 
@@ -1133,14 +1310,52 @@ maybe_monitor_nodes() ->
 %%% Scheduler v2 — tables, knobs, timers
 %%%===================================================================
 
-%% Boot knob flags (env read ONCE; restart to change — spec Part C).
-%% GEO/PROBE knobs belong to janus_geo / the probe task.
+%% Boot knob flags (env read ONCE; restart to change — spec Part C/D).
+%% GEO belongs to janus_geo; probe knobs (Task B2):
+%% JANUS_SCHED_PROBE (default off), JANUS_SCHED_PROBE_MAX_HOURLY
+%% (default 10, cluster-wide), test-only JANUS_SCHED_PROBE_FORCE
+%% (loud warning — never in prod).
 boot_knobs() ->
+    Force = env_truthy(os:getenv("JANUS_SCHED_PROBE_FORCE")),
+    case Force of
+        true ->
+            logger:warning(#{
+                what => janus_sched_probe_force_enabled,
+                note =>
+                    <<"JANUS_SCHED_PROBE_FORCE bypasses probe cadence and the fresh-skip; it NEVER bypasses the hourly cap or target eligibility. Test-only; never enable in production.">>
+            });
+        false ->
+            ok
+    end,
     persistent_term:put(?PT_KNOBS, #{
         rtt => env_truthy(os:getenv("JANUS_SCHED_RTT")),
-        health => env_truthy(os:getenv("JANUS_SCHED_HEALTH"))
+        health => env_truthy(os:getenv("JANUS_SCHED_HEALTH")),
+        probe => env_truthy(os:getenv("JANUS_SCHED_PROBE")),
+        probe_max_hourly => env_pos_int(
+            os:getenv("JANUS_SCHED_PROBE_MAX_HOURLY"), ?PROBE_MAX_HOURLY_DEFAULT
+        ),
+        probe_force => Force
     }),
     ok.
+
+env_pos_int(false, Default) ->
+    Default;
+env_pos_int("", Default) ->
+    Default;
+env_pos_int(Val, Default) when is_list(Val) ->
+    try
+        max(0, list_to_integer(Val))
+    catch
+        _:_ ->
+            logger:warning(#{
+                what => janus_worker_pool_probe_cap_garbage,
+                value => Val,
+                default => Default
+            }),
+            Default
+    end;
+env_pos_int(_, Default) ->
+    Default.
 
 %% Heir'd scheduler tables (spec Part 0.5): adopt from the heir with
 %% backoff retry (the heir may not yet have processed the old owner's
@@ -1164,6 +1379,10 @@ ensure_sched_tables() ->
     %% Owner-local counters (tolerant bump pattern, janus_geo
     %% precedent): they died with the previous owner; the name is free.
     _ = ets:new(?COUNTERS, [set, public, named_table]),
+    %% Probe-candidate injection seam (Task B2): plain public table,
+    %% NOT heir'd — injection is ephemeral (eunit / future ops tooling);
+    %% empty in production => probe_candidates/0 reads the catalog.
+    _ = ets:new(?PROBE_CAND, [set, public, named_table]),
     Adopted = [Tag || {adopted, Tag} <- Results],
     case Adopted of
         [] ->
@@ -1343,6 +1562,559 @@ delete_rtt_rows(Node) ->
     ok.
 
 %%%===================================================================
+%%% Scheduler v2 — probe machinery (spec Part 0.2/0.8, Task B2)
+%%%===================================================================
+
+%% Tick -> self-cast seam: {sched, 2, {probe, JobSpec}} is
+%% POOL-INTERNAL (spec rev 7) — consumed by the handle_cast clause
+%% behind do_probe; what crosses to the worker is a NORMAL pinned job
+%% carrying `internal => true` (the worker sees no new message type).
+maybe_kick_probe(State) ->
+    case probe_enabled() of
+        true ->
+            _ = gen_server:cast(self(), {sched, 2, {probe, #{}}}),
+            State;
+        false ->
+            State
+    end.
+
+%% The eligibility cascade (spec Part 0.2). Skip reasons are evaluated
+%% in a FIXED order and the FIRST disqualifying condition is counted:
+%% cap (FIRST — FORCE never bypasses it) -> drained (no dispatchable
+%% worker) -> cadence (all targets in flight / no due pair) -> fresh
+%% (an unexpired sched_rtt row exists, passive OR probe — skipped by
+%% FORCE) -> send_fail (job build/send failure or ack miss). An
+%% all-old-version fleet (no sched_v >= 2 member) is a SILENT no-op:
+%% old workers are not targets, and the skip enum has no reason for
+%% version exclusion. An empty provider set is likewise silent — there
+%% is no (worker, provider) pair to probe.
+do_probe(#state{} = State) ->
+    Now = now_mono(),
+    {Capped, Window} = probe_cap(Now, State),
+    case Capped of
+        true ->
+            ok = bump({probe_skip, cap}),
+            State;
+        false ->
+            do_probe_targets(probe_candidates(), Window, Now, State)
+    end.
+
+%% Rolling 1 h issued-probe window vs JANUS_SCHED_PROBE_MAX_HOURLY.
+%% Returns {Capped, Window} with expired stamps pruned (the caller
+%% re-stores the pruned window on issue).
+probe_cap(Now, #state{probe_issued = Issued}) ->
+    Window = [T || T <- Issued, Now - T < ?PROBE_HOUR_MS],
+    {length(Window) >= probe_max_hourly(), Window}.
+
+do_probe_targets([], _Window, _Now, State) ->
+    State;
+do_probe_targets(Providers, Window, Now, #state{pool = #{members := Members}} = State) ->
+    {Targets, AnyDispatchable} = probe_worker_targets(Members),
+    case {Targets, AnyDispatchable} of
+        {[], false} ->
+            ok = bump({probe_skip, drained}),
+            State;
+        {[], true} ->
+            %% Members exist but none carries sched_v >= 2: old workers
+            %% are NOT probe targets (spec Part 0.2) — silent.
+            State;
+        {_, _} ->
+            do_probe_pairs(Providers, Window, Now, Targets, State)
+    end.
+
+%% Dispatchable x sched_v >= 2 targets (pick's primitives minus the
+%% counter, spec Part 0.2): member not draining, LIVE sched_workers row
+%% reads dispatchable (missing row = drained = refuse), hello carried
+%% the additive sched_v => 2 marker (unupgraded workers return no
+%% data — probing them would re-probe to cap-exhaustion).
+probe_worker_targets(Members) ->
+    lists:foldl(
+        fun({Node, M}, {Targets, Any}) ->
+            MemberOk = maps:get(draining, M, false) =:= false,
+            case MemberOk andalso live_draining(Node) =:= false of
+                true ->
+                    case maps:get(sched_v, M, 1) >= 2 of
+                        true -> {[Node | Targets], true};
+                        false -> {Targets, true}
+                    end;
+                false ->
+                    {Targets, Any}
+            end
+        end,
+        {[], false},
+        maps:to_list(Members)
+    ).
+
+do_probe_pairs(Providers, Window, Now, Targets, #state{probe_inflight = Inflight} = State) ->
+    %% In-flight workers are EXCLUDED from targets (counted under
+    %% cadence when they were the only candidates).
+    Free = [N || N <- Targets, not maps:is_key(N, Inflight)],
+    Pairs = lists:usort([{N, P} || N <- Free, #{provider_id := P} <- Providers]),
+    %% FORCE bypasses cadence AND the fresh/unexpired-row skip —
+    %% never the cap (checked first) or eligibility above (spec 0.2).
+    Due =
+        case probe_force() of
+            true -> Pairs;
+            false -> [Pair || Pair <- Pairs, probe_cadence_due(Pair, Now, State)]
+        end,
+    case Due of
+        [] ->
+            ok = bump({probe_skip, cadence}),
+            State;
+        _ ->
+            Eligible =
+                case probe_force() of
+                    true -> Due;
+                    false -> [Pair || Pair <- Due, not rtt_row_fresh(Pair, Now)]
+                end,
+            case Eligible of
+                [] ->
+                    ok = bump({probe_skip, fresh}),
+                    State;
+                _ ->
+                    Pair = least_recently_probed(Eligible, State),
+                    dispatch_probe_flow(Pair, Providers, Window, State)
+            end
+    end.
+
+%% Cadence per (worker, provider) >= 60 s with +-20 % jitter. The
+%% jitter factor is phash2-derived from {Node, ProviderId, hour-bucket}
+%% — STABLE within an hour and per pair (deterministic evaluation,
+%% unlike a per-call rand), spread across pairs (spec Part 0.2).
+probe_cadence_due({Node, ProviderId}, Now, #state{probe_last = Last}) ->
+    case maps:find({Node, ProviderId}, Last) of
+        {ok, At} ->
+            Now - At >= cadence_threshold(Node, ProviderId, At);
+        error ->
+            %% Never probed: always due (and sorts as OLDEST below).
+            true
+    end.
+
+cadence_threshold(Node, ProviderId, LastAt) ->
+    Bucket = LastAt div ?PROBE_HOUR_MS,
+    Factor = 0.8 + 0.4 * (erlang:phash2({Node, ProviderId, Bucket}, 1000) / 1000.0),
+    round(?PROBE_CADENCE_MS * Factor).
+
+%% Freshness predicate (spec Part 0.2, one statement): an unexpired
+%% sched_rtt row exists — BOTH passive AND probe rows count; the 10-min
+%% TTL is the bound.
+rtt_row_fresh({Node, ProviderId}, Now) ->
+    try
+        case ets:lookup(?RTT, {Node, ProviderId}) of
+            [{_Key, _Ms, _Source, _SampledAt, ExpiresAt}] -> ExpiresAt > Now;
+            [] -> false
+        end
+    catch
+        _:_ -> false
+    end.
+
+%% Least-recently-probed pair; never-probed pairs sort as OLDEST
+%% (timestamp 0). Stable: the pair list is usorted before the
+%% timestamp sort, so ties keep term order.
+least_recently_probed(Pairs, #state{probe_last = Last}) ->
+    Sorted = lists:sort(
+        fun(A, B) -> maps:get(A, Last, 0) =< maps:get(B, Last, 0) end,
+        Pairs
+    ),
+    hd(Sorted).
+
+dispatch_probe_flow({Node, ProviderId}, Providers, Window, State) ->
+    Candidate = hd([C || #{provider_id := P} = C <- Providers, P =:= ProviderId]),
+    case build_probe_job(Candidate) of
+        {error, Reason} ->
+            logger:warning(#{
+                what => janus_sched_probe_build_failed,
+                node => Node,
+                provider => ProviderId,
+                reason => Reason
+            }),
+            ok = bump({probe_skip, send_fail}),
+            %% Stamp the pair as ATTEMPTED (probe_last, NOT
+            %% probe_issued — no spend): a failing pair that never
+            %% advances its cadence would be re-selected every tick
+            %% and starve every other pair (ocr review).
+            State#state{
+                probe_last = (State#state.probe_last)#{{Node, ProviderId} => now_mono()}
+            };
+        {ok, Fields} ->
+            case dispatch_probe(Node, Fields) of
+                {error, Reason} ->
+                    logger:warning(#{
+                        what => janus_sched_probe_send_failed,
+                        node => Node,
+                        provider => ProviderId,
+                        reason => Reason
+                    }),
+                    ok = bump({probe_skip, send_fail}),
+                    %% Attempted, not issued — see the build-fail stamp.
+                    State#state{
+                        probe_last = (State#state.probe_last)#{{Node, ProviderId} => now_mono()}
+                    };
+                {ok, JobRef} ->
+                    probe_issue(JobRef, Node, ProviderId, Window, State)
+            end
+    end.
+
+%% @doc Direct pinned send of ONE internal probe job to `Node`'s
+%% `janus_worker_dispatch` (spec Part 0.2): pick is NOT used, the
+%% reserve counter is NEVER touched (the exemption is structural).
+%% Runs in the POOL process on the live path — `self()` is the master
+%% session that receives ack/done/error. The additive `internal => true`
+%% rides the Fields map (extra keys pass wire validation untouched;
+%% old-worker decode builds from known keys only, spec Part 0.10 —
+%% janus_worker_wire is NOT modified). Safe to call from any process
+%% in eunit — completions then route to the caller.
+-spec dispatch_probe(node(), map()) -> {ok, binary()} | {error, term()}.
+dispatch_probe(Node, Fields) when is_atom(Node), is_map(Fields) ->
+    JobRef = crypto:strong_rand_bytes(16),
+    case janus_worker_wire:job(JobRef, self(), Fields#{internal => true}) of
+        {ok, JobMsg} ->
+            try
+                {janus_worker_dispatch, Node} ! JobMsg,
+                {ok, JobRef}
+            catch
+                _:_ -> {error, send_failed}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% Register the issued probe: the SAME {track, ...} tuple shape as
+%% pick's winners but Internal => true and NO counter increment (the
+%% track cast is decoupled from the counter, spec rev 9); in-flight
+%% map, cadence stamp, cap window; ack deadline timer (the timeout
+%% handler re-validates the Acked flag — no timer ref bookkeeping).
+probe_issue(JobRef, Node, ProviderId, Window, State) ->
+    SentAt = now_mono(),
+    _TRef = erlang:send_after(
+        janus_worker_wire:ack_deadline_ms(), self(), {probe_ack_timeout, JobRef}
+    ),
+    Tracked = (State#state.tracked)#{JobRef => {Node, SentAt, ProviderId, true}},
+    Inflight = (State#state.probe_inflight)#{Node => JobRef},
+    ProbeSent = (State#state.probe_sent)#{JobRef => {Node, ProviderId, SentAt, false}},
+    ProbeLast = (State#state.probe_last)#{{Node, ProviderId} => SentAt},
+    State#state{
+        tracked = Tracked,
+        probe_inflight = Inflight,
+        probe_sent = ProbeSent,
+        probe_last = ProbeLast,
+        probe_issued = [SentAt | Window]
+    }.
+
+probe_ack(JobRef, #state{probe_sent = Sent} = State) ->
+    case Sent of
+        #{JobRef := {Node, ProviderId, SentAt, false}} ->
+            State#state{probe_sent = Sent#{JobRef => {Node, ProviderId, SentAt, true}}};
+        _ ->
+            %% Unknown / late / duplicate ack: no-op.
+            State
+    end.
+
+%% Clear ALL probe bookkeeping for JobRef: the tracked entry is
+%% REMOVED without decrement (Internal => never incremented), the
+%% in-flight slot and dispatch details go with it.
+probe_clear(JobRef, Node, State) ->
+    State#state{
+        tracked = maps:remove(JobRef, State#state.tracked),
+        probe_inflight = maps:remove(Node, State#state.probe_inflight),
+        probe_sent = maps:remove(JobRef, State#state.probe_sent)
+    }.
+
+%% Defensive ack-miss cancel to the worker dispatch (the job may be
+%% queued but unacked — same shape as janus_http_worker_client's
+%% cancel_dispatch).
+probe_cancel(Node, JobRef) ->
+    try
+        {janus_worker_dispatch, Node} ! janus_worker_wire:cancel(JobRef),
+        ok
+    catch
+        _:_ -> ok
+    end.
+
+%% Probe-source sched_rtt write: COLD-START FILL ONLY (spec A.3) —
+%% written iff NO unexpired row exists (passive rows win; the master
+%% side measures elapsed since dispatch send until Task C's
+%% worker-measured value arrives via the load cast). Clamp applies at
+%% ingest exactly like passive writes.
+write_probe_rtt(Node, ProviderId, ElapsedMs) ->
+    case rtt_row_fresh({Node, ProviderId}, now_mono()) of
+        true ->
+            ok;
+        false ->
+            case clamp_rtt(ElapsedMs) of
+                {ok, Ms} ->
+                    Now = now_mono(),
+                    _ = ets:insert(?RTT, {{Node, ProviderId}, Ms, probe, Now, Now + ?RTT_TTL_MS}),
+                    ok;
+                {drop, Reason} ->
+                    ok = bump({rtt_dropped, Reason})
+            end
+    end.
+
+%%%===================================================================
+%%% Scheduler v2 — probe candidates (catalog source + injection seam)
+%%%===================================================================
+
+%% @doc Probe target PROVIDER candidates (spec Part 0.2):
+%% catalog-known AND ENABLED providers. The ETS injection seam
+%% (?PROBE_CAND) wins when non-empty — janus_catalog may not be
+%% running (eunit, workers), and tests inject pre-resolved candidates
+%% instead of mocking the catalog. Deterministic order (sorted by
+%% provider id).
+-spec probe_candidates() -> [map()].
+probe_candidates() ->
+    case injected_probe_candidates() of
+        [] ->
+            catalog_probe_candidates();
+        Rows ->
+            [Cand || {_Id, Cand} <- Rows]
+    end.
+
+injected_probe_candidates() ->
+    try
+        lists:sort(ets:tab2list(?PROBE_CAND))
+    catch
+        _:_ -> []
+    end.
+
+%% Defensive catalog read (no catalog published => [] — the cascade
+%% then no-ops). Candidate shape:
+%% #{provider_id, base_url, protocol, listing, secret_ref} — the
+%% minimal entitlement-probe inputs: base_url + protocol + first
+%% (name-sorted) enabled CHAT listing + first enabled key (the
+%% entitlement-probe catalog key pick: enabled keys ordered by id —
+%% same source the dashboard probe uses; spending rides the SEPARATE
+%% additive JANUS_SCHED_PROBE_MAX_HOURLY budget, never the dashboard's
+%% probe_budget_counters).
+catalog_probe_candidates() ->
+    case catch janus_catalog:get() of
+        #{catalog := #{providers := Tid} = Tabs} ->
+            try
+                [
+                    Cand
+                 || {Id, Meta} <- lists:sort(ets:tab2list(Tid)),
+                    is_map(Meta),
+                    maps:get(enabled, Meta, false) =:= true,
+                    Cand <- [catalog_probe_candidate(Id, Meta, Tabs)],
+                    Cand =/= skip
+                ]
+            catch
+                _:_ -> []
+            end;
+        _ ->
+            []
+    end.
+
+catalog_probe_candidate(Id, Meta, Tabs) ->
+    case to_bin(maps:get(base_url, Meta, undefined)) of
+        undefined ->
+            skip;
+        Base ->
+            Listing = first_chat_listing(Id, Tabs),
+            Key = first_enabled_key(Id),
+            case {Listing, Key} of
+                {undefined, _} ->
+                    skip;
+                {_, undefined} ->
+                    skip;
+                _ ->
+                    #{
+                        provider_id => Id,
+                        base_url => Base,
+                        protocol => maps:get(protocol, Meta, undefined),
+                        listing => Listing,
+                        secret_ref => maps:get(secret_ref, Key, undefined)
+                    }
+            end
+    end.
+
+first_chat_listing(Id, Tabs) ->
+    case maps:get(listings_by_name, Tabs, undefined) of
+        undefined ->
+            undefined;
+        Tid ->
+            try
+                Names = lists:sort([
+                    Name
+                 || {Name, Entries} <- ets:tab2list(Tid),
+                    is_list(Entries),
+                    lists:any(
+                        fun(E) ->
+                            is_map(E) andalso
+                                maps:get(provider_id, E, undefined) =:= Id andalso
+                                maps:get(enabled, E, false) =:= true andalso
+                                maps:get(modality, E, <<"chat">>) =:= <<"chat">>
+                        end,
+                        Entries)
+                ]),
+                case Names of
+                    [] -> undefined;
+                    [N | _] -> N
+                end
+            catch
+                _:_ -> undefined
+            end
+    end.
+
+first_enabled_key(Id) ->
+    case [K || #{enabled := true} = K <- janus_catalog:provider_keys(Id)] of
+        [K | _] -> K;
+        [] -> undefined
+    end.
+
+to_bin(B) when is_binary(B), B =/= <<>> -> B;
+to_bin(L) when is_list(L), L =/= [] -> list_to_binary(L);
+to_bin(_) -> undefined.
+
+%% @doc The minimal entitlement-probe job shape (1 token, one "hi"
+%% user message, non-stream — the SAME shape the dashboard's
+%% entitlement probe sends, `entitlements._probe_request`): builds the
+%% wire Fields map for a probe job. Protocol-correct headers/body per
+%% provider protocol; unknown protocols fall back to the openai_chat
+%% shape (same default as the dashboard probe). Key pick =
+%% entitlement-probe catalog pick (first enabled key, above).
+-spec build_probe_job(map()) -> {ok, map()} | {error, term()}.
+build_probe_job(#{
+    base_url := Base,
+    protocol := Protocol,
+    listing := Model,
+    secret_ref := SecretRef
+}) ->
+    case probe_secret(SecretRef) of
+        {error, _} = Err ->
+            Err;
+        {ok, Secret} ->
+            BaseTrimmed = trim_slashes(Base),
+            {Path, Headers, Body} = probe_request_shape(protocol_bin(Protocol), Model, Secret),
+            {ok, #{
+                url => <<BaseTrimmed/binary, Path/binary>>,
+                method => post,
+                headers => Headers,
+                body => thoas:encode(Body),
+                stream => false,
+                timeout_ms => janus_worker_wire:non_stream_timeout_ms(),
+                protocol_meta => #{}
+            }}
+    end;
+build_probe_job(_) ->
+    {error, bad_candidate}.
+
+probe_secret({_, Cipher}) when is_binary(Cipher) ->
+    try
+        janus_secrets:decrypt(Cipher)
+    catch
+        _:_ -> {error, decrypt_failed}
+    end;
+probe_secret(Cipher) when is_binary(Cipher) ->
+    try
+        janus_secrets:decrypt(Cipher)
+    catch
+        _:_ -> {error, decrypt_failed}
+    end;
+probe_secret(_) ->
+    {error, bad_secret_ref}.
+
+%% Protocol normalizer: catalog rows carry driver-decoded TEXT
+%% binaries (epgsql/esqlite); tolerate atoms too (injection seam).
+protocol_bin(P) when is_binary(P) -> P;
+protocol_bin(P) when is_atom(P) -> atom_to_binary(P, utf8);
+protocol_bin(_) -> <<>>.
+
+%% (base_url, protocol, listing, secret) -> {path, headers, body}.
+%% Mirrors the dashboard entitlement probe exactly (max_tokens=1, one
+%% "hi" user message, non-stream).
+probe_request_shape(<<"anthropic_messages">>, Model, Secret) ->
+    {
+        %% The version segment is part of the catalog base_url
+        %% (same join as janus_providers_anthropic) — a hard-coded
+        %% /v1 would double-stack .../v1/v1/messages (ocr review).
+        <<"/messages">>,
+        [
+            {<<"x-api-key">>, Secret},
+            {<<"anthropic-version">>, <<"2023-06-01">>},
+            {<<"content-type">>, <<"application/json">>}
+        ],
+        #{
+            <<"model">> => Model,
+            <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => <<"hi">>}],
+            <<"max_tokens">> => 1,
+            <<"stream">> => false
+        }
+    };
+probe_request_shape(<<"openai_responses">>, Model, Secret) ->
+    {
+        <<"/responses">>,
+        [
+            {<<"authorization">>, <<"Bearer ", Secret/binary>>},
+            {<<"content-type">>, <<"application/json">>}
+        ],
+        #{<<"model">> => Model, <<"input">> => <<"hi">>, <<"max_output_tokens">> => 1, <<"stream">> => false}
+    };
+probe_request_shape(_OpenaiChatDefault, Model, Secret) ->
+    {
+        <<"/chat/completions">>,
+        [
+            {<<"authorization">>, <<"Bearer ", Secret/binary>>},
+            {<<"content-type">>, <<"application/json">>}
+        ],
+        #{
+            <<"model">> => Model,
+            <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => <<"hi">>}],
+            <<"max_tokens">> => 1,
+            <<"stream">> => false
+        }
+    }.
+
+trim_slashes(Bin) when is_binary(Bin) ->
+    trim_slashes(Bin, byte_size(Bin)).
+
+trim_slashes(Bin, 0) ->
+    Bin;
+trim_slashes(Bin, S) ->
+    case binary:part(Bin, S - 1, 1) of
+        <<"/">> -> trim_slashes(binary:part(Bin, 0, S - 1));
+        _ -> Bin
+    end.
+
+%%%===================================================================
+%%% Scheduler v2 — /stats/sched source assembly
+%%%===================================================================
+
+%% Full /stats/sched source view served by the sched_stats call:
+%% counters + knob view (geo merged) + display EWMA + raw table rows.
+%% The JSON rendering itself is pure and lives in the handler
+%% (janus_gateway_stats:sched_json/1).
+sched_stats_map(#state{ewma = Ewma}) ->
+    Counters =
+        try
+            maps:from_list(ets:tab2list(?COUNTERS))
+        catch
+            _:_ -> #{}
+        end,
+    Knobs = (knobs())#{
+        geo_enabled => geo_enabled_safe(),
+        rtt_enabled => rtt_enabled(),
+        health_enabled => health_enabled()
+    },
+    Counters#{
+        knobs => Knobs,
+        health_ewma => maps:from_list([
+            {Node, E}
+         || {Node, {E, _Count}} <- maps:to_list(Ewma),
+            is_number(E)
+        ]),
+        rtt_rows => sched_rtt_rows(),
+        reserve_rows => reserve_tab()
+    }.
+
+geo_enabled_safe() ->
+    try
+        janus_geo:geo_enabled()
+    catch
+        _:_ -> false
+    end.
+
+%%%===================================================================
 %%% Scheduler v2 — reconcile / purge (30 s tick, spec Part 0.11)
 %%%===================================================================
 
@@ -1364,21 +2136,32 @@ purge_tracked(Now, Tracked, State) ->
             end,
             maps:to_list(Tracked)
         ),
-    lists:foreach(
-        fun({_JobRef, {Node, _ReservedAt, _ProviderId, Internal}}) ->
-            %% reserve_purged counts actual RESERVATION slots freed —
-            %% Internal (probe) entries never held one (ocr review).
-            case Internal of
-                false ->
-                    _ = ets:update_counter(?RESERVE, Node, {2, -1}, {Node, 0}),
-                    ok = bump(reserve_purged);
-                true ->
-                    ok
-            end
-        end,
-        Expired
-    ),
-    State#state{tracked = maps:from_list(Kept)}.
+    State1 =
+        lists:foldl(
+            fun({JobRef, {Node, _ReservedAt, _ProviderId, Internal}}, Acc) ->
+                %% reserve_purged counts actual RESERVATION slots
+                %% freed — Internal (probe) entries never held one
+                %% (ocr review). A purged probe also releases its
+                %% in-flight slot (its completion may never arrive;
+                %% without this the node would stay probe-blocked
+                %% until nodedown). No skip counter — the launch
+                %% succeeded; send_fail counts launch failures.
+                case Internal of
+                    false ->
+                        _ = ets:update_counter(?RESERVE, Node, {2, -1}, {Node, 0}),
+                        ok = bump(reserve_purged),
+                        Acc;
+                    true ->
+                        Acc#state{
+                            probe_inflight = maps:remove(Node, Acc#state.probe_inflight),
+                            probe_sent = maps:remove(JobRef, Acc#state.probe_sent)
+                        }
+                end
+            end,
+            State,
+            Expired
+        ),
+    State1#state{tracked = maps:from_list(Kept)}.
 
 %% Counter vs tracked-set reconcile: decrement the EXCESS only
 %% (Internal entries are SKIPPED by the excess math — counter

@@ -1,6 +1,7 @@
 %%% @doc Scheduler v2 tests for `janus_worker_pool` (spec rev 10,
 %%% Parts B / C: E.2 tier matrix, E.3 v1-equivalence, E.4 live reserve
-%%% loop, E.8 EWMA math, divergence window, RTT clamp).
+%%% loop, E.8 EWMA math, divergence window, RTT clamp; Task B2 E.4b —
+%%% probe dispatch / five skip reasons / ack-miss abort).
 %%%
 %%% Pure tier-matrix tests run without processes. Live tests boot the
 %%% REAL pool gen_server (janus_usage precedent — stateful modules are
@@ -360,6 +361,9 @@ live_pick_and_reserve_counter_test() ->
         %% Insert-default: first pick on a fresh node must not badarg.
         ?assertEqual({ok, ?A}, janus_worker_pool:pick(#{provider_id => p1})),
         ?assertEqual([{?A, 1}], ets:tab2list(sched_reserve)),
+        %% dispatch_worker_total{node, provider} counts the WINNING
+        %% reserve only (B2); the capacity-rollback pick below does not.
+        ?assertEqual(1, maps:get({dispatch_worker, ?A, p1}, janus_worker_pool:sched_stats(), 0)),
         %% Capacity 1: the second pick rolls back => local fallback.
         ?assertEqual(empty, janus_worker_pool:pick(#{provider_id => p1})),
         ?assertEqual([{?A, 1}], ets:tab2list(sched_reserve)),
@@ -790,11 +794,13 @@ live_unknown_sched_cast_dropped_counted_test() ->
         {_, _, Pool, _} = Stack,
         ok = hello(Pool, ?A, #{}),
         ok = wait_snapshot_member(?A),
-        %% The B2 probe trigger (and any newer-worker cast) against
-        %% THIS master: dropped + counted by the catch-all.
-        gen_server:cast(Pool, {sched, 2, {probe, whatever}}),
+        %% Any newer-worker cast against THIS master whose inner tag is
+        %% unknown ({probe,...} itself is CONSUMED by the Task B2 probe
+        %% clause — use a still-unknown tag): dropped + counted by the
+        %% catch-all.
+        gen_server:cast(Pool, {sched, 2, {probe_next, whatever}}),
         sync_pool(Pool),
-        ?assertEqual(1, maps:get({sched_unknown, probe}, janus_worker_pool:sched_stats(), 0)),
+        ?assertEqual(1, maps:get({sched_unknown, probe_next}, janus_worker_pool:sched_stats(), 0)),
         ?assert(is_process_alive(Pool))
     after
         stop_stack(Stack)
@@ -805,7 +811,16 @@ live_knobs_boot_env_test() ->
     os:putenv("JANUS_SCHED_HEALTH", "1"),
     Stack = start_stack(),
     try
-        ?assertEqual(#{rtt => true, health => true}, janus_worker_pool:knobs()),
+        ?assertEqual(
+            #{
+                rtt => true,
+                health => true,
+                probe => false,
+                probe_max_hourly => 10,
+                probe_force => false
+            },
+            janus_worker_pool:knobs()
+        ),
         ?assert(janus_worker_pool:rtt_enabled()),
         ?assert(janus_worker_pool:health_enabled())
     after
@@ -814,7 +829,16 @@ live_knobs_boot_env_test() ->
         os:unsetenv("JANUS_SCHED_HEALTH"),
         %% Rewrite the PT keys with defaults so later boots stay clean.
         Stack2 = start_stack(),
-        ?assertEqual(#{rtt => false, health => false}, janus_worker_pool:knobs()),
+        ?assertEqual(
+            #{
+                rtt => false,
+                health => false,
+                probe => false,
+                probe_max_hourly => 10,
+                probe_force => false
+            },
+            janus_worker_pool:knobs()
+        ),
         stop_stack(Stack2)
     end.
 
@@ -850,6 +874,370 @@ live_ets_transfer_adopt_cycle_test() ->
     end.
 
 %%%===================================================================
+%%% E.4b — probes (Task B2: dispatch / five skip reasons / abort)
+%%%===================================================================
+
+live_probe_knobs_boot_env_test() ->
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    os:putenv("JANUS_SCHED_PROBE_FORCE", "1"),
+    os:putenv("JANUS_SCHED_PROBE_MAX_HOURLY", "3"),
+    Stack = start_stack(),
+    try
+        ?assert(janus_worker_pool:probe_enabled()),
+        ?assert(janus_worker_pool:probe_force()),
+        ?assertEqual(3, maps:get(probe_max_hourly, janus_worker_pool:knobs()))
+    after
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        os:unsetenv("JANUS_SCHED_PROBE_FORCE"),
+        os:unsetenv("JANUS_SCHED_PROBE_MAX_HOURLY"),
+        clean_stack()
+    end.
+
+%% Probe candidate source: no catalog published => [] (defensive read);
+%% injected rows (the documented eunit seam) win when present.
+live_probe_candidates_source_test() ->
+    set_test_secrets_key(),
+    Stack = start_stack(),
+    try
+        ?assertEqual([], janus_worker_pool:probe_candidates()),
+        _ = inject_candidate(p2),
+        _ = inject_candidate(p1),
+        Cands = janus_worker_pool:probe_candidates(),
+        %% Deterministic order (sorted by provider id) + the injected
+        %% shape round-trips (ciphers are per-call random — compare the
+        %% stable projection).
+        ?assertEqual([p1, p2], [maps:get(provider_id, C) || C <- Cands]),
+        ?assertEqual(
+            [
+                <<"https://mock.probe.test">>,
+                <<"https://mock.probe.test">>
+            ],
+            [maps:get(base_url, C) || C <- Cands]
+        )
+    after
+        stop_stack(Stack)
+    end.
+
+%% Probes are money: with the knob off the {probe, _} cast is a SILENT
+%% no-op (no skip counters, no dispatch).
+live_probe_knob_off_cast_noop_test() ->
+    set_test_secrets_key(),
+    Stack = start_stack(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, ?A, #{sched_v => 2}),
+        ok = wait_snapshot_member(?A),
+        ?assertNot(janus_worker_pool:probe_enabled()),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        Stats = janus_worker_pool:sched_stats(),
+        lists:foreach(
+            fun(Reason) ->
+                ?assertEqual(0, maps:get({probe_skip, Reason}, Stats, 0))
+            end,
+            [cap, cadence, fresh, drained, send_fail]
+        ),
+        ?assertEqual(0, maps:get({probe, p1}, Stats, 0))
+    after
+        stop_stack(Stack)
+    end.
+
+%% Skip{drained}: the only target is drained at the LIVE re-check.
+live_probe_drained_skip_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    Stack = start_stack(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, ?A, #{sched_v => 2}),
+        ok = wait_snapshot_member(?A),
+        true = ets:insert(sched_workers, {?A, true}),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        ?assertEqual(1, maps:get({probe_skip, drained}, janus_worker_pool:sched_stats(), 0))
+    after
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        clean_stack()
+    end.
+
+%% Old-version workers (hello without sched_v => 2) are NOT probe
+%% targets — a SILENT no-op (no skip reason exists for version
+%% exclusion; spec Part 0.2).
+live_probe_old_worker_silent_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    Stack = start_stack(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, ?A, #{}),
+        ok = wait_snapshot_member(?A),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        Stats = janus_worker_pool:sched_stats(),
+        lists:foreach(
+            fun(Reason) ->
+                ?assertEqual(0, maps:get({probe_skip, Reason}, Stats, 0))
+            end,
+            [cap, cadence, fresh, drained, send_fail]
+        )
+    after
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        clean_stack()
+    end.
+
+%% Skip{fresh}: an unexpired passive sched_rtt row (BOTH passive AND
+%% probe rows count) blocks the pair; the probe knob is on, FORCE off.
+live_probe_fresh_skip_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    Stack = start_stack(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, node(), #{sched_v => 2}),
+        ok = wait_snapshot_member(node()),
+        Now = now_ms(),
+        true = ets:insert(sched_rtt, {{node(), p1}, 100.0, passive, Now, Now + 600_000}),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        Stats = janus_worker_pool:sched_stats(),
+        ?assertEqual(1, maps:get({probe_skip, fresh}, Stats, 0)),
+        ?assertEqual(0, maps:get({probe, p1}, Stats, 0))
+    after
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        clean_stack()
+    end.
+
+%% Skip{cap}: checked FIRST; FORCE never bypasses it (MAX_HOURLY=0).
+live_probe_cap_skip_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    os:putenv("JANUS_SCHED_PROBE_FORCE", "1"),
+    os:putenv("JANUS_SCHED_PROBE_MAX_HOURLY", "0"),
+    Stack = start_stack(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, ?A, #{sched_v => 2}),
+        ok = wait_snapshot_member(?A),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        Stats = janus_worker_pool:sched_stats(),
+        ?assertEqual(1, maps:get({probe_skip, cap}, Stats, 0)),
+        %% Never issued: no probe_total, no other skip reason.
+        ?assertEqual(0, maps:get({probe, p1}, Stats, 0)),
+        ?assertEqual(0, maps:get({probe_skip, fresh}, Stats, 0)),
+        ?assertEqual(0, maps:get({probe_skip, cadence}, Stats, 0))
+    after
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        os:unsetenv("JANUS_SCHED_PROBE_FORCE"),
+        os:unsetenv("JANUS_SCHED_PROBE_MAX_HOURLY"),
+        clean_stack()
+    end.
+
+%% Full path on a REAL local dispatch: the fake janus_worker_dispatch
+%% receives a NORMAL job whose Fields carry the ADDITIVE `internal =>
+%% true` key, acks, and completes with done — the pool measures
+%% elapsed, writes a probe-source cold-start rtt row, counts
+%% probe_total{provider}, and NEVER touches the reserve counter.
+live_probe_full_path_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    Stack = start_stack(),
+    Fake = start_fake_worker(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, node(), #{sched_v => 2}),
+        ok = wait_snapshot_member(node()),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        {JobRef, Fields} =
+            receive
+                {fake_job, JobRef0, Fields0} -> {JobRef0, Fields0}
+            after 5000 ->
+                error(no_probe_job)
+            end,
+        %% The additive internal marker rides the job map (Task C's
+        %% worker-side hook); wire validation tolerates the extra key.
+        ?assertEqual(true, maps:get(internal, Fields, undefined)),
+        ok = janus_worker_wire:validate({janus_job, JobRef, self(), Fields}),
+        %% Minimal entitlement-probe shape (dashboard _probe_request).
+        ?assertEqual(post, maps:get(method, Fields)),
+        ?assertEqual(false, maps:get(stream, Fields)),
+        ?assertEqual(<<"https://mock.probe.test/chat/completions">>, maps:get(url, Fields)),
+        {ok, #{<<"max_tokens">> := 1, <<"model">> := <<"probe-model">>}} =
+            thoas:decode(maps:get(body, Fields)),
+        ?assert(lists:keymember(<<"authorization">>, 1, maps:get(headers, Fields))),
+        %% Ack + done route to the POOL (master session for probes).
+        ok = wait_until(fun() ->
+            [] =/= [R || {{N, P}, _, probe, _, _} = R <- ets:tab2list(sched_rtt), N =:= node(), P =:= p1]
+        end, 200),
+        [RttRow] = [R || {{N, P}, _, probe, _, _} = R <- ets:tab2list(sched_rtt), N =:= node(), P =:= p1],
+        Self = node(),
+        ?assertMatch({{Self, p1}, Ms, probe, _, _} when is_float(Ms), RttRow),
+        Stats = janus_worker_pool:sched_stats(),
+        ?assertEqual(1, maps:get({probe, p1}, Stats, 0)),
+        ?assertEqual(0, maps:get({probe_skip, send_fail}, Stats, 0)),
+        %% Counter-neutrality end-to-end (no reserve slot ever held).
+        ?assertEqual([], ets:tab2list(sched_reserve))
+    after
+        Fake ! stop,
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        clean_stack()
+    end.
+
+%% The 30 s TICK path (not the direct cast): with the probe knob on,
+%% force_tick self-casts {sched, 2, {probe, _}} and the job dispatches.
+live_probe_tick_kicks_when_enabled_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    Stack = start_stack(),
+    Fake = start_fake_worker(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, node(), #{sched_v => 2}),
+        ok = wait_snapshot_member(node()),
+        force_tick(Pool),
+        receive
+            {fake_job, _JobRef, _Fields} -> ok
+        after 5000 ->
+            error(tick_did_not_probe)
+        end
+    after
+        Fake ! stop,
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        clean_stack()
+    end.
+
+live_probe_force_bypasses_cadence_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    os:putenv("JANUS_SCHED_PROBE_FORCE", "1"),
+    Stack = start_stack(),
+    Fake = start_fake_worker(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, node(), #{sched_v => 2}),
+        ok = wait_snapshot_member(node()),
+        %% First probe cast issues immediately...
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        receive
+            {fake_job, _Ref1, _F1} -> ok
+        after 5000 ->
+            error(first_probe_did_not_issue)
+        end,
+        %% ...and the SECOND cast, within the 60 s cadence window,
+        %% must STILL issue under FORCE (bypasses cadence, not just
+        %% the fresh-skip — ocr review found the filter order bug).
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        receive
+            {fake_job, _Ref2, _F2} -> ok
+        after 5000 ->
+            error(force_did_not_bypass_cadence)
+        end,
+        Stats = janus_worker_pool:sched_stats(),
+        ?assertEqual(0, maps:get({probe_skip, cadence}, Stats, 0))
+    after
+        Fake ! stop,
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        os:unsetenv("JANUS_SCHED_PROBE_FORCE"),
+        clean_stack()
+    end.
+
+%% FORCE bypasses the fresh-skip but the probe row still respects the
+%% COLD-START existence gate: an unexpired PASSIVE row survives the
+%% probe completion (the probe result is discarded, spec A.3).
+live_probe_force_bypasses_fresh_test() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    os:putenv("JANUS_SCHED_PROBE_FORCE", "1"),
+    Stack = start_stack(),
+    Fake = start_fake_worker(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, node(), #{sched_v => 2}),
+        ok = wait_snapshot_member(node()),
+        Now = now_ms(),
+        true = ets:insert(sched_rtt, {{node(), p1}, 100.0, passive, Now, Now + 600_000}),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        receive
+            {fake_job, _JobRef, _Fields} -> ok
+        after 5000 ->
+            error(force_did_not_bypass_fresh)
+        end,
+        %% The fake worker auto-acks + auto-dones; wait for completion.
+        ok = wait_until(fun() ->
+            maps:get({probe, p1}, janus_worker_pool:sched_stats(), 0) >= 1
+        end, 200),
+        %% The passive row SURVIVES (existence gate).
+        ?assertEqual(
+            [{{node(), p1}, 100.0, passive, Now, Now + 600_000}],
+            [R || {{N, P}, _, _, _, _} = R <- ets:tab2list(sched_rtt), N =:= node(), P =:= p1]
+        )
+    after
+        Fake ! stop,
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        os:unsetenv("JANUS_SCHED_PROBE_FORCE"),
+        clean_stack()
+    end.
+
+%% Ack-miss ABORT against an unreachable node: after the 5 s ack
+%% deadline — probe_skip{send_fail}, in-flight + tracked cleared
+%% WITHOUT decrement, NEVER a local fallback. A re-cast then skips
+%% {cadence} (last-probed is fresh; the in-flight slot was freed).
+%% Generator form: the real 5 s ack deadline + poll exceeds eunit's
+%% default per-test timeout.
+live_probe_ack_miss_aborts_test_() ->
+    {timeout, 15, fun live_probe_ack_miss_aborts/0}.
+
+live_probe_ack_miss_aborts() ->
+    set_test_secrets_key(),
+    os:putenv("JANUS_SCHED_PROBE", "1"),
+    Stack = start_stack(),
+    try
+        {_, _, Pool, _} = Stack,
+        _ = inject_candidate(p1),
+        ok = hello(Pool, ?B, #{sched_v => 2}),
+        ok = wait_snapshot_member(?B),
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        %% In flight: no skip yet (the 5 s ack deadline runs for real).
+        ?assertEqual(0, maps:get({probe_skip, send_fail}, janus_worker_pool:sched_stats(), 0)),
+        ok = wait_until(fun() ->
+            maps:get({probe_skip, send_fail}, janus_worker_pool:sched_stats(), 0) >= 1
+        end, 260),
+        %% NO local fallback for internal jobs (no dispatch_local
+        %% reason ever fired) and no reserve slot was ever held.
+        Stats = janus_worker_pool:sched_stats(),
+        ?assertEqual([], [K || {{dispatch_local, _} = K, V} <- maps:to_list(Stats), V > 0]),
+        ?assertEqual([], ets:tab2list(sched_reserve)),
+        %% In-flight cleared: the next evaluation is cadence-blocked
+        %% (the pair was probed seconds ago), NOT in-flight-blocked.
+        gen_server:cast(Pool, {sched, 2, {probe, #{}}}),
+        sync_pool(Pool),
+        ?assertEqual(1, maps:get({probe_skip, cadence}, janus_worker_pool:sched_stats(), 0))
+    after
+        stop_stack(Stack),
+        os:unsetenv("JANUS_SCHED_PROBE"),
+        clean_stack()
+    end.
+
+%%%===================================================================
 %%% Fixture — real gen_server stack (sqlite backend + ETS heir)
 %%%===================================================================
 
@@ -867,6 +1255,9 @@ start_stack() ->
     {Heir, Db, Pool, Path}.
 
 stop_stack({Heir, Db, Pool, Path}) ->
+    %% Scrub the test keyring so probe tests never leak it into
+    %% later suites (ocr review: order independence).
+    os:unsetenv("JANUS_SECRETS_KEY"),
     try
         gen_server:stop(Pool)
     catch
@@ -884,6 +1275,73 @@ stop_stack({Heir, Db, Pool, Path}) ->
     end,
     _ = file:delete(Path),
     ok.
+
+%% Boot one clean-env stack to scrub the PT knob keys after an
+%% env-dependent test (boot_knobs re-reads the environment at init).
+clean_stack() ->
+    Stack = start_stack(),
+    ?assertNot(janus_worker_pool:probe_enabled()),
+    stop_stack(Stack).
+
+%% Probe envelopes are real JSEC secrets (production shape): a working
+%% keyring must be in the environment for encrypt (test) + decrypt
+%% (pool) — janus_secrets roundtrip-test precedent.
+set_test_secrets_key() ->
+    os:putenv(
+        "JANUS_SECRETS_KEY",
+        "k1:" ++ base64:encode_to_string(crypto:strong_rand_bytes(32))
+    ).
+
+%% Inject one probe PROVIDER candidate into the documented ETS seam
+%% (sched_probe_candidates — wins over the catalog path when non-empty;
+%% no catalog is published under eunit). Returns the injected map.
+inject_candidate(ProviderId) ->
+    {ok, Cipher} = janus_secrets:encrypt(<<"sk-probe-secret">>),
+    Cand = #{
+        provider_id => ProviderId,
+        base_url => <<"https://mock.probe.test">>,
+        protocol => <<"openai_chat">>,
+        listing => <<"probe-model">>,
+        secret_ref => {<<"k1">>, Cipher}
+    },
+    true = ets:insert(sched_probe_candidates, {ProviderId, Cand}),
+    Cand.
+
+%% Fake LOCAL janus_worker_dispatch (the name is free under eunit —
+%% the real one only boots on worker nodes): receives the probe job,
+%% tells the test process, acks, and completes with a production-shaped
+%% done. Receives {janus_cancel, JobRef} defensively (reported).
+start_fake_worker() ->
+    Parent = self(),
+    Pid = spawn(fun() ->
+        register(janus_worker_dispatch, self()),
+        Parent ! {fake_worker_ready, self()},
+        fake_worker_loop(Parent)
+    end),
+    receive
+        {fake_worker_ready, Pid} -> ok
+    after 5000 ->
+        error(fake_worker_not_ready)
+    end,
+    Pid.
+
+fake_worker_loop(Parent) ->
+    receive
+        {janus_job, JobRef, MasterSessionPid, Fields} ->
+            Parent ! {fake_job, JobRef, Fields},
+            MasterSessionPid ! {janus_job_ack, JobRef, self()},
+            MasterSessionPid ! {janus_done, JobRef, #{
+                usage => undefined, status => 200, trailers => #{}, body => <<>>
+            }},
+            fake_worker_loop(Parent);
+        {janus_cancel, JobRef} ->
+            Parent ! {fake_cancel, JobRef},
+            fake_worker_loop(Parent);
+        stop ->
+            ok
+    after 10000 ->
+        ok
+    end.
 
 hello(Pool, Node, Extra) ->
     Meta = maps:merge(#{role => worker, vsn => 1, region => undefined}, Extra),
