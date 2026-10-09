@@ -58,11 +58,16 @@ hello_ack(Node) when is_atom(Node) ->
     Msg.
 
 -spec hello_nack(node(), drained | vsn) ->
-    {janus_worker_hello_nack, node(), map()}.
+    {ok, {janus_worker_hello_nack, node(), map()}} | {error, term()}.
 hello_nack(Node, Reason) when is_atom(Node) ->
-    Msg = {janus_worker_hello_nack, Node, #{reason => Reason}},
-    ok = validate(Msg),
-    Msg.
+    case valid_nack_reason(Reason) of
+        ok ->
+            Msg = {janus_worker_hello_nack, Node, #{reason => Reason}},
+            ok = validate(Msg),
+            {ok, Msg};
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec drain(node()) -> {janus_worker_drain, node()}.
 drain(Node) when is_atom(Node) ->
@@ -101,11 +106,17 @@ done(JobRef, Fields) when is_binary(JobRef), is_map(Fields) ->
     ok = validate(Msg),
     Msg.
 
--spec error(binary(), atom(), binary()) -> {janus_error, binary(), map()}.
+-spec error(binary(), atom(), binary()) ->
+    {ok, {janus_error, binary(), map()}} | {error, term()}.
 error(JobRef, Code, Message) when is_binary(JobRef), is_binary(Message) ->
-    Msg = {janus_error, JobRef, #{code => Code, message => Message}},
-    ok = validate(Msg),
-    Msg.
+    case valid_error_code(Code) of
+        ok ->
+            Msg = {janus_error, JobRef, #{code => Code, message => Message}},
+            ok = validate(Msg),
+            {ok, Msg};
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec cancel(binary()) -> {janus_cancel, binary()}.
 cancel(JobRef) when is_binary(JobRef) ->
@@ -120,16 +131,16 @@ credit(JobRef, N) when is_binary(JobRef), is_integer(N), N > 0 ->
     Msg.
 
 -spec redact_job({janus_job, binary(), pid(), map()}) ->
-    {janus_job, binary(), pid(), map()}.
+    {ok, {janus_job, binary(), pid(), map()}} | {error, term()}.
 redact_job({janus_job, JobRef, MasterSessionPid, Fields}) ->
     case validate({janus_job, JobRef, MasterSessionPid, Fields}) of
         ok ->
             #{headers := Hdr} = Fields,
             RedHdr = [{K, <<>>} || {K, _V} <- Hdr],
             RedFields = Fields#{headers => RedHdr, body => <<>>},
-            {janus_job, JobRef, MasterSessionPid, RedFields};
+            {ok, {janus_job, JobRef, MasterSessionPid, RedFields}};
         {error, Reason} ->
-            error({bad_job, Reason})
+            {error, {bad_job, Reason}}
     end.
 
 -spec validate(term()) -> ok | {error, term()}.
@@ -185,29 +196,42 @@ with_ok([{error, _} = Err | _]) ->
 %% Internal validation
 %%--------------------------------------------------------------------
 
-validate_hello_meta(#{role := worker, vsn := ?VSN} = Meta) ->
-    case maps:get(region, Meta, undefined) of
-        undefined -> ok;
-        R when is_binary(R) -> ok;
-        _ -> {error, bad_region}
-    end;
-validate_hello_meta(#{role := Role}) ->
-    {error, {bad_role, Role}};
-validate_hello_meta(#{vsn := Vsn}) ->
-    {error, {bad_vsn, Vsn}};
+validate_hello_meta(#{role := Role, vsn := Vsn} = Meta) ->
+    with_ok([
+        case Role of
+            worker -> ok;
+            _ -> {error, {bad_role, Role}}
+        end,
+        case Vsn of
+            ?VSN -> ok;
+            _ -> {error, {bad_vsn, Vsn}}
+        end,
+        case maps:get(region, Meta, undefined) of
+            undefined -> ok;
+            R when is_binary(R) -> ok;
+            _ -> {error, bad_region}
+        end
+    ]);
 validate_hello_meta(_) ->
     {error, bad_hello_meta}.
 
-validate_job_fields(Fields) when map_size(Fields) =:= 7 ->
-    with_ok([
-        maps_find(url, Fields, fun valid_binary/1),
-        maps_find(method, Fields, fun valid_method/1),
-        maps_find(headers, Fields, fun valid_headers/1),
-        maps_find(body, Fields, fun valid_body/1),
-        maps_find(stream, Fields, fun valid_boolean/1),
-        maps_find(timeout_ms, Fields, fun valid_timeout_ms/1),
-        maps_find(protocol_meta, Fields, fun valid_protocol_meta/1)
-    ]);
+-define(JOB_REQUIRED, [url, method, headers, body, stream, timeout_ms, protocol_meta]).
+
+validate_job_fields(Fields) when is_map(Fields) ->
+    case lists:all(fun(K) -> maps:is_key(K, Fields) end, ?JOB_REQUIRED) of
+        false ->
+            {error, bad_job_fields};
+        true ->
+            with_ok([
+                maps_find(url, Fields, fun valid_binary/1),
+                maps_find(method, Fields, fun valid_method/1),
+                maps_find(headers, Fields, fun valid_headers/1),
+                maps_find(body, Fields, fun valid_body/1),
+                maps_find(stream, Fields, fun valid_boolean/1),
+                maps_find(timeout_ms, Fields, fun valid_timeout_ms/1),
+                maps_find(protocol_meta, Fields, fun valid_protocol_meta/1)
+            ])
+    end;
 validate_job_fields(_) ->
     {error, bad_job_fields}.
 
@@ -218,10 +242,12 @@ maps_find(Key, Map, Fun) ->
     end.
 
 validate_done_fields(#{usage := Usage, status := Status, trailers := Trailers, body := Body}) ->
-    valid_usage(Usage),
-    valid_status(Status),
-    valid_map(Trailers),
-    valid_done_body(Body);
+    with_ok([
+        valid_usage(Usage),
+        valid_status(Status),
+        valid_map(Trailers),
+        valid_done_body(Body)
+    ]);
 validate_done_fields(_) ->
     {error, bad_done_fields}.
 
