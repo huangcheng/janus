@@ -7,6 +7,48 @@ REL_DIR="/opt/janus"
 VM_ARGS="$REL_DIR/releases/*/vm.args"
 NODE_NAME="${JANUS_NODE_NAME:-janus@127.0.0.1}"
 COOKIE="${JANUS_ERLANG_COOKIE:-}"
+JANUS_ROLE_NORM="$(printf '%s' "${JANUS_ROLE:-master}" | tr '[:upper:]' '[:lower:]')"
+IS_WORKER=false
+case "$JANUS_ROLE_NORM" in
+  master) ;;
+  worker) IS_WORKER=true ;;
+  *)
+    echo "janus: unknown JANUS_ROLE=$JANUS_ROLE (use master or worker)" >&2
+    exit 1
+    ;;
+esac
+
+# Worker dist: explicit master long name + fleet-grade cookie (32 random bytes).
+if [ "$IS_WORKER" = true ]; then
+  if [ -z "${JANUS_MASTER_NODE:-}" ]; then
+    echo "janus: JANUS_ROLE=worker requires JANUS_MASTER_NODE" >&2
+    exit 1
+  fi
+  if [ -z "$COOKIE" ]; then
+    echo "janus: JANUS_ROLE=worker requires JANUS_ERLANG_COOKIE (≥64 hex chars)" >&2
+    exit 1
+  fi
+  case "$COOKIE" in
+    *[!0-9a-fA-F]*)
+      echo "janus: JANUS_ROLE=worker requires JANUS_ERLANG_COOKIE as hex (≥64 chars)" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${#COOKIE}" -lt 64 ]; then
+    echo "janus: JANUS_ROLE=worker requires JANUS_ERLANG_COOKIE ≥64 hex chars (32 random bytes)" >&2
+    exit 1
+  fi
+  MASTER_PEER="$JANUS_MASTER_NODE"
+  if [ -z "${JANUS_FLEET_PEERS:-}" ]; then
+    JANUS_FLEET_PEERS="$MASTER_PEER"
+  else
+    case ",${JANUS_FLEET_PEERS}," in
+      *,"$MASTER_PEER",*) ;;
+      *) JANUS_FLEET_PEERS="${JANUS_FLEET_PEERS},${MASTER_PEER}" ;;
+    esac
+  fi
+  export JANUS_FLEET_PEERS
+fi
 
 # Cookie: always render -setcookie + write ~/.erlang.cookie (chmod 600).
 if [ -z "$COOKIE" ]; then
@@ -27,8 +69,14 @@ COOKIE_ARG="-setcookie $COOKIE"
 FLEET_PORT="${JANUS_FLEET_DIST_PORT:-25672}"
 TLS_DIR="${JANUS_FLEET_TLS_DIR:-/var/lib/janus/fleet}"
 
-if [ "${JANUS_FLEET_ENABLED:-false}" = "true" ]; then
-  if [ -n "${JANUS_ERLANG_COOKIE:-}" ] && [ "${#JANUS_ERLANG_COOKIE}" -lt 16 ]; then
+# inet_tls dist for signal-fleet mesh OR master/worker pool (worker hello only).
+DIST_TLS=false
+if [ "$IS_WORKER" = true ] || [ "${JANUS_FLEET_ENABLED:-false}" = "true" ]; then
+  DIST_TLS=true
+fi
+
+if [ "$DIST_TLS" = true ]; then
+  if [ "$IS_WORKER" = false ] && [ -n "${JANUS_ERLANG_COOKIE:-}" ] && [ "${#JANUS_ERLANG_COOKIE}" -lt 16 ]; then
     echo "janus: JANUS_FLEET_ENABLED=true but JANUS_ERLANG_COOKIE too short" >&2; exit 1
   fi
   # Dev-only CA generation (local e2e): self-signed fleet CA + per-node certs
