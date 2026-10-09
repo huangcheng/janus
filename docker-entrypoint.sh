@@ -24,6 +24,13 @@ if [ "$IS_WORKER" = true ]; then
     echo "janus: JANUS_ROLE=worker requires JANUS_MASTER_NODE" >&2
     exit 1
   fi
+  case "$JANUS_MASTER_NODE" in
+    *@*) ;;
+    *)
+      echo "janus: JANUS_MASTER_NODE must be a long node name (name@host), got '$JANUS_MASTER_NODE'" >&2
+      exit 1
+      ;;
+  esac
   if [ -z "$COOKIE" ]; then
     echo "janus: JANUS_ROLE=worker requires JANUS_ERLANG_COOKIE (≥64 hex chars)" >&2
     exit 1
@@ -42,10 +49,19 @@ if [ "$IS_WORKER" = true ]; then
   if [ -z "${JANUS_FLEET_PEERS:-}" ]; then
     JANUS_FLEET_PEERS="$MASTER_PEER"
   else
-    case ",${JANUS_FLEET_PEERS}," in
-      *,"$MASTER_PEER",*) ;;
-      *) JANUS_FLEET_PEERS="${JANUS_FLEET_PEERS},${MASTER_PEER}" ;;
-    esac
+    _found=false
+    _old_ifs=$IFS
+    IFS=,
+    for _p in $JANUS_FLEET_PEERS; do
+      if [ "$_p" = "$MASTER_PEER" ]; then
+        _found=true
+        break
+      fi
+    done
+    IFS=$_old_ifs
+    if [ "$_found" = false ]; then
+      JANUS_FLEET_PEERS="${JANUS_FLEET_PEERS},${MASTER_PEER}"
+    fi
   fi
   export JANUS_FLEET_PEERS
 fi
@@ -104,7 +120,7 @@ extendedKeyUsage=serverAuth,clientAuth
   fi
   for f in ca.pem node.pem node-key.pem; do
     if [ ! -f "$TLS_DIR/$f" ]; then
-      echo "janus: fleet on but $TLS_DIR/$f missing (set JANUS_FLEET_TLS_DIR or JANUS_FLEET_GEN_TLS=1)" >&2
+      echo "janus: TLS dist requires $TLS_DIR/$f (set JANUS_FLEET_TLS_DIR or JANUS_FLEET_GEN_TLS=1)" >&2
       exit 1
     fi
   done
