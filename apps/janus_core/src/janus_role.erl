@@ -6,7 +6,7 @@
 
 -spec resolve() -> {ok, master | worker} | {error, unknown_role | missing_master_node}.
 resolve() ->
-    case parse_role(os:getenv("JANUS_ROLE")) of
+    case parse_role(normalize_env(os:getenv("JANUS_ROLE"))) of
         {ok, Role} = Ok ->
             persistent_term:put(?PT_KEY, Role),
             Ok;
@@ -17,6 +17,13 @@ resolve() ->
 -spec get() -> master | worker.
 get() ->
     persistent_term:get(?PT_KEY).
+
+normalize_env(false) ->
+    false;
+normalize_env(Val) when is_list(Val) ->
+    string:lowercase(Val);
+normalize_env(Other) ->
+    Other.
 
 parse_role(false) ->
     {ok, master};
@@ -38,6 +45,6 @@ master_node_env() ->
             {error, missing_master_node};
         "" ->
             {error, missing_master_node};
-        _Node ->
-            {ok, ok}
+        Node ->
+            {ok, Node}
     end.

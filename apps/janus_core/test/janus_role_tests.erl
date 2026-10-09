@@ -47,3 +47,11 @@ unknown_role_test() ->
 worker_missing_master_test() ->
     set_role_env({set, "worker"}, unset),
     ?assertEqual({error, missing_master_node}, janus_role:resolve()).
+
+worker_empty_master_node_test() ->
+    set_role_env({set, "worker"}, {set, ""}),
+    ?assertEqual({error, missing_master_node}, janus_role:resolve()).
+
+worker_role_case_insensitive_test() ->
+    set_role_env({set, "WORKER"}, {set, ?MASTER_NODE}),
+    ?assertEqual({ok, worker}, janus_role:resolve()).
