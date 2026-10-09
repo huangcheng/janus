@@ -1228,6 +1228,7 @@ handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Rou
     ),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate, Req, State) ->
+    note_usage_outcome(error),
     _ = track_proxied(500, Route, #{}),
     _ = release_route_inflight(Route),
     reply_err(ClientProto, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
