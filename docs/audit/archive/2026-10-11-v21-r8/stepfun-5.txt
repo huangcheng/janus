@@ -1,0 +1,25 @@
+**Verdict: GO** — every round‑6/7 fold is verifiably present and the spec is internally consistent and implementable as pinned; only cosmetic provenance/wording polish remains.
+
+**Critical risks** (none blocking)
+- B.1 names the take‑vs‑reconcile / release‑vs‑nodedown races but not the *insert*‑vs‑reconcile / insert‑vs‑nodedown races — same bounded class (two‑tick guard; transient ‑1 clamp), but unnamed, so a future reader may "fix" a non‑bug.
+- B.1 leaves one cheap `{touched,_}` cast per completion; the serialized‑mailbox ceiling is lifted for *picks* only. The `pool_message_queue_len` before/after must expect a drop, not zero.
+
+**Contradictions / stale claims**
+- The prompt's one‑line summary retains pre‑fold phrasings ("64‑label‑set cap with registry eviction", "boot warning", 13.7 "purge", 13.8 "<10 s") that the doc correctly supersedes — the doc is normative.
+- Header says "rev 4 — FINAL / folds round 6" while the body carries the round‑7 (rev 4.1) folds — provenance line missing.
+- The `/stats/sched` `rtt_ms` map's *value semantics* change (raw last‑arrival → EWMA) under a "schema unchanged / additive" claim — true of shape only.
+
+**Missing first‑ship requirements**
+- None blocking. Optional: name the insert races; state entrypoint behavior when `vm.args` is absent; list `dispatch_local{unary_fallback}` explicitly among C.1's rendered label sets.
+
+**Architecture/design notes**
+- `system_monitor` single‑slot verify‑at‑implementation is the right call; per‑node dist telemetry via each node's own :8090 keeps the no‑new‑wire invariant honestly scoped to local reads.
+- The capacity bypass on mass worker loss, and the take‑vs‑reconcile undercount *direction flip* (transient over‑admission vs v2's stranded capacity), are correctly documented as accepted trades — the runbook note names a genuinely different failure shape.
+- Knobs‑off ⇒ pure `select_v2` v1‑equivalence is preserved; the only semantic change (EWMA ordering, knob ON) is deliberate and flagged in Part G.
+
+**Top 5 concrete edits**
+1. Header: add "Rev 4.1 folds round 7" provenance (renumbering, tick clamp, :8090 pinning, `git_sha` hello key, 64‑window scoping).
+2. B.1: name the insert‑vs‑reconcile / insert‑vs‑nodedown races as the same bounded class as the take races.
+3. A.2/B.2: one sentence — the `rtt_ms` map is shape‑additive but its values become the EWMA when the knob is on.
+4. C.1: sharpen the `pool_message_queue_len` note — expect reduction, not elimination.
+5. Part E eunit: assert release idempotence when nodedown already decremented (release‑first may be a no‑op).

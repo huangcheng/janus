@@ -1,0 +1,23 @@
+**1. Verdict: GO WITH FIXES** — ratify; every remaining item is fold-note/label drift, nothing blocks implementation.
+
+**2. Critical risks**
+None unguarded. The three accepted softnesses are named with bounds and eunits: take-vs-reconcile undercount (persists only until job completion; over-admission bounded by race window + two-tick guard), transient -1 reserve rows (tick clamps same-tick; zero-row deletion scoped to absent nodes), >10-min job purge (v2 long-stream class, restated). The increment-first admission primitive (compare returned count, rollback with the pinned `{2,-1},{Node,0}` form, no tracked row for losers) is the correct atomic construction and matches v2's proven capacity-1 eunit.
+
+**3. Contradictions or stale claims**
+- Rev-4 fold header calls build provenance "C.4" (twice: runtime visibility, knob-off-guard cross-ref), but the renumbered body makes build provenance C.3 and knob-off C.4. Rev 4.2 claims "fold-note label drift fixed (C.3/C.4 renumber-aware)" — it isn't, in that block.
+- Rev-3 fold note still says "ALL rows expired ⇒ null / 0 and the sort falls back to `infinity`" — the exact stale phrase rev 4 claims removed. Body A.3/B.2 is clean (null, never 0; fallback is B.2's per-provider rule).
+- Header self-identifies as "rev 4 — FINAL"; the rev 4.2 wording pass (round-8 folds: counter triggers, first-admission-per-pool-lifetime, live-read ordering eunit) exists only in prompt.md. All four items ARE in the body — verified — but target.md doesn't record them.
+- prompt.md itself is stale vs the spec: 13.8 "<10s" (spec: <20s, SIGTERM-grace-chain-justified); "C.2 master-only surfacing" (spec: per-node since rev 3); C.3/C.4 numbering inverted; "64-label-set cap with registry eviction" (pre-split). Spec governs.
+
+**4. Missing first-ship requirements**
+None. Eunit enumeration (per item), opt-in gate steps with teardown, runbook ordering, dirty-tree refusal with logged escape hatch, worker-side guard rails — all present.
+
+**5. Architecture/design notes**
+The `{touched, Node}` poke is same-node (master session → master pool), so no mixed-version cast exposure under masters-first deploy. Process-dictionary pre-byte predicate is session-scoped and dies correctly. Shared take-and-maybe-decrement helper across release/nodedown/purge structurally prevents gate drift — the right call.
+
+**6. Top 5 concrete edits**
+1. Relabel build-provenance bullets "C.3" in the rev-4 fold list (or annotate as pre-renumber labels).
+2. Strike "and the sort falls back" from the rev-3 A.3 fold bullet.
+3. Add a rev 4.2 header block recording the round-8 folds; bump status to RATIFIED.
+4. Move `janus_sched_note_inflight_deprecated_total` out of the gauges sentence into the counters list in C.1.
+5. Refresh prompt.md's stale summary lines before any future audit reuse.

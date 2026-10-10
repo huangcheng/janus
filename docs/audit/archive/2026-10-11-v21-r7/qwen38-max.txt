@@ -1,0 +1,25 @@
+**1. Verdict:** GO WITH FIXES — nine of the ten round-6 folds verify in the body; two one-line pins remain: the Part C renumber is claimed but not actually applied, and the negative-reserve-row heal is unspecified for nodes that re-hello before the next tick.
+
+**2. Critical risks**
+- *Negative reserve rows on LIVE nodes.* A release (or admission rollback) racing nodedown re-creates the row via insert-default as `{Node,-1}`. The tick clause deletes zero/negative rows ONLY for nodes ABSENT from pool records, and reconcile never increments: if the victim re-hellos before the next tick, it over-admits by one slot per event permanently (until its next nodedown) and `/stats/sched` shows a conspicuous -1. Runbook G.7's "until the job completes" bound does not cover this tracked-empty case. This is the one gap in an otherwise complete healing story.
+
+**3. Contradictions / stale claims**
+- Body reads C.1, C.2, C.4, C.3 — the "renumbered into reading order" fold was not executed ("grep-verified 10/10" is 9/10). No body cross-reference pins either number; a heading swap is safe.
+- Non-goals parenthetical ("only REMOVES a master-side internal call and ADDS optional vm.args lines") omits C.4's additive `git_sha` hello-meta key — safe under v2 Part 0.10 additive-key tolerance, but the enumeration is stale.
+- The audit brief itself still says "64-label-set cap with registry eviction"; the spec's counters-never-evict rule is canonical — flagged so later rounds don't audit against the stale summary.
+
+**4. Missing first-ship requirements**
+- Tick heal clause: clamp a negative reserve row to 0 even for PRESENT nodes when that node's non-internal tracked set is empty (+ one eunit: re-hello-beats-tick heals). Keeps "reconcile never increments against live jobs" — with empty tracked there is nothing to await.
+- C.2: OTP ≥ 21 `busy_dist_port` delivers unbusy transitions; on OTP 27 the verify-at-impl will almost certainly yield busy-ms accumulation — pin it as the default plan with events-only as the documented fallback.
+
+**5. Architecture/design notes**
+- Take-owns-decrement + one shared take-and-maybe-decrement helper across release/nodedown/purge closes the double-decrement class cleanly; increment-first admission with pinned rollback keeps exactly-one-wins without a mailbox hop.
+- Per-node dist-counter rendering on workers with guarded pool reads is right; F7's two-reads-per-scrape scoping is honest.
+- B.2's incremental EWMA on the last-arrival-wins row is deterministic and implementable; named biases acceptable for a preference-only key.
+
+**6. Top 5 edits**
+1. Swap C.3 ↔ C.4 headings so reading order matches the claim.
+2. B.1: add the tick negative-clamp for present nodes (tracked empty ⇒ 0) + eunit.
+3. Non-goals: add "and one additive hello-meta key (`git_sha`)" to the wire-safety enumeration.
+4. C.2: name busy-ms accumulation as the expected OTP 27 outcome.
+5. G.7: pair with edit 2 — tracked-empty negatives are tick-healed, distinct from the job-completion-bounded undercount.

@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — the design is internally coherent and every named race is pinned; what remains is definitional (one unobservable "observable" claim, one bound drifting between prompt and spec, one stale fold line).
+
+**2. Critical risks**
+- B.1's corrective clamp is called "bounded, observable," but C.1 lists **no counter for clamped/deleted negative rows** — the transient `-1` over-admission window (release racing nodedown/re-hello) has no telemetry surface at all. This is exactly the residue-class bug the spec exists to kill; it must be countable.
+- Take-vs-reconcile undercount ⇒ over-admission persists until completion with no distinguishing signal (reserve reads look healthy). Accepting it is fine; the gate can only catch it via 13.4 rest-state, which under-count also passes. A bound assertion in the eunit (as specified) is the only guard — keep it mandatory.
+
+**3. Contradictions or stale claims**
+- 13.8 in-flight fail bound: prompt says `< 10 s`; spec pins `< 20 s` (SIGTERM 10 s grace + SIGKILL chain). Pick one.
+- Rev-3 fold block still reads "`null / 0` and the sort falls back to `infinity`" while A.3 says "null, never 0" and the rev-4 header claims the phrase is gone — the fold note itself is stale.
+- Prompt's audit list still says "C.3 build provenance … C.3 first-admission"; the spec's renumbering (C.3 provenance / C.4 guard) is correct — fix the derived labels.
+
+**4. Missing first-ship requirements**
+- Counter for the tick's corrective writes (clamp / zero-row delete), per above.
+- Drain-idle arming latency when the draining node's last job ends via NODEDOWN: no `{touched, Node}` poke fires on worker loss, so arming is tick-bounded (30 s) — state it next to the ≤250 ms completion bound.
+- A.3 `dispatched_total` source unspecified: who sums `{dispatch_worker, Node, _}`, where it lives, and whether adopt resets it (it resets the other counters, so consistency demands yes).
+
+**5. Architecture/design notes**
+- Admission-by-returned-counter is sound: atomic increment + insert-default gives capacity exactly-one-wins without read-check races; rollback touching no tracked row is correct.
+- The Internal asymmetry (reconcile filters to `Internal =:= false`; purge reaps all but decrements only non-Internal) is coherent and correctly shared through one take-helper for release/nodedown/purge.
+- The live reserve sort read is a declared runtime ordering change (fresher than v2) with the pure `select_v2` contract held — acceptable because the equivalence eunit plus the new live-read ordering eunit together pin both layers.
+- Per-node dist-counter local reads under F7's pool-only snapshot rule are cleanly scoped.
+
+**6. Top 5 concrete edits**
+1. Add `janus_sched_reserve_clamped_total` to C.1 (and a gate/eunit assertion), or delete "observable" from B.1.
+2. Reconcile 13.8 to `< 20 s` everywhere (or justify `< 10 s`).
+3. Delete the stale "null / 0 … falls back" fold line.
+4. State NODEDOWN-completion arming is tick-bounded (30 s), no poke.
+5. Pin `dispatched_total` storage + adopt-reset semantics in A.3.

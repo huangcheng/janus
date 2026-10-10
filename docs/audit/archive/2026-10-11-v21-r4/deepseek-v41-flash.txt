@@ -1,0 +1,29 @@
+## 1. Verdict
+GO WITH FIXES — the caller-side bookkeeping design is sound and crash-safe, but the B.2 sort-key contract is under-specified and two chaos numeric bounds are not guaranteed by the stated mechanisms.
+
+## 2. Critical risks
+- **B.2 sort key is ambiguous.** The canonical number is per-`{node,provider}` EWMA, but `pick`/`select_v2` sorts *nodes*. The spec never says the sort uses the **job's provider** cell; "the row's Ewma" is singular. A node with no cell for that provider (or expired) must be pinned to `infinity` — undefined. Silent RTT-order drift.
+- **Purge decrements live reservations.** A >10-min in-flight job is `take`n and its reserve decremented → permanent undercount → over-admission. Only the take-vs-reconcile undercount is named; this one is not.
+- **"Knobs off ⇒ v1 bit-for-bit" (0.3) overreaches.** A.2 switches the inflight sort source from snapshot to LIVE `sched_reserve`; live ordering ≠ v2's flush-bounded hint. The invariant should be scoped to `select_v2`'s pure input, not live ordering.
+- **13.7 "<30 s nodedown" isn't guaranteed by `net_ticktime=30`** (Erlang declares down up to ~1.5×T; an orderly container kill need not RST immediately). Flaky assertion.
+- **13.8 "<10 s fail-fast" assumes death, but `docker restart` is graceful** (SIGTERM; cowboy `idle_timeout=300_000` untouched). In-flight may hang past 10 s.
+
+## 3. Contradictions / stale claims
+- **Part 0 F4** still says "evicted label sets removed from the registry — the v2 rule", contradicting **C.1 rev 3** (counters NEVER evicted; reject-new-into-overflow). Unreconciled.
+- A.2 arms drain-idle on `reserve == 0`, but B.1 permits transient `-1` (insert-default after nodedown/purge) → arming can miss a tick.
+- Prompt summary ("master-only surfacing", "registry eviction") is stale vs the spec; spec is internally coherent here.
+
+## 4. Missing first-ship requirements
+- **sched_rtt row reaping**: B.2 says "TTL expiry drops the row", but reads only *filter* unexpired — nothing deletes them; rows leak per `{node,provider}`.
+- **C.3** can never fire on a single-node stack with no admission; local-worker admission path unstated.
+- No rollback path for a persisted bad `vm.args` value across restart.
+
+## 5. Architecture / design notes
+Take-owned decrement + insert-default decrement + `Internal=:=false` filter (reconcile/purge/nodedown) is consistent and F1/F2-safe; `{touched,Node}` keeps the pick path mailbox-free at v2 release-cast rate; select+per-key-take avoids double-decrement; shared adopt reset covers F2; per-node C.2 rendering is coherent under no-new-wire.
+
+## 6. Top 5 concrete edits
+1. Pin B.2/A.3: sort uses the candidate's EWMA cell for the **job's provider**; absent/expired ⇒ `infinity`; `rtt_ms_avg` never sorts.
+2. Name and bound the purge-of-live-job undercount (skip purge for unfinished jobs, or TTL > max job life).
+3. Rescope 0.3's "bit-for-bit v1" to the pure function; acknowledge live-reserve drift.
+4. Rewrite Part 0 F4 to C.1's counter/gauge split.
+5. Re-derive 13.7/13.8 bounds (SIGKILL / explicit stop-timeout; `ticktime=30` ≠ <30 s detection).

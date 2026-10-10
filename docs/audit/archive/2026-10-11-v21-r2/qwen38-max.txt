@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — all round-1 folds are present and coherent; five pins are missing, racy, or stale, none architecturally fatal.
+
+**2. Critical risks**
+- **Inflight-hint staleness regression:** after B.1 nothing reaches the pool at reserve time, so snapshot `inflight` refreshes only on completion casts or the 30 s tick. Under sustained long streams without completions, knobs-off v1 least-inflight balancing silently degrades — a selection-semantics change on the production default path. Fix: pick reads `sched_reserve` live (public, `read_concurrency`) for the inflight component; snapshot stays for health/rtt/geo. Otherwise document the staleness as accepted.
+- **13.7 "<30 s nodedown"** holds only if docker-kill's TCP RST propagates; at default `net_ticktime` 60 s, silent-death detection is 60–75 s. Pin the RST assumption and/or run the gate with `JANUS_NET_TICKTIME=30`.
+- **Purge ownership unpinned:** "reaps ALL expired rows" must be per-key `ets:take` like release/nodedown; delete-then-decrement racing a concurrent release double-decrements (clamp heals, but the pin is what the "post-purge done no-op" eunit actually proves).
+
+**3. Contradictions / stale claims**
+- Part I checklist says "JSON schema_version 2"; body and rev-2 fold pin **stays 1**. Fix the checklist.
+- The 13.4 rest-state amendment lives only in the fold header; Part F never restates it — it will miss the gate script.
+- Rev-2 drain-idle "(≤ 250 ms)" overstates quiet nodes (else tick, 30 s); harmless but imprecise.
+
+**4. Missing first-ship requirements**
+- 13.7 UNARY phase doesn't pin a slow-key job; a 1–5 s unary finishes before `docker kill` lands, making the pre-byte fallback assert flaky. Reuse 13.8's slow-key pin.
+- Tick zero-row cleanup races a concurrent pick's default-insert bump (soft over-permit until heal). Restrict zero-row deletion to nodes no longer in the pool.
+- C.1 omits rendering `sched_note_inflight_deprecated_total` (or state intentionally /stats-only).
+
+**5. Architecture/design notes**
+- C.2 master-only surfacing is over-restriction: a worker rendering its OWN dist counters needs no dist messages, and dist storms are exactly when worker-side visibility matters. Surface locally on every node; master aggregates in /stats/sched.
+- Expect OTP to deliver no busy_dist_port *unbusy* message; keep the verify-at-impl pin but state the fallback deliverable now (events + last-busy age).
+- `ets:take`-owned decrement is the correct idempotence spine — keep it uniform across release/nodedown/purge.
+
+**6. Top 5 concrete edits**
+1. B.1/A.2: pick-time live `sched_reserve` read for inflight, or an explicit accepted-staleness paragraph naming the knobs-off path.
+2. B.1: pin purge as per-key `ets:take`; zero-row cleanup scoped to non-member nodes.
+3. 13.7: slow-key unary job; pin RST/ticktime assumption (gate env `JANUS_NET_TICKTIME=30`).
+4. Part I: `schema_version → 1`; restate the 13.4 rest-state assert in Part F.
+5. C.2: per-node local surfacing of dist counters, master aggregation in /stats/sched.

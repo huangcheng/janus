@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — 20/21 rev-3 folds landed and are coherent, but one claimed fold (F4 rewrite) is factually absent from the body and one deliverable (C.2 worker-side surfacing) may have no observable surface.
+
+## 2. Critical risks
+- **F4 body contradicts C.1.** 0.2/F4 still reads "evicted label sets removed from the registry — the v2 rule", while C.1 mandates counters are *never* evicted (reject-new-into-overflow). An implementer following 0.2 builds eviction and breaks counter monotonicity/rate().
+- **C.2 worker rendering may be unobservable.** Workers skip the agent :8080 listener (v2 base); the spec never states that a worker serves :8090 admin or any read path. "Each node renders its own `janus_sched_dist_*` on its own /stats/sched" then has no scrape point exactly in the dist-storm case it targets.
+- **Part E pdict predicate is process-bound by implication.** `janus_worker_forwarded` only works if LocalFun/fallback runs in the same process that set it; nothing pins that.
+
+## 3. Contradictions or stale claims
+- Preamble claims "F4 rewritten to the counter/gauge split" and rev-3.1 claims 21/21 grep-verified — false on F4.
+- A.3 attaches "all expired ⇒ sort falls back to infinity" to the node-level `rtt_ms_avg`, which the same paragraph says is display-only, "never used for sorting" (sorting is per-cell, B.2).
+- Minor: rev-3.1 says git_sha is "the 14th field"; the A.3 list has 15 (git_sha is 15th).
+
+## 4. Missing first-ship requirements
+- B.1 never states the fate of the old `{sched,2,{track|release}}` cast handlers; A.2 pins `note_inflight` as a counted no-op, B.1 should do the same for track/release (stale-beam caller safety).
+- Where worker-local dist counters are read (admin listener kept on workers? state it).
+- Fallback-in-session-process pin (Part E).
+
+## 5. Architecture/design notes
+- B.1 spine is sound: insert-default decrement makes badarg-impossible, `ets:take` owns the decrement (idempotent release, no nodedown double-decrement), poke-cast per completion keeps the pick path mailbox-free; the named take-vs-reconcile undercount bound is honest.
+- B.2 incremental EWMA on the last-arrival-wins row is implementable and deterministic; seed-at-first cold-outlier bias documented.
+- 13.7/13.8 bounds are coherent with `JANUS_NET_TICKTIME=30`; separate-stack knob boot correctly handles the boot-time env constraint.
+
+## 6. Top 5 concrete edits
+1. Rewrite 0.2/F4 to the C.1 counter/gauge split (delete the "evicted label sets removed from the registry" sentence).
+2. C.2: add one line stating the worker's own read path for its `/stats/sched` (e.g., :8090 kept on workers).
+3. B.1: add "track/release cast handlers ship as counted no-ops, no state mutation" (mirror A.2).
+4. A.3: move the sort-infinity fallback into the B.2 per-cell clause; keep `rtt_ms_avg` strictly display.
+5. Part E: pin "fallback executes in the session process that set `janus_worker_forwarded`".

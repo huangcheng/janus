@@ -1,0 +1,25 @@
+**1. Verdict:** GO WITH FIXES — the round-6 pins are correctly folded and the round-7 diff is nearly clean, but one fold claim is false in the body and two first-ship gaps (worker telemetry read path, dashboard surfacing) remain.
+
+**2. Critical risks**
+- **C.2 worker telemetry has no verified read path.** AGENTS.md pins only "workers skip :8080"; whether workers run the :8090 admin listener is unstated. If they don't, "each node renders its own `janus_sched_dist_*`" is hollow. Pin/verify at implementation.
+- **Finding #1 (knobs-off blindness) is only half-closed.** `knobs_off_total`, `workers[]`, `git_sha` are additive JSON; the dashboard SPA (sibling repo) rendering is unspecified. Additive JSON without SPA surfacing leaves the operator curl-dependent — the exact production failure mode.
+
+**3. Contradictions / stale claims**
+- Rev-4 fold claims "Part C sections renumbered into reading order (C.1, C.2, C.3, C.4)," but the body renders **C.4 (Build provenance) before C.3 (Knob-off guard)**. The fold is not actually in the document.
+
+**4. Missing first-ship requirements**
+- Dashboard SPA field rendering (or explicit deferral) for the new `/stats/sched` keys.
+- `deploy_prod.sh` must *pass* `--build-arg JANUS_GIT_SHA` (only the dirty-tree refusal is pinned).
+- Eunit-first ordering (project rule) not restated; implementers may write tests after code.
+
+**5. Architecture / design notes**
+- The `{touched, Node}` poke keeps the pool mailbox at v2's release-cast rate; B.1's real win is pick-path mailbox-freedom — honestly stated, no overclaim.
+- `system_monitor` single-slot: the implementation grep is mandatory, not optional — two callers would silently clobber.
+- Part E's release-then-local capacity bypass is a genuine discipline hole under mass worker loss; acceptable only because the knob is default-off and the trade is runbook-documented.
+
+**6. Top 5 concrete edits**
+1. Swap C.3/C.4 in the Part C body (or correct the rev-4 fold bullet) so "reading order" is true.
+2. Pin workers' :8090 listener in C.1/C.2 (grep the listener config; assert worker-side `/stats/sched` responds in the gate).
+3. Add a dashboard-repo deliverable line — or an explicit Part H deferral — for SPA rendering of `workers[]`/`git_sha`/`knobs_off`/dist counters.
+4. Add `--build-arg JANUS_GIT_SHA=$(git rev-parse HEAD)` passthrough to C.4's `deploy_prod.sh` requirements.
+5. Add to Part I: eunit written **first** per project rule, and gate artifacts saved to a durable path and referenced in the commit.

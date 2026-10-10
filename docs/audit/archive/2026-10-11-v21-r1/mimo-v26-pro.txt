@@ -1,0 +1,33 @@
+**1. Verdict:** GO WITH FIXES — scope and failure-mode discipline are right, but two bookkeeping ambiguities (reserve-vs-tracked ownership, probe rows in reconcile) and an unspecified counter store must be pinned before coding.
+
+**2. Critical risks**
+- B.1 is ambiguous whether the reserve *increment* also moves caller-side. `ets:update_counter/4` cannot clamp at capacity; racing caller-side picks lose capacity-1 exactly-one-wins until heal. Pin: `pick` stays a serialized gen_server call doing the reserve; only the tracked insert and release move. Require the ONE pinned `update_counter/4` form at the new caller-side decrement site (5-tuple UpdateOp wraps).
+- Reconcile "reserve vs `sched_tracked` contents" must filter `Internal =:= false`; probe rows never touch reserve, so counting them manufactures drift every tick.
+- A.3/C.1 assume counters (`dispatched_total`, `dispatch_local_total`, `rtt_ms_avg`, `would_demote`) that per 0.1.2 "appear in no repo module". These are NEW state, not a view: storage, increment sites, adopt/nodedown behavior are unspecified.
+- C.1 evicting counter label sets breaks monotonicity for `rate()`; cap should reject new label sets, or document resets.
+
+**3. Contradictions or stale claims**
+- A.2: "handler stays … then removes it — in THIS spec it becomes: handler stays" contradicts itself; the "old beam master session" mixed-version story is wrong (the single master restarts its beam on upgrade) — keep the no-op as belt-and-braces, not a versioning requirement.
+- A.2 already describes B.1's caller-side `ets:take` release, but `sched_tracked` arrives in B.1; deploy sequencing undefined.
+- A.1 overclaims: it pins ingest and repo display, not the unreleased prod view's rendering bug.
+- Part E fires on "chunk/done arrived" in one clause, "byte reached the client" in another — two predicates.
+- C.3 "on boot … ≥1 worker admitted": admission is async (hello).
+
+**4. Missing first-ship requirements**
+- Counter-store spec (above).
+- B.2: sample ordering for deterministic EWMA replay (arrival order, tie rule); "single-sample identical" only holds if replay is deterministic.
+- Part F: 13.7's "next request serves (local fallback `empty_pool` **or** the surviving worker)" is an unfalsifiable disjunction — pin a 2-worker topology and assert `dispatch_worker` delta on w2; "bounded poll" needs explicit numbers (purge TTL is 10 min; state the reconcile-tick bound).
+- `system_monitor` is node-global: `janus_dist_monitor` replaces any existing monitor — document exclusivity.
+- Provenance: prod ran an image built from uncommitted code. Require build-from-main + commit sha recorded (image label or /stats), else A.3 recurs.
+
+**5. Architecture/design notes**
+- B.2 is the only intentional selection-semantics change (RTT sort, knob-on path); knobs-off v1 equivalence holds — but say this in the non-goal instead of "algorithm shape unchanged".
+- Adding `unary_fallback` to the pinned `dispatch_local` reason enum breaks the exact-set pin; call out updating the pin.
+- vm.args ranges look valid; specify append-vs-overwrite and idempotency across container restarts. A.2 unification prevents dual-track drift, but if the residue was genuine user traffic it won't be explained — note the residual unknown.
+
+**6. Top 5 concrete edits**
+1. B.1: state "reserve increment stays in serialized `pick`; only tracked insert/release move caller-side"; mandate the pinned `update_counter/4` form with a no-5-tuple comment.
+2. A.2/B.1: reconcile and purge filter `Internal =:= false`; add probe-row drift eunit.
+3. New subsection: counter store for all `janus_sched_*_total` (location, increments, adopt/nodedown, monotonicity — reject-new under cap, not evict-old).
+4. Merge/sequence A.2 and B.1 as one deploy unit; fix the handler sentence; drop the old-beam justification.
+5. Part F: pin 13.7 topology + w2 assertion; replace every "bounded poll" with explicit timeouts.

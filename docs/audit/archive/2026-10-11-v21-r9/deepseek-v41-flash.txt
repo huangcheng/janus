@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — the design is sound and internally consistent on the hard parts (caller-side `sched_tracked`, one take-and-maybe-decrement helper, incremental EWMA, provenance), but Part E's pre-byte predicate and a few numeric/label statements need pinning before ratification.
+
+## 2. Critical risks
+- **E fallback race**: `janus_worker_forwarded` is set by forwarded chunks; `{'DOWN'}` is an async signal. If the worker wrote a chunk then died, master may process DOWN before the chunk. Erlang same-pair signal ordering *probably* saves you, but the spec never states it. A late chunk after `LocalFun` = double response + double billing. Pin the ordering or drain the mailbox before firing.
+- **B.1 undercount bound overstated**: "over-admission bounded by the race window and the two-tick guard" is wrong in spirit — the undercount persists until the job *completes*, so over-admission is bounded by the concurrent race cohort, not the tick. Restate.
+- **B.2 reaper unnamed**: cells carry `ExpiresAtMono`, but no part says what deletes an expired cell (tick? purge?). Without it, TTL "drops the row whole" is aspirational.
+
+## 3. Contradictions / stale claims
+- Header fold notes say "C.4 runtime visibility" for build provenance, but rev 4 renumbered provenance to **C.3** (C.4 = knob-off guard). Label drift survives the renumber.
+- Part 0.3 says the member `inflight` map is REMOVED; A.2 says the builder still copies reserve into it for display. Reconcile wording.
+- Spec 13.8 is `<20 s`; the audit prompt summarizes `<10 s`. One number.
+- The prompt's "64-label-set cap with registry eviction" contradicts F4 (counters NEVER evicted, reject-new-into-overflow). Spec is self-consistent; the summary is stale.
+
+## 4. Missing first-ship requirements
+- Expired-cell reaper + interval (above).
+- E: what happens if the pool is mid-restart when the completion `{touched,Node}` cast fires — accepted tick-bounded, but state it in A.2's bound text, not only B.1.
+- No explicit TEST-FLOWS.md edit listed for the 13.4 rest-state invariant (body says "follows existing format"; make it an item).
+- A.1's "old-shape hello → 1" needs the mixed-image tolerance line repeated (v2 Part 0.10 reference is implied, not cited).
+
+## 5. Architecture notes
+Caller-side bookkeeping with a single release/nodedown/purge spine is the correct de-bottleneck; insert-default decrement making badarg impossible is the right invariant. Incremental EWMA on the last-arrival row is implementable and keeps one canonical number. Per-node dist counters via a local read respect the no-new-wire rule. ENV+label provenance is correct (labels alone are invisible). The chaos two-phase split is right.
+
+## 6. Top 5 concrete edits
+1. Part E: pin the DOWN-vs-chunk ordering guarantee (or drain-then-check) before `LocalFun`.
+2. B.2/A.3: name the expired-cell reaper and cadence.
+3. B.1: replace "race window + two-tick guard" with "concurrent race cohort; persists to completion".
+4. Fix C.3/C.4 label drift in the rev-4 fold notes.
+5. Pin 13.8 to one bound and reconcile the prompt's `<10 s`.

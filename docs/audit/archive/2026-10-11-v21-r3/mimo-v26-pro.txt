@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — folds are present and coherent, but four fold-vs-body inconsistencies must be reconciled before ratification.
+
+**2. Critical risks**
+- Take-vs-reconcile undercount persists until job completion (accepted, but the eunit must pin the bound numerically, not just "asserted").
+- Nodedown reserve-row delete vs. concurrent release's insert-default recreates a transient `-1` row — healable via tick clamp, but only if the tick clamp also runs before capacity checks read the counter.
+- `system_monitor` exclusivity is verify-at-impl only; if any other subsystem arms it, C.2 silently dies (F3).
+- Unary fallback: release-then-local admits unbounded local execution on mass worker loss (documented, knob-off default — acceptable).
+- 13.7's <30 s nodedown bound depends on RST detection at `docker kill`; if only tick detection fires at ticktime 30, the bound misses. State the assertion as RST-path-or-tick with a poll bound ≥60 s.
+
+**3. Contradictions / stale claims**
+- **A.2 body vs rev-3 header:** body still says "the snapshot builder copies `sched_reserve` counts into each candidate's `inflight`"; the header says `pick/1` reads `sched_reserve` LIVE and snapshot inflight is display-only. Part 0.3 agrees with the header; A.2 is stale.
+- **F4 (Part 0.2) vs C.1:** F4 still describes "evicted label sets removed from the registry — the v2 rule"; C.1 pins counters-never-evicted + per-family caps + overflow accumulator. F4 must be rewritten to the counter/gauge split (same class as the Part I schema_version fix).
+- **C.2 body vs header:** body says "only the MASTER's counters surface in sched_stats/0"; header says every node renders its OWN dist counters on its own `/stats/sched`. Pick one phrasing (per-node local surfacing) and state whether workers run :8090.
+- **A.3 field list missing `git_sha`:** header claims it was added to the A.3 field list + fixture; body enumerates 13 fields without it while C.4 says it surfaces per-worker in the A.3 array.
+- `rtt_ms_avg` "null / 0" is ambiguous — pin it as `rtt_ms_avg: null`, `rtt_sample_count: 0` explicitly.
+
+**4. Missing first-ship requirements**
+- C.1's `janus_sched_dispatch_local_total` has no reason label, yet Part E/F assert `dispatch_local{unary_fallback}`. Specify the label (or a dedicated counter) now.
+- 13.7/13.8 have no stated teardown/retry policy for the separate knob-ON stack boot (beyond `--teardown`).
+
+**5. Architecture/design notes**
+- B.1 write-order/insert-default/`ets:take` spine is now correct and internally consistent; the concurrency note rightly preserves caller-side pick.
+- B.2 incremental EWMA on the last-arrival-wins row is implementable and deterministic; one canonical number for sort/JSON/metrics is the right call.
+- Drain-idle NON-INTERNAL narrowing removes the lost-probe sticky stall without weakening the arm condition.
+
+**6. Top 5 concrete edits**
+1. Rewrite A.2's sort-hint sentence to the live-`sched_reserve` read; mark builder `inflight` display-only.
+2. Rewrite F4 to the C.1 counter/gauge cardinality split.
+3. Reconcile C.2 body with per-node local surfacing; name the worker-side endpoint.
+4. Add `git_sha` to the A.3 field list and fixture line.
+5. Add `reason` label to `janus_sched_dispatch_local_total` (or a `…_unary_fallback_total` counter) and pin `rtt_ms_avg: null` / `rtt_sample_count: 0`.

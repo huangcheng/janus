@@ -1,0 +1,33 @@
+**Verdict: GO WITH FIXES** — the design's shape is sound, but Part E contradicts Part F, B.1 omits a blocking table-protection change, and two observability claims (C.2, F4) don't survive scrutiny.
+
+**Critical risks**
+- **B.1 is blocked as written.** v2 pinned `sched_reserve` as owner-written (protected). Caller-side `ets:take` + decrement on a protected table = `badarg` inside the session process → request fails, violating the "never fail because of bookkeeping" invariant. The spec never states `sched_reserve` must become `public` (+ `write_concurrency`), nor who deletes zeroed rows.
+- **E vs F contradiction:** Part E says gate 13.7 asserts `dispatch_local{unary_fallback}`, but 13.7 is a mid-*stream* kill and F5 forbids streams. The counter can never be asserted as specified.
+- **C.2 has no wire path:** worker-side `busy_dist_port` cannot reach master-side `sched_stats/0` under the "no new wire messages" invariant. Scope it to master-only or piggyback explicitly and amend the invariant.
+- **F4 eviction is unsound for gauges:** node×provider rtt (dozens²) exceeds 64, so most gauges never render, and eviction makes live series flap between scrapes. Eviction ≠ cardinality bound.
+- **Throughput claim overstates:** `pick/1` still crosses the gen_server (selection + reserve increment); only track/release leave the mailbox. The serialized hot path is reduced, not removed.
+
+**Contradictions / stale claims**
+- A.2's "for one release… then removes it — in THIS spec it becomes" is self-contradictory; ship the no-op-with-counter wording only.
+- Two different "rtt" numbers: /stats/sched shows raw mean, sort key + C.1 gauge show EWMA. Ops will compare them.
+- 13.8 "no 300 s cowboy hang": `idle_timeout` 300 s is deliberate; the real assertion is conn-reset-on-container-death — say that.
+- 13.8 "delta ≥ 1" on a counter that resets at restart — assert absolute ≥ 1 post-restart.
+
+**Missing first-ship**
+- **Provenance control:** prod image came from uncommitted code; deploy must label images with commit sha so "prod ≠ main" is detectable.
+- **Rest-state invariant in the default gate:** after benchmark traffic, assert every `reserve_inflight == 0` — else the next residue is as undiagnosable as this one.
+- **Pin the client-visible contract for mid-stream worker loss** (status vs truncated SSE vs error event); 13.7's "terminated with an error" is unfalsifiable otherwise.
+- **Pin eligible error reasons** for the unary fallback, or slow-provider timeouts silently become double-billed retries.
+- vm.args: replace pre-existing `net_ticktime`/`+zdbbl` lines rather than appending duplicates.
+
+**Architecture notes**
+- F1/F2/F7 stories hold: two-tick guard against the ETS set, adopt resets both tables, nodedown clears both, workers array built only inside `sched_stats/0`. B.2 EWMA is behavior-identical at one sample.
+- Guard transient negative reserve (blocks drain-idle's 0-trigger and over-admits); tick must clamp and delete zero rows.
+- Verify-at-impl on unbusy is honest — keep, with the events+age fallback as deliverable.
+
+**Top 5 edits**
+1. Split 13.7: stream phase (clean abort) + unary phase (fallback counter, knob on); pin E's eligible-reason list.
+2. B.1: add `sched_reserve` → public/write_concurrency, the exact release primitive, and zero-row cleanup at tick.
+3. C.2: master-only scope or explicit piggyback + invariant amendment.
+4. F4: 64-cap for counters only; gauges render deterministically (node-level aggregate or fixed top-N), never evicted.
+5. B: state pick remains gen_server-serialized and add a gate measurement, or move selection caller-side behind an atomic reserve CAS.

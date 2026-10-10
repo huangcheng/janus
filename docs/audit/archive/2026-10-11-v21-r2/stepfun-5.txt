@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — all seven round-1 folds are present and mostly coherent, but three stale-text contradictions, one race newly introduced by the caller-side release move, and several gate-implementability gaps must close before ratification.
+
+**2. Critical risks**
+- **B.1 release race (new in rev 2):** release is `ets:take` then decrement, but nodedown deletes the reserve row between the two → the caller's `update_counter` badargs and crashes a session for an already-completed job — violating "request never fails because of bookkeeping." v2 was immune (release was a gen_server cast, serialized with nodedown). Pin the decrement with insert-default `{Node,0}`; the tick's negative-clamp + zero-row cleanup heals the transient `{Node,-1}`.
+- **13.7 knob flip unspecified:** `JANUS_SCHED_UNARY_FALLBACK` is env-based; flipping mid-step needs a master restart, which confounds the two-worker topology and re-hello assertions.
+- **13.7 `reserve_inflight{w1} == 0` unimplementable as written** if nodedown removes the member — /stats/sched then has no w1 row. Pin the evicted-worker JSON shape (status=down, inflight sampled 0).
+
+**3. Contradictions / stale claims**
+- Part I says "JSON schema_version 2"; header and A.3 say stays 1.
+- F4 (0.2) still describes v2 eviction ("evicted label sets removed from the registry"); the rev-2 counter/gauge split was applied only to C.1.
+- C.4 claims the workers array shows mixed-image fleets, but A.3's field-by-field list has no per-worker `git_sha`.
+- A.3 "rtt_ms_avg = mean of the node's unexpired rtt rows" vs B.2 "read the row's Ewma" — undefined for multi-provider nodes.
+
+**4. Missing first-ship**
+- Gate master's local-worker state unpinned: if it co-hosts a worker (as aliyun prod does), "workers_available drops to 1" and "next request → w2" are wrong. Pin master-only for 13.7/13.8.
+- Unary phase has no slow-key; a pre-kill completion makes the step vacuous. 13.8 already uses one.
+- Runbook should state RTT sorting is now EWMA-smoothed — enabling RTT after v2.1 changes order vs v2 (deliberate; ops must know).
+
+**5. Architecture notes**
+- Purge-then-late-release nets correct (take finds nothing); v2 rule preserved.
+- Nodedown take-then-decrement is safe against concurrent caller releases; only the row-delete window (risk 1) is exposed.
+- EWMA read-modify-write is safe — the gen_server is the sole `sched_rtt` writer; seed-at-first-sample lets one cold outlier bias ~4 samples (acceptable, document).
+- C.2 master-only surfacing fits no-new-wire; worker busy-dist ports stay invisible — state this in the module doc.
+
+**6. Top 5 edits**
+1. Part I: schema_version 1; rewrite F4 to the counter/gauge split.
+2. B.1: pin release form `ets:update_counter(sched_reserve, Node, {2,-1}, {Node,0})` + document clamp-heal.
+3. A.3: add per-worker `git_sha` to the field set and eunit fixture.
+4. B.2/A.3: define node `rtt_ms_avg` = mean of the node's unexpired rows' Ewma values.
+5. Part F: pin 13.7's knob-flip mechanism (separate stack run), slow-key unary phase, evicted-worker JSON shape, and master-without-local-worker.

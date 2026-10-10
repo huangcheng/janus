@@ -1,0 +1,31 @@
+# Audit — Scheduler v2.1 spec (rev 1)
+
+## 1. Verdict
+**GO WITH FIXES** — sound hardening scope with correct invariants, but four named races/gaps (EWMA ordering, drain arming, reconcile double-decrement, deploy provenance) need spec-level pins before implementation.
+
+## 2. Critical risks
+- **B.2 EWMA nondeterminism**: folding `sched_rtt` via table iteration is order-undefined; the sort key could flap snapshot-to-snapshot. EWMA must fold samples ordered by mono timestamp (rows must carry one), else selection jitters.
+- **Drain-idle arming event disappears**: v1 armed on `note_inflight` hitting zero; after B.1/A.2 decrements are caller-side ETS writes the gen_server never sees. If armed only on the 30 s tick, drain-idle stretches ~+30 s. Spec must say where arming is checked (tick + dirty flush).
+- **Reconcile/release double-decrement**: release does `ets:take` then decrement; between them, reconcile can "heal" the same unit → undercount → over-dispatch past capacity. Two-tick window makes it rare but it must be named and eunit'd (F1 covers excess, not undercount).
+- **Deploy provenance unaddressed**: evidence #2's root cause was an image built from uncommitted code; A.3 treats the symptom (view parity) only.
+
+## 3. Contradictions / stale claims
+- "last-arrival-wins" `sched_rtt` rows vs. "the node's unexpired samples" (plural) for EWMA — row key/multiplicity is ambiguous; single row per {Node,Provider} makes B.2 a no-op.
+- 13.7's "purge/reconcile bounded poll" has no number; with 10-min purge / two-tick reconcile, only the nodedown clears-both-tables path is fast. Give every poll an explicit bound (e.g. ≤70 s).
+- "Additive /metrics": evicting a counter label set re-adds it as a reset series — document so dashboards don't alert.
+
+## 4. Missing first-ship requirements
+- Pool gen_server **mailbox-length gauge** (process_info) in /metrics — the direct B.1 success signal — plus a perf re-run artifact proving the ceiling moved.
+- `erlang:system_monitor/2` is node-global single-slot: verify no existing caller is silently displaced (C.2).
+- Note_inflight "master→master only" is asserted, not verified — add a code-check note.
+- Unary fallback: pin the "worker_lost-class timeout" to the pre-stream ack deadline value; state it never fires on send-fail (that path already falls back locally).
+
+## 5. Architecture / design notes
+F1–F7 coverage is genuinely good; ETS-heir reset (F2) and single-snapshot workers view (F7) are correctly specified. vm.args validation (F6) and unary-fallback conditions (F5) are tight. Chaos steps are falsifiable and /stats-asserted as required.
+
+## 6. Top 5 concrete edits
+1. B.2: "EWMA folds unexpired samples sorted by embedded mono timestamp; sched_rtt row shape is {Node,Provider}⇒N samples keyed ⟨key, timestamp⟩ — spell it out."
+2. A.2: "Drain-idle arming evaluates reserve==0 on every sched_tick AND every snapshot/dirty flush (≤250 ms), preserving DRAIN_IDLE_MS semantics."
+3. B.1: add eunit "reconcile healing a unit whose release is mid-take must not double-decrement; undercount is clamped at 0 and reconciled upward next tick."
+4. New Part G item: "Deploy provenance: CI-only images; git SHA stamped into /stats/sched and image label; deploy script refuses dirty trees."
+5. Part F: give 13.7/13.8 explicit per-assertion poll bounds (≤70 s re-hello, ≤2-tick reserve clear) and record the perf re-run artifact path in the commit.

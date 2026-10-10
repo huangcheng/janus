@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — folds land; five small pins close the last gaps before ratification.
+
+**2. Critical risks**
+- The v2 "reserve increment is ALREADY caller-side" claim rests on the v2 capacity-1 eunit, but B.1's correctness depends on it. Add an implementation-time grep assertion (mailbox sends of `update_counter` ⇒ 0) so the move is provable, not assumed.
+- `janus_sched_pool_message_queue_len` uses `process_info` on the pool gen_server. On workers the pool is unregistered; the sched_stats guard doesn't apply here. Need a separate worker-side `whereis` check before the `process_info` call.
+
+**3. Contradictions or stale claims**
+- C.3 "at the FIRST worker admission" needs a persistence story — the flag must survive pool restarts or every crash re-warns. State `persistent_term` with a once-only stamp.
+- C.1 lists the overflow counter (`dispatch_worker_total` cap 256) but never names the label-free sink counter. Operators grep by name.
+- B.2 "~4 samples to wash out cold outlier" understates: at α=0.25 the first sample still carries ~42% at sample 4 (~13% at sample 8). Either rename or correct.
+
+**4. Missing first-ship requirements**
+- 13.7 step must assert w2's state during the storm (sticky/armed/EWMA unchanged — survivors must not be punished by w1's death).
+- B.1 eunit enumeration lists "concurrent picks on capacity-1" but not a SUSTAINED load fixture proving the mailbox actually empties (the B.1 success signal). Add a before/after pool_message_queue_len assertion in the eunit.
+- Part G runbook's note about EWMA-smoothed RTT changing v2 ordering needs an explicit "you may see brief reshuffles on enable" warning.
+- C.2 fallback deliverable ("events + last-busy age") must be stated when the OTP 27 verification runs, not deferred to a future commit.
+
+**5. Architecture / design notes**
+- Take-and-maybe-decrement helper consolidation is the right shape — gates cannot drift across release/nodedown/purge.
+- Incremental EWMA on the row (no fold order) is correct for last-arrival-wins.
+- `janus_worker_forwarded` process-dict dying with the session is cleaner than ETS for a per-call flag.
+- Build provenance (ENV + label + dirty-tree refusal) closes the uncommitted-code incident class structurally.
+
+**6. Top 5 concrete edits**
+1. Add worker-side `whereis` guard for the pool_message_queue_len `process_info` call.
+2. Name the `dispatch_worker_total` overflow counter (`janus_sched_dispatch_worker_overflow_total`) and document it.
+3. Persist C.3 first-admission flag via `persistent_term` with explicit once-only semantics.
+4. Implementation-time grep assertion that v2 reserve `ets:update_counter` is caller-side before B.1 lands.
+5. 13.7: assert w2 sticky/EWMA/drained state is unchanged during and after w1's death (survivor discipline).

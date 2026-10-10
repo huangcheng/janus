@@ -1,0 +1,31 @@
+**1. Verdict.** GO WITH FIXES — rev 3 folds land the LIVE sort hint, dirty-flush poke, EWMA sort, and chaos pins; a few body-text drift items need surgical edits.
+
+**2. Critical risks.**
+- **A.3/B.2 `rtt_ms_avg` contradicted**: A.3 body says "one number everywhere" but B.2 row is per-{Node,Provider}; fold-correct def is "per-node MEAN of unexpired Ewma cells". Sort key derivation is unnamed — implementers diverge.
+- **`{touched,Node}` cast undefined**: A.2 + fold reference a completion-path poke; B.1's gen_server keeps list omits it. Sender, handler behavior, snapshot-dirty + drain-idle re-arm eval — all unspecified.
+
+**3. Contradictions / stale claims.**
+- A.3 field list = 13 fields; fold adds `git_sha` as 14th. Body enumeration misses it.
+- **F4 (Part 0.2)** still says "evicted label sets removed from the registry — the v2 rule" — contradicts C.1's split (counters reject-into-overflow; gauges deterministic).
+- C.2 body: "only MASTER's counters surface" — fold says per-node local surfacing. Body not updated.
+- A.3 body lacks the all-expired → null + infinity fallback named in B.2 and the fold.
+
+**4. Missing first-ship requirements.**
+- 13.7/13.8 gate stack: `JANUS_NET_TICKTIME=30` must be in TEST-FLOWS.md boot env on master AND workers; spec says only "on every node".
+- `janus_sched_dispatch_local_total` unlabelled in C.1, but E adds `reason=unary_fallback` as a "value addition". Body must name the `{reason}` label with bounded set.
+- C.3 "ONE warning" needs "once per pool-process lifetime"; drained+re-hello would re-fire literally.
+- Capacity-bypass trade-off in E absent from G runbook.
+- B.1 body omits the fold's insert-default `{Node,0}` on release, per-key select+take spine for nodedown/purge, and "nodes absent from pool records" scope on zero-row cleanup.
+
+**5. Architecture notes.**
+- Caller-side ETS decoupling is consistent (reserve-first/take-then-decrement/Internal filter on reconcile and drain-idle).
+- Per-{Node,Provider} EWMA is the right granularity; per-node aggregator must be named.
+- pdict `janus_worker_forwarded` is the cleanest pre-byte predicate.
+- "No new wire" preserved by per-node local surfacing — body just needs matching rewrite.
+
+**6. Top 5 edits.**
+1. **A.3 + B.2 `rtt_ms_avg`**: replace A.3's "`rtt_ms_avg` IS the canonical incremental EWMA — one number everywhere" with "`rtt_ms_avg` (per node) = MEAN of unexpired per-{Node,Provider} row.Ewma cells; sort reads the same MEAN; all-expired → null + infinity fallback". Mirror in B.2's "sort key" line.
+2. **Define `{touched,Node}`**: add to B.1 gen_server keeps — "completion-path poke from releases → handler marks snapshot dirty + re-evaluates drain-idle arming; pick stays mailbox-free".
+3. **C.2 rewrite**: "only MASTER's counters surface" → "every node renders its OWN `janus_sched_dist_*` on its OWN /stats/sched (local read, no wire, no aggregation)".
+4. **A.3 field list**: append `git_sha` as 14th field (per-worker, from C.4 hello meta additive key).
+5. **F4 rewrite**: replace unified-eviction line with C.1 split — "counters reject beyond per-family cap into overflow (no eviction); gauges render deterministically (no flapping)".

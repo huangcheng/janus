@@ -1,0 +1,31 @@
+## 1. Verdict
+
+**GO WITH FIXES** — 9 of 10 rev-4 folds verified in the body; one fold (Part C renumbering) is claimed but not actually applied, and nothing semantic remains open.
+
+## 2. Critical risks
+
+None blocking. Residual accepted risks are all named in-spec: take-vs-reconcile undercount persists until completion (bounded, eunit'd); transient −1 on release-racing-nodedown (tick-clamped, eunit'd); unary-fallback capacity bypass and double-billing window (operator opt-in, documented); >10-min jobs purged early (v2 class).
+
+## 3. Contradictions or stale claims
+
+- **Part C ordering (the one unapplied fold):** rev-4 header claims "Part C sections renumbered into reading order (C.1, C.2, C.3, C.4)", but the body still renders C.1 (metrics) → C.2 (busy_dist_port) → **C.4** (build provenance) → **C.3** (knob-off guard). References resolve correctly either way; purely cosmetic but the fold claim is false as written.
+- **prompt.md audit-focus list is stale** (not the spec, but it misdirects auditors): it still describes "64-label-set cap with registry eviction" (rev-2 replaced this with counters-never-evicted/overflow), "knobs-all-off **boot** warning" (spec fires at first admission), and "13.8 fail-fast <10s" (spec pins <20 s via SIGTERM grace chain).
+
+## 4. Missing first-ship requirements
+
+None. eunit enumeration (B.1 race suite, A.2 drain-idle paths, B.2 EWMA, A.1/A.3 fixtures, C.4 stamp, E fallback), gate steps 13.4/13.7/13.8 with opt-in and teardown, runbook enablement order, and the rest-state invariant are all present.
+
+## 5. Architecture/design notes
+
+- Release/nodedown/purge sharing ONE take-and-maybe-decrement helper is the right drift-proofing; the insert-default form making decrements badarg-impossible is the cleanest resolution of the session-crash risk.
+- Caller-side reserve reads in `pick/1` make knobs-off ordering *fresher* than v2 — the invariant is correctly scoped to the pure `select_v2` function.
+- Two-reads-per-scrape (pool snapshot + local dist counters) with guarded pool reads is honest and worker-safe; master-only aggregation correctly preserved under the no-new-wire invariant.
+- ENV-baked git SHA + `git status --porcelain` dirty-tree refusal closes the actual incident vector (untracked files).
+
+## 6. Top 5 concrete edits
+
+1. Physically reorder Part C body to C.1, C.2, C.3, C.4 (renumber provenance→C.3, knob-off→C.4) or correct the rev-4 fold note.
+2. Update prompt.md's audit-focus list: counter overflow (not eviction), first-admission (not boot), 13.8 <20 s (not <10 s).
+3. In C.1, add one sentence naming the exact guard shape (`whereis(janus_worker_pool)` + `is_process_alive`) so implementers don't invent a try/catch.
+4. In 13.7, state the poll interval/deadline pair for the "<30 s evict" assertion (poll bound is promised but only the deadline is numeric).
+5. In Part I, tick the F1–F7 guard checkbox explicitly per item (currently a bare checklist) so ratification records the mapping.

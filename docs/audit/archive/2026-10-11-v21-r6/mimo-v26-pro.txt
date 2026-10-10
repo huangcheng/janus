@@ -1,0 +1,32 @@
+## 1. Verdict
+
+**GO WITH FIXES** — the rev-3.3 pins are present and coherent, but the NODEDOWN spine silently dropped the `Internal =:= false` decrement gate and two counters/bounds need one-line pins.
+
+## 2. Critical risks
+
+- **B.1 NODEDOWN decrement gate missing**: release pins "iff the taken row exists AND `Internal =:= false`" and PURGE says "without decrement for Internal rows", but NODEDOWN says only "`ets:take` … owns the decrement". As written, taking a probe row (Internal=true, never reserved) at nodedown decrements a reservation that was never made → reserve undercount → over-admission until tick/reconcile clamps it. Restate the same conjunct there (and note the per-key take spine should share one helper with release so the gate cannot drift).
+- Admission rollback (increment → compare RETURNED → decrement → next candidate) is race-free, but the rollback decrement must go through the same pinned `{2,-1},{Node,0}` form and must NOT touch tracked (nothing was inserted yet) — worth one sentence.
+
+## 3. Contradictions / stale claims
+
+- Header A.3 bullet: "ALL rows expired ⇒ … the sort falls back to `infinity`" — A.3 is display-only; the fallback is B.2's per-provider cell rule (body says this correctly). Delete the header phrasing.
+- Header says "rev 3"; this round is 3.3 — bump the label so the fold log and the confirmation round match.
+- 13.7 "<30 s nodedown" holds only on the RST path (docker kill); tick-granularity can exceed net_ticktime for silent loss. Scope the assertion to the kill case explicitly (text half-does: "tick floor covers only SILENT loss").
+
+## 4. Missing first-ship requirements
+
+- C.3: is `janus_sched_knobs_off_total` bumped once (at first admission) or per admission? The warning is ONE; the counter policy is unstated and the gate assertion depends on it.
+- C.2 metric names: `busy-ms/age` left "per the C.2 verification" — pin the gauge name (e.g. `janus_sched_dist_last_busy_age_seconds`) now, or C.1's enumeration is incomplete.
+- A.3: old-worker hello without `git_sha` → render `null` (trivial, unstated).
+
+## 5. Architecture/design notes
+
+The core moves are sound: the admission primitive (increment-first, compare returned count, rollback-on-over) is the only race-free form; take-owned decrement gives idempotent release for free; tracked-insert failure → two-tick heal closes F1; EWMA-on-row (one canonical number for sort/JSON/gauge) kills the fold-order nondeterminism; the counter-reject/gauge-deterministic cardinality split is the right call; Part E's session-scoped process-dictionary pre-byte predicate is adopt-safe and the buffered-bytes double-billing window is now named as THE risk; 13.8 <20 s is header/body consistent. Residual softness (take-vs-reconcile undercount, purge-early long streams, capacity bypass) is named — good.
+
+## 6. Top 5 edits
+
+1. NODEDOWN: add "`ets:take` then decrement **iff `Internal =:= false`**" (share the release helper).
+2. Pin C.3 counter semantics (once-ever vs per admission) in one clause.
+3. Name the C.2 age/busy-ms gauges in C.1's enumeration.
+4. Delete the header A.3 "sort falls back to infinity" clause.
+5. Scope 13.7's <30 s nodedown bound to the RST (kill) path; note tick-floor caveat.

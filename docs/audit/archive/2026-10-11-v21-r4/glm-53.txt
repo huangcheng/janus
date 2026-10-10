@@ -1,0 +1,25 @@
+**1. Verdict:** GO WITH FIXES — 12/13 rev-3 folds verified landed in the part bodies and coherent; the F4 rewrite is still missing from the body, plus three small residuals.
+
+**2. Critical risks**
+- **F4 (0.2) is the unlanded fold.** It still says "evicted label sets removed from the registry — the v2 rule", directly contradicting C.1's "COUNTER label sets are NEVER evicted", and falsifying the preamble's "F4 rewritten" claim. An implementer reading failure modes first builds the monotonicity-breaking behavior F4 exists to guard.
+- **C.2's per-node surfacing assumes workers serve /stats/sched.** `sched_stats/0` is a `janus_worker_pool` surface; the pool is master-side and workers skip `:8080`. Nothing pins that a worker node binds an admin listener or what its `/stats/sched` returns pool-less — the nodes where dist storms matter may have no surface.
+- **13.7's "<30 s nodedown evict" at ticktime 30 is only met via RST.** Tick-based detection at `net_ticktime=30` takes ≥30 s; "RST-or-tick — both satisfied" is wrong on the tick half. Gate will flake on non-RST deaths.
+
+**3. Contradictions or stale claims**
+- F4 vs C.1 vs preamble (above).
+- A.3's `rtt_ms_avg` parenthetical appends "the sort falls back to infinity" to a display-only aggregate, while the canonical-family wording says the per-node mean is "never used for sorting". Same trigger condition, mangled sentence — separate the node sort-key fallback from the display aggregate.
+- 0.3's "v1 ordering, bit-for-bit" overclaims: A.2 changes the live inflight source. Pure `select_v2` equivalence holds; live tie-breaks can differ transiently (deliberate, fresher) — say that instead.
+- A.3 calls `git_sha` "the worker's hello-reported image SHA"; C.4 stamps the git SHA. Same value, loose wording.
+
+**4. Missing first-ship requirements**
+- Pin the worker-side observability path for C.2: either confirm workers bind the read-only admin listener with a defined pool-less `/stats/sched`, or render `janus_sched_dist_*` straight from `janus_dist_monitor` rather than pool `sched_stats/0`.
+
+**5. Architecture/design notes**
+B.1's spine is coherent end-to-end: pinned insert-default decrement (badarg-impossible), take-owned idempotent release, nodedown/purge on one per-key take spine, zero-row cleanup scoped to pool-absent nodes, `Internal =:= false` reconcile filter, named take-vs-reconcile undercount, shared adopt reset. The `{touched, Node}` poke honestly restores v2's release-cast rate while keeping pick mailbox-free; the tick bound for quiet nodes is stated. Part E's process-dictionary predicate is sound (dies with the session, no adopt concern); release-before-LocalFun is ordered and asserted. B.2's one-canonical-number discipline holds across sort/JSON/gauge.
+
+**6. Top 5 concrete edits**
+1. Rewrite F4 to the counter/gauge split; delete "evicted label sets removed from the registry".
+2. Pin the worker-node surface for dist counters (admin listener on workers, or bypass the pool).
+3. Decouple A.3's `rtt_ms_avg` from the sort fallback; state the node sort-key fallback separately.
+4. Relax 13.7's evict bound to ≤40 s (or gate at ticktime 15) so the tick path satisfies it.
+5. Soften 0.3's "bit-for-bit" to pure-function equivalence, noting the fresher live reserve read; align A.3's "image SHA" wording to "git SHA".

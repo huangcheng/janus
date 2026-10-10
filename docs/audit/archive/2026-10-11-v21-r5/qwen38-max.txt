@@ -1,0 +1,30 @@
+**1. Verdict:** GO WITH FIXES — all rev-3.2 folds are present and coherent; the residuals are three mechanical pinning gaps, none touching selection semantics.
+
+**2. Critical risks**
+- **Worker-side `/stats/sched` path undefined.** C.2 pins per-node dist rendering ("works on master AND worker"), but `sched_stats/0` is master-only and C.1 still says the scrape reads it "ONCE per scrape." On a pool-less worker that call has no target; the handler's degraded worker-mode contract (dist counters + `git_sha` only) is implied, never pinned.
+- **Negative-reserve healing dependency.** Release decrement can create `{Node,-1}`; B.1 relies on "tick clamp," but reconcile is pinned decrement-only. If the tick clamp write is not kept alongside the scoped zero-row deletion, -1 rows persist and capacity reads loose until nodedown. Name the clamp as a tick duty explicitly.
+
+**3. Contradictions / stale claims**
+- Rev-2 header bullet still says **13.8 in-flight failure `< 10 s`**; Part F body correctly says `< 15 s` (SIGTERM/SIGKILL grace). Stale header.
+- C.3 promises `janus_sched_knobs_off_total` in **/metrics AND /stats/sched**, but C.1's counter enumeration omits it.
+- `janus_sched_note_inflight_deprecated_total` is a counter listed inside the gauge block (cosmetic, invites misrender).
+- Non-goals line "only REMOVES a master-side internal call and ADDS vm.args lines" understates the additive hello `git_sha` key (safe, but the sentence is stale).
+
+**4. Missing first-ship requirements**
+- Worker-node render branch for `/stats/sched` + `/metrics` (see risk 1).
+- B.2 does not restate `sched_rtt` table options; caller-side Ewma reads at pick time need `public + read_concurrency` pinned exactly as B.1 does for `sched_reserve`.
+- C.4's dirty-tree refusal lives in `deploy_prod.sh`, which belongs to the **dashboard repo** (`../janus-dashboard/scripts/`) — name the repo so the guard isn't implemented nowhere.
+
+**5. Architecture/design notes**
+- B.1 concurrency story is now correct and honestly stated: increment was already caller-side; only tracked insert/release leaves the mailbox; take-spine unifies release/nodedown/purge with no double-decrement.
+- One canonical EWMA number feeding sort/gauge/JSON (with `rtt_ms_avg` demoted to display mean) cleanly kills the mean-vs-EWMA split.
+- "Bit-for-bit v1" scoped to the pure `select_v2` contract with live-reserve runtime ordering documented as fresher-by-design — correct scoping.
+- Drain-idle conjunct (non-Internal tracked empty ∧ reserve == 0) cannot false-arm; drift-blocked arming heals in ≤ 2 ticks — acceptable.
+- No item alters tier order or knob-off defaults; selection semantics unchanged.
+
+**6. Top 5 concrete edits**
+1. C.1: add `janus_sched_knobs_off_total` to the counter list.
+2. C.2/C.1: pin the pool-less worker render branch (`/stats/sched` = dist stats + `git_sha`; master-scoped scrape wording).
+3. Header rev-2 bullet: correct 13.8 bound to `< 15 s`.
+4. B.2: pin `sched_rtt` as public/read_concurrency for caller-side Ewma reads.
+5. C.4: state the `git status --porcelain` refusal is implemented in the dashboard repo's `deploy_prod.sh` against the Janus tree.

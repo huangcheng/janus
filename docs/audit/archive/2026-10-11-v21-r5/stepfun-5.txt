@@ -1,0 +1,26 @@
+## 1. Verdict
+**GO WITH FIXES** — every rev‑3.2 fold is present and internally coherent; residuals are implementable gaps, not design breaks.
+
+## 2. Critical risks
+- **C.2 has no worker endpoint unless proven otherwise.** It requires each worker to render `/stats/sched`. Workers skip `:8080`, but the spec never states that `:8090` is role‑gated ON for workers. If the admin listener is master‑only, per‑node dist telemetry is unobservable — the exact storm moment C.2 exists for.
+- **Part E flag lifecycle.** `janus_worker_forwarded` "dies with the session" is safe only if a worker session is one‑per‑job. If sessions are reused, a stale set flag silently suppresses a legitimate fallback. Not pinned.
+- **C.4 "image label → env at boot" is not automatic** from inside a container. Pin the mechanism (Dockerfile `ENV` vs deploy‑script `docker run -e`) or the stamp reads empty.
+- **C.2 defers two blockers to implementation**: system_monitor exclusivity grep and the OTP‑27 unbusy verdict. If another module owns system_monitor, dist telemetry never fires and nothing fails loudly.
+
+## 3. Contradictions / stale claims
+None material. The old "64‑label cap with eviction" is fully removed; `64` now governs only the JSON `rtt_ms` window (coherent across F4/C.1). "v1 bit‑for‑bit" is correctly scoped to the pure function (0.3); the RTT‑EWMA knob‑ON ordering change is disclosed (B.2/G). Both are easy to misread — see edit 5.
+
+## 4. Missing first‑ship requirements
+- Role‑gated `:8090` on workers (risk 1).
+- C.1 lists `janus_sched_dispatch_local_total` label‑free, yet Part E needs `dispatch_local{unary_fallback}` — the `reason` label is unstated.
+- No eunit pins that a post‑nodedown release decrement's transient `-1` is clamped **before** a pick reads it as negative capacity (B.1 names the transient but not the pick‑visible bound).
+
+## 5. Architecture/design notes
+B.1's throughput win is pick‑side only; completions still cost one `touched` cast at v2's rate — honest and sufficient, but "de‑bottleneck" must not be sold as mailbox‑free completions. Capacity exactly‑one‑wins correctly rests on the atomic counter + insert‑default; the pinned form is preserved everywhere. Reconcile's never‑increment undercount is bounded and named — acceptable softness.
+
+## 6. Top 5 concrete edits
+1. **C.2**: state `:8090` starts on workers; handler calls `janus_dist_monitor:stats/0` unconditionally, pool stats only on master.
+2. **Part E**: reset `janus_worker_forwarded` at job start (or assert session‑per‑job); eunit the reused‑session case.
+3. **C.4**: pin the exact env source and who sets it at run time.
+4. **C.1**: render `janus_sched_dispatch_local_total{reason}` and document `unary_fallback` in the reason enum.
+5. **Non‑goal/0.3**: add one line — "RTT knob ON reorders vs v2 (EWMA)" — so "selection semantics unchanged" cannot be misread to cover the knob‑ON path.

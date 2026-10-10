@@ -1,0 +1,28 @@
+**1. Verdict**
+GO WITH FIXES — the spec is internally consistent after 8 rounds; three one-sentence pins remain (sort-key ETS access, a gate race barrier, a provenance smoke assert), none architectural.
+
+**2. Critical risks**
+- **B.2 sort-key table access unpinned.** `pick/1` is caller-side; the live `sched_reserve` read is pinned public + `read_concurrency`, but the live read of the `sched_rtt` `{Node,Provider}` Ewma cell is not. If `sched_rtt` stays gen_server-private, every RTT-knob-ON pick badargs on the hot path — violating "request never fails because of bookkeeping."
+- **13.7 UNARY phase has no dispatch barrier.** "kill w1 before first byte" is timing-hoped, not gated: if the kill lands pre-dispatch the job goes to w2/local and the `unary_fallback ≥ 1` assert flakes. Pin: poll `dispatch_worker{w1,_}` delta ≥ 1 before `docker kill`.
+- **Nodedown delete-after-take window.** Between the per-key take loop and `ets:delete(sched_reserve, Node)`, a re-hello'd pick's fresh increment is wiped → under-admit-by-1 until that job completes. Same accepted class as take-vs-reconcile, but *unnamed*, while the spec claims all softness is named.
+
+**3. Contradictions / stale claims**
+- Fold-note label drift survived its own "fixed" claim: rev 3 "C.4 dirty-tree guard" and rev 4 "C.4 runtime visibility" both describe build provenance, which is **C.3** in the body (C.4 = knob-off guard).
+- The audit prompt's preamble lags the body (13.8 "<10 s" vs body's <20 s; "64-label-set cap with eviction" vs body's counters-never-evicted). Body governs; harmless but worth syncing.
+- Body otherwise self-consistent: `rtt_ms_avg` null-not-0, F7 pool-series-only, schema_version 1 everywhere.
+
+**4. Missing first-ship requirements**
+- Prod read-only smoke should assert `/stats/sched` `git_sha` **present and ≠ `unknown`** — a dropped `--build-arg` currently ships silent "unknown" and defeats C.3's entire point.
+- A.2's grep verification should explicitly cover modality handlers (`janus_http_modality` family) as `note_inflight` call-site candidates, not just `janus_http_worker_client`.
+
+**5. Architecture/design notes**
+- Honest bounds hold: the `{touched,_}` poke keeps one cast per completion (mailbox win is pick-path only); quiet nodes tick-bounded 30 s; v2.1 under-count shape correctly distinguished from v2 over-count (G.7).
+- Pre-byte predicate via process dictionary is correctly session-scoped; DOWN-vs-chunk mailbox ordering closes without a double-emit path.
+- In-memory counters resetting at master restart is handled by 13.8's absolute-≥-1 rule; Prometheus reset detection covers scrapers.
+
+**6. Top 5 concrete edits**
+1. B.2: pin `sched_rtt` public + `{read_concurrency, true}`; caller-side Ewma read at pick.
+2. 13.7 (both phases): dispatch barrier — assert `dispatch_worker{w1,_}` delta ≥ 1 before `docker kill`.
+3. B.1 NODEDOWN: name the delete-vs-re-hello undercount (bounded 1, heals at completion).
+4. C.3: add `git_sha ≠ unknown` assertion to the prod read-only smoke.
+5. Fix rev 3/rev 4 fold-note "C.4" → "C.3" for build-provenance items.

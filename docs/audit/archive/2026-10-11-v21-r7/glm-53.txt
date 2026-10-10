@@ -1,0 +1,32 @@
+**Audit of `F:\Janus\docs\audit\target.md` (rev 4, round 7 confirmation)**
+
+**1. Verdict: GO WITH FIXES** — the architecture is sound and all round-6 pins landed except three documentation-level defects (one claimed fold was never applied); every fix is mechanical.
+
+**2. Critical risks**
+- A fold explicitly claimed applied and "grep-verified" (Part C renumber) is **not** in the body — treat the fold log as claims, not facts, until re-verified.
+- C.1/C.2 assume workers serve `/stats/sched` + `/metrics`; nothing in the spec pins the worker-side admin listener. If workers run no :8090, the per-node `janus_sched_dist_*` deliverable has no surface — precisely during dist storms.
+- Everything substantive (take-vs-reconcile undercount, transient −1, unary double-billing) is bounded, default-off, and named — not blockers.
+
+**3. Contradictions or stale claims**
+1. Rev-4 fold: "Part C sections renumbered into reading order (C.1, C.2, C.3, C.4)" — body order is **C.1, C.2, C.4, C.3**.
+2. C.1/F4: the 64-recency window "governs ONLY the JSON rtt_ms map" — but A.3's pinned field list contains **no rtt_ms map** (only `rtt_ms_avg` + cells). The window is orphaned; rev-3's header "EWMA recency-64 window" for gauges also contradicts C.1's "no windowing on the gauge".
+3. B.2 eunit still says "reads rtt_ms_avg null / count 0 **and the sort falls back to infinity**" — the exact coupling the rev-4 fold deleted; the sort rule is per-provider only.
+4. Non-goals "No new wire messages" vs C.4's additive hello meta key — softened elsewhere as gateway-role scoping; wording only.
+
+**4. Missing first-ship requirements**
+- Pin the worker HTTP surface for C.1/C.2 (or state where worker dist counters render).
+- `deploy_prod.sh` lives in the dashboard repo; the spec never says the `git status --porcelain` check targets the **Janus** tree.
+- The dispatch_worker overflow accumulator counter is undescribed (name, labels).
+
+**5. Architecture/design notes**
+- No silent selection-semantics change: B.2's EWMA sort key and A.2's live inflight read are declared deliberate; the pure `select_v2` contract and knobs-off equivalence eunit are preserved.
+- B.1's single take-and-maybe-decrement helper + insert-default decrement yields idempotent release, badarg-impossible sessions, and one nodedown/purge spine — sound.
+- Mixed-version safety holds: all bookkeeping is master-side; workers gain only additive hello meta.
+- Softness direction flip (undercount until completion) is bounded by the two-tick guard — acceptable.
+
+**6. Top 5 concrete edits**
+1. Apply the Part C renumber (swap the C.3/C.4 bodies) or correct the fold note.
+2. Add the per-provider `rtt_ms` recency-64 map to A.3's field list (needed for prod-view field-compatibility anyway) **or** delete the 64-window references from C.1/F4 — pick one.
+3. Delete "and the sort falls back to infinity" from B.2's eunit line; keep the per-provider rule sentence.
+4. Pin (a) worker-side `/stats/sched`+`/metrics` availability and (b) the Janus tree as the porcelain-check target in C.4.
+5. Name the reject-new overflow counter (e.g. `janus_sched_dispatch_worker_overflow_total`, label-free) in C.1 so cap rejection is observable.

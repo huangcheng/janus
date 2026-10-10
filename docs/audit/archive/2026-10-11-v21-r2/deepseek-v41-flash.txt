@@ -1,0 +1,31 @@
+**1. Verdict:** GO WITH FIXES — the fold set is largely coherent, but one internal contradiction (schema_version), one undefined field contract (per-node `rtt_ms_avg`), and one unproven recovery dependency must close before first ship.
+
+**2. Critical risks**
+- **A.3 granularity gap:** B.2 EWMA is per-`{node,provider}`, but the workers entry exposes a per-*member* `rtt_ms_avg` and A.3 still calls it "mean of the node's unexpired rtt rows." No aggregation rule → sort, JSON, and `/metrics` can legitimately disagree.
+- **13.7 recovery depends on vaporware:** "the existing … `net_kernel:connect_node/1` retry — Task C" names a task absent from this spec and unconfirmed in the shipped base. The ≤70 s re-hello assertion is unproven.
+- **Part E capacity bypass:** release-then-LocalFun never re-reserves; mass worker loss admits unbounded local execution. Acceptable only if documented.
+- **C.1 counter overflow-reject** permanently drops per-node/provider attribution for `dispatch_worker_total` as providers churn; `*_overflow_total` is dimensionless.
+
+**3. Contradictions / stale claims**
+- **Part I checklist says "schema_version 2"**; A.3 and the rev-2 header pin **schema_version stays 1**. Direct contradiction.
+- A.3: "mean of the node's unexpired rtt rows" vs its own next bullet "`rtt_ms_avg` IS the canonical incremental EWMA."
+- Rev-2 header claims the **13.4 rest-state invariant** fold; Part F body specifies only 13.7/13.8 — the 13.4 edit is missing.
+- Prompt says fallback never fires on `janus_error`; Part E body never states it.
+
+**4. Missing first-ship requirements**
+- No definition of per-node `rtt_ms_avg` aggregation.
+- 13.4 rest-state assertion not written.
+- C.2 "verify unbusy message exists" + system_monitor exclusivity are open with no fallback if exclusivity fails.
+- No gate step asserting A.3 field parity or C.4 `git_sha` surfacing.
+
+**5. Architecture notes**
+- Caller-side track/release is sound: reserve-bump-first + `take`-owns-decrement gives idempotence and exactly-one-wins via counter atomicity; reconcile against the ETS set is correct. But the pool now never observes drain completion, so sticky arming is bounded by tick+250 ms — document it.
+- **Internal probe rows block drain-idle for 10 min** (A.2 emptiness conjunct "any kind"). With probes on, this delays sticky-close; exclude `Internal` rows from the emptiness test.
+- schema_version=1 with additive keys is fine if stated once.
+
+**6. Top 5 concrete edits**
+1. Fix Part I to `schema_version 1`.
+2. Define per-node `rtt_ms_avg` aggregation (or expose per-provider only) and delete "mean" wording.
+3. Write the 13.4 rest-state assertion into Part F.
+4. Add the re-hello `connect_node` retry task (or demote ≤70 s to a measured gate assertion).
+5. Re-reserve capacity for unary fallback (or document bypass) and exclude `Internal` rows from drain-idle emptiness.

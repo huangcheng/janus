@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — every Rev 3/3.2 fold verified present and coherent; residuals are mechanical (enumeration drift, two stale parentheticals), no new architectural defect.
+
+**2. Critical risks**
+- C.1's enumeration is the render contract, yet it omits C.2's `janus_sched_dist_*` counters and C.3's `janus_sched_knobs_off_total` — the second consecutive round of list drift (round 4 caught the F4 body; same failure mode, now in the opposite direction).
+- Worker-node /metrics is unpinned: C.1 says render from `sched_stats/0` once per scrape, but that call is master-only (workers run no pool). Worker :8090 behavior (zero-out vs absent vs crash) is unspecified.
+- A.3's `rtt_ms_avg` bullet still says "and the sort falls back to infinity" — couples the node display mean to sorting, contradicting B.2's display-only pin; an implementer reading A.3 alone could sort on the mean.
+
+**3. Contradictions or stale claims**
+- Rev-2 fold header: 13.8 "< 10 s" vs Part F body "< 15 s" (deliberate widening; header not updated).
+- `janus_sched_note_inflight_deprecated_total` sits in the GAUGE list but is a counter (`_total`, must support `rate()`).
+- Part C ordered C.1, C.2, C.4, C.3 (editorial).
+- Folds verified intact: F4 body rewrite, C.2 per-node surfacing via direct `janus_dist_monitor:stats/0` merge, B.2 per-{Node,Provider} Ewma sort key with infinity fallback, purge >10-min slot-free naming, pure-contract scoping of the v1-equivalence invariant, 13.7 RST-vs-tick reasoning, 13.8 SIGTERM/SIGKILL grace chain.
+
+**4. Missing first-ship requirements**
+- No named eunit for C.1 itself (scrape one snapshot → assert every enumerated name + renderer escaping); Part I claims "eunit per item".
+- No counter-vs-gauge type table in C.1 — the source of the misclassification above.
+
+**5. Architecture/design notes**
+- Live per-candidate `sched_reserve` reads trade cross-candidate snapshot consistency for freshness — acceptable for preference ordering; capacity remains enforced by the atomic pinned-form increment (keep the capacity-1 eunit as proof).
+- Dist counters bypassing the pool is correct under no-new-wire; only the worker /metrics shape needs pinning.
+- 13.7's `JANUS_NET_TICKTIME=30`, affinity_node pinning, slow-key unary, and separate stack boot are implementable as written.
+
+**6. Top 5 concrete edits**
+1. C.1 enumeration: add `janus_sched_dist_busy_events_total` (+ `busy_ms_total` iff OTP 27 verifies unbusy) and `janus_sched_knobs_off_total`; move `note_inflight_deprecated_total` to counters; add the type table.
+2. C.1: pin worker-node /metrics — pool-derived sched_* render zero/absent on workers; dist counters render from the local `janus_dist_monitor` read on every node.
+3. A.3: delete "and the sort falls back to infinity" from the `rtt_ms_avg` bullet — the fallback belongs to the per-provider cell (B.2).
+4. Update the rev-2 fold header's 13.8 bound to <15 s (or mark superseded).
+5. Reorder C.3 before C.4; add the C.1 render eunit.

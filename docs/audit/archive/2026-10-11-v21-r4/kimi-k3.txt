@@ -1,0 +1,26 @@
+## 1. Verdict
+**GO WITH FIXES** — rev-3 folds are landed and coherent in 20/21 spots, but F4's body was never actually rewritten (stale v2 eviction text contradicting C.1), and B.2/C.2 carry two smaller internal contradictions.
+
+## 2. Critical risks
+- **F4 body is stale.** Part 0.2 F4 still reads "the /metrics rendering caps label sets exactly like /stats/sched does (64-entry budget, **evicted label sets removed from the registry** — the v2 rule)". C.1 mandates counters NEVER evicted (reject-new-into-overflow) and gauges deterministic without eviction. The preamble claims F4 was rewritten; it wasn't. An implementer reading Part 0 first will build the wrong registry semantics — this is exactly the incident class the dirty-tree guard (C.4) exists to prevent, now in spec form.
+- **C.2 worker-side rendering path doesn't exist.** "Each node renders its OWN `janus_sched_dist_*` counters on its own /stats/sched" + final line "Exposed through `sched_stats/0` (additive) and C.1 rendering" — but `janus_worker_pool:sched_stats/0` is master-only; workers run no pool. The worker's admin listener needs a direct `janus_dist_monitor:stats/0` read, and C.1's "reads `sched_stats/0` ONCE per scrape" must not crash/omit on workers. Unspecified.
+
+## 3. Contradictions or stale claims
+- **B.2 vs A.3 on "ONE canonical number".** B.2: "the snapshot builder, the sort key, /stats/sched `rtt_ms_avg`, and the /metrics gauge ALL read the row's Ewma". But `rtt_ms_avg` is per-NODE (mean of unexpired per-provider cells per A.3) — for a 2-provider node it is no row's Ewma. A.3's "ONE canonical RTT family… display-only aggregation" wording is correct; B.2's sentence predates it. Fix B.2: sort key + gauge read the row Ewma; `rtt_ms_avg` is the A.3 mean.
+- **"Bit-for-bit v1 ordering" overclaims.** With the sort reading `sched_reserve` LIVE, runtime ordering under concurrent load can diverge from v2's flush-bounded hint (intended — "FRESHER"). The pure-function equivalence eunit still holds; scope the invariant wording to the pure contract, not runtime traces.
+
+## 4. Missing first-ship requirements
+- Worker-side /metrics behavior for C.1 on a node with no pool (explicit degrade rule).
+- Nothing else structural — eunit enumerations, chaos bounds, provenance, runbook are complete.
+
+## 5. Architecture/design notes
+- Insert-default decrement semantics verified: `update_counter/4` applies the op to the inserted `{Node,0}` default → transient −1, tick-clamped. Sound.
+- Take-owns-decrement spine (release/nodedown/purge) is uniform; the named undercount bound is honest.
+- `{touched,Node}` poke rate = v2 release-cast rate; pick path mailbox-free claim holds.
+
+## 6. Top 5 concrete edits
+1. Rewrite F4 body to the counter/gauge split (mirror C.1's language verbatim).
+2. Fix B.2's "ALL read the row's Ewma" sentence; delegate `rtt_ms_avg` to A.3.
+3. C.2: specify worker rendering via `janus_dist_monitor:stats/0` direct read; drop/replace "through `sched_stats/0`".
+4. C.1: state worker-scrape behavior explicitly (dist counters local; pool families absent).
+5. Reword 0.3 "bit-for-bit" invariant to "pure select_v2 ordering equivalence; live-read freshness is a deliberate runtime change".

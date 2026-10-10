@@ -1,0 +1,30 @@
+## 1. Verdict
+**GO WITH FIXES** — core design is sound and honest about trade-offs, but probe-row accounting in the new reconcile guard, caller-side write ordering, and the schema_version bump need pinning before ratification.
+
+## 2. Critical risks
+- **B.1 reconcile vs `sched_tracked` must exclude `Internal=true` probe rows.** Probes insert tracked rows but never reserve; if the two-tick guard compares raw counts, reserve < tracked reads as negative drift and the guard "heals" reserve upward — capacity corruption from a bookkeeping table.
+- **Caller-side write order unpinned.** Pick must bump `sched_reserve` with the pinned 4-tuple `ets:update_counter/4` form FIRST and only insert the tracked row on success (bump failure ⇒ try next candidate); release = `ets:take` then pinned-form decrement. The 5-tuple ban must be restated for these new writers or B.1 reintroduces the wrap bug.
+- **Drain-idle on reserve=0 is not equivalent under reconcile.** A downward heal on a draining node can hit 0 while jobs still run, arming the sticky timer early. Arm on the node's tracked-set emptiness, not the counter.
+- **schema_version 1→2 contradicts "additive."** Additive keys don't require a bump; the bump breaks existing pinned gate/eunit assertions and any consumer. Pick one: keep 1, or enumerate every fixture that flips.
+
+## 3. Contradictions or stale claims
+- C.3's boot counter is only useful if /metrics is scraped — prod scrapes nothing today (the eval itself noticed zero prometheus rendering). A boot-time counter invisible in /stats/sched is surface without surface.
+- F claims "no log scraping," but C.3's warning is log-only; only the counter half is falsifiable by its own gate rules.
+- 0.1.2's real lesson is uncommitted code reached prod; A.3 replaces the view but nothing prevents recurrence.
+
+## 4. Missing first-ship requirements
+- **Build provenance**: embed git sha in the image, expose it in /stats, and have deploy assert a clean tree — one call detects "prod image ≠ main" forever.
+- C.1's `janus_sched_rtt_ms` must read the SAME snapshot-builder EWMA map (B.2) via `sched_stats/0`; state this explicitly or F7 torn-state risk reappears through the metrics path.
+- 13.7/13.8: confirm the ≤70 s re-hello bound is untouched by Part D (ticktime default unchanged) — say so.
+
+## 5. Architecture/design notes
+- Keep `sched_tracked` and `sched_reserve` adopt/reset in ONE shared helper so F2 can't drift from the reserve path later.
+- The verify-at-impl honesty on busy/unbusy is good; pin the outcome sentence in `janus_dist_monitor`'s module doc at implementation time.
+- E's fire conditions are complete; add an eunit assertion that reservation release precedes `LocalFun` so capacity isn't double-held during the fallback.
+
+## 6. Top 5 concrete edits
+1. B.1: exclude `Internal=true` rows from the reserve-vs-tracked comparison (purge still reaps them).
+2. B.1: pin write order (reserve bump → tracked insert; take → decrement) and restate the pinned update_counter form.
+3. A.2: drain-idle arms on per-node tracked-set empty, not reserve=0.
+4. A.3: keep schema_version=1, or list the fixtures that flip to 2.
+5. Add git-sha provenance to image + /stats + deploy-time clean-tree assert.

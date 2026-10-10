@@ -1,0 +1,28 @@
+1. **Verdict: GO** — the round 1–8 folds hold together; remaining items are editorial (provenance labels) or already-hedged verify-at-impl, nothing blocking.
+
+2. **Critical risks**
+- Part E cross-sender ordering: the monitor `{'DOWN'}` and worker chunk messages come from different processes; DOWN can be processed before an already-delivered chunk, so "pre-byte" is really "no chunk *processed* yet". Inside the documented double-billing window, but unnamed.
+- 13.7 unary-phase "kill w1 before first byte" rides operator timing; the slow key widens the window but does not pin it.
+- C.2 unbusy-message existence is unknown on OTP 27 — hedged with a stated fallback deliverable; acceptable.
+
+3. **Contradictions or stale claims**
+- prompt.md still summarizes /metrics as "64-label-set cap with registry eviction" — superseded by the rev-2 rule (counters never evicted; per-family caps with reject-into-overflow; gauges deterministic). Spec text is authoritative; the summary should be fixed.
+- Spec header says "rev 4 — FINAL… round 6" while the history is at round 8 (rev 4.2); fold records for rounds 7–8 are absent from the doc — ironic given C.4 is about provenance.
+- prompt's "member.inflight removed from pure pool functions" overstates; the spec's pin ("select_v2 input contract unchanged; pick supplies inflight live") is the accurate one.
+
+4. **Missing first-ship requirements**
+- None material. Nice-to-have: make the B.1 pool-mailbox-gauge before/after measurement a saved gate artifact, not just a commit note.
+
+5. **Architecture/design notes**
+- Admission increment-first-then-compare is sound: the atomic returned count is the decision; a loser's rollback interleaving another picker's increment is conservative-only (never over-admits).
+- The nodedown select+take spine with the insert-default `{2,-1}` cannot badarg; the same-tick negative clamp closes the residue.
+- Drain-idle conjunct (non-internal tracked empty ∧ reserve == 0) is false-arm-safe: tracked rows vanish only on take/completion, and the take-vs-reconcile undercount touches reserve only.
+- Workers surfacing dist counters on :8090 respects both master-only :8080 and no-new-wire (local reads, per-node).
+- The E ordering race and 13.7 kill timing are the only spots where "asserted" slightly outruns "deterministic".
+
+6. **Top 5 concrete edits**
+1. Retitle the spec to rev 4.2 and add a one-line fold record for rounds 7–8.
+2. Part E: add one sentence naming the DOWN-vs-in-transit-chunk mailbox ordering as part of the documented pre-byte window, so a future reader doesn't file it as a bug.
+3. Part F 13.7 unary phase: pin the kill trigger (poll the dispatched counter, or a fixed post-dispatch delay bounded by slow-key TTFB) instead of "kill before first byte".
+4. Part C.1: pin the listener — sched_* series render on the :8090 read-only admin listener, same surface as /stats/sched.
+5. Fix prompt.md's /metrics summary to the ratified counter/gauge split so later rounds don't re-litigate eviction.

@@ -1,0 +1,27 @@
+**1. Verdict:** GO WITH FIXES — 20 of 21 rev-3 folds verified landed and coherent; F4 never got rewritten, and three implementation-path gaps need pinning before first ship.
+
+**2. Critical risks**
+- **C.2 render path is unimplementable as written if the pool is master-only.** "Every node renders its own `janus_sched_dist_*` on its own /stats/sched" plus "Exposed through `sched_stats/0`" assumes `janus_worker_pool` (and an admin :8090 listener) runs on workers. If the pool is master-only, workers have no `sched_stats/0` and no surface — and dist storms are exactly when the worker side matters. Pin: pool-on-workers, or a separate `janus_dist_monitor:stats/0` folded into the local admin render.
+- **Drain-idle false-arm race.** Arming reads `reserve == 0` while picks bump reserve caller-side; a pick landing between the emptiness check and the arm (or after) arms sticky around an in-flight job. Same race existed in v2 off `member.inflight` (not a regression), but the spec pins only the reconcile case. Draining-node selectability must be pinned.
+
+**3. Contradictions / stale claims**
+- **F4 (0.2) is stale**: still "64-entry budget, evicted label sets removed from the registry — the v2 rule", no counter/gauge split — directly contradicting C.1 (counters NEVER evicted, per-family reject-into-overflow; gauges deterministic, 64-window only on the JSON rtt map). The preamble's "F4 rewritten" is the one fold that did not land; the 21/21 count is 20/21.
+- All other folds verified in-body: live-reserve pick read, `{touched}` completion poke, `rtt_ms_avg` + `git_sha`, C.4 porcelain/`unknown`, B.1 race pins, non-Internal drain-idle conjunct, 13.7 pins, C.1 direct-Ewma gauge, Part E process-dictionary flag, 13.4 rest-state in Part F, G EWMA note, schema_version 1.
+
+**4. Missing first-ship requirements**
+- Unary knob plumbing (env → `janus_config`/persistent_term) unpinned; 13.7 unary phase lacks a bound on how fast the fallback fires after `DOWN` (stream phase has < 30 s).
+- Unspecified whether probe (`Internal`) releases also send the `{touched}` poke — mailbox noise at probe rate; scope it or state it.
+- Confirm workers serve :8090 at all (C.2 per-node rendering and the C.3 gate assertion depend on it).
+
+**5. Architecture / design notes**
+- B.1 is sound: the pinned insert-default form kills the badarg class, take-owned decrement gives idempotence, the `Internal =:= false` filter removes manufactured probe drift; the named take-vs-reconcile undercount is microsecond-window and eunit-bounded — acceptable.
+- Live reserve read in pick is one ETS read per candidate — noise against provider latency, strictly fresher than v2's flush-bounded hint; the knobs-off equivalence contract is unchanged.
+- Part E's session-scoped pre-byte flag is the right shape; chat-family-only correctly excludes double-billed generations.
+- **No silent selection-semantics change found**: knobs-off ordering contract unchanged; the only ordering delta (EWMA RTT) is knob-gated and documented in G.
+
+**6. Top 5 concrete edits**
+1. Rewrite 0.2 F4 to the C.1 split (counters never evicted; gauges deterministic; 64-window only on the JSON `rtt_ms` map).
+2. C.2: pin the worker-side render path (pool-on-workers vs. `janus_dist_monitor:stats/0` in the local render); note monotonic counters make F7 torn reads moot.
+3. A.2/B.1: pin draining-node selectability; if selectable, drain-idle arming must re-validate reserve or cancel sticky on a later bump.
+4. Part E: pin knob plumbing and add a < 30 s fallback-firing bound to the 13.7 unary phase.
+5. B.1: scope the `{touched,Node}` poke to non-Internal releases, or state that probes poke too.

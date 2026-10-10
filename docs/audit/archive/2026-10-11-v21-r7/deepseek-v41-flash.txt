@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — rev 4 folds are internally consistent and safe to ship, but three under-specified seams (sched_rtt access, the B.1 undercount bound, C.1 overflow/cardinality) should be pinned before implementation.
+
+## 2. Critical risks
+- **B.2 read path unspecified**: `pick/1` reads `{Node,P}` Ewma caller-side, but only `sched_reserve`/`sched_tracked` get `read_concurrency` pinned. `sched_rtt`'s table options and absent-cell (badarg vs `infinity`) handling are not stated — a caller-side sort can crash or read a protected-table error.
+- **B.1 undercount → over-admission** is named but unquantified. "Bounded by the race window" is hand-wavy; with N concurrent takes per tick the overshoot scales with N. Needs a numeric eunit bound, not prose.
+- **Part E capacity bypass**: release-then-local never re-reserves, so mass worker loss admits unbounded local execution. Documented as a trade, but no rate limit, circuit-breaker, or per-fallback log — a silent cost explosion is possible.
+- **C.1 gauge cardinality**: `janus_sched_rtt_ms{node,provider}` is uncapped (relies on TTL churn); the label-free overflow accumulator for `dispatch_worker_total` is described but never named in the render list.
+
+## 3. Contradictions / stale claims
+- Audit brief says "64-label-set cap with registry eviction"; spec F4 correctly forbids counter eviction (reject-into-overflow). Spec is self-consistent — the brief is stale; ensure no eviction text survives in code/docs.
+- **13.8 bound mismatch**: brief says <10 s, spec Part F says <20 s. Pin one and name the exact docker `--stop-timeout`/SIGTERM→SIGKILL grace.
+- A.2 removes `member.inflight` yet A.3/snapshot retains `inflight` (reserve sample). Intentional, but restate so a reader doesn't "clean up" the snapshot field.
+
+## 4. Missing first-ship requirements
+- `sched_rtt` table creation + concurrency options, and cold-start ordering guaranteeing both ETS tables exist before the first `pick/1`.
+- The C.2 unbusy-message decision must fix the exact metric name and the mandated module-doc sentence (spec says "state which" without naming it).
+- Record the system_monitor exclusivity grep result (F3/§C.2) as an artifact.
+- A log/rate policy for every `unary_fallback` use.
+
+## 5. Architecture notes
+Incremental EWMA on the single last-arrival row is the right fix (deterministic, no fold order). Take-owns-decrement plus one shared take-and-maybe-decrement helper prevents release/nodedown/purge drift — good. Caller-side tracked + two-tick reconcile preserves "request never fails for bookkeeping". No silent selection change: EWMA only bites with the RTT knob on (stated in G).
+
+## 6. Top 5 concrete edits
+1. Pin `sched_rtt` options (public + `read_concurrency`) and absent/expired cell ⇒ `infinity`; add eunit.
+2. Reconcile 13.8's bound to one number and pin docker stop-timeout.
+3. Name the overflow counter and add a TTL/cap note for the rtt gauge.
+4. Quantify the B.1 take-vs-reconcile undercount and assert it in eunit.
+5. Add a fallback log/rate and restate snapshot `inflight` is display-only.

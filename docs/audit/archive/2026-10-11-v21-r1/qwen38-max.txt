@@ -1,0 +1,31 @@
+**1. Verdict**
+GO WITH FIXES — direction is sound, but B.2's EWMA state, the nodedown release race, drain-idle eventing, and unary-fallback scope must be pinned before implementation.
+
+**2. Critical risks**
+- **B.2 may be a silent no-op:** sched_rtt rows are "last-arrival-wins" (one row per {node,provider}); recomputing EWMA "over unexpired samples" at snapshot time has no history to consume — EWMA collapses to latest sample. Maintain it incrementally on `{rtt,...}` arrival (like health EWMA) or store a bounded series. As written, unimplementable or identity.
+- **nodedown double-decrement:** "delete the node's rows from BOTH tables" races concurrent caller releases. Must `ets:take` tracked rows and decrement per non-Internal row; blanket reserve deletion double-decrements against in-flight releases.
+- **Drain-idle lost its event:** reserve decrements are now caller-side; the gen_server gets no message at 0, so arming silently moves to tick polling (immediate → ≤1 tick latency). State this bound or implementers improvise.
+- **Unary fallback scope undefined:** image/TTS/ASR requests are unary-shaped; fallback could double-bill a whole image generation. Whitelist eligible modalities (chat/responses only unless stated).
+- **F1 ordering unpinned:** state reserve-increment → tracked insert → send explicitly so the two-tick guard covers exactly the crash gap.
+
+**3. Contradictions / stale claims**
+- A.3 `rtt_ms_avg` = mean of rows vs C.1 `janus_sched_rtt_ms` = EWMA vs B.2 sort key — three different values. Pick one canonical display (EWMA) or JSON no longer explains selection.
+- "apply_inflight removed from PURE functions, fixtures updated" vs invariant "v1-equivalence eunit untouched" — clarify `select_v2`'s candidate contract (inflight integer) is unchanged; only builder fixtures change.
+- C.3 "on boot … AND ≥1 worker admitted": workers arrive post-boot — the warning fires at first admission; say so.
+
+**4. Missing first-ship requirements**
+- Build provenance: evidence #2 was deploy-from-dirty-tree; nothing prevents recurrence. Surface git SHA in `/healthz` or `/stats/sched`.
+- Runbook G.5: `net_ticktime` must change on all nodes together; asymmetric rolling flaps dist connections.
+- Gate 13.7: give the purge bound numerically (≤2 ticks + margin), the explicit w1 restart command, and how the step toggles `JANUS_SCHED_UNARY_FALLBACK` on/off.
+
+**5. Architecture/design notes**
+- Caller-side ETS move is correct; `ets:take`-owns-decrement preserves idempotence — apply the same rule to purge.
+- Verify-at-impl honesty on the unbusy message is fine; keep the module-doc fallback deliverable promise.
+- F7: note `sched_stats/0` still races caller ETS writes (accepted soft class — document it).
+
+**6. Top 5 concrete edits**
+1. Rewrite B.2: incremental EWMA updated at `{rtt}` arrival; snapshot/sort/display read it.
+2. Unify A.3/C.1 rtt display on EWMA (rename or add field).
+3. B.1: nodedown = take-and-decrement; drain-idle detection explicitly tick-based.
+4. Part E: modality whitelist + exact pre-byte definition.
+5. Add git-SHA surfacing (Part C) and ticktime-symmetry warning (G.5).

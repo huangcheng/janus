@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — rev 4.1 is implementable and internally sound; the remaining defects are stale cross-references and one wording slip in the fold preamble, not design faults.
+
+**2. Critical risks**
+- Silent dist loss (no RST) is asserted out of gate scope but nowhere deferred: at ticktime 30 the bound is 30–45 s, untested, and Part H omits it. Add it to H so the gap is a decision, not an accident.
+- Part E's `janus_worker_forwarded` predicate covers "no chunk forwarded AND no done/error emitted," but a worker-side buffered-then-lost response is explicitly a double-billing window; the runbook sentence (G.6) must quote it verbatim or the operator opts in blind.
+- Runtime pick ordering does change when knobs are off (live reserve read vs v2 flush-bounded hint). Documented, but no eunit asserts the live-read path's ordering; only the pure `select_v2` equivalence is tested.
+
+**3. Contradictions or stale claims**
+- Rev-4 header bullet "C.4 runtime visibility fixed" and "C.3 fires at FIRST worker admission" use the OLD numbering (build provenance is now C.3, knob-off guard C.4) — fix the fold-note labels.
+- F7 body still says "no separate ad-hoc reads," contradicting rev 4's scope tightening (dist counters = separate per-node read). Restate F7 as pool-series-only.
+- Rev-4 header says "release-after-nodedown creates a transient -1"; B.1 correctly says a release AFTER nodedown's take no-ops — it is release RACING the reserve-row delete. Align the header to "racing."
+- Prompt's background claims "64-label-set cap with registry eviction" and 13.8 "fail-fast <10s"; the spec (correctly) forbids counter eviction and bounds 13.8 at <20 s. Harmless to the spec, but fix prompt.md so the next round isn't re-litigating settled text.
+
+**4. Missing first-ship requirements**
+- No named module/owner for the boot-side `JANUS_GIT_SHA` env → persistent_term read (C.3 implies it; specify it).
+- No eunit for the admission-rollback path (pinned form, no tracked row touched) — the capacity-1 race test covers the win, not the rollback across multiple candidates.
+
+**5. Architecture/design notes**
+- The B.1 spine (take-owned decrement, one shared helper for release/nodedown/purge, `Internal =:= false` conjunct, insert-default badarg-impossibility, tick clamp-to-0 for all nodes + zero-row deletion only for pool-absent nodes) is coherent and closes every race named across rounds 2–7.
+- B.2's single canonical EWMA cell (sort / gauge / display-mean with null-not-0) is now unambiguous; the per-provider unknown-last fallback and the display mean are properly separated.
+- C.2's "each node renders its own dist counters via the guarded local read" resolves the worker-telemetry vs no-new-wire tension cleanly.
+
+**6. Top 5 concrete edits**
+1. Renumber the C.* labels inside the rev-3/rev-4 fold notes to match the body.
+2. Rewrite F7's last clause: single-snapshot governs pool series; dist counters are a stated second local read.
+3. Change the header bullet "release-after-nodedown" → "release racing nodedown's reserve-row delete."
+4. Add "silent-loss nodedown detection (tick-bounded 30–45 s, untested)" to Part H.
+5. Name the boot reader for `JANUS_GIT_SHA` and add a rollback eunit to B.1's enumeration.

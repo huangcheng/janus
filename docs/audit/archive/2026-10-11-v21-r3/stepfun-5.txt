@@ -1,0 +1,29 @@
+**1. Verdict:** GO WITH FIXES — the rev-3 folds are substantively present and the design is implementable, but three passages the header claims were fixed still carry pre-fold text contradicting the folded semantics, and two aggregation details need pinning.
+
+**2. Critical risks**
+- None blocking. One design-level risk: B.1's purpose was mailbox relief, yet every completion still casts the pool `{sched,2,{touched,Node}}` (same rate as v2's release cast). `janus_sched_pool_message_queue_len` may barely improve unless the poke is conditional (draining nodes only) or rate-capped; the tick already covers quiet nodes.
+
+**3. Contradictions / stale claims**
+- Header claims per-worker `git_sha` added to "the A.3 field list + fixture"; Part A's 14-field list contains no `git_sha` (C.4 also promises it in the A.3 array).
+- Header claims the stale "mean of raw rows" parenthetical was deleted; A.3 still reads "rtt_ms_avg (mean of the node's unexpired rtt rows)", contradicting A.3's own later "IS the canonical incremental EWMA". The all-expired ⇒ null / infinity fallback appears only in B.2.
+- Header claims F4 was rewritten to the counter/gauge split; F4 still mandates the v2 "64-entry budget, evicted label sets removed from the registry" for /metrics — directly contradicting C.1.
+- C.2 body says "only the MASTER's counters surface in sched_stats/0" while the fold requires per-node surfacing; whether workers even serve /stats/sched (:8090 on `JANUS_ROLE=worker`) is never stated.
+- A.2 still has the builder copying reserve into candidate `inflight` without saying that copy is now display-only (0.3 says the sort reads live) — invites a double-source implementer bug.
+
+**4. Missing first-ship requirements**
+- Node-level RTT sort aggregation never pinned: rows are per `{Node,Provider}` but select_v2 sorts nodes. B.2 must state the node key = mean of unexpired row Ewmas (identical to `rtt_ms_avg`), all-expired ⇒ infinity.
+- No assertion that /stats/sched exists on the worker role — C.2's per-node deliverable depends on it.
+- Part E: release-before-LocalFun plus delayed nodedown lets a concurrent pick reserve on the just-dead worker; the capacity bypass covers it in spirit, but name this transient explicitly.
+
+**5. Architecture/design notes**
+- B.1 take-owned decrement + insert-default pinning is sound; the take-vs-reconcile undercount is correctly named and bounded.
+- A.2's NON-INTERNAL emptiness conjunct is the right narrowing; lost-probe-lingers-until-purge is acceptable.
+- 13.7/13.8 bounds are internally consistent (ticktime 30 ⇒ nodedown < 30 s; keepalive 60 s ⇒ re-hello ≤ 70 s; absolute post-restart counters).
+- Knobs-off default preserves bit-identical v1 ordering; the EWMA RTT ordering change is honestly flagged in G.
+
+**6. Top 5 concrete edits**
+1. A.3: add `git_sha` to the per-member list + fixture; fix the parenthetical to "mean of the node's unexpired per-provider EWMA cells"; add "all rows expired ⇒ null / 0 / infinity".
+2. F4: rewrite to the C.1 split (counters never evicted, per-family cap + overflow; gauges deterministic; 64-window is JSON-only).
+3. C.2: replace the master-only sentence with per-node surfacing; add "VERIFY :8090 /stats/sched runs on worker role".
+4. B.2: pin the node-level sort aggregate (mean of unexpired row Ewmas; all-expired ⇒ infinity) and state the sort ignores snapshot-copied values.
+5. B.1/A.2: make the `{touched,Node}` poke draining-conditional or capped so the pool mailbox genuinely shrinks.

@@ -1,0 +1,28 @@
+**Verdict: GO WITH FIXES** — selection and the ETS split are sound; spec is missing wire-level guarantees for two failure paths the chaos gate claims to verify.
+
+**Critical risks**
+1. **F1 reconcile drift direction undefined.** Spec says "drift correction across two ticks against the ETS set" but doesn't name the action. With probes (Internal=true) tracked but not reserved, `reserve < tracked` is normal; `reserve > tracked` means a crashed caller between `update_counter` and `insert`. Action must be: decrement reserve to `tracked_count` on the node (probes excluded), never touch tracked — otherwise probes get phantom-decremented and real reservations leak.
+2. **13.8 assumes workers auto-re-hello after master restart.** OTP `net_kernel` does not reconnect; workers need a `net_kernel:connect_node/1` retry loop. Spec is silent — gate will hang or fail if the loop doesn't exist.
+3. **`schema_version: 2` is breaking, not additive.** Any pinned consumer (dashboard) parsing `version==1` rejects. The "additive JSON" claim contradicts the bump itself.
+
+**Contradictions / stale claims**
+- A.3 "field-compatible" with the prod view is qualitative. Enumerate prod-view fields (`would_demote`, `dispatched_total`, `rtt_ms_avg`, `inflight`, `sched_v`, `status`, `region`, `capacity`, `dispatchable`, `rtt_sample_count`, `health_ewma_ms`, `sticky`, `draining`) and assert each.
+- C.1 "registry eviction" assumes the metrics renderer can unregister; verify the renderer (likely ETS-backed) actually supports eviction or card blows up.
+- "No wire change" for A.1 is true for the wire, but the `sched_v=1` display bug lives in the unreleased view, not the ingest. A.1 eunit pins ingest only; add a display-layer assertion.
+
+**Missing first-ship requirements**
+- **Drain-idle with lingering probes**: a draining node's tracked probe rows (no reserve decrement) survive until the 10-min purge; spec doesn't say whether drain-idle waits for purge.
+- **Probe lifecycle**: when do probe tracked rows leave `sched_tracked`? Only on purge, or on probe completion? Spec hand-waves "same as v2" but v2 prose is silent.
+- **JobRef uniqueness across adopt generations**: adopt RESETS `sched_tracked`; in-flight done/error from the old master hits `ets:take/2` (no-op, fine), but a colliding JobRef from new master could be wrongly consumed. Need master-monotonic JobRefs or a generation token.
+- **Chaos step bounds**: 13.7 "no hang" needs a numeric deadline (e.g. <30s); 13.8 "fail fast" needs one too (<10s for client-side RST). 13.7 node-down detection latency is unstated.
+
+**Architecture notes**
+- Caller-side `ets:take/2` cleanly removes the mailbox bottleneck; `ets:tab2list/1` on tick is O(rows) but verify it stays bounded at capacity ceiling.
+- B.2 EWMA in the snapshot builder costs O(unexpired rtt rows) per scrape — fine at dozens×dozens, worth noting.
+
+**Top 5 concrete edits**
+1. **F1 reconcile:** "if `reserve > tracked_count` on node N (probes excluded), decrement reserve by delta; never mutate tracked."
+2. **13.8:** require a documented `net_kernel:connect_node` retry on workers; assert reconnect ≤70s as a precondition for re-hello.
+3. **A.3:** list every prod-view field and assert parity; Part G: deploy dashboard first to accept `schema_version` 1 and 2 during rolling cutover.
+4. **Drain-idle + probes:** drain completes when `reserve == 0` AND node's tracked probe rows are purged, OR add an explicit probe-release path so probes exit tracked promptly.
+5. **Chaos bounds:** 13.7 stream terminates <30s, 13.8 client failure <10s, both assert `workers_available` recovery ≤70s; assert nodedown→evict <30s in 13.7.

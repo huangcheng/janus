@@ -1,0 +1,29 @@
+**Verdict: GO WITH FIXES** — v2.1 is coherent; all round-3 folds land and the rev-3.3 residual pins are present, but 3–4 implementation-boundary clarifications must land before code starts.
+
+**Critical risks**
+- **B.1 NODEDOWN decrement ambiguity**: spec says "per-key `ets:take` (take owns the decrement)... then delete the reserve row" without naming whether the take itself decrements or a separate `update_counter/4` follows. Pin it: per non-Internal taken JobRef → `update_counter(sched_reserve, Node, {2,-1}, {Node,0})`, THEN `ets:delete(sched_reserve, Node)`. Otherwise reserve drifts upward on every nodedown.
+- **A.2 drain-idle during probe linger**: probes (Internal=true) linger 10 min until purge; the "non-Internal tracked empty" gate passes while they sit. Benign (probes don't reserve), but eunit must assert sticky arms anyway so a future reviewer doesn't mistake it for a stalled gate.
+- **Part E release-after-nodedown**: if `{'DOWN'}` arrives after the pool's nodedown already took tracked rows + deleted reserve, "release FIRST" creates a transient `-1` (insert-default). Tick clamps; eunit the race so drift is bounded and observable.
+
+**Contradictions / stale claims**
+- **A.3 says "ALL expired ⇒ null"** for `rtt_ms_avg`; **B.2 says "null / 0"** — pick one (null per the field's stated form).
+- **A.3 `dispatched_total`** vs **C.1 `dispatch_worker_total{node,provider}`** are the same counter in two views; A.3 must state "per-node sum of C.1's counter".
+- **F4 cap 256** is unjustified (4 × 20 = 80 sets); add a one-line rationale ("16 × 32 → 512; 256 is headroom").
+
+**Missing first-ship**
+- **Worker hello `git_sha` field**: C.4 stamps the SHA but the wire field name in `hello_opts` isn't pinned — name it so A.3's array field is wired end-to-end, not aspirational.
+- **e2e_mw_local.sh `--steps 13.7,13.8` + `--teardown`** is referenced in Part F but the harness contract isn't specified — ship a one-line invocation snippet.
+- **Sample prometheus scrape** for `janus_sched_*` series — spec notes "prod scrapes nothing yet", making it part of operator enablement, not optional.
+- **13.7 client exit / SSE format** is loosely bounded ("curl exit non-zero or truncated SSE with terminal error"); pin exact assertion (specific `grep` patterns over captured stream).
+
+**Architecture / design notes**
+- B.1 admission ordering (increment-first / compare-return / rollback) is correct; capacity-1 eunit validates atomicity, but **capacity-N concurrent-pick-vs-release** is mandatory — rollback-under-contention transiently over-counts and the two-tick heal catches residue, not in-flight race artifacts.
+- C.1 overflow-accumulator pattern is sound; one label-free `*_overflow_total` per family is the right escape (avoid per-overflow-label sets).
+- A.3 workers view being the single F7 snapshot requires atomic sampling of EWMA cells with pool members — torn values across a dirty flush would surface as `would_demote` flips mid-scrape.
+
+**Top 5 concrete edits**
+1. **B.1 NODEDOWN**: explicit per-non-Internal `update_counter/4` decrement before the wholesale reserve delete.
+2. **Part E release-after-nodedown eunit**: assert reserve clamps at 0 within one tick when DOWN races nodedown.
+3. **A.3 prose**: state `dispatched_total` = per-node sum of C.1's `dispatch_worker_total{node,provider}`; resolve null vs "null/0" for `rtt_ms_avg`.
+4. **C.4 + A.3 wire contract**: name the worker-hello `git_sha` field end-to-end.
+5. **Part F harness + sample scrape**: ship `--steps 13.7,13.8` invocation + prometheus scrape sample.

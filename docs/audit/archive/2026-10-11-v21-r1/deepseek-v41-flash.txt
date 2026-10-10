@@ -1,0 +1,33 @@
+## 1. Verdict
+**GO WITH FIXES** — the direction is sound, but B.2's EWMA is unimplementable as written and the B.1 reconcile guard will misfire; both must be fixed before ratification.
+
+## 2. Critical risks
+- **B.1 reconcile counts probe rows.** Guard compares `sched_reserve` vs `sched_tracked` contents, but probes insert `Internal => true` rows with no reserve. Without an `Internal =:= false` filter, tracked > reserve permanently and the two-tick healer churns. Same filter needed in purge scan.
+- **B.2 EWMA vs "last-arrival-wins."** Rows stay "raw samples, last-arrival-wins" (one row per key) yet the builder is told to EWMA "over the node's unexpired samples." One row ⇒ E1 = x1 ⇒ no smoothing, and the two-sample ordering eunit cannot pass. Either the table retains N samples (a shape/schema change the spec denies) or B.2 is a no-op.
+- **C.1 counter eviction.** The 64-label-set cap "removes evicted label sets from the registry." Safe for gauges (`rtt_ms`), but `janus_sched_dispatch_worker_total{node,provider}` is a counter — eviction+re-add resets it, breaking monotonicity and `rate()`.
+- **A.2 vs Part I.** Removing `member.inflight` forces the v1 `least-inflight` sort and its equivalence eunit to read the reserve sample and update fixtures — the spec says so in A.2 but Part I claims "v1-equivalence eunit untouched." False.
+- **Mixed-version asymmetry.** `note_inflight` handler is preserved, but the removed `{release,...}` cast is not. Same-node (pool+session) makes this low-risk, but the spec should state it, not imply symmetry.
+
+## 3. Contradictions / stale claims
+- B.2 multi-sample EWMA vs single-row shape (above).
+- A.3 `rtt_ms_avg` (mean) vs C.1 `janus_sched_rtt_ms` (EWMA) — two definitions for one quantity.
+- Part I "selection semantics unchanged" vs B.2, which explicitly changes the sort key with knobs on.
+- C.3 "on boot with ≥1 worker admitted": workers join via async hello, so a boot-time check usually sees zero workers and never fires.
+- Part E "release the reservation first" vs 13.7 asserting "purge/reconcile" clears it — nodedown, not purge, is the real path.
+
+## 4. Missing first-ship requirements
+- Diff/recover the **uncommitted prod image** before A.3 overwrites it (field-compat assumed, unverified).
+- Dashboard consumer update for `schema_version 2` (cross-repo, unspecified).
+- `net_ticktime` must be **cluster-uniform**; mismatch causes false node-downs.
+- Verify idle-residue root cause (dual-track is assumed, not proven).
+- 13.7 must assert the **nodedown** clear, not a purge poll.
+
+## 5. Architecture notes
+Caller-side `sched_tracked` with `ets:take/2` idempotence and adopt-reset (F2) is correct; add the Internal filter. Keep evicted counter totals in an overflow accumulator instead of dropping. `janus_dist_monitor` counting still lets its mailbox grow under storm — sample rather than queue. Unary-fallback conditions (pre-byte, once, knob-on, never stream/janus_error) are well-specified.
+
+## 6. Top 5 edits
+1. Resolve B.2: retain multi-sample rows (new schema) or drop the EWMA claim; unify `rtt_ms_avg`/`rtt_ms`.
+2. Add `Internal =:= false` filter to reconcile **and** purge.
+3. Never evict counter label sets; cap gauges only, accumulate overflow.
+4. Fix A.2/Part I: state the v1 sort + equivalence eunit are updated.
+5. Add tasks: prod-image diff, dashboard v2, uniform `net_ticktime`, nodedown assertion in 13.7.

@@ -1,0 +1,26 @@
+**1. Verdict: GO WITH FIXES** — every rev-3.2 fold is present and coherent; residual gaps are counter write-paths and worker-side surfacing, not design errors.
+
+**2. Critical risks**
+- **Counter writers unspecified under B.1.** C.1 renders `dispatch_worker_total{node,provider}`, `geo_match`, `capacity_exhausted`, `dispatch_local`, `health_demote` — all decided caller-side on the pick path. The spec never says who increments them or where (casts would violate "PICK hot path stays mailbox-free"; ETS is implied but unnamed), nor where the 256-cap overflow accumulator lives and how `sched_stats/0` reads it.
+- **Worker-side /stats/sched undefined.** C.2 mandates each node renders its own `janus_sched_dist_*` on its own `/stats/sched`, yet `sched_stats/0` is master-only and whether workers serve :8090 is unstated; C.1's single-snapshot render cannot run on a worker.
+
+**3. Contradictions / stale claims**
+- Header fold says 13.8 in-flight failure `< 10 s`; Part F pins `< 15 s` (SIGTERM 10 s grace). Header is stale.
+- "Both satisfied at ticktime 30" for the <30 s nodedown bound: silent-loss tick detection at ticktime 30 can exceed 30 s; only the RST (docker kill) path guarantees it — and the gate asserts only hard kills. Overclaim.
+- Fold says drain-idle/capacity-N eunits were "added to E's enumeration" — Part E has none; they live in A.2/B.1.
+- 13.8 "the adopt path resets counters": a full master restart recreates tables fresh; adopt is the pool-restart-with-heir path (F2). Mislabel.
+- Reconcile undercount: "persists until those jobs complete" — the racing job *is* completing; a resulting R<T has no restoring writer (reconcile only decrements) and heals only via clamp/zero-row deletion for absent nodes. Healing story muddled.
+
+**4. Missing first-ship requirements**
+- C.1's metric enumeration omits `janus_sched_knobs_off_total` (C.3 demands /metrics) and the whole `janus_sched_dist_*` family (C.2 says C.1 renders them); conditional `busy_ms_total` not reflected.
+- The JSON `rtt_ms` "64-recency window" is now underdefined post-EWMA (window of what — rows?).
+
+**5. Architecture/design notes**
+Sound: incremental EWMA (deterministic), take-owned decrement idempotence, insert-default badarg-impossibility, counter/gauge cardinality split, per-node dist surfacing. Minor: NODEDOWN's per-row decrement followed by reserve-row delete is redundant (delete alone suffices) — harmless but say why; pin that the two-tick guard's persistence window strictly covers the take→decrement gap.
+
+**6. Top 5 edits**
+1. B.1/C.1: add "counter write paths" — caller-side ETS `update_counter` table, overflow accumulator, snapshot read.
+2. Specify worker /stats/sched render path (dist + health only; pool keys absent) and :8090 exposure.
+3. Add `knobs_off_total` + `dist_*` to the C.1 enumeration.
+4. Header: 13.8 `< 10 s` → `< 15 s`; fix "E's enumeration" cross-ref.
+5. Reword the nodedown bound ("RST immediate; tick floor covers silent loss only, bound asserted for hard kills") and state the undercount's real recovery.

@@ -1,0 +1,22 @@
+Verdict: GO WITH FIXES — design is sound; three implementation-visible pins remain.
+
+Critical risks
+- **Reserve/tracked write order (B.1).** Reserve-bump-then-tracked-insert is right, but the spec never pins what happens when the tracked insert throws *after* the insert-default created the row. It says "reservation stands untracked" — correct — yet a crash *between* the two leaves reserve > tracked with no JobRef anywhere; only the two-tick reconcile sees it. That healing path is real, but the eunit must assert the exact interleaving (insert throws, tick heals), not just "drift corrected across two ticks".
+- **Take-vs-reconcile double-count.** The spec names the undercount but never bounds the *reconcile* side: reconcile decrements by `reserve − |non-internal tracked|`, which after a purge/take gap can be negative. `max(0, …)` must be stated explicitly, else a release racing purge drives reserve to −2.
+- **`ets:take` and write_concurrency.** `take` on a `write_concurrency` table is serialized per key only; fine, but the release helper must be a single `try ets:take … of` — if take throws badarg (table gone at shutdown), the decrement is skipped, not double-applied.
+
+Contradictions / stale claims
+- A.3 says `rtt_ms_avg` is "arithmetic mean of unexpired per-provider EWMA cells" while B.2's sort is per-{node,provider} Ewma. Two numbers with near-identical names invite a future reader to feed the display mean into the sort. Rename the display field or add a one-line "NOT the sort input" in the field list (B.2 says it; A.3 does not).
+- Rev-4 header claims "all one-sentence pins" folded, yet round-6/rev-3 notes leave `C.4 dirty-tree guard` described as `git status --porcelain` while Part I still lists "C.4 build provenance" numbering that shifted under the Part C renumber.
+- 13.7 stream phase asserts "client stream terminates with error in <30 s" riding the docker-KILL RST, but Part H defers silent loss. The gate step must state the RST assumption in the assertion itself, not only in the header note.
+
+Missing first-ship
+- No eunit for the *pick-side live read* under a concurrent release that deletes the row (read of a just-taken key must yield 0 via insert-default semantics or default, not crash).
+- `janus_sched_pool_message_queue_len` reads `process_info(Pool, message_queue_len)` — needs a stated "missing ⇒ omit series" rule for the same worker-node case as the other pool series.
+
+Top 5 edits
+1. B.1: state `Dec = max(0, Reserve − Tracked)` and forbid negative reconciles.
+2. B.1 eunit: add the insert-throws interleaving + take-badarg-at-shutdown case.
+3. A.3/B.2: mark `rtt_ms_avg` display-only in the A.3 field list itself.
+4. 13.7: embed the RST/<30 s assumption in the assertion text.
+5. C.1: add the pool-queue-gauge omission rule for non-master nodes.

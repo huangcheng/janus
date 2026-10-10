@@ -1,0 +1,26 @@
+**1. Verdict: GO WITH FIXES** — all 18 round-1 folds are present and coherent, but two stale claims survived the fold pass (schema_version, rtt_ms_avg definition) and one aggregation step is underspecified.
+
+**2. Critical risks**
+- Part I checklist still says "JSON schema_version 2", directly contradicting the fold "schema_version stays 1" (and 0.3/A.3). An implementer ticking Part I would bump it and break pinned consumers.
+- B.1 nodedown "ets:take the node's tracked rows": `sched_tracked` is keyed by JobRef, so there is no take-by-node; it needs select-then-take per key (racing caller releases) or a per-node index. The "decrement once per non-Internal row" pin is good, but the primitive is not pinned as the reserve-bump form is — spell out select+take and the race semantics.
+
+**3. Contradictions or stale claims**
+- A.3 field list defines `rtt_ms_avg` as "mean of the node's unexpired rtt rows" (round-1 text), then the same section says it IS the incremental EWMA per B.2. Delete the parenthetical.
+- A.3 needs a node-level value, but B.2 stores EWMA per {Node,Provider}. "One canonical number everywhere" holds per provider; the per-node aggregation across providers (mean of EWMA columns? weighted?) is undefined and nondeterministic if done by table fold. Pin it (e.g., arithmetic mean of the node's unexpired EWMA cells).
+- Part I "no key renames" is fine, but Part E's new `dispatch_local` reason enum + "JSON key set update" should state explicitly that it's a value addition, not a schema change (consistent with stays-1).
+
+**4. Missing first-ship requirements**
+- No stated behavior when a node's rtt rows all expire (rtt_ms_avg/rtt_sample_count → null/0? sort fallback?) — B.2 eunit only covers "row drops whole".
+- 13.7 unary phase requires killing w1 "before first byte" without a determinism mechanism (13.8 uses slow-key; 13.7 should too).
+- Worker-side `janus_dist_monitor` counters are structurally unsurfaced (no-new-wire) — acceptable, but C.2 should say so in one line so nobody "fixes" it later.
+
+**5. Architecture/design notes**
+- The concurrency correction is right: reserve increment was already caller-side; B.1 only relocates track/release. Capacity exactly-one-wins is inherited from v2's counter semantics — worth one clause restating how insert-default yields exactly-one-wins, since "on success" is misleading (update_counter with default never fails).
+- F1–F7 all have named guards; reconcile/purge Internal split, release-first-before-LocalFun, and the rest-state invariant close the observed residue class.
+
+**6. Top 5 concrete edits**
+1. Part I: "schema_version 2" → "schema_version stays 1 (additive keys only)".
+2. A.3: drop "(mean of the node's unexpired rtt rows)"; define per-node aggregation over B.2 EWMA cells.
+3. B.1 nodedown: pin the select-then-take sequence and its race behavior vs concurrent releases.
+4. B.2: add expiry-emptiness semantics (null vs 0, sort fallback) + eunit line.
+5. 13.7 unary phase: add a slow-key/barrier for "before first byte" determinism.

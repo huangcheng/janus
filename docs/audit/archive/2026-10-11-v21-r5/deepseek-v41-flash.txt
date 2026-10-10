@@ -1,0 +1,31 @@
+## 1. Verdict
+**GO WITH FIXES** — the de-bottleneck (B.1) and observability (A.3/C) items are sound, but the negative-reserve healing story and the "pick/1 unchanged" claim are internally incoherent and must be pinned before implementation.
+
+## 2. Critical risks
+- **Reconcile cannot heal a negative.** Reconcile "never increments"; the tick deletes zero/negative rows **only for nodes ABSENT from pool records**. A caller-side decrement that races nodedown (or a double-decrement window) leaves `{Node,-1}` on a *live, idle* node — healed only by the next pick. 13.4's "EVERY reserve_inflight entry must be 0" then fails spuriously. The "clamped by the tick" wording and the absent-node scoping contradict each other.
+- **Nodedown-vs-pick orphan.** A pick reading the pre-evict snapshot can insert a reserve/tracked row after NODEDOWN cleared both. The row belongs to a present-in-snapshot node, so reconcile sees no drift and the tick won't reap it (node may re-hello). Unnamed race.
+- **system_monitor premise is wrong.** `erlang:system_monitor/2` is **per-process**, not "node-global single-slot." The exclusivity grep/VERIFY is moot; conversely, multiple processes could each arm it. F3/C.2 should be restated.
+
+## 3. Contradictions / stale claims
+- "B.1 moves ONLY the tracked insert/release out of the mailbox; **pick/1 itself is unchanged**" vs "the winning pick … **inserts the tracked row**." If pick/1 inserts, it changed. Pin the insert as a wrapper (`pick_and_reserve/1`) around pure `select_v2`; reword.
+- Rev-3 fold says 13.8 "< 10 s"; Part F body says "< 15 s". Header stale.
+- "tick deletes zero/negative-clamped rows" vs "zero-row deletion scoped to ABSENT nodes" — negative *clamp* scope undefined.
+- "bit-for-bit v1" is correctly scoped to pure `select_v2`, but the knobs-off **runtime** least-inflight source changed (live reserve). The equivalence eunit must use fixed inputs, never runtime traces — say so explicitly.
+
+## 4. Missing first-ship requirements
+- No eunit/gate for Part D: vm.args idempotent REPLACE and invalid-drop (F6) despite Part I "eunit per item."
+- No test for C.1 renderer escaping/label conventions against the existing metrics module.
+- `pick/1` behavior when the reserve row is absent (treat as 0?) unspecified.
+- No rollback/mixed-version note for `sched_tracked` beyond adopt.
+
+## 5. Architecture notes
+- Two deliberate runtime ordering changes (live reserve; EWMA RTT) — document that v1-fallback ordering shifts even with knobs off.
+- Release-before-LocalFun + no re-reserve means the reserve counter no longer bounds local execution during mass worker loss — acceptable, but state that capacity_exhausted/local counters over-report.
+- JobRef 128-bit / take-idempotence / Internal-filter are correct.
+
+## 6. Top 5 concrete edits
+1. Pin negative healing: tick clamps negative rows to 0 for **all** nodes, or exclude negatives from 13.4; state reconcile never increments.
+2. Move reserve-bump+tracked-insert into a named wrapper; fix "pick/1 unchanged."
+3. Correct C.2/F3 to per-process system_monitor; drop node-global-single-slot.
+4. Align 13.8 bound (header <10 s → <15 s).
+

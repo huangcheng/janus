@@ -1,0 +1,29 @@
+## Verdict
+**GO WITH FIXES** — rev 4.1 is round-7-confirmed; fold integrity holds and named guards cover F1–F7. Three definitional gaps and one ambiguity need closing before the confirmation stamp.
+
+## Critical risks
+None blocking. Dual-track inflight structurally eliminated (A.2), pool mailbox bottleneck removed (B.1), EWMA math implementable (B.2 incremental), chaos gate covers kill path (13.7) and master-restart (13.8). Capacity bypass in E is explicitly documented as the knob's accepted trade; no silent over-admission class remains.
+
+## Contradictions or stale claims
+None observed. C-section renumbering (C.1 metrics → C.2 busy_dist_port → C.3 build provenance → C.4 knob-off) matches content; stale "sort falls back" phrase in A.3/B.2 is gone; 64-recency window is correctly scoped to the v2 /stats/sched `rtt_ms` map only (no gauge windowing); tick-floor 30–45 s silent-loss note honest and out of gate scope.
+
+## Missing first-ship requirements
+1. **`janus_sched_rtt_dropped_total` trigger undefined** — C.1 lists the counter; B.2 only defines TTL-expiry (whole-row drop) and seed-at-first-sample. Pin the drop condition (TTL reaping? failed cast-handler insert? ETS row-rewrite race?).
+2. **`janus_sched_probe_skip_total` trigger undefined** — likely `JANUS_SCHED_PROBE_MAX_HOURLY` headroom exhaustion; pin the condition (verify-at-impl that no other skip path exists in v2).
+3. **C.4 counter semantics ambiguous** — "At the FIRST worker admission ... bumps `janus_sched_knobs_off_total`". Reconnect storms would inflate the counter unless "first" is per stack boot. Pin semantics.
+4. **`dispatch_local_total` reason breakdown unstated** — `{unary_fallback}` is "value addition to reason enum"; confirm /metrics renders a single counter (current reading: yes — pin explicitly so F4 cardinality stays bounded).
+5. **`{touched, Node}` cast shape unspecified** — state `gen_server:cast` (not `gen_server:call`); release path must stay mailbox-free per B.1's invariant.
+
+## Architecture/design notes
+- Pinned `{2,1}/{2,-1},{Node,0}` insert-default forms correctly scoped (4-tuple UpdateOp stays forbidden, wrap risk eliminated).
+- Internal=false filter consistently applied at release, nodedown, and reconcile — probe rows never decrement, no drift class.
+- Tick corrective write (clamp negatives for ALL nodes; delete zeros only for ABSENT nodes) correctly avoids racing a live pick's insert-default.
+- C.2 worker /stats/sched via :8090 listener honors "no new wire" invariant (dist_monitor is local read, no cross-node aggregation).
+- Release-first / take-before-decrement / purge-via-take-spine form a single helper — drift between paths structurally impossible.
+
+## Top 5 concrete edits
+1. **B.2/C.1**: Pin `rtt_dropped_total` trigger — TTL-expiry reaping (dominant case) plus any failed cast-handler insert path.
+2. **C.1**: Pin `probe_skip_total` — `JANUS_SCHED_PROBE_MAX_HOURLY` headroom exceeded.
+3. **C.4**: Pin `janus_sched_knobs_off_total` — increments on first admission per stack boot (resets on pool restart); ONE warning per cluster lifetime regardless of reconnects.
+4. **C.1**: Pin `dispatch_local_total` rendering — single counter; reasons in logs/json metadata, not metric labels (preserves F4 cardinality rule).
+5. **B.1**: State `{touched, Node}` is `gen_server:cast`; release path stays mailbox-free; snapshot-dirty marking is the only pool-side work per completion.

@@ -1,0 +1,25 @@
+**1. Verdict: GO** — every rev-4/4.1 fold is verified present and internally consistent in the body of `target.md`; the only residuals are non-normative header-hygiene items that cannot affect implementation.
+
+**2. Critical risks**
+- Three verify-at-implementation pins stay open (OTP 27 unbusy-transition existence; system_monitor exclusivity grep; no worker-side `note_inflight` caller). Each has a stated fallback, but they must be executed pre-merge, not deferred.
+- Unary fallback's worker-buffered-bytes window is accepted double-billing (F5) — the Part G knob sentence must ship with the code, not after.
+- Take-vs-reconcile undercount persists until job completion — named and bounded, but invisible to gate 13.4 (rest-state asserts post-drain zero only). Accepted softness; keep it in G.7.
+
+**3. Contradictions or stale claims**
+- Header fold bullets use pre-renumbering labels: rev-4 "C.4 runtime visibility" is body **C.3** (build provenance); rev-2 "C.3 fires at FIRST worker admission" is body **C.4** (knob-off guard).
+- Rev-3 header carries both "only the MASTER's counters surface in sched_stats/0" and "every node renders its OWN counters" — the body reconciles them (pool `sched_stats/0` master-only vs per-node HTTP merge of `janus_dist_monitor:stats/0`), but the header reads contradictory standalone.
+- Title says "rev 4 — FINAL"; the lineage is rev 4.1 / round 8.
+- `prompt.md`'s round-7 lens still says 13.8 "<10s"; the spec's <20 s (SIGTERM grace + SIGKILL) is the correct bound — the prompt is stale, not the spec.
+
+**4. Missing first-ship requirements**
+- None material. Minor: 13.7 stream phase never pins its stack's knob state — state knob-off/default and assert `unary_fallback` stays 0 there.
+
+**5. Architecture/design notes**
+- Body is coherent and implementable: the pinned `{2,±1},{Node,0}` forms plus one shared take-and-maybe-decrement helper (release/nodedown/purge) make gate-drift structurally impossible; insert-default makes the decrement badarg-impossible; admission is decided by the atomic counter's return value. EWMA-in-row yields one canonical number across sort/JSON/metrics; the counter/gauge cardinality split is sound; F1–F7 each have a named guard; schema_version 1 preserved additively throughout.
+
+**6. Top 5 concrete edits**
+1. Annotate header fold bullets with post-renumber section numbers (C.4→C.3, C.3→C.4).
+2. Mark the rev-3 "C.2 scoped (master-only surfacing)" bullet as superseded by per-node surfacing.
+3. Retitle to "rev 4.1 — RATIFIED" and tick the Part I boxes that now hold.
+4. Pin 13.7 stream-phase knob state = off + assert `dispatch_local{unary_fallback}` == 0.
+5. Promote the three verify-at-impl pins into a named pre-merge checklist line in Part I so they survive ratification.

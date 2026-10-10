@@ -1,0 +1,26 @@
+**1. Verdict: GO WITH FIXES** — the mechanisms are sound and rev-3 folds are coherent, but several folds are claimed-but-not-applied in the body, and the RTT sort input is ambiguously pinned.
+
+**2. Critical risks**
+- **Unapplied folds (spec-internal drift, the exact failure mode C.4 exists to prevent):** the rev-3 header claims F4 was rewritten, `git_sha` added to A.3, and C.2 made per-node — none landed in the body (details below).
+- **`{touched, Node}` poke has no owner as written:** A.2 and the fold depend on it, but B.1's "gen_server keeps" list omits the handler. Dirty-flush drain-idle re-arming (≤250 ms) is unspecified without it.
+- **RTT sort input ambiguity:** B.2 says the sort key reads the `{Node,Provider}` row Ewma; A.3 ties the sort's infinity fallback to node-level `rtt_ms_avg` (mean of cells) and calls it "one number everywhere." If pick-time provider is known, these differ — pin which one sorts.
+
+**3. Contradictions or stale claims**
+- F4 (0.2) still says gauge label sets are "evicted… removed from the registry — the v2 rule," contradicting C.1's never-evict counters / deterministic gauges.
+- A.3 field list (14 fields) lacks per-worker `git_sha`; C.4 and the fold say it's there.
+- C.2 body says "only the MASTER's counters surface in sched_stats/0" vs the per-node-surfacing fold.
+- C.1's rendered list omits `janus_sched_knobs_off_total` (C.3) and `janus_sched_dist_*` counters (C.2 says "C.1 rendering").
+
+**4. Missing first-ship requirements**
+- Confirm workers actually serve :8090 `/stats/sched` (workers skip :8080; admin-listener status unpinned) — else C.2's per-node fold needs a listener change.
+- 13.7's "nodedown < 30 s" at ticktime 30 is RST-dependent; pure tick detection can run ~T + T/4. Keep asserting via `docker kill` (RST) and state the slop.
+
+**5. Architecture/design notes**
+The caller-side spine is sound: reserve-bump-first with the pinned 4-tuple-arg `update_counter`, take-owns-decrement idempotence, insert-default release immune to nodedown row deletion, scoped zero-row cleanup, select+per-key-take shared by nodedown/purge, adopt reset via one helper. The B.2 single-row incremental EWMA is deterministic and the unary-fallback conditions are tight (one pdict predicate, release-before-LocalFun, `janus_error` excluded, knob-off default). Node-mean `rtt_ms_avg` washes out per-provider differences — acceptable if deliberate, but say so.
+
+**6. Top 5 concrete edits**
+1. Rewrite F4 to the C.1 counter/gauge split; delete "evicted label sets removed from the registry."
+2. Add `git_sha` to A.3's per-member field enumeration and its eunit fixture.
+3. Add `{touched, Node}` to B.1's handler list; name the sender (release path) and the one-cast-per-completion rate.
+4. Pin the sort: provider-matched row Ewma → node-mean `rtt_ms_avg` → infinity; fix A.3's "one number everywhere" wording.
+5. Add `knobs_off_total` and `janus_sched_dist_*` to C.1's list; fix C.2's master-only sentence and pin worker :8090 availability.

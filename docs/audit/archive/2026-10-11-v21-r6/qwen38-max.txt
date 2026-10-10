@@ -1,0 +1,28 @@
+**1. Verdict**
+GO WITH FIXES — all rev-3.3 folds are present and coherent (admission primitive, insert-fail heal, C.1 worker rendering, A.3 display-only rtt_ms_avg, ALLOW_DIRTY, 20 s fail-fast, buffered-bytes window); residuals are one implementability gap and a few pins, nothing architectural.
+
+**2. Critical risks**
+- C.4 provenance chain is mechanically incomplete: Docker image **labels are not visible to the running container**. "build-arg → label → env at boot" only works if the Dockerfile also bakes `ENV JANUS_GIT_SHA=${JANUS_GIT_SHA}`; otherwise `/stats/sched` reports `unknown` forever and the feature silently dies.
+- 13.7 timing claim is inaccurate: "<30 s bound assumes RST-or-tick — both satisfied at ticktime 30". Tick detection is ≈ N–1.5×N (30–45 s at N=30), never <30 s. The step passes only via docker-kill RST; as written it invites a false assertion if anyone later tests silent loss.
+
+**3. Contradictions / stale claims**
+- Header says "rev 3" and logs only rounds 1–2, while the body carries rev-3.3 folds (ADMISSION PRIMITIVE, `JANUS_DEPLOY_ALLOW_DIRTY`, 20 s widening) — header fold-log is stale.
+- Part C physical ordering is C.1, C.2, C.4, C.3 (C.3 appears after C.4).
+- Spec is otherwise internally consistent (20 s appears identically in rev-fold note and 13.8 body).
+
+**4. Missing first-ship requirements**
+- Pin that **worker-role nodes serve `/stats/sched` and `/metrics`** on :8090 — C.2's per-node `janus_sched_dist_*` rendering on workers assumes the route exists under the worker boot role; state it explicitly.
+- Pin the label set of `janus_sched_dispatch_local_total`: E and 13.7 assert `dispatch_local{unary_fallback}`, but C.1 lists the metric label-free. Add a bounded `{reason}` label (never-evicted, tiny cardinality) or state JSON is the sole attribution source.
+- The `ENV` bake for `JANUS_GIT_SHA` (see §2).
+
+**5. Architecture/design notes**
+- Admission primitive (increment-first → compare returned count → rollback) is correct; rollback's transient +1 only biases concurrent live-reserve sort reads — within the accepted softness class.
+- One unnamed residual: a crash between reserve increment and tracked insert for a node **absent from pool records** leaves a non-zero orphan reserve row the tick won't delete (zero-only) and reconcile may not scan; it self-heals via two-tick reconcile if the node rejoins. Name it in B.1.
+- take-owned decrement + insert-default makes bookkeeping badarg-proof; single-canonical EWMA number for sort/JSON/gauge is clean.
+
+**6. Top 5 concrete edits**
+1. C.4: require `ENV JANUS_GIT_SHA=${JANUS_GIT_SHA}` in the Dockerfile; label ≠ runtime env.
+2. 13.7: restate the <30 s bound as RST-path-only; tick detection at N is ≈ N–1.5N.
+3. Bump header to rev 3.3 with rounds 3–5 fold log; reorder C.3/C.4.
+4. C.1: add `{reason}` to `janus_sched_dispatch_local_total`.
+5. B.1: name the absent-node orphan-reserve residual and its rejoin heal; pin worker :8090 `/stats/sched` route in C.2.

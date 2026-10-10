@@ -1,0 +1,25 @@
+**1. Verdict:** GO WITH FIXES — all nine substantive round-6 folds verify in the text; the residue is one unapplied renumbering and two healing-path wording pins.
+
+**2. Critical risks:**
+- Negative-reserve heal path is ambiguous: a release racing nodedown's `ets:delete(sched_reserve, Node)` resurrects `{Node,-1}` via insert-default (named + eunit'd), but "transient -1 clamped by the tick" collides with "the tick deletes zero rows ONLY for nodes ABSENT from pool records" — if the node re-hellos (≤70 s) before the tick, a negative row on a *present* node has no named healer (reconcile only decrements excess), and it silently grants one extra admission.
+- Unary-fallback capacity bypass and take-vs-reconcile undercount are real but correctly scoped as named, accepted softness (knob-default-off; bounded by the race window; eunit'd).
+
+**3. Contradictions or stale claims:**
+- Rev 4 claims Part C was renumbered into reading order (C.1–C.4), but the file still ships **C.4 before C.3** — the fold is asserted, not applied.
+- C.2 still says "VERIFY AT IMPLEMENTATION (OTP 27 docs)" for an unbusy message, while rev 3 pinned the fallback deliverable as stated *now* ("expect NO unbusy").
+- The prompt's audit-focus line "13.8 fail-fast <10s" is stale; the spec's <20 s (SIGTERM 10 s grace → SIGKILL chain) is the implementable bound and should stand.
+
+**4. Missing first-ship requirements:**
+- The `janus_sched_pool_message_queue_len` before/after measurement (recorded in the implementation commit) lives only in the rev-2 fold note, never in the C.1 body — implementers will drop it.
+
+**5. Architecture/design notes:**
+- The shared take-and-maybe-decrement helper correctly closes the gate-drift class across release/nodedown/purge; probe neutrality (`Internal =:= false` conjunct) is now uniform, and the drain-idle non-Internal emptiness conjunct fixes the lost-probe stall without weakening arming.
+- The single canonical RTT number is coherent: sort reads the cell Ewma, JSON `rtt_ms_avg` is display-only (null, never 0, on all-expired), gauge reads the row directly; F7's two-reads-per-scrape scoping is honest.
+- Admission primitive (increment → compare *returned* count → rollback `{2,-1},{Node,0}` touching no tracked row) is genuinely race-free; worker-side pool-read guards close the dead-name crash class exactly where dist storms occur.
+
+**6. Top 5 concrete edits:**
+1. Swap §C.3/§C.4 into reading order (or delete the renumbering fold claim).
+2. Pin the clamp: tick maps negative→0 for ALL nodes; deletes zero rows only for nodes absent from pool records (state the re-hello-before-tick case).
+3. Move the mailbox-gauge before/after measurement requirement into the C.1 body.
+4. In C.2, state the expectation ("no unbusy message in OTP 27; events + last-busy age is the deliverable"), keeping verify-as-upgrade-only.
+5. Add one B.1 sentence: nodedown's per-row decrement is subsumed by the subsequent reserve-row delete (harmless; helper-shared) — prevents a future "optimize it away" drift.

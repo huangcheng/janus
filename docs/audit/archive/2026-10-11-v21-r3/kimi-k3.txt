@@ -1,0 +1,32 @@
+## 1. Verdict
+
+**GO WITH FIXES** — the rev-3 preamble folds are substantively correct, but several were applied only to the preamble: the body still carries pre-fix text that now contradicts it (A.2 builder-copy vs live-read, A.3 rtt_ms_avg/git_sha, F4 eviction, C.2 master-only, B.1 missing the {touched} poke).
+
+## 2. Critical risks
+
+- **A.2 vs 0.3/preamble contradiction (the qwen regression half-fixed).** 0.3 and the preamble pin the sort reading `sched_reserve` LIVE at pick time with snapshot inflight display-only; A.2's body still says "the snapshot builder copies sched_reserve counts into each candidate's inflight (as it copied member.inflight before)" — the exact stale design rev 3 claims to fix. B.1's "pick/1 stays caller-side, unchanged" compounds it: pick now does a per-candidate live ETS read, which is a change.
+- **B.1 body omits the {touched,Node} poke.** A.2 references "(the {touched,...} poke cast, B.1)" but B.1's gen_server-keeps list never defines it — the dirty-flush trigger exists only in the preamble. An implementer reading the body cannot build it.
+- **Zero-row cleanup scoping missing from the body.** The preamble scopes tick zero-row deletion to nodes absent from pool records (else it races a pick's insert-default); B.1's body has the unscoped sentence. Unscoped deletion is harmless-ish but can silently drop a live node's freshly inserted {Node,0} row.
+
+## 3. Contradictions or stale claims
+
+- **A.3 rtt_ms_avg**: the bullet "rtt_ms_avg IS the canonical incremental EWMA (B.2) — one number everywhere" directly contradicts the (correct) preamble definition (mean of the node's unexpired per-provider EWMA cells — per-node, not the per-{node,provider} sort/metrics number). The field-list parenthetical "mean of the node's unexpired rtt rows" is the stale phrasing rev 3 claims deleted.
+- **A.3 git_sha**: C.4 says the worker SHA surfaces "per-worker in the A.3 array", but A.3's field list omits it (14 fields, no git_sha) while claiming field-by-field production parity.
+- **F4** was not rewritten despite the preamble claim: it still says "caps label sets… evicted label sets removed from the registry", contradicting C.1's never-evict-counters split.
+- **C.2** body says "only the MASTER's counters surface in sched_stats/0", contradicting the rev-3 per-node local surfacing (each node's own /stats/sched renders its own dist counters).
+
+## 4. Missing first-ship requirements
+
+None structurally new; the eunit/gate enumerations, 13.4 rest-state, 13.7/13.8 bounds, and provenance refusal are all present. Only the body-text items above block implementability.
+
+## 5. Architecture/design notes
+
+Live-read-at-pick is sound (public + read_concurrency, one read per candidate, fresher than v2) and the {touched} poke preserves the mailbox-free pick path — the design is right; the text just lags. Take-vs-reconcile undercount, EWMA cold-outlier bias, and the unary-fallback capacity bypass are named honestly.
+
+## 6. Top 5 concrete edits
+
+1. A.2: replace the builder-copies sentence with "pick/1 reads sched_reserve live per candidate for the sort; snapshot inflight is display-only"; drop B.1's "pick unchanged".
+2. B.1: add `{sched,2,{touched,Node}}` to the gen_server-keeps list with sender (completion path) and dirty-mark semantics; add the absent-node scoping to zero-row deletion.
+3. A.3: rewrite rtt_ms_avg as mean-of-unexpired-EWMA-cells, delete the "canonical EWMA, one number everywhere" line; add git_sha to the field list and fixture.
+4. F4: rewrite to the counter/gauge cardinality split per C.1.
+5. C.2: change master-only surfacing to per-node local rendering on each node's own /stats/sched.

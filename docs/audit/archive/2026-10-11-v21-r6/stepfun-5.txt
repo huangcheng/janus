@@ -1,0 +1,29 @@
+## 1. Verdict
+**GO WITH FIXES** — all seven rev-3.3 folds are present, coherent, and header/body-consistent (admission primitive, insert-failure heal, C.1 enumeration incl. worker rendering, DISPLAY-ONLY rtt_ms_avg, ALLOW_DIRTY, <20 s, buffered-bytes risk); residuals are implementability pins, not design defects.
+
+## 2. Critical risks
+- **Worker-side render path (C.1/C.2):** the spec asserts pool series are "omitted without crashing" on workers but never pins *how* `janus_worker_pool:sched_stats/0` behaves when no pool runs (workers do serve :8090 per C.2). A gen_server call to a dead name exits; if /metrics or /stats/sched crashes on a worker, C.2/C.3 telemetry dies exactly during the dist storms it exists for. Highest-value pin.
+- **B.1 flips the softness direction:** v2 residue = over-count → stranded capacity; the new take-vs-reconcile race = under-count → possible over-admission. Named and bounded, but the failure mode changed *shape*, not just size — runbook should say so.
+
+## 3. Contradictions / stale claims
+- C.1 "reading sched_stats/0 ONCE per scrape" vs C.2's dist local-read: that is two reads; F7's single-snapshot rule covers pool series only. Tighten.
+- "A downward reconcile heal cannot false-arm" is overstated: the conjunct requires *tracked* jobs gone; the insert-failure class leaves reserve>0 with tracked empty, so a draining node can arm early (bounded — 30 s sticky, picks already stopped).
+- No other stale text found.
+
+## 4. Missing first-ship
+- **`dispatchable` (A.3) undefined** — the claimed field-for-field match to the prod view needs its exact predicate.
+- **Overflow accumulator rendering unpinned** — "reject-new-into-overflow" says nothing about the emitted series name/shape.
+- **C.4 label→env hop compressed:** Docker labels are not runtime-readable; the Dockerfile must `ENV JANUS_GIT_SHA` from the build arg.
+
+## 5. Architecture notes
+- The touched-poke keeps one cast per completion (v2 rate) — B.1's relief is pick-path only; honestly stated.
+- Admission via the atomic counter's return value is correct; capacity exactly-one-wins follows from counter atomicity + insert-default.
+- Nodedown select+take spine is right vs blanket delete; adopt reset in the shared helper closes F2.
+- EWMA-on-row removes fold-order nondeterminism; ~4-sample seed bias acceptable for a preference-only key.
+
+## 6. Top 5 edits
+1. Pin worker degradation: `sched_stats/0` returns a defined stub (e.g. `{error, no_pool}`) when the pool is down; renderer and /stats/sched branch on it explicitly.
+2. Define `dispatchable` in A.3's field list.
+3. Qualify the false-arm claim: "tracked jobs gone; the untracked-insert-failure class may arm early on a draining node (accepted)."
+4. C.1: state the single snapshot governs pool series; dist series read `janus_dist_monitor:stats/0` separately per scrape.
+5. C.4: add the Dockerfile `ENV JANUS_GIT_SHA` stamp (label is metadata only).

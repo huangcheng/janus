@@ -1,0 +1,27 @@
+## 1. Verdict
+GO WITH FIXES — rev 2 folds round 1 faithfully and is internally coherent except for one real mechanism gap (dirty-flush trigger), one A.3 self-contradiction, and one stale checklist line.
+
+## 2. Critical risks
+- **Dirty-flush trigger is unspecified after B.1.** In v2 the reserve/tracked mutations arrived as casts that marked the snapshot dirty; post-B.1 they are caller-side ETS writes the gen_server never sees. Yet A.2 arms drain-idle on "every dirty-flush republish (≤250 ms)" and 0.3 keeps the sort-hint staleness bound at "250 ms dirty / 30 s tick". Nothing pins what dirties the snapshot now. As written the flush may only fire on the 30 s tick, silently tripling the drain-idle event bound and the staleness invariant. This is the one newly-introduced defect.
+- **take-vs-reconcile double-decrement.** Release = `ets:take` then decrement; the two-tick reconcile heals reserve excess vs non-Internal tracked rows. A heal landing between a caller's take and decrement double-decrements. The spec acknowledges "undercount clamped at 0 and reconciled next tick" — but reconcile only *decrements*; an undercount (reserve below live jobs) is never healed upward, so capacity overshoot persists until those jobs finish. The two-tick guard shrinks the window but does not close it; the accepted bound should be stated explicitly.
+
+## 3. Contradictions or stale claims
+- **Part I checklist**: "All new observability is additive (JSON schema_version 2…)" — rev 2 pins schema_version **1** everywhere (A.3, C.4). Stale leftover.
+- **A.3 self-contradiction**: first bullet defines `rtt_ms_avg` as "mean of the node's unexpired rtt rows"; second bullet says it IS the canonical incremental EWMA. Pick one (the EWMA).
+- **Per-node vs per-{node,provider}**: the B.2 EWMA is keyed `{Node, ProviderId}` but the A.3 workers array is per member; the fold of multiple provider EWMAs into one per-node `rtt_ms_avg`/`rtt_sample_count` is undefined.
+
+## 4. Missing first-ship requirements
+- Eunit for drain-idle arming via the tick path (tracked-empty ∧ reserve==0 conjunct), including the lost-probe-delays-sticky case — the rest-state invariant is only asserted in gate 13.4.
+- 13.7 never says how traffic is *pinned to w1* (drain w2? capacity?) — "two-worker topology pinned" needs the forcing mechanism or the dispatch_worker{w2} delta assertion is unearned.
+
+## 5. Architecture/design notes
+- Nodedown take-then-delete is sound: the pinned insert-default form recreating a −1 row after reserve-row deletion is correctly covered by the tick zero/negative cleanup.
+- C.2 master-only surfacing under the no-new-wire invariant is consistent; the exclusivity grep is the right verification.
+- The Internal=false reconcile filter plus purge-reaps-all is coherent; probes never reserved, never counted.
+
+## 6. Top 5 concrete edits
+1. Pin the dirty-flush trigger post-B.1 (periodic sub-second rebuild, or a no-op poke cast on release), or honestly widen the drain-idle/staleness bounds to the tick interval.
+2. A.3: delete "mean of unexpired rows"; define the per-node aggregation over per-{node,provider} EWMA rows (or make the field per-provider).
+3. Part I: schema_version 2 → 1.
+4. State the take/reconcile double-decrement race and its accepted bound (permanent undercount until job completion; softness class).
+5. Add drain-idle-arming eunit (tick path + lost-probe delay) and name the w1-pinning mechanism in 13.7.

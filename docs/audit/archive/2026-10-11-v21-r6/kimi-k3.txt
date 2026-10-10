@@ -1,0 +1,29 @@
+# Audit — Scheduler v2.1 spec rev 3 (+3.3 folds)
+
+## 1. Verdict
+**GO** — all nine round-5 folds are present and mechanically coherent; remaining items are verification pins, not design defects.
+
+## 2. Critical risks
+- **Admission rollback form not pinned.** B.1 pins the increment and the release decrement to the insert-default form, but the capacity-over *rollback* decrement is not explicitly given the same form. If implementers use bare `ets:update_counter/3` there, a nodedown row-delete racing the rollback can badarg the *pick caller* — the exact crash class B.1 exists to eliminate. One-sentence pin fixes it.
+- **Worker-side `/stats/sched` assumes the admin listener.** C.2 requires every node to render its own `janus_sched_dist_*` on its own /stats/sched, but workers skip the agent :8080 listener; whether :8090 (admin /stats + /metrics) runs on workers is not stated anywhere in the spec. If it doesn't, C.2's worker-side deliverable is unimplementable as written.
+
+## 3. Contradictions or stale claims
+- C.1's "reads `sched_stats/0` ONCE per scrape — the same single snapshot" is accurate for pool series but the scrape also reads `janus_dist_monitor:stats/0` (C.2's direct merge). Worth one clause so "F7 single snapshot" isn't misread as forbidding the dist read.
+- The increment→tracked-insert window vs reconcile is not named, though the take-vs-reconcile race is. It's actually safe (the excess can't persist two consecutive ticks, so the two-tick guard can't fire on it) — but saying so explicitly prevents a future "fix" that breaks the guard.
+
+## 4. Missing first-ship requirements
+- A.3 `git_sha` default for pre-C.4 workers (no hello meta key) — must render `null`, like `would_demote`'s unknown rule. One clause.
+- Part G: state that the 13.7/13.8 chaos steps are excluded from the deploy-blocking default gate set (F says opt-in; the runbook should say the deploy gate stays green without them).
+
+## 5. Architecture/design notes
+- The admission primitive (increment-first, compare returned count, rollback) is correct: the counter's atomicity + insert-default gives exactly-one-wins without a read-check race; the capacity-N pick/release eunit is the right proof artifact.
+- EWMA-rides-the-row (B.2) keeps one canonical number across sort/JSON/gauge and eliminates the round-1 fold-order defect cleanly; seed-at-first cold bias is honestly documented.
+- The `{touched, Node}` completion poke preserves the v2 release-cast message rate while freeing the pick path — the throughput claim is credible, and `pool_message_queue_len` gives a direct before/after measurement.
+- E's process-dictionary `janus_worker_forwarded` predicate is the right shape (dies with the session, no adopt concern); the buffered-at-worker window is correctly named as the double-billing risk.
+
+## 6. Top 5 concrete edits
+1. B.1: pin the capacity-over rollback decrement to the same `{2,-1},{Node,0}` insert-default form.
+2. C.2/D: add one line stating workers run the :8090 admin listener (verify against docker-entrypoint) so worker-side /stats/sched exists.
+3. B.1: name the increment→insert vs reconcile window and why the two-tick guard is immune to it.
+4. A.3: `git_sha => null` when the worker's hello omits the meta key.
+5. Part G: note chaos steps 13.7/13.8 are opt-in and outside the deploy-blocking gate.

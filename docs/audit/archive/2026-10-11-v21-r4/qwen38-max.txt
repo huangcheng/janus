@@ -1,0 +1,27 @@
+**1. Verdict:** GO WITH FIXES — the rev-3 folds nearly all landed in the bodies, but the F4 fold demonstrably did not (still stale v2 eviction text) and the C.2 per-node flip leaves worker-side surfacing unpinned; everything else is mechanical.
+
+**2. Critical risks**
+- **C.2 worker surfacing is unsatisfiable as written.** Every node must render its own `janus_sched_dist_*` on "its own /stats/sched", but the tail sentence routes exposure through `janus_worker_pool:sched_stats/0` — the pool is master-side, and workers skip the agent `:8080`. No pinned surface exists for worker-node counters.
+- **0.2 F4 vs C.1 cardinality contradiction.** F4 still says "/metrics rendering caps label sets… 64-entry budget, evicted label sets removed from registry — the v2 rule". An implementer following F4 would evict counter label sets and break monotonicity/rate().
+
+**3. Contradictions or stale claims**
+- Preamble claims "F4 rewritten to the counter/gauge split" — the body was not touched (the one fold that missed the body, the exact round-3 defect class).
+- C.2 trailing "Exposed through sched_stats/0 (additive) and C.1 rendering" is leftover rev-2 master-only text, contradicting the per-node rendering it sits under.
+- Prompt says "git_sha as the 14th field"; A.3's list has 15 fields (git_sha is 15th). Cosmetic, but the claim doesn't match.
+
+**4. Missing first-ship requirements**
+- Pin the worker-local read path: `janus_dist_monitor:stats/0` surfaced by the worker's own admin listener (state explicitly whether workers boot `:8090`), independent of `janus_worker_pool`.
+- C.4 mechanism gap: an image **label is not visible inside the container**; pin the chain as Dockerfile `ARG JANUS_GIT_SHA=unknown` → `ENV` (label kept for external provenance only).
+- C.4 dirty check: `deploy_prod.sh` lives in the dashboard repo but builds the Janus image — pin `git -C <janus-root> status --porcelain`, not cwd-relative.
+
+**5. Architecture/design notes**
+- Honesty discipline is good: take-vs-reconcile undercount bound, capacity bypass, poke-rate parity, seed-at-first bias all named.
+- B.1 inherits capacity overshoot rollback from v2 ("pick/1 unchanged") but never pins it: post-increment > capacity must roll back with the pinned decrement form and skip the tracked insert — that is what makes exactly-one-wins true.
+- The nodedown take spine omits the `Internal =:= false` filter that release/purge state explicitly; probe rows would wrongly decrement reserve.
+
+**6. Top 5 concrete edits**
+1. Rewrite 0.2 F4 to the counter/gauge split: counters never evicted (reject-new → overflow accumulator, per-family caps); 64-recency window governs only the JSON `rtt_ms` map.
+2. C.2: replace the stale tail with the worker-local exposure path; split the nested-paren run-on.
+3. B.1 NODEDOWN bullet: add "decrement only for taken rows where `Internal =:= false`".
+4. C.4: pin ARG→ENV stamp chain and `git -C <janus-root> status --porcelain` in `deploy_prod.sh`.
+5. B.1: pin the overshoot rollback (returned value > capacity ⇒ pinned-form decrement, no tracked insert).

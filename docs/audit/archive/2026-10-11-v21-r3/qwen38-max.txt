@@ -1,0 +1,29 @@
+**1. Verdict**
+GO WITH FIXES — the rev-3 folds are substantively sound, but two of them were not fully written into the part bodies they amend.
+
+**2. Critical risks**
+- **A.2 body still carries the pre-fix sort-hint design.** The round-2 headline fix (pick reads `sched_reserve` LIVE; snapshot inflight display-only) lives in the preamble and 0.3, but A.2 says "select_v2 sort hint: the snapshot builder copies `sched_reserve` counts into each candidate's `inflight`". An implementer reading Part A ships the staleness regression the spec claims fixed.
+- **B.1's gen_server keep-list omits `{touched, Node}`** and the ≤250 ms dirty-flush timer. A.2's drain-idle re-arming depends on both; as written B.1 is unimplementable consistently with A.2. Sender coverage is also unspecified (must fire on every release path — done/error/worker_lost/send-fail — and never for probes; justified since ttfb/rtt casts don't cover error completions).
+
+**3. Contradictions / stale claims**
+- **F4 contradicts C.1**: F4 still says "evicted label sets removed from the registry (the v2 rule)"; C.1 pins counters-never-evicted + overflow accumulator.
+- **A.3 field list lacks `git_sha`** (14 fields) while the rev-3 fold and C.4 both claim it was added and surfaces in the A.3 array. Fixture enumeration must match.
+- **Non-goal "no new wire messages"** is literally violated by C.4's additive `git_sha` hello key; safe under the v2 additive rule but should be named, not left to collide with the non-goal.
+- C.2 body ("only the MASTER's counters surface in sched_stats/0") reads against the rev-3 per-node surfacing fold; needs rewording to "each node renders its own counters locally; no cross-node aggregation."
+- Minor: B.1 release text doesn't restate the insert-default `{Node,0}` form or the absent-node scoping of zero-row cleanup that the preamble pins.
+
+**4. Missing first-ship requirements**
+- Counter home + adopt-reset semantics stated where 13.8 relies on them (counters reset at restart) — one sentence in C.1.
+- A.2 should state the pick-time live read happens per candidate inside pick/1 (order relative to snapshot gen), so display-copy and sort-read can't drift.
+
+**5. Architecture notes**
+- Live-reserve sort read is the right fix — strictly fresher than v2, one ETS read/candidate, caller-side. Poke-cast keeps the pick path mailbox-free at v2's completion rate; honest trade.
+- Take-owned decrement + insert-default makes nodedown/release/purge pairwise safe; named undercount bound is the correct v2-softness treatment.
+- B.2 incremental EWMA on the last-arrival-wins row is implementable and deterministic; documented cold-outlier/TTL biases are adequate.
+
+**6. Top 5 edits**
+1. Rewrite A.2: pick/1 reads reserve LIVE for the sort component; snapshot copy is display-only; delete "sort hint" wording.
+2. B.1 keep-list += `{touched,Node}` handler + dirty-flush timer; pin senders (all release paths, no probes).
+3. Replace F4 with the C.1 cardinality split.
+4. Add `git_sha` to A.3's field list + eunit fixture (15 fields), reconciled with C.4.
+5. Reword C.2 per-node surfacing; amend the no-new-wire non-goal to allow the additive hello key.

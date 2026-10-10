@@ -1,0 +1,27 @@
+1. **Verdict: GO WITH FIXES** — every claimed rev-3.2 fold is present and coherent in the body; the residuals are header staleness (13.8 bound), one unspecified nullability, and one unproven atomicity claim.
+
+2. **Critical risks**
+   - **Capacity exact-one-wins is asserted, not pinned.** B.1 credits "the v2 concurrent capacity-1 eunit" for exactly-one-wins, but `ets:update_counter/4` atomicity alone does not provide it: if pick does read-`reserve < capacity`-then-increment, two concurrent callers both pass the check and both increment. Exactly-one-wins requires the admission decision to BE the atomic counter op (e.g. bounded increment with a post-increment over-capacity decrement-and-loser path). The spec never pins the admission primitive — pin it or downgrade the claim to "over-admission bounded by the race window" (the same softness class B.1 already accepts for reconcile).
+   - **`{touched, Node}` poke is a new mailbox message; its rolling-safety is only implicit.** It is master-internal (caller → local pool), so same-node restart covers it, but the mixed-version invariant paragraph names only the note_inflight removal — the poke should be named there too.
+
+3. **Contradictions or stale claims**
+   - Rev-2 header fold still says "13.8 — in-flight client failure **< 10 s**"; Part F body says **< 15 s** (SIGTERM 10 s grace chain). The header was not re-pinned in rev 3.2.
+   - Prompt-side only (not spec): prompt.md still describes "64-label-set cap with registry eviction" and "fail-fast <10s" — the spec itself is consistent on both; no spec edit needed beyond the header.
+
+4. **Missing first-ship requirements**
+   - A.3 `git_sha`: no stated rendering when an OLD worker's hello carries no meta key (mixed-version fleets are the exact case C.4 targets). Pin `null` (mirroring `would_demote`'s "null when unknown").
+   - C.1 `janus_sched_pool_message_queue_len` on workers (no pool process): absent-gauge behavior unstated — pin "gauge omitted on workers".
+   - 13.8 does not restate `JANUS_NET_TICKTIME=30`; the rev-3 header claims "13.7/13.8 run with" it — restate in the 13.8 body or scope the header to 13.7.
+
+5. **Architecture/design notes**
+   - The live-read sort hint (A.2) is the right call; the invariant's scoping to the PURE function is now honest.
+   - B.2's incremental-EWMA-on-one-row is minimal and deterministic; seed-bias (~4 samples) disclosure is sufficient for a preference-only key.
+   - C.2's per-node local surfacing correctly sidesteps the no-new-wire invariant; system_monitor exclusivity grep is a real implementation gate, not boilerplate.
+   - The PD-flag pre-byte predicate (Part E) is race-free only because DOWN and forwarding are serialized in one session process — worth one sentence stating that, since a future refactor into separate forwarder processes would silently break it.
+
+6. **Top 5 concrete edits**
+   1. B.1: pin the capacity-admission primitive (atomic increment-then-check with loser decrement) or restate the guarantee as bounded over-admission; adjust the capacity-N eunit claim to match.
+   2. Rev-2 header: change "13.8 — in-flight client failure < 10 s" to < 15 s.
+   3. A.3: `git_sha` renders `null` when the worker hello omits it; add to the fixture.
+   4. Mixed-version invariant bullet: name the `{sched,2,{touched,Node}}` cast as master-internal, safe under same-node restart.
+   5. C.1: state the pool-mailbox gauge is omitted (not 0) on workers; 13.8 body: restate ticktime=30.

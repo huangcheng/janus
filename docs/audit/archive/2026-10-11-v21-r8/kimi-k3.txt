@@ -1,0 +1,32 @@
+## 1. Verdict
+
+**GO** — every round-7 fold is verifiably present in the rev 4 text and no new contradiction surfaced.
+
+## 2. Critical risks
+
+None blocking. Residual accepted softnesses are all named and bounded (transient −1 clamped same-tick; take-vs-reconcile undercount until completion; >10-min jobs purged early; unary-fallback capacity bypass).
+
+## 3. Contradictions or stale claims
+
+- **Fold verification (all pass):** Part C is actually renumbered — C.1 metrics, C.2 busy_dist_port, C.3 build provenance, C.4 knob-off guard; body headers match. B.2's eunit now reads "rtt_ms_avg null / count 0 (display); the per-provider sort cell is simply absent — B.2's unknown-last rule" — the stale "sort falls back" coupling is gone everywhere (A.3's remnant phrase now points to B.2's per-provider rule, correct). The 64-recency window is scoped to the v2 `rtt_ms` JSON map in both F4 and C.1; the gauge reads the row Ewma directly. The tick clamp covers ALL nodes with the re-hello'd-live-node rationale stated. C.2 pins workers' :8090 as the existing v1 surface. The non-goals header names the additive `git_sha` hello key.
+- Historical fold-note references to old C-numbering ("C.4 dirty-tree guard", "C.3 fires at first admission") remain in the rev-history preamble — acceptable as archaeology, but a reader grepping "C.4" hits both meanings.
+- **The round-8 prompt itself is stale**: it describes "/metrics (64-label-set cap with registry eviction)" and "C.2 master-only surfacing" — both superseded in the spec (counters never evicted; per-node surfacing). The spec is right; don't let the prompt's summary leak into implementation tickets.
+
+## 4. Missing first-ship requirements
+
+None. Eunit enumeration, gate steps (13.4 rest-state, 13.7 two-phase, 13.8), runbook order, deploy refusal, and the emergency escape hatch are all present.
+
+## 5. Architecture/design notes
+
+- The increment-first-compare-rollback admission primitive is correct and exactly-one-wins; rollback touching no tracked row is the right pin.
+- One-helper take-and-maybe-decrement shared by release/nodedown/purge eliminates the conjunct-drift class for good.
+- `janus_worker_forwarded` dying with the session is the cleanest possible pre-byte predicate.
+- Two-reads-per-scrape (pool snapshot + local dist read) honestly stated; worker-side guard pinned.
+
+## 6. Top 5 concrete edits
+
+1. Ship it — mark Status: RATIFIED.
+2. At implementation, grep-verify the two stated exclusivities: no other `system_monitor` caller; no worker-side `note_inflight` sender (spec already mandates both).
+3. Verify OTP 27 unbusy-message existence before writing `janus_dist_monitor`'s header doc, as pinned.
+4. Keep the historical fold notes but add one line above them: "C.x references below use pre-renumbering."
+5. Correct any derived ticket/prompt text that still says "registry eviction" or "master-only dist surfacing."

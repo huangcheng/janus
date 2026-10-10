@@ -1,0 +1,28 @@
+**Verdict:** GO WITH FIXES — every round-4 fold is present and coherent; three small precision gaps.
+
+**Critical risks**
+1. **B.1 write-order failure mode unnamed.** The pinned counter increment is badarg-IMPOSSIBLE, but the subsequent `ets:insert(sched_tracked, …)` can independently throw (table not heir'd yet at boot, `badarg` on race with adopt, system_limit). Reserve excess then needs heal via the two-tick reconcile — the release's take-not-found is the same path, but the spec never names the insert-failure → reconcile-heal guarantee. Add it next to "take() owns the decrement."
+2. **C.4 dirty-tree overreach.** `git status --porcelain` empty-required will fail on the operator's temp `.env`/local notes that should not block prod deploy. Whitelist (`.deploy-allowlist`) or document `--allow-untracked-known` for emergencies.
+3. **13.8 fail-fast bound fragility.** The 15 s relies on docker SIGTERM's 10 s grace closing sockets cleanly. A hanging shutdown (e.g., DB pool drain) can blow the bound. Either widen to < 20 s with a SIGKILL fallback assertion, or assert per-event (socket close observed via process-monitor, not wall clock).
+
+**Contradictions or stale claims**
+- "Workers view field set deliberately MATCHES the production view field-by-field" — the prod view's field names should be quoted verbatim from the eval report, not paraphrased, or the deploy-neutral promise is uncheckable.
+- 13.7 `dispatch_worker{w2,_}` delta ≥ 1 assumes survivor has capacity 0/1; with `JANUS_WORKER_CAPACITY=32` the first request is fine but the spec should pin the gate's worker capacity (recommend 1) so affinity+capacity interacts deterministically.
+- Part E "Pre-byte predicate" reads "no chunk forwarded AND no done/error emitted" — bytes buffered at the worker but not yet forwarded are also pre-byte (the documented double-billing risk), state it explicitly.
+
+**Missing first-ship requirements**
+- Eunit for the **tracked-insert failure → reconcile-heal** path (B.1).
+- Eunit asserting `janus_dist_monitor:stats/0` is **per-node local** on a worker process (not aggregated) — the "no new wire" invariant has no test yet.
+- `git_sha` eunit covering BOTH injected-and-present AND missing-build-arg-stamps-`unknown`.
+- Gate assertion: 13.7 nodedown path clears `sched_tracked` rows for w1 (not just `sched_reserve`) — the take-spine is asserted in eunit but the gate currently checks only reserve/external observability.
+
+**Architecture/design notes**
+- `member.inflight` map deletion from pure pool functions is fine; live-read in `pick/1` (one ETS lookup per candidate) is cheaper than v2's mailbox-cast and correct.
+- EWMA `E' = 0.75E + 0.25x` with `E1 = x1` matches the v2 health-EWMA pattern — keep them numerically identical so knob enablement doesn't drift the two means.
+
+**Top 5 concrete edits**
+1. **B.1**: Add one sentence — "tracked-insert failure leaves reserve excess; the two-tick reconcile decrements against the ETS NON-INTERNAL tracked set, healing within ~2 s."
+2. **B.1 (release path)**: Spell out the symmetry — "release `ets:take` returns `'$undefined'` for a dead-owner stale JobRef; the session decrements iff taken; take-not-found is a no-op (the race window's other writer already decremented or reconcile will heal)."
+3. **Part E**: Pre-byte predicate wording — "no chunk forwarded AND no done/error emitted **for the JobRef**; bytes buffered at the worker that never reached the master also satisfy pre-byte (operator-accepted double-billing window)."
+4. **C.4**: `deploy_prod.sh` whitelist mechanism for known-untracked-but-safe paths; document the override flag.
+5. **13.7**: Pin worker capacity=1 in the gate topology; assert `sched_tracked[w1_*]` absent post-nodedown (not just reserve=0); expand the 15 s bound assertion to a process-monitor event rather than wall clock for 13.8.

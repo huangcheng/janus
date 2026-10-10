@@ -1,0 +1,28 @@
+**Verdict: GO WITH FIXES** — spec is shippable; items below are documentation/clarification, not blocking.
+
+**Critical risks**
+None blocking. One interleaving should be named:
+- **Tracked insert after nodedown delete**: if nodedown's `ets:select` runs before the tracked insert commits, then `ets:delete(sched_reserve, Node)` runs, then the insert commits, the result is reserve missing/0 with tracked holding 1 orphaned row. The master session's release path self-heals (take + insert-default decrement → tick clamps) when the session is alive. If the master session also dies, the orphan lingers until purge (10 min), over-admitting by 1 and (if draining) stalling sticky for the window. Bounded by purge; currently unnamed alongside the take-vs-reconcile undercount.
+
+**Contradictions or stale claims**
+- Prompt's "<10s" for 13.8 contradicts spec's "<20s" — spec is correct (SIGTERM 10 s + SIGKILL).
+- Prompt's "64-label-set cap with registry eviction" contradicts spec's "COUNTER label sets are NEVER evicted" — spec is the source of truth (round-2 explicit reversal); audit checklist is stale.
+
+**Missing first-ship requirements**
+- :8090 listener on workers needs explicit verification (AGENTS.md is ambiguous; spec assumes it for the dist counter surfacing path).
+- C.4 first-admission latch across adopt: does the latch reset on pool heir-takeover, or persist? "PER POOL LIFETIME" is undefined across adopt.
+- `janus_dist_monitor` supervisor child placement (master AND worker) needs explicit naming in the supervision tree.
+- Sticky arming one-tick delay after a heal-vs-release race: if counter is stale-high and tracked empties before the heal decrements, the emptiness conjunct fails until the next tick. Bounded to 1 s; spec's "cannot false-arm" is correct but the delay should be stated.
+
+**Architecture/design notes**
+- F7's single-snapshot rule is correctly scoped to POOL series only; dist counters are a separate per-node local read (two reads per scrape).
+- B.1's reserve increment remains caller-side (unchanged from v2); only tracked insert/release moves out of the mailbox. The concurrency note explicitly corrects the round-1 misconception.
+- The knobs-off equivalence eunit is correctly scoped to the PURE `select_v2` contract; the live-read pick ordering eunit is separate and asserts reserve-count-driven flips.
+- The unary-fallback capacity bypass (release-then-local never re-reserves) is a deliberate availability-over-discipline trade; documented and counted.
+
+**Top 5 concrete edits**
+1. Name the "tracked insert after nodedown delete" interleaving in B.1 alongside the take-vs-reconcile undercount; state the bounded over-admission and sticky-stall window (≤ 10 min until purge, self-healed when the master session is alive).
+2. State the sticky-arming one-tick delay bound after a heal-vs-release race in A.2.
+3. Clarify C.4's "PER POOL LIFETIME" — does adopt reset the first-admission latch?
+4. Verify and explicitly state that :8090 runs on workers in C.2's surfacing-path paragraph.
+5. In Part I's checklist, add: "Tracked insert after nodedown delete is named and accepted" and "First-admission latch behavior across adopt is defined".

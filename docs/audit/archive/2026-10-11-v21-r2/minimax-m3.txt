@@ -1,0 +1,28 @@
+**1. Verdict:** GO WITH FIXES — coherent on caller-side bookkeeping, incremental EWMA, drain re-arming, and chaos bounds, but carries two internal contradictions and a few unresolved state-location questions that must be pinned before ship.
+
+**2. Critical risks**
+- **Pre-byte predicate owner (Part E).** "no chunk forwarded AND no done/error for the JobRef" implies per-JobRef state on the master session; the spec doesn't say where it lives or how it's cleared on the release-before-LocalFun step. Adopt must drop it too.
+- **Probe-loss drain-idle drag.** A.2 explicitly lets a LOST probe delay sticky up to 10 min (purge TTL). A draining node can sit non-sticky for ten minutes on one dead probe; either document loudly or arm by non-Internal-empty only.
+- **B.1 race claim not covered by cited eunit.** Counter-bump-then-insert between gen_server `pick/1` return and caller write isn't what the v2 concurrent capacity-1 fixture proves (concurrent-pick vs release isn't proved). Add one capacity-N race fixture.
+
+**3. Contradictions / stale claims**
+- **schema_version**: A.3 says STAYS 1; self-review I.4 says "JSON schema_version 2". Pick one — additive = 1.
+- **rtt gauge canonical EWMA**: B.2 says one canonical number everywhere; C.1 says the gauge follows a "64-most-recent-unexpired window". Same metric, same renderer — reconcile.
+- C.2 says "only master's counters surface in sched_stats/0", but workers also serve :8090 /stats/sched; per-node render under-reports on worker nodes. Either master-merge or rename to `*_local`.
+
+**4. Missing first-ship requirements**
+- eunit enumerations missing for C.1, C.2, C.3, B.2, E (only B.1/A.1/A.3/C.4 itemized).
+- TEST-FLOWS.md 13.7 + 13.8 entries (Part F) and `deploy_prod.sh` dirty-tree guard (C.4) referenced but not filed.
+- C.4 CI gap: if `--build-arg JANUS_GIT_SHA` is absent, stamp is empty — pin CI to set it, or persist `unknown` explicitly.
+
+**5. Architecture / design notes**
+- "No new wire" applied correctly to gateway-role messages; C.2's local-telemetry framing is right but the surfacing rule needs the per-node caveat above.
+- Drain re-arm on tick + dirty-flush (≤250 ms) couples to the dirty-flush publisher — verify it actually republishes on every counter change, not only periodic.
+- 13.7 two-phase / opt-in `--steps` is the right knob; ensure `--teardown` reclaims whichever worker survives an asymmetric kill.
+
+**6. Top 5 concrete edits**
+1. Pin Part I.4 to "schema_version 1; all changes additive" — remove the "2".
+2. In C.1 rtt gauge, replace "64-most-recent-unexpired window" with "reads row Ewma directly" (matches B.2).
+3. Name the pre-byte predicate state (`#state{forwarded=#{}, ...}` on the master session) and take-and-clear it on release and adopt reset.
+4. Change A.2's tracked-emptiness conjunct to "non-Internal tracked EMPTY" so probe-loss cannot stall drain-idle; document the 10-min probe-loss cap separately.
+5. Add capacity-N concurrent-pick-vs-release eunit to B.1 (and one for unary-fallback release-before-LocalFun ordering).

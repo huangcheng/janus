@@ -1,0 +1,28 @@
+## 1. Verdict
+**GO WITH FIXES** — the v2.1 design is coherent and the rev-3 folds are real, but the capacity gate and four stale bodies need pinning before implementation.
+
+## 2. Critical risks
+- **Capacity is not enforced by the pinned counter form.** `ets:update_counter(sched_reserve, Node, {2,1}, {Node,0})` is a plain increment — no threshold. "Exactly-one-wins from the counter's atomicity" is false unless `pick` reads the returned value, and **rolls back (decrement) when > capacity**. B.1 says "insert tracked ONLY on success" but never names the rollback. Pin it, or concurrent picks over-admit.
+- **"Bit-for-bit v1 ordering" is overstated.** A.2 removes `note_inflight`; live least-inflight now reads `sched_reserve`, which is *fresher/different* from v1's cast-maintained hint. The eunit passes only because it drives pure fixtures. Real knobs-off ordering can differ from v1.
+
+## 3. Contradictions / stale claims
+- **F4** says label sets are "evicted … removed from the registry"; **C.1** says counters are NEVER evicted (reject-into-overflow) and only gauges use the 64-recency window. F4 stale.
+- **C.2 body**: "only the MASTER's counters surface in sched_stats/0"; **rev-3 fold**: every node renders its own `janus_sched_dist_*` on its own `/stats/sched`. Contradiction.
+- **B.1 body**: "NODEDOWN: `ets:take` the node's tracked rows" — impossible, `sched_tracked` is keyed by JobRef; rev-3 uses select+per-key take. Body stale.
+- **A.2 body**: builder copies reserve into candidate `inflight` (sort hint); **rev-3**: pick reads reserve LIVE, snapshot `inflight` is display-only. A.2 stale.
+- **Sort-key granularity ambiguous**: B.2 says the sort reads "the row's Ewma" (per-`{node,provider}`); A.3 defines per-node `rtt_ms_avg` = mean of per-provider EWMAs. State which the sort consumes.
+
+## 4. Missing first-ship requirements
+- No metric names for C.1's reject-into-overflow accumulators (only "overflow counter" prose).
+- C.4's hello-meta `git_sha` is an additive **wire payload**; the "no new wire messages" invariant should say so explicitly.
+- No explicit assertion that the over-capacity increment is rolled back.
+
+## 5. Architecture notes
+Incremental EWMA on the last-arrival-wins row is sound and removes fold-order nondeterminism. Per-family counter caps + deterministic gauges correctly protect rate()/monotonicity. Take-vs-reconcile undercount is bounded and named — acceptable. Nodedown select+take spine is correct.
+
+## 6. Top 5 edits
+1. **B.1**: pin the capacity gate — increment, if result > capacity decrement + advance candidate; name it in the concurrent-capacity eunit.
+2. **Reconcile stale bodies** with rev-3: A.2 sort-hint source, B.1 nodedown take, C.2 per-node surfacing, F4 counter-vs-gauge eviction.
+3. **Resolve sort-key granularity** (per-provider Ewma vs per-node mean) across B.2/A.3.
+4. **Name the overflow accumulator metrics** in C.1.
+5. **Reword "bit-for-bit v1"** to "pure-function equivalence; live least-inflight is now reserve-based" and add a gate check.

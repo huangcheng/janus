@@ -1,0 +1,31 @@
+**1. Verdict: GO WITH FIXES** — every rev-3 fold lands in the part bodies (grep-verifiable); residuals are mechanical wording, one runbook stub, one chaos-test pin.
+
+**2. Critical risks**
+- **G.6 is a stub, not runbook**: "documented with its double-billing trade" — placeholder, not the doc. F5 promises operators an explicit cost/latency trade; ship the sentence ("operator accepts risk of double-billing upstream when worker dies after payment but before forwarding; streams exempt, knob default off").
+- **13.7 "<30 s" depends on SIGKILL, not pinned**: OTP ticktime-30 nodedown ≈ 120 s; chaos must use `docker kill` (RST), not `docker stop` (tick dominates, bound fails). State explicitly.
+- **A.2 "residue impossibility" overstates**: B.1 names take-vs-reconcile undercount as accepted softness; undercount persists until **tick clamp** drops reserve to 0, not until jobs complete (completions add nothing to reserve — release's second decrement is a no-op on the absent tracked row).
+
+**3. Contradictions / stale claims**
+- B.1 "persists until the job completes" — wrong mechanism; tick clamp heals, completion does not.
+- Nodedown's blanket delete bypasses the per-row `Internal` filter; state once so readers don't apply the per-row rule to nodedown.
+- All 13 rev-3 fold grep items present — no landing miss.
+
+**4. Missing first-ship requirements**
+- eunit for `{touched, Node}` dirty-flush handler (new message, needs test).
+- eunit for C.4 `unknown` stamp fallback (build-arg absent path).
+- eunit for C.3 first-admission firing (async — must await, not boot-time).
+- eunit for vm.args F6 validation (integer + range + idempotent replace).
+- Consolidated per-part eunit list (B.2 EWMA tests live separately from B.1 enumeration).
+
+**5. Architecture / design notes**
+- `{touched, Node}` correctly replaces v2's release cast (same rate) — mailbox rate honest.
+- Tracked + reserve dual reconciled every 2 ticks unchanged; `Internal =:= false` filter is the new shape.
+- /metrics `rtt_ms{node,provider}` is unbounded gauge; NOT under the 64-cap that governs JSON only — state for dashboard authors.
+- Drain-idle conjunct (draining ∧ non-Internal tracked empty ∧ reserve == 0) is right post-unification; `reserve == 0` alone would false-arm during a one-tick reconcile heal.
+
+**6. Top 5 concrete edits**
+1. Part G §6: write the one-sentence double-billing trade explicitly.
+2. Part F 13.7: pin `docker kill` (not `docker stop`); the <30 s bound assumes RST detection.
+3. A.2 "residue impossibility" → "residue self-heals at next tick clamp; undercount bounded by the named race window (B.1)".
+4. B.1: replace "persists until the job completes" with "persists until next tick clamp deletes the row; two-tick guard still bounds over-admission".
+5. Add eunit enumeration: `{touched,Node}` handler, C.4 unknown fallback, C.3 first-admission timing, vm.args F6 validation.
