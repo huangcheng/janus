@@ -127,6 +127,90 @@ done_rejects_bad_status_test() ->
 validate_bad_shape_test() ->
     ?assertEqual({error, bad_shape}, janus_worker_wire:validate({unknown_msg, foo, bar})).
 
+%%%===================================================================
+%%% Scheduler v2 additive keys (spec Part 0.10 — TEST ORDER rule: the
+%%% shipped validators must match the ENRICHED maps BEFORE the
+%%% piggyback ships; every production shape below validates as-is)
+%%%===================================================================
+
+%% done map WITH the OPTIONAL rtt_ms float key (Task C piggyback).
+done_with_rtt_ms_validates_test() ->
+    Done = janus_worker_wire:done(?JREF, #{
+        usage => undefined,
+        status => 200,
+        trailers => #{},
+        body => undefined,
+        rtt_ms => 12.5
+    }),
+    ?assertEqual(ok, janus_worker_wire:validate(Done)).
+
+%% error map WITH rtt_ms — via the additive error/4 constructor; the
+%% plain error/3 shape is unchanged.
+error_with_rtt_ms_validates_test() ->
+    {ok, Err} = janus_worker_wire:error(?JREF, timeout, <<"timed out">>, #{rtt_ms => 3.25}),
+    ?assertEqual(ok, janus_worker_wire:validate(Err)),
+    %% The plain error/3 shape is unchanged (old callers).
+    {ok, Plain} = janus_worker_wire:error(?JREF, timeout, <<"timed out">>),
+    ?assertEqual(
+        {janus_error, ?JREF, #{code => timeout, message => <<"timed out">>}}, Plain
+    ),
+    %% A raw enriched tuple (worker→master wire shape) also validates:
+    %% the shipped clause matches on code/message only.
+    ?assertEqual(
+        ok,
+        janus_worker_wire:validate(
+            {janus_error, ?JREF, #{code => connect, message => <<"x">>, rtt_ms => 0.5}}
+        )
+    ).
+
+%% Job fields WITH the additive internal (probe marker) + provider_id
+%% (worker EWMA attribution) keys — old-worker decode builds from known
+%% keys only; extra keys pass untouched.
+job_additive_keys_validate_test() ->
+    Master = self(),
+    {ok, Msg} = janus_worker_wire:job(
+        ?JREF,
+        Master,
+        (job_fields())#{
+            internal => true,
+            provider_id => <<"prov-1">>
+        }
+    ),
+    ?assertEqual(ok, janus_worker_wire:validate(Msg)).
+
+%% Hello WITH the additive capacity/sched_v markers: the constructor
+%% carries well-formed values into the meta; garbage is DROPPED (the
+%% worker-side env parse clamps garbage to 1 before this, so the wire
+%% only sees well-formed values); the old shape omits the keys.
+hello_additive_keys_test() ->
+    From = self(),
+    Msg = janus_worker_wire:hello(From, ?WNODE, #{
+        region => <<"cn-east">>, capacity => 4, sched_v => 2
+    }),
+    ?assertEqual(ok, janus_worker_wire:validate(Msg)),
+    {janus_worker_hello, From, ?WNODE, Meta} = Msg,
+    ?assertEqual(4, maps:get(capacity, Meta)),
+    ?assertEqual(2, maps:get(sched_v, Meta)),
+    %% Unset capacity => key OMITTED (master defaults to infinity).
+    Old = janus_worker_wire:hello(From, ?WNODE, #{region => <<"cn-east">>}),
+    {janus_worker_hello, From, ?WNODE, OldMeta} = Old,
+    ?assertEqual(false, maps:is_key(capacity, OldMeta)),
+    ?assertEqual(false, maps:is_key(sched_v, OldMeta)),
+    ?assertEqual(ok, janus_worker_wire:validate(Old)),
+    %% Raw enriched hello tuple (worker→master wire shape) validates.
+    ?assertEqual(
+        ok,
+        janus_worker_wire:validate(
+            {janus_worker_hello, From, ?WNODE, #{
+                role => worker, vsn => 1, region => <<"us">>, capacity => 1, sched_v => 2
+            }}
+        )
+    ),
+    %% Constructor drops malformed additive values (never reaches the wire).
+    Garbage = janus_worker_wire:hello(From, ?WNODE, #{region => <<"us">>, capacity => <<"four">>}),
+    {janus_worker_hello, From, ?WNODE, GarbageMeta} = Garbage,
+    ?assertEqual(false, maps:is_key(capacity, GarbageMeta)).
+
 redact_job_headers_without_values_test() ->
     Master = self(),
     {ok, Msg} = janus_worker_wire:job(?JREF, Master, job_fields()),

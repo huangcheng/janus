@@ -17,6 +17,13 @@
 -define(PDICT_MASTER, janus_worker_master).
 -define(PDICT_MASTER_MON, janus_worker_master_mon).
 -define(PDICT_WORKER, janus_worker_http_pid).
+%% Scheduler v2 (spec A.3, Task C): upstream duration start (mono ms),
+%% the additive `internal` job flag (probes — three-seam exclusion),
+%% and the additive `provider_id` (per-(worker, provider) EWMA
+%% attribution on the dispatcher).
+-define(PDICT_UPSTREAM_START, janus_worker_upstream_start).
+-define(PDICT_INTERNAL, janus_worker_internal).
+-define(PDICT_PROVIDER, janus_worker_provider).
 
 -spec run(binary(), pid(), map()) -> ok.
 run(JobRef, MasterSessionPid, Fields) when
@@ -28,6 +35,8 @@ run(JobRef, MasterSessionPid, Fields) when
     put(?PDICT_MASTER_MON, MasterMon),
     put(?PDICT_CREDITS, 0),
     put(?PDICT_SEQ, janus_worker_wire:initial_chunk_seq()),
+    put(?PDICT_INTERNAL, maps:get(internal, Fields, false) =:= true),
+    put(?PDICT_PROVIDER, maps:get(provider_id, Fields, undefined)),
     MasterSessionPid ! janus_worker_wire:job_ack(JobRef, self()),
     TimeoutMs = maps:get(timeout_ms, Fields),
     TRef = erlang:send_after(TimeoutMs, self(), job_timeout),
@@ -67,7 +76,10 @@ run(JobRef, MasterSessionPid, Fields) when
         erase(?PDICT_MASTER_MON),
         erase(?PDICT_CREDITS),
         erase(?PDICT_SEQ),
-        erase(?PDICT_WORKER)
+        erase(?PDICT_WORKER),
+        erase(?PDICT_UPSTREAM_START),
+        erase(?PDICT_INTERNAL),
+        erase(?PDICT_PROVIDER)
     end,
     ok.
 
@@ -76,6 +88,7 @@ run(JobRef, MasterSessionPid, Fields) when
 %%%===================================================================
 
 run_unary(#{method := Method, url := Url, headers := Headers, body := Body0} = _Fields) ->
+    put(?PDICT_UPSTREAM_START, erlang:monotonic_time(millisecond)),
     Body = iolist_to_binary(Body0),
     case target_from_url(Url) of
         {ok, Target} ->
@@ -148,6 +161,7 @@ wait_unary(HttpPid, HttpMon) ->
 %%%===================================================================
 
 run_stream(#{url := Url, headers := Headers, body := Body0} = _Fields) ->
+    put(?PDICT_UPSTREAM_START, erlang:monotonic_time(millisecond)),
     Body = iolist_to_binary(Body0),
     case target_from_url(Url) of
         {ok, Target} ->
@@ -373,28 +387,73 @@ ensure_clear_control() ->
 %%% Emit helpers
 %%%===================================================================
 
+%% done/error maps gain the OPTIONAL `rtt_ms` float key — the RAW
+%% per-job upstream duration (spec A.3). Error completions DO carry it
+%% (the master writes passive rtt rows for them); internal (probe)
+%% jobs carry NEITHER the key NOR an EWMA report (the three-seam
+%% exclusion, spec E.6). The worker's passive EWMA feed is SEPARATE:
+%% successful (status < 400) non-internal completions only.
 emit_done(Status, Body) ->
     JobRef = get(?PDICT_JOB),
     Master = get(?PDICT_MASTER),
-    Fields = #{
+    Fields0 = #{
         usage => undefined,
         status => Status,
         trailers => #{},
         body => Body
     },
+    {Fields, RttMs} = with_rtt_ms(Fields0),
     Master ! janus_worker_wire:done(JobRef, Fields),
+    case RttMs =/= undefined andalso Status < 400 of
+        true -> report_duration(RttMs);
+        false -> ok
+    end,
     ok.
 
 emit_error(Code, Message) when is_atom(Code), is_binary(Message) ->
     JobRef = get(?PDICT_JOB),
     Master = get(?PDICT_MASTER),
-    case janus_worker_wire:error(JobRef, Code, Message) of
+    {ErrFields, _RttMs} = with_rtt_ms(#{code => Code, message => Message}),
+    case janus_worker_wire:error(JobRef, Code, Message, ErrFields) of
         {ok, Err} ->
             Master ! Err;
         {error, _} ->
             ok
     end,
     ok.
+
+%% Merge `rtt_ms` into the completion map for NORMAL jobs; internal
+%% jobs keep the plain map (no key). Returns {Map, RttMs | undefined}.
+with_rtt_ms(Map) ->
+    case get(?PDICT_INTERNAL) of
+        true ->
+            {Map, undefined};
+        _ ->
+            case get(?PDICT_UPSTREAM_START) of
+                Start when is_integer(Start) ->
+                    Elapsed = float(max(0, erlang:monotonic_time(millisecond) - Start)),
+                    {Map#{rtt_ms => Elapsed}, Elapsed};
+                _ ->
+                    {Map, undefined}
+            end
+    end.
+
+%% Report the successful per-job duration to the dispatcher (the EWMA
+%% must survive across per-job sessions — the dispatcher owns it, spec
+%% Task C). Only sent when the job carried `provider_id` (per-provider
+%% attribution); a missing dispatcher (eunit / boot race) is tolerated.
+report_duration(RttMs) ->
+    case get(?PDICT_PROVIDER) of
+        ProviderId when ProviderId =/= undefined ->
+            try
+                janus_worker_dispatch ! {job_duration, ProviderId, RttMs}
+            catch
+                _:_ -> ok
+            end,
+            ok;
+        _ ->
+            ok
+    end.
 
 %%%===================================================================
 %%% URL / error mapping

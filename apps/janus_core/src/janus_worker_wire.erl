@@ -17,6 +17,7 @@
     chunk/3,
     done/2,
     error/3,
+    error/4,
     cancel/1,
     credit/2,
     redact_job/1,
@@ -46,7 +47,20 @@ initial_chunk_seq() -> 0.
 -spec hello(pid(), node(), map()) -> {janus_worker_hello, pid(), node(), map()}.
 hello(From, Node, Opts) when is_pid(From), is_atom(Node), is_map(Opts) ->
     Region = maps:get(region, Opts, undefined),
-    Meta = #{role => worker, vsn => ?VSN, region => Region},
+    %% Scheduler v2 ADDITIVE hello keys (spec Part 0.10): capacity /
+    %% sched_v ride the meta ONLY when well-formed — an old master's
+    %% admit path builds its record from known keys and ignores them;
+    %% the validator below tolerates the extra keys (verified: it
+    %% matches on role/vsn/region only).
+    Additive = maps:filter(
+        fun
+            (capacity, C) when is_integer(C), C >= 1 -> true;
+            (sched_v, V) when is_integer(V), V >= 1 -> true;
+            (_K, _V) -> false
+        end,
+        Opts
+    ),
+    Meta = maps:merge(#{role => worker, vsn => ?VSN, region => Region}, Additive),
     Msg = {janus_worker_hello, From, Node, Meta},
     ok = validate(Msg),
     Msg.
@@ -109,9 +123,23 @@ done(JobRef, Fields) when is_binary(JobRef), is_map(Fields) ->
 -spec error(binary(), atom(), binary()) ->
     {ok, {janus_error, binary(), map()}} | {error, term()}.
 error(JobRef, Code, Message) when is_binary(JobRef), is_binary(Message) ->
+    error(JobRef, Code, Message, #{}).
+
+%% Scheduler v2 additive-key form (spec A.3): ExtraFields merges into
+%% the base #{code, message} map — the shipped error validator matches
+%% on code/message only, so extra keys (`rtt_ms`) pass validation and
+%% an old master still decodes the message (spec Part 0.10).
+-spec error(binary(), atom(), binary(), map()) ->
+    {ok, {janus_error, binary(), map()}} | {error, term()}.
+error(JobRef, Code, Message, ExtraFields) when
+    is_binary(JobRef), is_binary(Message), is_map(ExtraFields)
+->
     case valid_error_code(Code) of
         ok ->
-            Msg = {janus_error, JobRef, #{code => Code, message => Message}},
+            %% Base keys WIN: an ExtraFields collision with the
+            %% reserved code/message must never override the wire
+            %% contract (ocr review).
+            Msg = {janus_error, JobRef, maps:merge(ExtraFields, #{code => Code, message => Message})},
             ok = validate(Msg),
             {ok, Msg};
         {error, _} = Err ->

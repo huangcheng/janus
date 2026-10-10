@@ -34,16 +34,20 @@ call(ProviderProto, Route, _Body, Map, WantStream0, LocalFun) when is_function(L
             LocalFun();
         true ->
             Affinity = affinity_opts(Route),
-            case safe_pick(Affinity) of
+            JobRef = crypto:strong_rand_bytes(16),
+            case safe_pick(pick_opts(Affinity, Route, JobRef)) of
                 empty ->
                     LocalFun();
                 {ok, WorkerNode} ->
                     case prepare_job(ProviderProto, Route, Map, WantStream) of
                         {error, _} = Err ->
                             %% Same failure local gun would see after resolve.
+                            %% Nothing was ever sent — release the pick's
+                            %% reservation (send-fail class, spec Part 0.11).
+                            ok = sched_release(JobRef),
                             Err;
                         {ok, Fields} ->
-                            dispatch(WorkerNode, Fields, WantStream, LocalFun)
+                            dispatch(WorkerNode, JobRef, Fields, WantStream, LocalFun)
                     end
             end
     end.
@@ -58,15 +62,17 @@ unary_post(Route, PathSuffix, Body, Opts, LocalFun) when
             LocalFun();
         true ->
             Affinity = affinity_opts(Route),
-            case safe_pick(Affinity) of
+            JobRef = crypto:strong_rand_bytes(16),
+            case safe_pick(pick_opts(Affinity, Route, JobRef)) of
                 empty ->
                     LocalFun();
                 {ok, WorkerNode} ->
                     case prepare_unary_job(Route, PathSuffix, Body, Opts) of
                         {error, _} = Err ->
+                            ok = sched_release(JobRef),
                             Err;
                         {ok, Fields} ->
-                            dispatch(WorkerNode, Fields, false, LocalFun)
+                            dispatch(WorkerNode, JobRef, Fields, false, LocalFun)
                     end
             end
     end.
@@ -156,6 +162,15 @@ safe_pick(Opts) ->
         _:_ -> empty
     end.
 
+%% Pick opts (Task C, spec Part C): affinity/region as today, plus
+%% `job_ref` (the pick's reserve loop correlates its {track} cast) and
+%% `provider_id` (the track row + dispatch_worker_total label).
+pick_opts(Affinity, Route, JobRef) ->
+    Affinity#{
+        provider_id => maps:get(provider_id, Route, undefined),
+        job_ref => JobRef
+    }.
+
 affinity_opts(#{provider_id := Pid}) ->
     case janus_catalog:lookup_provider(Pid) of
         {ok, Prov} -> affinity_opts_from_provider(Prov);
@@ -176,25 +191,48 @@ normalize_region(_) -> undefined.
 %%--------------------------------------------------------------------
 
 prepare_job(openai_chat, Route, Map, WantStream) ->
-    finish_prepare(janus_providers_openai:prepare(chat_completions, Route, Map, WantStream), WantStream);
+    finish_prepare(
+        janus_providers_openai:prepare(chat_completions, Route, Map, WantStream),
+        provider_id(Route),
+        WantStream
+    );
 prepare_job(openai_responses, Route, Map, WantStream) ->
-    finish_prepare(janus_providers_openai:prepare(responses, Route, Map, WantStream), WantStream);
+    finish_prepare(
+        janus_providers_openai:prepare(responses, Route, Map, WantStream),
+        provider_id(Route),
+        WantStream
+    );
 prepare_job(openai_decisions, Route, Map, WantStream) ->
-    finish_prepare(janus_providers_openai:prepare(decisions, Route, Map, WantStream), WantStream);
+    finish_prepare(
+        janus_providers_openai:prepare(decisions, Route, Map, WantStream),
+        provider_id(Route),
+        WantStream
+    );
 prepare_job(anthropic_messages, Route, Map, WantStream) ->
-    finish_prepare(janus_providers_anthropic:prepare(Route, Map, WantStream), WantStream);
+    finish_prepare(
+        janus_providers_anthropic:prepare(Route, Map, WantStream),
+        provider_id(Route),
+        WantStream
+    );
 prepare_job(_, _, _, _) ->
     {error, unknown_protocol}.
 
-finish_prepare({error, _} = Err, _WantStream) ->
+provider_id(Route) when is_map(Route) ->
+    maps:get(provider_id, Route, undefined).
+
+finish_prepare({error, _} = Err, _ProviderId, _WantStream) ->
     Err;
-finish_prepare({ok, #{url := Url, method := Method, headers := Headers, body := Body}}, WantStream) ->
+finish_prepare({ok, #{url := Url, method := Method, headers := Headers, body := Body}}, ProviderId, WantStream) ->
     Timeout =
         case WantStream of
             true -> janus_worker_wire:stream_timeout_ms();
             false -> janus_worker_wire:non_stream_timeout_ms()
         end,
-    Fields = #{
+    %% The additive `provider_id` key (Task C, spec A.3) lets the
+    %% worker attribute its per-provider passive EWMA; normal jobs
+    %% NEVER carry `internal` (omitted — probes are pool-issued only).
+    %% Extra keys pass wire validation untouched (spec Part 0.10).
+    Fields0 = #{
         url => Url,
         method => Method,
         headers => Headers,
@@ -203,6 +241,11 @@ finish_prepare({ok, #{url := Url, method := Method, headers := Headers, body := 
         timeout_ms => Timeout,
         protocol_meta => #{}
     },
+    Fields =
+        case ProviderId of
+            undefined -> Fields0;
+            _ -> Fields0#{provider_id => ProviderId}
+        end,
     {ok, Fields}.
 
 %% Shared resolve for modality unary (local post + worker job). No stream/model rewrite.
@@ -271,7 +314,7 @@ prepare_unary_job(Route, PathSuffix, Body, Opts) ->
             timeout_ms := Timeout
         }} ->
             Target = #{host => Host, port => Port, path => Path, tls => Tls},
-            {ok, #{
+            Fields0 = #{
                 url => janus_providers_http:target_url(Target),
                 method => post,
                 headers => Headers,
@@ -279,23 +322,37 @@ prepare_unary_job(Route, PathSuffix, Body, Opts) ->
                 stream => false,
                 timeout_ms => Timeout,
                 protocol_meta => #{}
-            }}
+            },
+            Fields =
+                case maps:get(provider_id, Route, undefined) of
+                    undefined -> Fields0;
+                    ProviderId -> Fields0#{provider_id => ProviderId}
+                end,
+            {ok, Fields}
     end.
 
 %%--------------------------------------------------------------------
 %% Send job / ack / relay
 %%--------------------------------------------------------------------
 
-dispatch(WorkerNode, Fields, WantStream, LocalFun) ->
-    JobRef = crypto:strong_rand_bytes(16),
+%% JobRef is generated BEFORE pick (Task C): the pick opts carry it so
+%% the pool's reserve loop correlates its {track} cast with this
+%% dispatch's release/rtt/ttfb casts (spec Part 0.11).
+dispatch(WorkerNode, JobRef, Fields, WantStream, LocalFun) ->
     case janus_worker_wire:job(JobRef, self(), Fields) of
         {error, _} ->
+            %% Never sent: reclaim the reservation (send-fail class).
+            ok = sched_release(JobRef),
             LocalFun();
         {ok, JobMsg} ->
             note_inflight(WorkerNode, 1),
             case send_job(WorkerNode, JobMsg) of
                 {error, _} ->
                     note_inflight(WorkerNode, -1),
+                    %% Send-fail: release + dispatch_local{send_fail}
+                    %% (spec Part 0.11 / Part C metrics).
+                    ok = sched_release(JobRef),
+                    ok = note_dispatch_local(send_fail),
                     LocalFun();
                 ok ->
                     case wait_ack(JobRef, WorkerNode) of
@@ -304,19 +361,30 @@ dispatch(WorkerNode, Fields, WantStream, LocalFun) ->
                             cancel_dispatch(WorkerNode, JobRef),
                             flush_job(JobRef),
                             note_inflight(WorkerNode, -1),
+                            %% Ack-miss: the reservation stays PENDING
+                            %% (late, not absent — spec Part 0.11); the
+                            %% master executes locally.
+                            ok = note_dispatch_local(ack_miss),
                             LocalFun();
                         {ok, WorkerSessionPid} ->
                             Mon = monitor(process, WorkerSessionPid),
+                            %% TTFB clock starts at ack receipt (spec A.4).
+                            TtfbStart = erlang:monotonic_time(millisecond),
                             case WantStream of
                                 true ->
                                     %% Drain runs AFTER upstream_call returns —
                                     %% release inflight / demonitor inside Drain.
                                     grant_credit(WorkerSessionPid, JobRef),
-                                    remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode);
+                                    remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart);
                                 false ->
                                     try
                                         remote_unary(
-                                            JobRef, WorkerSessionPid, Mon, WorkerNode, Fields
+                                            JobRef,
+                                            WorkerSessionPid,
+                                            Mon,
+                                            WorkerNode,
+                                            Fields,
+                                            TtfbStart
                                         )
                                     after
                                         finish_remote(Mon, WorkerNode)
@@ -410,10 +478,58 @@ note_inflight(Node, Delta) ->
     end.
 
 %%--------------------------------------------------------------------
+%% Scheduler v2 casts (Task C, spec Part 0.11 / A.3 / A.4)
+%%--------------------------------------------------------------------
+
+%% All `{sched, 2, _}` messages go via gen_server:cast to the LOCAL
+%% master pool (the spec-pinned delivery class — an older pool drops
+%% and counts them in its catch-all). Casts from this process are
+%% FIFO, so rtt always precedes its release at the pool.
+sched_cast(Msg) ->
+    try
+        gen_server:cast(janus_worker_pool, Msg)
+    catch
+        _:_ -> ok
+    end,
+    ok.
+
+sched_release(JobRef) ->
+    sched_cast({sched, 2, {release, JobRef}}).
+
+%% Forward the worker's additive `rtt_ms` piggyback (done AND error
+%% completions; internal jobs never carry it, worker-side).
+maybe_ingest_rtt(JobRef, CompletionMap) when is_map(CompletionMap) ->
+    case maps:get(rtt_ms, CompletionMap, undefined) of
+        RttMs when is_number(RttMs) ->
+            sched_cast({sched, 2, {rtt, JobRef, RttMs}});
+        _ ->
+            ok
+    end.
+
+%% TTFB (spec A.4): dispatch-ack -> first forwarded chunk, with the
+%% done-completion fallback (full elapsed) for single-chunk/non-stream
+%% jobs. Successful non-internal completions only — error completions
+%% never feed the health EWMA. Send once per job.
+maybe_send_ttfb(_JobRef, _TtfbStart, already_sent) ->
+    already_sent;
+maybe_send_ttfb(JobRef, TtfbStart, not_sent) ->
+    Elapsed = max(0, erlang:monotonic_time(millisecond) - TtfbStart),
+    ok = sched_cast({sched, 2, {ttfb, JobRef, Elapsed}}),
+    already_sent.
+
+note_dispatch_local(Reason) ->
+    try
+        janus_worker_pool:note_dispatch_local(Reason)
+    catch
+        _:_ -> ok
+    end,
+    ok.
+
+%%--------------------------------------------------------------------
 %% Non-stream relay
 %%--------------------------------------------------------------------
 
-remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields) ->
+remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields, TtfbStart) ->
     Timeout = maps:get(timeout_ms, Fields) + janus_worker_wire:ack_deadline_ms(),
     receive
         {janus_done, JobRef, Done} ->
@@ -423,6 +539,15 @@ remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields) ->
                 false ->
                     stash_done(Done, ok),
                     Status = maps:get(status, Done),
+                    _ = maybe_ingest_rtt(JobRef, Done),
+                    case Status < 400 of
+                        true ->
+                            %% Single-shot fallback: full elapsed as TTFB.
+                            _ = maybe_send_ttfb(JobRef, TtfbStart, not_sent);
+                        false ->
+                            ok
+                    end,
+                    ok = sched_release(JobRef),
                     Body =
                         case maps:get(body, Done) of
                             undefined -> <<>>;
@@ -431,21 +556,27 @@ remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields) ->
                     Headers = maps:get(trailers, Done, #{}),
                     {ok, Status, Headers, Body}
             end;
-        {janus_error, JobRef, #{code := Code, message := Msg}} ->
+        {janus_error, JobRef, #{code := Code, message := Msg} = ErrMap} ->
             stash_outcome(error),
+            ok = maybe_ingest_rtt(JobRef, ErrMap),
+            ok = sched_release(JobRef),
             map_worker_error(Code, Msg);
         {'DOWN', Mon, process, WorkerSessionPid, _Reason} ->
             stash_outcome(error),
             mark_dead(JobRef),
+            ok = sched_release(JobRef),
             {error, worker_lost};
         {janus_chunk, JobRef, _, _} ->
             %% Non-stream must not chunk; ignore and keep waiting.
-            remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields)
+            remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields, TtfbStart)
     after Timeout ->
         stash_outcome(error),
         cancel_session(WorkerSessionPid, JobRef),
         mark_dead(JobRef),
         flush_job(JobRef),
+        %% Stream/unary timeout with a live worker session: NO release
+        %% (spec Part 0.11 — release on done/error/worker_lost/send-fail
+        %% ONLY; the 10-min purge reclaims).
         {error, {await, timeout}}
     end.
 
@@ -453,20 +584,20 @@ remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields) ->
 %% Stream relay — returns {ok, stream, Status, Headers, Drain}
 %%--------------------------------------------------------------------
 
-remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode) ->
+remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart) ->
     %% First-ship: provisional 200 until done.status (spec §4.2 mid-stream
     %% non-2xx). Status is only on janus_done; chunks may precede it.
     Headers = #{<<"content-type">> => <<"text/event-stream">>},
     Drain = fun(ChunkFun) ->
         try
-            stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, 0)
+            stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, 0, TtfbStart, not_sent)
         after
             finish_remote(Mon, WorkerNode)
         end
     end,
     {ok, stream, 200, Headers, Drain}.
 
-stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq) ->
+stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent) ->
     receive
         {janus_chunk, JobRef, Seq, Bin} when is_binary(Bin) ->
             case is_dead(JobRef) of
@@ -494,6 +625,8 @@ stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq) ->
                             flush_job(JobRef),
                             throw(janus_client_disconnect)
                     end,
+                    %% TTFB on the FIRST forwarded chunk (spec A.4).
+                    TtfbSent1 = maybe_send_ttfb(JobRef, TtfbStart, TtfbSent),
                     %% Top up one credit after client write flushed.
                     try
                         WorkerSessionPid ! janus_worker_wire:credit(JobRef, 1)
@@ -501,7 +634,9 @@ stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq) ->
                         _:_ ->
                             ok
                     end,
-                    stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, Seq + 1)
+                    stream_drain(
+                        JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, Seq + 1, TtfbStart, TtfbSent1
+                    )
             end;
         {janus_done, JobRef, Done} ->
             case is_dead(JobRef) of
@@ -515,6 +650,13 @@ stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq) ->
                             false -> ok
                         end,
                     stash_done(Done, OkOrErr),
+                    ok = maybe_ingest_rtt(JobRef, Done),
+                    _ =
+                        case Status < 400 of
+                            true -> maybe_send_ttfb(JobRef, TtfbStart, TtfbSent);
+                            false -> TtfbSent
+                        end,
+                    ok = sched_release(JobRef),
                     case Status >= 400 of
                         true ->
                             {error, {worker_http_status, Status}};
@@ -522,22 +664,26 @@ stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq) ->
                             ok
                     end
             end;
-        {janus_error, JobRef, #{code := Code, message := Msg}} ->
+        {janus_error, JobRef, #{code := Code, message := Msg} = ErrMap} ->
             stash_outcome(error),
+            ok = maybe_ingest_rtt(JobRef, ErrMap),
+            ok = sched_release(JobRef),
             case map_worker_error(Code, Msg) of
                 {error, Reason} -> {error, Reason}
             end;
         {'DOWN', Mon, process, WorkerSessionPid, _Reason} ->
             stash_outcome(error),
             mark_dead(JobRef),
+            ok = sched_release(JobRef),
             {error, worker_lost};
         {janus_job_ack, JobRef, _} ->
-            stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq)
+            stream_drain(JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent)
     after janus_worker_wire:stream_timeout_ms() ->
         stash_outcome(error),
         cancel_session(WorkerSessionPid, JobRef),
         mark_dead(JobRef),
         flush_job(JobRef),
+        %% No release on timeout (spec Part 0.11 — see remote_unary).
         {error, {await, timeout}}
     end.
 

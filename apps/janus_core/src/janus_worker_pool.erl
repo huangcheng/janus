@@ -42,6 +42,7 @@
     available/0,
     undrain/1,
     note_inflight/2,
+    note_dispatch_local/1,
     drain_idle_ms/0,
     %% Scheduler v2 surfaces (spec Part C).
     knobs/0,
@@ -466,6 +467,14 @@ undrain(Node) when is_atom(Node) ->
 -spec note_inflight(node(), 1 | -1) -> ok.
 note_inflight(Node, Delta) when is_atom(Node), (Delta =:= 1 orelse Delta =:= -1) ->
     gen_server:cast(?SERVER, {note_inflight, Node, Delta}).
+
+%% @doc Client-side dispatch-local reason emission (Task C, spec Part
+%% C): pick counts its OWN local-fallback reasons; `send_fail` and
+%% `ack_miss` happen AFTER pick returned, so `janus_http_worker_client`
+%% reports them here (`sched_dispatch_local_total{reason}`).
+-spec note_dispatch_local(atom()) -> ok.
+note_dispatch_local(Reason) when is_atom(Reason) ->
+    ok = bump({dispatch_local, Reason}).
 
 -spec drain_idle_ms() -> pos_integer().
 drain_idle_ms() ->
