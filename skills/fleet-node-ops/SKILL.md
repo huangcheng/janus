@@ -125,6 +125,33 @@ Only when intentionally running the **signal bus** (not worker pool capacity):
 
 Prefer master/worker env (`JANUS_ROLE=worker`) for new egress capacity.
 
+## Scheduler v2 env reference (spec `2026-10-10-scheduler-v2.md` Part D)
+
+All knobs are **boot-time only** (read once into `persistent_term`; restart to
+change — no hot-reload surface) and **default OFF / no behavior change**
+(selection ≡ v1: affinity pin → region tag → least-inflight + name). Rollback
+= knob off + restart; stale heir-persisted rows are unread with knobs off.
+
+| Env | Scope | Default | Meaning |
+|-----|-------|---------|---------|
+| `JANUS_SCHED_GEO=0\|1` | master | `0` | Auto-GeoIP provider geo (tier-4 `auto` comparator). Explicit `1` + missing mmdb + empty `GEO_TEST_HOSTS` **refuses boot**. |
+| `JANUS_SCHED_GEO_TEST_HOSTS` | master | unset | TEST-ONLY seam: `host=region;host2=region2` consulted BEFORE DNS/mmdb (exact-host ⇒ injected region). Non-empty satisfies the explicit-1 boot check AND exempts the mmdb existence refusal. Loud log; gate scripts only. |
+| `JANUS_SCHED_REGIONS` | master | built-in vocab | REPLACES the region vocabulary wholesale: ordered rules `CC[:SUBDIVISION]=tag;CC=tag` (first match wins). `other` is always auto-appended (fallback for outside-vocab). Parse errors skip the rule + warn. |
+| `JANUS_MMDB_PATH` | master | unset | Runtime path to the GeoLite2-City mmdb (NOT in git/image; CC BY 4.0 — `NOTICE` attribution). Master-only; workers need no mmdb. Place it BEFORE flipping `JANUS_SCHED_GEO=1`. |
+| `JANUS_SCHED_RTT=0\|1` | master | `0` | RTT as the selection sort key. `sched_rtt` rows are written by the passive `rtt_ms` piggyback REGARDLESS (knob gates only the sort). |
+| `JANUS_SCHED_HEALTH=0\|1` | master | `0` | Health demotion: per-worker TTFB EWMA (α=0.25, seeds at sample 1, admitted at ≥3 samples) demoted when > max(5000 ms, 3× median of OTHER measured workers). Errors/probes excluded. |
+| `JANUS_SCHED_PROBE=0\|1` | master | `0` | Master-issued 1-token internal probes (30 s tick; spend real provider money — opt-in only). |
+| `JANUS_SCHED_PROBE_MAX_HOURLY` | master | `10` | Cluster-wide probe cap per rolling hour across ALL workers × providers (a separate additive budget; never starved by dashboard probes). |
+| `JANUS_SCHED_PROBE_FORCE` | master | unset | TEST-ONLY: bypass cadence AND the fresh-row skip — NEVER the hourly cap, target eligibility, or the `sched_v` filter. Loud log; never in prod. |
+| `JANUS_WORKER_REGION` | worker | unset | Operator-declared worker region (e.g. `cn-east`), carried in hello as `geo_region`. Unset/`unknown` = participates in everything except geo preference. Declaring a region NARROWS matching provider traffic to that worker — declare all workers in a region before enabling. |
+| `JANUS_WORKER_CAPACITY` | worker | unset ⇒ `infinity` | Max CONCURRENT jobs on the worker (hello field; clamped ≥1). Exhaustion on the master rolls back to the next candidate, then LOCAL fallback — never a failed request. |
+
+Provider-side (catalog columns, set per provider — dashboard
+`POST /api/providers` accepts `region_tag` + `affinity_node`): `region_tag`
+is the legacy geo comparator (UNGATED v1 behavior); `affinity_node` is an
+ABSOLUTE pin (ignores health/geo tiers; soft capacity cap on that node).
+Observation surface: read-only `GET /stats/sched` (bearer `JANUS_STATS_TOKEN`).
+
 ## Redaction rules (N6)
 
 Verify artifacts, tickets, and chat attachments must **never** contain:
