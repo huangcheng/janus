@@ -62,6 +62,12 @@
     normalize_want_stream/1,
     outcome_bin/1,
     map_worker_error/2,
+    %% Exported for eunit: the drain's deadline arithmetic is the crux
+    %% of the inactivity ceiling and would otherwise only be reachable
+    %% through a real stream.
+    deadline_remaining/1,
+    deadline_remaining/2,
+    classify_stream_timeout/2,
     parse_affinity_node/1,
     affinity_opts_from_provider/1,
     video_path/1,
@@ -943,6 +949,11 @@ remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart, LocalFun, Fa
 %% Drain starts — never Cowboy-forwarded during preflight.
 stream_preflight(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart) ->
     ok = flush_acks(JobRef),
+    %% Pre-first-byte wait, bounded by the TOTAL budget only. The
+    %% inactivity ceiling deliberately does NOT apply here: nothing has
+    %% been forwarded yet, so "silence" is not yet distinguishable from
+    %% a slow upstream, and tightening this changes failover timing
+    %% (a {await, timeout} here is the retryable first-byte timeout).
     stream_preflight(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart, stream_deadline()).
 
 stream_preflight(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart, Deadline) ->
@@ -1033,12 +1044,18 @@ stream_drain_start(
     TtfbStart,
     TtfbSent
 ) ->
+    %% Both deadlines are anchored HERE, once. Only the inactivity one is
+    %% restarted by a forwarded chunk; the total budget must measure
+    %% stream age, so recomputing it per chunk would make it unbounded
+    %% and leave the timeout classification unreachable.
+    Deadline = stream_deadline(),
+    Inactivity = stream_inactivity_deadline(),
     ok = flush_acks(JobRef),
     case Prefetch of
         {chunk, Seq, Plain} ->
             stream_forward_plain(
                 JobRef, Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
-                ExpectSeq, TtfbStart, TtfbSent
+                ExpectSeq, TtfbStart, TtfbSent, Deadline, Inactivity
             );
         {done, Done, TtfbStart1} ->
             stream_done(JobRef, Done, TtfbStart1, TtfbSent)
@@ -1065,12 +1082,12 @@ stream_drain(
         {janus_chunk, JobRef, _, _, _} = Msg ->
             stream_chunk(
                 Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
-                ExpectSeq, TtfbStart, TtfbSent
+                ExpectSeq, TtfbStart, TtfbSent, Deadline, Inactivity
             );
         {janus_chunk, JobRef, _, _} = Msg ->
             stream_chunk(
                 Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
-                ExpectSeq, TtfbStart, TtfbSent
+                ExpectSeq, TtfbStart, TtfbSent, Deadline, Inactivity
             );
         {janus_done, JobRef, Done} ->
             case is_dead(JobRef) of
@@ -1116,7 +1133,12 @@ stream_drain(
     after Wait ->
         case deadline_remaining(Deadline, Inactivity) of
             0 ->
-                stream_drain_timeout(JobRef, WorkerSessionPid, Deadline);
+                %% Classify from the SAME pair the wait was computed
+                %% from, so the verdict cannot depend on a second clock
+                %% read after the deadline already fired.
+                stream_drain_timeout(
+                    JobRef, WorkerSessionPid, deadline_remaining(Deadline), deadline_remaining(Inactivity)
+                );
             _ ->
                 %% A keepalive tick, not a deadline: reassure the CLIENT
                 %% then re-arm. Never touches either deadline — a
@@ -1154,19 +1176,39 @@ emit_keepalive(KeepaliveFun) ->
         _:_ -> ok
     end.
 
-stream_drain_timeout(JobRef, WorkerSessionPid, Deadline) ->
+stream_drain_timeout(JobRef, WorkerSessionPid, TotalLeft, InactivityLeft) ->
     stash_outcome(error),
     cancel_session(WorkerSessionPid, JobRef),
     mark_dead(JobRef),
     flush_job(JobRef),
-    %% No release on timeout (spec Part 0.11 — see remote_unary).
-    %% Distinguish the two budgets: a total-budget trip is the old
-    %% behavior; an inactivity trip means the upstream went silent
-    %% while the stream was still nominally alive.
-    case deadline_remaining(Deadline) of
-        0 -> {error, {await, timeout}};
-        _ -> {error, {await, no_progress}}
+    %% Distinguish the two budgets: a total-budget trip keeps the old
+    %% {await, timeout}; an inactivity trip means the upstream went
+    %% silent while the stream was still nominally alive.
+    %%
+    %% RELEASE ON INACTIVITY ONLY. The total-budget path keeps the
+    %% long-standing "no release on timeout" policy (spec Part 0.11 —
+    %% see remote_unary), which previously landed at ~600s, roughly when
+    %% purge_tracked/2 reclaims the reservation anyway. The inactivity
+    %% cap fires at ~180s, so inheriting that policy would pin a pool
+    %% slot for several minutes AFTER the request was aborted; a stall
+    %% storm could then exhaust the pool and push unrelated traffic to
+    %% local fallback. The job is cancelled and dead here, exactly as on
+    %% the {janus_error, _} path that releases in the same situation.
+    case classify_stream_timeout(TotalLeft, InactivityLeft) of
+        timeout ->
+            {error, {await, timeout}};
+        no_progress ->
+            ok = sched_release(JobRef),
+            {error, {await, no_progress}}
     end.
+
+%% Which budget ran out? Pure so eunit can pin it. Equal instants count
+%% as the TOTAL budget: that is the pre-existing behavior, and the
+%% release-on-trip policy differs between the two, so the tie must be
+%% resolved deterministically rather than by clause order.
+-spec classify_stream_timeout(non_neg_integer(), non_neg_integer()) -> timeout | no_progress.
+classify_stream_timeout(TotalLeft, InactivityLeft) when TotalLeft =< InactivityLeft -> timeout;
+classify_stream_timeout(_TotalLeft, _InactivityLeft) -> no_progress.
 
 %% Chunk-leg continuation of stream_drain: normalization happens HERE,
 %% at the FIRST master-side receive, BEFORE any seq/credit/log
@@ -1176,7 +1218,18 @@ stream_drain_timeout(JobRef, WorkerSessionPid, Deadline) ->
 %% skip cancel/release/flush), and only for a LIVE job (a dead job's
 %% stragglers keep the drop-only behavior).
 stream_chunk(
-    Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun, ExpectSeq, TtfbStart, TtfbSent
+    Msg,
+    JobRef,
+    WorkerSessionPid,
+    Mon,
+    WorkerNode,
+    ChunkFun,
+    KeepaliveFun,
+    ExpectSeq,
+    TtfbStart,
+    TtfbSent,
+    Deadline,
+    Inactivity
 ) ->
     case is_dead(JobRef) of
         true ->
@@ -1188,14 +1241,26 @@ stream_chunk(
                 {janus_chunk, _Ref, Seq, Wire, Meta} ->
                     stream_chunk_decoded(
                         JobRef, Seq, Wire, Meta, WorkerSessionPid, Mon, WorkerNode, ChunkFun,
-                        KeepaliveFun, ExpectSeq, TtfbStart, TtfbSent
+                        KeepaliveFun, ExpectSeq, TtfbStart, TtfbSent, Deadline, Inactivity
                     )
             end
     end.
 
 stream_chunk_decoded(
-    JobRef, Seq, Wire, Meta, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
-    ExpectSeq, TtfbStart, TtfbSent
+    JobRef,
+    Seq,
+    Wire,
+    Meta,
+    WorkerSessionPid,
+    Mon,
+    WorkerNode,
+    ChunkFun,
+    KeepaliveFun,
+    ExpectSeq,
+    TtfbStart,
+    TtfbSent,
+    Deadline,
+    Inactivity
 ) ->
     case decode_chunk(Wire, Meta) of
         {error, Reason} ->
@@ -1214,7 +1279,7 @@ stream_chunk_decoded(
             end,
             stream_forward_plain(
                 JobRef, Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
-                Seq + 1, TtfbStart, TtfbSent
+                Seq + 1, TtfbStart, TtfbSent, Deadline, Inactivity
             )
     end.
 
@@ -1222,7 +1287,7 @@ stream_chunk_decoded(
 %% — D4 zero-forward detection must not trust post-done mark_forwarded.
 stream_forward_plain(
     JobRef, _Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
-    NextSeq, TtfbStart, TtfbSent
+    NextSeq, TtfbStart, TtfbSent, Deadline, _Inactivity
 ) ->
     try
         ChunkFun(Plain)
@@ -1247,8 +1312,9 @@ stream_forward_plain(
         _:_ ->
             ok
     end,
-    %% A forwarded chunk is progress: the inactivity window restarts from
-    %% an absolute instant (never from a stray message — H1).
+    %% A forwarded chunk is progress: ONLY the inactivity window
+    %% restarts. The total budget keeps the instant captured at drain
+    %% start, so a steadily-dribbling upstream still cannot exceed it.
     stream_drain(
         JobRef,
         WorkerSessionPid,
@@ -1259,7 +1325,7 @@ stream_forward_plain(
         NextSeq,
         TtfbStart,
         TtfbSent1,
-        stream_deadline(),
+        Deadline,
         stream_inactivity_deadline()
     ).
 
