@@ -7,7 +7,7 @@ ARG NODE_BASE=node:22-alpine
 FROM ${PY_BASE} AS base
 WORKDIR /app
 
-# CN builders point these at domestic mirrors (SWR CI on tencent):
+# CN builders point these at domestic mirrors:
 #   --build-arg PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_INDEX
 COPY pyproject.toml .

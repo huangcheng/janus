@@ -11,11 +11,11 @@
 # copy goes stale exactly when a promote swaps roles. The H3 promote
 # script writes BOTH mirrors before the DNS repoint (under the deploy
 # lock); deploy/backup scripts REFUSE when no copy exists — never
-# silently default to aliyun.
+# silently default to the leader.
 #
 # File format (idempotent — one leader): comment header + one host line:
 #     # <header comment>
-#     aliyun
+#     <leader-alias>
 # A `leader=<host>` prefix is tolerated on read.
 #
 # Resolution order (first hit wins, no fallthrough past an existing file):
@@ -109,7 +109,7 @@ topology_read() {
   out="$(_topology_resolve)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<EOF
-topology: NO topology file found (H3-D7 refuse-guard: never defaulting to aliyun).
+topology: NO topology file found (H3-D7 refuse-guard: never defaulting to a leader).
    looked for: JANUS_TOPOLOGY_FILE='${JANUS_TOPOLOGY_FILE:-}' (env),
                 JANUS_TOPOLOGY_LEADER (env),
                 $JANUS_TOPOLOGY_DEV_MIRROR (dev-box mirror),

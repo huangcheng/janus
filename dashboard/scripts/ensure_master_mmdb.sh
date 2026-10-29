@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Place/refresh GeoLite2-City.mmdb on a master host and wire compose+.env.
 #
-#   bash scripts/ensure_master_mmdb.sh aliyun
+#   bash scripts/ensure_master_mmdb.sh <leader-alias>
 #
 # Host path:  /opt/stacks/janus/geo/GeoLite2-City.mmdb
 # In-container: JANUS_MMDB_PATH=/var/lib/janus/geo/GeoLite2-City.mmdb
@@ -28,7 +28,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # LOCAL python (Windows hosts expose `python`, not `python3` — the
 # deploy gate runs from Git Bash; server-side heredocs below use the
-# aliyun image python3 and are unaffected).
+# the provider image python3 and are unaffected).
 PY3="$(command -v python3 || command -v python || true)"
 FETCH="$ROOT/scripts/fetch_geolite2_mmdb.sh"
 STACK="/opt/stacks/janus"

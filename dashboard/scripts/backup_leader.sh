@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Daily leader Postgres + .env generation-set backup (age-encrypted).
-# Spec §5.3 — run on aliyun via janus-backup.timer.
+# Spec §5.3 — run on the leader node via janus-backup.timer.
 # H3-D7/H4 (spec 2026-10-15-maturity-hardening): the leader host comes
 # from the operator-side topology — REFUSE when it is missing (never
-# silently default to aliyun). On the leader node the timer context has
+# silently default to the leader). On the leader node the timer context has
 # no operator-side FILE: set JANUS_TOPOLOGY_FILE or JANUS_TOPOLOGY_LEADER
 # in /opt/stacks/janus/janus-backup.env to the current leader (the
 # authoritative mirrors stay at the deploy origins: dev-box
@@ -29,7 +29,7 @@ require_cmd flock
 LEADER="$(topology_read)" || die 2 "no topology file found — refusing to guess the leader (bootstrap from a deploy origin: deploy_prod.sh --init-topology <host>; on-node timer: set JANUS_TOPOLOGY_FILE/JANUS_TOPOLOGY_LEADER in janus-backup.env)"
 _log "topology: leader=$LEADER (source: $(topology_source))"
 # ---- demoted-node guard (H3-D7) ----
-# The topology speaks SSH aliases ('aliyun'), so this node must name itself.
+# The topology speaks SSH aliases, so this node must name itself.
 # JANUS_BACKUP_NODE_ALIAS (janus-backup.env) wins; otherwise derive the alias
 # from the local hostname against the host inventory (topology leader +
 # JANUS_FOLLOWER_HOSTS) and FAIL CLOSED when the hostname matches neither —
@@ -51,7 +51,7 @@ if [[ -z "$NODE_ALIAS" ]]; then
   if _node_matches "$LEADER"; then
     NODE_ALIAS="$LEADER"
   else
-    IFS=',' read -r -a _KNOWN_NODES <<<"${JANUS_FOLLOWER_HOSTS:-jdcloud,tencent}"
+    IFS=',' read -r -a _KNOWN_NODES <<<"${JANUS_FOLLOWER_HOSTS:-}"
     for h in ${_KNOWN_NODES[@]+"${_KNOWN_NODES[@]}"}; do
       h="$(echo "$h" | xargs)"
       [[ -n "$h" ]] || continue
@@ -63,7 +63,7 @@ if [[ -z "$NODE_ALIAS" ]]; then
   fi
 fi
 if [[ -z "$NODE_ALIAS" ]]; then
-  die 2 "cannot determine this node's topology alias (hostname '${HOST_SHORT:-?}' matches neither the topology leader '$LEADER' nor JANUS_FOLLOWER_HOSTS='${JANUS_FOLLOWER_HOSTS:-jdcloud,tencent}') — set JANUS_BACKUP_NODE_ALIAS in /opt/stacks/janus/janus-backup.env (documented in scripts/janus-backup.env.example) so a demoted node cannot back up as the leader"
+  die 2 "cannot determine this node's topology alias (hostname '${HOST_SHORT:-?}' matches neither the topology leader '$LEADER' nor JANUS_FOLLOWER_HOSTS='${JANUS_FOLLOWER_HOSTS:-<unset>}') — set JANUS_BACKUP_NODE_ALIAS in /opt/stacks/janus/janus-backup.env (documented in scripts/janus-backup.env.example) so a demoted node cannot back up as the leader"
 fi
 if [[ "$NODE_ALIAS" != "$LEADER" ]]; then
   die 2 "topology leader is '$LEADER' but this node is '$NODE_ALIAS' — move the backup timer to the leader (post-promote role swap, H3-D7)"

@@ -1,9 +1,9 @@
 #!/bin/bash
-# Reconcile firewall + aliyun SG to one source of truth: the dashboard's gateway_nodes table.
+# Reconcile firewall + cloud SG to one source of truth: the dashboard's gateway_nodes table.
 #
 # Single source of truth: /api/nodes (gateway_nodes). Anything not listed is dead.
 # Host: the per-node firewalld rich-rule for 25672 (workers + dashboard peer).
-# Cloud: the aliyun ECS SG ingress rule for 25672 over the same set.
+# Cloud: the alibaba-cloud ECS SG ingress rule for 25672 over the same set.
 #
 # Usage:
 #   recon-firewall.sh [--dry-run] [--roster-from-dashboard]
@@ -53,7 +53,7 @@ while IFS= read -r r; do
 done <<<"$cur_fw"
 [ "$DRY" = 0 ] && firewall-cmd --runtime-to-permanent
 
-# aliyun SG: revise 25672/tcp ingress to exactly ALLOW
+# cloud SG: revise 25672/tcp ingress to exactly ALLOW
 if command -v aliyun >/dev/null; then
   SG=${JANUS_SG_ID:-sg-n4aiqokdvu38761lrjb8}
   REGION=${JANUS_REGION:-cn-wuhan-lr}

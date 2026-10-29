@@ -11,7 +11,7 @@ only — deterministic, zero billable traffic, zero production access):
 | file | hardware class |
 |------|----------------|
 | `2026-10-15-win-dev.json` | Windows dev box (this repo's daily-driver machine) |
-| `<date>-runner.json` | CI host hardware class — the self-hosted runner moved from contabo (uninstalled + deregistered 2026-10-22) to the tencent CI host; not yet recorded, see below |
+| `<date>-runner.json` | CI host hardware class — the self-hosted runner moved between cloud providers (old runner uninstalled + deregistered 2026-10-22); not yet recorded, see below |
 
 Targets recorded: `healthz`, `models_list`, `chat_unary`,
 `chat_stream_ttfb`, `chat_stream_total` — median/p95/mean/min/max ms,
@@ -56,8 +56,8 @@ Notes:
 ### Recording the CI-host baseline
 
 Not automatable from a dev box: it needs a local stack booted on the CI
-host itself (the contabo runner that this section was written for was
-uninstalled and deregistered on 2026-10-22; CI now runs on tencent). For
+host itself (the original runner this section was written for was
+uninstalled and deregistered on 2026-10-22; the CI host has since moved). For
 whoever has that host:
 
 ```bash

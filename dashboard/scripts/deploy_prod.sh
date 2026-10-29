@@ -9,7 +9,7 @@
 #   bash scripts/deploy_prod.sh --plan      # DRY RUN: print the deploy plan (topology
 #                                           # leader, followers, lock state, images)
 #                                           # and EXIT 0 — no SSH required, no mutation
-#   bash scripts/deploy_prod.sh --init-topology aliyun ...  # first-run bootstrap of the
+#   bash scripts/deploy_prod.sh --init-topology leader-1 ...  # first-run bootstrap of the
 #                                           # operator-side topology mirrors (H3-D7)
 #   bash scripts/deploy_prod.sh --force-lock ...  # break-glass past a held deploy lock
 #                                           # (audited; see F4.1)
@@ -287,14 +287,14 @@ elif [ -n "$INV" ] && [ -f "$INV" ]; then
 else
   ALL_HOSTS="$LEGACY_DEFAULT_HOSTS"
 fi
-# Excluded hosts (operator instruction, 2026-10-22): `contabo` was torn
+# Excluded hosts (operator instruction): retired hosts were torn
 # down (it hosted the CI Actions runner, uninstalled + deregistered that
 # day; a shared runner) and non-janus hosts run unrelated containers —
 # neither serves a gateway container, so they are NEVER fleet hosts. The
 # filter runs AFTER resolution so neither a stale inventory secret nor an
 # explicit JANUS_DEPLOY_HOSTS scope can quietly put them back into a
 # rollout: the drop is reported on stderr instead.
-EXCLUDED_HOSTS="contabo vultr"
+EXCLUDED_HOSTS="${JANUS_DEPLOY_EXCLUDED_HOSTS:-}"  # space-separated retired aliases; unset/empty excludes none
 for _ex in $EXCLUDED_HOSTS; do
   case " $ALL_HOSTS " in
     *" $_ex "*)
@@ -831,7 +831,7 @@ collect_node_logs() {  # $1 = node (ssh host); sets DEPLOY_LOG_DIR on first use
   fi
 }
 
-# Resilient file ship (live cutover 2026-10-16: aliyun's sshd RESETS
+# Resilient file ship (live cutover 2026-10-16: one provider's sshd RESETS
 # long streams — a plain `cat | ssh` or streamed tar dies mid-file):
 # split into chunks, scp each with retries, reassemble remotely,
 # sha256-verify both sides.
@@ -884,6 +884,13 @@ ship_file() {  # <local-file> <host> <remote-path>
 # Per-node remote from the inventory (JANUS_NODE_GIT_<NAME>), else
 # JANUS_GW_GIT_REMOTE, else https://github.com/YOUR_ORG/janus.git.
 # JANUS_DEPLOY_SHIP=scp forces the chunked-scp fallback.
+# True if any per-node git remote (JANUS_NODE_GIT_<INVNAME>) is set —
+# node_git_remote() resolves each node's remote from exactly those.
+node_git_remote_any() {
+  env | grep -q '^JANUS_NODE_GIT_[A-Za-z0-9_]*=' >/dev/null
+  return $?
+}
+
 node_git_remote() {  # $1 = ssh host
   local inv="${NODE_INVNAME[$1]:-}" v="JANUS_NODE_GIT_${inv:-X}"
   printf '%s' "${!v:-${JANUS_GW_GIT_REMOTE:-https://github.com/YOUR_ORG/janus.git}}"
@@ -1448,7 +1455,7 @@ if [ "$SMOKE_ONLY" -eq 0 ]; then
   # refuses (same class as the v2.1 C.3 dirty-tree gate).
   if [ -n "$BARE_NODES" ]; then
     _gw_short="$(git -C "$GW_SRC" rev-parse --short HEAD)"
-    if [ "${JANUS_DEPLOY_SHIP:-git}" = git ] && [ -n "${JANUS_GW_GIT_REMOTE:-}${JANUS_NODE_GIT_ALIYUN:-}${JANUS_NODE_GIT_JDCLOUD:-}${JANUS_NODE_GIT_TENCENT:-}" ]; then
+    if [ "${JANUS_DEPLOY_SHIP:-git}" = git ] && { [ -n "${JANUS_GW_GIT_REMOTE:-}" ] || node_git_remote_any; }; then
       # Git ship: every node builds its own release from the repo at
       # $GW_SHA — no local artifact (and no local docker) needed. A
       # node whose build fails halts the deploy before any flip.
@@ -2075,7 +2082,7 @@ EOF2
         fi
         cd '$BARE_PREFIX/src/janus-dashboard'
         git fetch -q origin && git checkout -q origin/main
-        PIP_INDEX_URL='${JANUS_DEPLOY_PIP_INDEX:-https://mirrors.aliyun.com/pypi/simple/}'         NPM_CONFIG_REGISTRY='${JANUS_DEPLOY_NPM_REGISTRY:-https://registry.npmmirror.com}'         env $_builder_env bash scripts/build_bare_dashboard.sh $_py3_args >/tmp/dash-build.log 2>&1 || { tail -5 /tmp/dash-build.log >&2; exit 1; }
+        PIP_INDEX_URL='${JANUS_DEPLOY_PIP_INDEX:-https://pypi.org/simple/}'         NPM_CONFIG_REGISTRY='${JANUS_DEPLOY_NPM_REGISTRY:-https://registry.npmmirror.com}'         env $_builder_env bash scripts/build_bare_dashboard.sh $_py3_args >/tmp/dash-build.log 2>&1 || { tail -5 /tmp/dash-build.log >&2; exit 1; }
         basename \$(ls -dt bare-artifacts/dash/dash-* | head -1) | sed s/^dash-//" )" || { echo "FAIL: leader-side dashboard git build failed"; exit 1; }
       ssh -o BatchMode=yes "$LEADER" "set -e; ln -sfn dash-$_dash_sha8 '$BARE_PREFIX/dash/current'; mkdir -p '$BARE_PREFIX/dash'; [ -d '$BARE_PREFIX/dash/dash-$_dash_sha8' ] || cp -a '$BARE_PREFIX/src/janus-dashboard/bare-artifacts/dash/dash-$_dash_sha8' '$BARE_PREFIX/dash/'; chown -R $BARE_USER:$BARE_USER '$BARE_PREFIX/dash/dash-$_dash_sha8'"
     fi

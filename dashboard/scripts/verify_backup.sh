@@ -47,10 +47,10 @@
 # failure is a WARN via JANUS_BACKUP_ALERT_URL, not a page).
 #
 # Weekly cadence (H5-D2): this used to be an ops-owned cron on the
-# contabo runner, which was uninstalled + deregistered on 2026-10-22 —
+# the retired runner, which was uninstalled + deregistered on 2026-10-22 —
 # nothing schedules the check today, and the dashboard repo deliberately
 # has NO GitHub workflow for it. The crontab shape below is the template
-# to re-register on the tencent CI host (adapt the paths):
+# to re-register on the CI host (adapt the paths):
 #   17 3 * * 1 JANUS_BACKUP_ENV_FILE=/opt/janus-ci/janus-backup.env \
 #     AGE_IDENTITY_FILE=/opt/janus-ci/age/janus-backup-identity.txt \
 #     /opt/janus-ci/janus-dashboard/scripts/verify_backup.sh \
@@ -60,7 +60,7 @@
 # pipeline is NOT provisioned anywhere — no janus-backup.env and no age
 # identity exist on any host, including the CI host the template above
 # names — so this script cannot run as shipped. What actually protects
-# data today is the legacy `janus-pg-backup.timer` on the aliyun leader
+# data today is the legacy `janus-pg-backup.timer` on the leader
 # (daily 03:30, plain /opt/janus/backups/pg/janus-*.dump, 14 days) and
 # THAT format this script does not accept (it needs *.dump.age plus
 # AGE_IDENTITY_FILE and <stem>.counts.json). Two ways out, both operator

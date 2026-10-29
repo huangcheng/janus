@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Convert production from 3× signal-fleet gateways to master/worker OTP:
-#   aliyun  — master (agent :8080) + co-located worker (docker DNS)
-#   tencent — worker only
-#   jdcloud — worker only
+#   <leader>    — master (agent :8080) + co-located worker (docker DNS)
+#   <worker-1>  — worker only
+#   <worker-2>  — worker only
 #
-# Prerequisites: SSH Host aliases aliyun/tencent/jdcloud in ~/.ssh/config.
+# The fleet's SSH aliases live in this script's MW_* variables below —
+# set them per fleet; the defaults carry no real host names.
 # No local test gate (test suites removed 2026-10-18); verify via browser + curl live-checks.
 # Rotates fleet cookie (≥64 hex) + regenerates shared CA leaves with SANs
 # for all four long names. Artifacts under /tmp/janus-mw-deploy-<ts>/
@@ -35,10 +36,22 @@ ART="${JANUS_MW_DEPLOY_ART:-/tmp/janus-mw-deploy-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$ART/tls" "$ART/logs"
 chmod 700 "$ART"
 
-MASTER_HOST=aliyun
+# Fleet SSH aliases: no defaults — the operator sets MW_* per fleet
+# (this conversion script targets exactly one known fleet, so a missing
+# alias must fail closed here, not dial a fictitious host).
+: "${MW_LEADER_ALIAS:?set the fleet leader SSH alias}"
+: "${MW_WORKER1_ALIAS:?set worker-1 SSH alias}"
+: "${MW_WORKER2_ALIAS:?set worker-2 SSH alias}"
+MASTER_HOST="${MW_LEADER_ALIAS}"
+WORKER1_HOST="${MW_WORKER1_ALIAS}"
+WORKER2_HOST="${MW_WORKER2_ALIAS}"
+# Worker Erlang long names must carry a dotted host (docker DNS), like
+# the co-located worker block below.
+: "${MW_WORKER1_NODE:?set worker-1 Erlang long name (janus@host)}"
+: "${MW_WORKER2_NODE:?set worker-2 Erlang long name (janus@host)}"
+W_WORKER1_NODE="${MW_WORKER1_NODE}"
+W_WORKER2_NODE="${MW_WORKER2_NODE}"
 MASTER_IP="${JANUS_MW_MASTER_IP:?set JANUS_MW_MASTER_IP}"
-TENCENT_IP="${JANUS_MW_WORKER_IP:?set JANUS_MW_WORKER_IP}"
-JDCLOUD_IP="${JANUS_MW_WORKER2_IP:?set JANUS_MW_WORKER2_IP}"
 # DNS hostname required: IP literals skip /etc/hosts, so a co-located
 # worker cannot hairpin to janus@<public-ip>. External workers resolve
 # <public origin> → MASTER_IP via public DNS.
@@ -48,13 +61,37 @@ OLD_MASTER_NODE="janus@${MASTER_IP}"
 # Co-located worker: dotted docker hostname (OTP -name rejects bare names).
 # Listens on 25672 inside the docker network only — NOT published to host
 # (static janus_fleet_epmd is single-port; host IP:25672 stays the master).
-W_ALIYUN_HOST=janus-worker.aliyun.mw
-W_ALIYUN_NODE="janus@${W_ALIYUN_HOST}"
-W_TENCENT_NODE="janus@${TENCENT_IP}"
-W_JDCLOUD_NODE="janus@${JDCLOUD_IP}"
-
-ALL_NODES="${MASTER_NODE},${OLD_MASTER_NODE},${W_ALIYUN_NODE},${W_TENCENT_NODE},${W_JDCLOUD_NODE}"
-WORKER_PEERS="${W_ALIYUN_NODE},${W_TENCENT_NODE},${W_JDCLOUD_NODE}"
+: "${MW_LEADER_WORKER_HOST:?set the co-located worker Erlang host (dotted, docker DNS)}"
+W_LEADER_WORKER_HOST="${MW_LEADER_WORKER_HOST}"
+case "$MW_LEADER_WORKER_HOST" in
+  [A-Za-z0-9-]*.[A-Za-z0-9-]*) ;;
+  *) echo "MW_LEADER_WORKER_HOST must be a dotted hostname ([a-z0-9-] labels; OTP -name rejects bare names)" >&2; exit 2;;
+esac
+case "$MW_LEADER_WORKER_HOST" in
+  *[!A-Za-z0-9.-]*) echo "MW_LEADER_WORKER_HOST must contain only [A-Za-z0-9.-] (it is interpolated into remote commands)" >&2; exit 2;;
+esac
+for _n in "$MW_WORKER1_NODE" "$MW_WORKER2_NODE" "$W_LEADER_WORKER_HOST" "$MASTER_DNS"; do
+  case "$_n" in
+    janus@*.*) ;;
+    *.*) ;;
+    *) echo "Erlang host/node values must be dotted names, got: $_n" >&2; exit 2;;
+  esac
+  case "$_n" in
+    *[!A-Za-z0-9.@-]*) echo "Erlang host/node values must contain only [A-Za-z0-9.@-], got: $_n" >&2; exit 2;;
+  esac
+done
+# SSH aliases may be short (they resolve via ~/.ssh/config): charset only.
+for _n in "$MASTER_HOST" "$WORKER1_HOST" "$WORKER2_HOST"; do
+  case "$_n" in
+    *[!A-Za-z0-9._-]*) echo "SSH aliases must contain only [A-Za-z0-9._-], got: $_n" >&2; exit 2;;
+  esac
+done
+W_LEADER_WORKER_NODE="janus@${W_LEADER_WORKER_HOST}"
+ALL_NODES="${MASTER_NODE},${OLD_MASTER_NODE},${W_LEADER_WORKER_NODE},${W_WORKER1_NODE},${W_WORKER2_NODE}"
+# SSH aliases (distinct from Erlang node names above): the hosts this
+# script actually dials, in dial order — also the rollback artifact keys.
+DEPLOY_HOSTS=("$MASTER_HOST" "$WORKER1_HOST" "$WORKER2_HOST")
+WORKER_PEERS="${W_LEADER_WORKER_NODE},${W_WORKER1_NODE},${W_WORKER2_NODE}"
 
 log() { echo "$*" | tee -a "$ART/harness.log"; }
 
@@ -64,10 +101,10 @@ log() { echo "$*" | tee -a "$ART/harness.log"; }
 # the operator to archaeology on three hosts. Driven from the EXIT trap so a
 # `set -e` abort is covered too, not just the explicit `die` paths.
 rollback_hint() {
-  [ -s "$ART/prev-image-aliyun" ] || [ -s "$ART/prev-image-tencent" ] || [ -s "$ART/prev-image-jdcloud" ] || return 0
+  [ -s "$ART/prev-image-${DEPLOY_HOSTS[0]}" ] || [ -s "$ART/prev-image-${DEPLOY_HOSTS[1]}" ] || [ -s "$ART/prev-image-${DEPLOY_HOSTS[2]}" ] || return 0
   log "ROLLBACK: previous image ids + fleet/env/compose backups recorded — recipe: $ART/rollback.txt"
   local h
-  for h in aliyun tencent jdcloud; do
+  for h in "${DEPLOY_HOSTS[@]}"; do
     [ -s "$ART/prev-image-$h" ] || continue
     log "   $h: prev-image $(cat "$ART/prev-image-$h") backup $(cat "$ART/backup-dir-$h" 2>/dev/null || echo '?')"
   done
@@ -180,7 +217,7 @@ else
   log "   dist :25672: published on ${DIST_BIND} only (JANUS_MW_DIST_BIND)"
 fi
 
-# M5 (review): tencent/jdcloud become dist-only workers, so any host-local
+# M5 (review): worker-only nodes become dist-only workers, so any host-local
 # Caddy/DNS entry that still proxies 127.0.0.1:48080 there has no backend.
 # Those host configs are in neither repo — an operator action, but it must
 # be visible BEFORE anything mutates (the old script only said so at the end).
@@ -190,7 +227,7 @@ log "NOTE: all three hostnames serve gateway endpoints (see deploy topology docs
 
 # Inventory = the SSH aliases plus the remote prerequisites this script uses
 # (docker for every step, python3 for env_set, the bind-mounted sys.config).
-for h in aliyun tencent jdcloud; do
+for h in "${DEPLOY_HOSTS[@]}"; do
   ssh -o ConnectTimeout=8 "$h" \
     'command -v docker >/dev/null && command -v python3 >/dev/null && test -d /opt/stacks/janus && test -f /opt/stacks/janus/.env && test -f /opt/stacks/janus/sys.config' \
     || die "pre-flight: '$h' unreachable or missing docker / python3 / /opt/stacks/janus/{.env,sys.config} (SSH inventory)"
@@ -345,7 +382,7 @@ capture_rollback() {  # $1 = host
   echo "# MW deploy rollback material — $ART — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "# Order: restore the MASTER first, then the workers (reverse of the rollout)."
 } >>"$ART/rollback.txt"
-for h in aliyun tencent jdcloud; do
+for h in "${DEPLOY_HOSTS[@]}"; do
   capture_rollback "$h"
   prev="$(cat "$ART/prev-image-$h")"
   bdir="$(cat "$ART/backup-dir-$h")"
@@ -356,20 +393,20 @@ for h in aliyun tencent jdcloud; do
     echo "ssh $h 'cp -a $bdir/fleet/. /opt/stacks/janus/fleet/'"
     echo "ssh $h 'docker tag $prev janus-gw:latest'"
     echo "ssh $h 'cd /opt/stacks/janus && docker compose up -d --force-recreate janus'"
-    if [ "$h" = aliyun ]; then
-      echo "ssh aliyun 'cd /opt/stacks/janus && docker compose up -d --force-recreate janus-worker'"
+    if [ "$h" = "$MASTER_HOST" ]; then
+      echo "ssh $h 'cd /opt/stacks/janus && docker compose up -d --force-recreate janus-worker'"
     fi
   } >>"$ART/rollback.txt"
 done
 log "   rollback recipe: $ART/rollback.txt"
 
-log "== 3. ship image to aliyun/tencent/jdcloud =="
+log "== 3. ship image to the fleet =="
 renew_deploy_lock "image ship"
 # A bare `wait` returns 0 whatever the children did, so collect the pids: a
 # failed `docker load`/`docker tag` on one host was invisible, and that host
 # then recreated from its PREVIOUS janus-gw:latest.
 SHIP_PIDS=(); SHIP_HOSTS=()
-for h in aliyun tencent jdcloud; do
+for h in "${DEPLOY_HOSTS[@]}"; do
   (cat "$ART/janus_deploy.tgz" | ssh "$h" \
     "docker load >/dev/null 2>&1 && docker tag janus:dashboard janus-gw:latest" \
     && log "   $h: image loaded") &
@@ -378,7 +415,7 @@ done
 for i in "${!SHIP_PIDS[@]}"; do
   wait "${SHIP_PIDS[$i]}" || die "${SHIP_HOSTS[$i]}: image load/tag failed — that host still holds its previous image"
 done
-for h in aliyun tencent jdcloud; do
+for h in "${DEPLOY_HOSTS[@]}"; do
   verify_loaded_image "$h"
 done
 
@@ -436,7 +473,7 @@ PY"
 
 log "== 4. install TLS on all hosts =="
 renew_deploy_lock "TLS install"
-for h in aliyun tencent jdcloud; do
+for h in "${DEPLOY_HOSTS[@]}"; do
   install_tls "$h"
   log "   $h: fleet TLS installed"
 done
@@ -444,40 +481,60 @@ done
 log "== 5. rewrite env (master + workers) =="
 renew_deploy_lock "env rewrite"
 # Shared cookie + disable signal-fleet on every host.
-for h in aliyun tencent jdcloud; do
+for h in "${DEPLOY_HOSTS[@]}"; do
   env_set "$h" JANUS_ERLANG_COOKIE "$COOKIE"
   env_set "$h" JANUS_FLEET_ENABLED "false"
   env_set "$h" JANUS_FLEET_DIST_PORT "25672"
   env_set "$h" JANUS_FLEET_TLS_DIR "/var/lib/janus/fleet"
 done
 
-# Master (aliyun)
-env_set aliyun JANUS_ROLE "master"
-env_set aliyun JANUS_NODE_NAME "$MASTER_NODE"
-env_set aliyun JANUS_FLEET_PEERS "$WORKER_PEERS"
+# Master
+env_set "$MASTER_HOST" JANUS_ROLE "master"
+env_set "$MASTER_HOST" JANUS_NODE_NAME "$MASTER_NODE"
+env_set "$MASTER_HOST" JANUS_FLEET_PEERS "$WORKER_PEERS"
 # Clear worker-only keys if previously set. No `-i.bak` (L2): step 2b's
 # fleet.bak dir already holds the pre-deploy .env, and a stray .env.bak only
 # multiplies the copies of every secret it contains.
-ssh aliyun "sed -i -e '/^JANUS_MASTER_NODE=/d' -e '/^JANUS_WORKER_REGION=/d' -e '/^JANUS_WORKER_CAPACITY=/d' /opt/stacks/janus/.env"
+ssh "$MASTER_HOST" "sed -i -e '/^JANUS_MASTER_NODE=/d' -e '/^JANUS_WORKER_REGION=/d' -e '/^JANUS_WORKER_CAPACITY=/d' /opt/stacks/janus/.env"
 
 # Co-located worker env file (separate from master .env). The cookie is
 # appended from stdin — never in argv, where a local or remote `ps` reads it —
 # and the remote python reads it from fd 3 (the ssh stdin duplicated before
 # the heredoc), so no shell variable or process environment ever holds it.
-printf '%s\n' "$COOKIE" | ssh aliyun "python3 - 3<&0 <<'PY'
+# Values ride the same stdin pipe as the cookie (fd3), never the remote
+# command line: three header lines then the cookie.
+printf '%s\n%s\n%s\n' "$W_LEADER_WORKER_NODE" "$MASTER_NODE" "$COOKIE" \
+  | ssh "$MASTER_HOST" "python3 - 3<&0 <<'PY'
 import os
 with os.fdopen(3) as fh:
+    worker_node = fh.readline().strip()
+    master_node = fh.readline().strip()
     ck = fh.readline().strip()
 if not ck:
     raise SystemExit('.env.worker: empty cookie on stdin')
 p = '/opt/stacks/janus/.env.worker'
-with open(p, 'a') as fh:
+existing = open(p).read() if os.path.exists(p) else ''
+for key in ('JANUS_ERLANG_COOKIE', 'JANUS_ROLE', 'JANUS_NODE_NAME', 'JANUS_MASTER_NODE'):
+    existing = '\n'.join(l for l in existing.splitlines() if not l.startswith(key + '='))
+import tempfile
+_d = os.path.dirname(p)
+_fd, _tmp = tempfile.mkstemp(dir=_d, prefix='.env.worker.')
+os.close(_fd)
+os.chmod(_tmp, 0o600)
+with open(_tmp, 'w') as fh:
+    fh.write(existing.rstrip('\n') + ('\n' if existing.strip() else ''))
     fh.write('JANUS_ERLANG_COOKIE=%s\n' % ck)
-os.chmod(p, 0o600)
+    # The co-located worker reads .env.worker (not .env): it needs the
+    # same worker identity the remote loop writes, else vm_args defaults
+    # the long name to janus@127.0.0.1 and it never joins the mesh.
+    fh.write('JANUS_ROLE=worker\n')
+    fh.write('JANUS_NODE_NAME=%s\n' % worker_node)
+    fh.write('JANUS_MASTER_NODE=%s\n' % master_node)
+os.replace(_tmp, p)
 PY"
 
 # Remote workers
-for pair in "tencent:${W_TENCENT_NODE}" "jdcloud:${W_JDCLOUD_NODE}"; do
+for pair in "${WORKER1_HOST}:${W_WORKER1_NODE}" "${WORKER2_HOST}:${W_WORKER2_NODE}"; do
   h="${pair%%:*}"
   node="${pair##*:}"
   env_set "$h" JANUS_ROLE "worker"
@@ -492,8 +549,8 @@ done
 
 log "== 6. rewrite compose files =="
 renew_deploy_lock "compose rewrite"
-# Aliyun: master (+ dashboard unchanged) + co-located worker
-ssh aliyun 'cat > /opt/stacks/janus/docker-compose.yml <<'\''YAML'\''
+# Leader: master (+ dashboard unchanged) + co-located worker
+ssh "$MASTER_HOST" 'cat > /opt/stacks/janus/docker-compose.yml <<'\''YAML'\''
 services:
   janus:
     image: janus-gw:latest
@@ -524,11 +581,11 @@ services:
     image: janus-gw:latest
     pull_policy: never
     container_name: janus-worker
-    hostname: janus-worker.aliyun.mw
+    hostname: __WORKER_HOSTNAME__
     # Map master DNS to the master container IP (refreshed at rollout).
     # IP literals cannot be overridden via /etc/hosts — master MUST be a DNS name.
     extra_hosts:
-      - "${MASTER_DNS}:HOST_MASTER_IP"
+      - "__MASTER_ORIGIN__:HOST_MASTER_IP"
     restart: unless-stopped
     env_file: .env.worker
     volumes:
@@ -537,7 +594,7 @@ services:
       - ./docker-entrypoint.sh:/docker-entrypoint.sh:ro
     networks:
       caddy-net:
-        aliases: [janus-worker.aliyun.mw]
+        aliases: [__WORKER_HOSTNAME__]
     # Dist only on the docker network — do NOT publish 25672 (master owns host :25672).
     healthcheck:
       test: ["CMD-SHELL", "pidof beam.smp >/dev/null || exit 1"]
@@ -573,8 +630,16 @@ networks:
     external: true
 YAML'
 
+# The heredoc above is QUOTED (no local/remote expansion): substitute the
+# real worker hostname placeholder now (the pre-existing ${MASTER_DNS}
+# extra_hosts line is interpolated by docker compose from the node env).
+ssh "$MASTER_HOST" "sed -i \"s|__WORKER_HOSTNAME__|${W_LEADER_WORKER_HOST}|g\" /opt/stacks/janus/docker-compose.yml" \
+  || die "compose: worker-hostname substitution failed"
+ssh "$MASTER_HOST" "grep -qF 'hostname: ${W_LEADER_WORKER_HOST}' /opt/stacks/janus/docker-compose.yml && ! grep -q __WORKER_HOSTNAME__ /opt/stacks/janus/docker-compose.yml" \
+  || die "compose: worker hostname missing or placeholder left after substitution"
+
 # Remote workers: no agent ports, publish dist only
-for h in tencent jdcloud; do
+for h in "$WORKER1_HOST" "$WORKER2_HOST"; do
   ssh "$h" 'cat > /opt/stacks/janus/docker-compose.yml <<'\''YAML'\''
 services:
   janus:
@@ -613,7 +678,7 @@ done
 # landed — a silent no-op here would ship the world-reachable mapping while
 # the operator believes it is pinned.
 if [ -n "$DIST_BIND" ]; then
-  for h in aliyun tencent jdcloud; do
+  for h in "${DEPLOY_HOSTS[@]}"; do
     ssh "$h" "sed -i 's|^      - \"25672:25672\"\$|      - \"${DIST_BIND}:25672:25672\"|' /opt/stacks/janus/docker-compose.yml"
     ssh "$h" "grep -qx '      - \"${DIST_BIND}:25672:25672\"' /opt/stacks/janus/docker-compose.yml" \
       || die "$h: cannot pin the dist publish to ${DIST_BIND} (compose mapping not rewritten)"
@@ -622,12 +687,12 @@ if [ -n "$DIST_BIND" ]; then
 fi
 
 # Sync entrypoint from local gateway (image also has one; bind-mount overrides).
-scp -q "$GW_SRC/docker-entrypoint.sh" aliyun:/opt/stacks/janus/docker-entrypoint.sh
-scp -q "$GW_SRC/docker-entrypoint.sh" tencent:/opt/stacks/janus/docker-entrypoint.sh
-scp -q "$GW_SRC/docker-entrypoint.sh" jdcloud:/opt/stacks/janus/docker-entrypoint.sh
-ssh aliyun 'chmod +x /opt/stacks/janus/docker-entrypoint.sh'
-ssh tencent 'chmod +x /opt/stacks/janus/docker-entrypoint.sh'
-ssh jdcloud 'chmod +x /opt/stacks/janus/docker-entrypoint.sh'
+for _h in "$MASTER_HOST" "$WORKER1_HOST" "$WORKER2_HOST"; do
+  scp -q "$GW_SRC/docker-entrypoint.sh" "$_h":/opt/stacks/janus/docker-entrypoint.sh
+done
+for _h in "$MASTER_HOST" "$WORKER1_HOST" "$WORKER2_HOST"; do
+  ssh "$_h" 'chmod +x /opt/stacks/janus/docker-entrypoint.sh'
+done
 
 log "== 7. rollout: master first, then workers =="
 renew_deploy_lock "rollout"
@@ -638,45 +703,53 @@ renew_deploy_lock "rollout"
 # the HOST_MASTER_IP placeholder, so later runs left a stale IP behind and
 # the worker could no longer resolve the master at all.
 pin_master_ip() {  # $1 = host, $2 = master container IP
-  ssh "$1" "python3 - '$2' <<'PY'
-import re, sys
+  # The compose heredoc is quoted, so the pin target ships as the
+  # __MASTER_ORIGIN__ placeholder; substitute the operator's DNS name
+  # and the live container IP in one remote pass.
+  printf '%s\n%s\n' "$MASTER_DNS" "$2" \
+    | ssh "$1" "python3 - 3<&0 <<'PY'
+import os, re, sys
+with os.fdopen(3) as fh:
+    dns = fh.readline().strip()
+    ip = fh.readline().strip()
 p = '/opt/stacks/janus/docker-compose.yml'
 text = open(p).read()
-new, n = re.subn(r'(janus\.master\.cn:)[0-9A-Za-z_.-]+', r'\g<1>' + sys.argv[1], text)
-if n != 1:
-    sys.exit('extra_hosts pin for the master origin not found (matches=%d) in %s' % (n, p))
+text = text.replace('__MASTER_ORIGIN__', dns)
+new, n = re.subn(r'(__MASTER_ORIGIN__|' + re.escape(dns) + r':)HOST_MASTER_IP', r'\g<1>' + ip, text)
+if '__MASTER_ORIGIN__' in new or n != 1:
+    sys.exit('extra_hosts pin for the master origin not applied (matches=%d)' % n)
 open(p, 'w').write(new)
 PY"
 }
 
-ssh aliyun 'cd /opt/stacks/janus && docker compose up -d --force-recreate --remove-orphans janus' \
-  >"$ART/logs/aliyun-master-up.txt" 2>&1 || die "aliyun master recreate failed"
+ssh "$MASTER_HOST" 'cd /opt/stacks/janus && docker compose up -d --force-recreate --remove-orphans janus' \
+  >"$ART/logs/leader-master-up.txt" 2>&1 || die "master recreate failed"
 for i in $(seq 1 60); do
-  if ssh aliyun 'curl -s -m 2 http://127.0.0.1:48080/healthz' >/dev/null 2>&1; then
-    log "   aliyun master: healthy"
+  if ssh "$MASTER_HOST" 'curl -s -m 2 http://127.0.0.1:48080/healthz' >/dev/null 2>&1; then
+    log "   master: healthy"
     break
   fi
   sleep 2
-  [ "$i" -eq 60 ] && die "aliyun master healthz timeout"
+  [ "$i" -eq 60 ] && die "master healthz timeout"
 done
-verify_node_image aliyun janus
+verify_node_image "$MASTER_HOST" janus
 
-# The co-located worker is a second service in aliyun's compose project and
+# The co-located worker is a second service in the leader's compose project and
 # must be recreated with the master: the normal ship path (deploy_prod.sh)
 # only recreates `janus`, which leaves this worker on the conversion-day
 # artifact forever.
-if host_has_service aliyun janus-worker; then
-  MASTER_CIP="$(ssh aliyun 'docker inspect -f "{{(index .NetworkSettings.Networks \"caddy-net\").IPAddress}}" janus' 2>/dev/null || true)"
-  [ -n "$MASTER_CIP" ] || die "aliyun: cannot read the master's caddy-net address"
-  pin_master_ip aliyun "$MASTER_CIP"
+if host_has_service "$MASTER_HOST" janus-worker; then
+  MASTER_CIP="$(ssh "$MASTER_HOST" 'docker inspect -f "{{(index .NetworkSettings.Networks \"caddy-net\").IPAddress}}" janus' 2>/dev/null || true)"
+  [ -n "$MASTER_CIP" ] || die "leader: cannot read the master's caddy-net address"
+  pin_master_ip "$MASTER_HOST" "$MASTER_CIP"
   log "   leader worker extra_hosts -> ${MASTER_DNS}:${MASTER_CIP}"
-  ssh aliyun 'cd /opt/stacks/janus && docker compose up -d --force-recreate janus-worker' \
-    >"$ART/logs/aliyun-worker-up.txt" 2>&1 || die "aliyun worker recreate failed"
-  verify_node_image aliyun janus-worker
-  log "   aliyun worker: recreated"
+  ssh "$MASTER_HOST" 'cd /opt/stacks/janus && docker compose up -d --force-recreate janus-worker' \
+    >"$ART/logs/leader-worker-up.txt" 2>&1 || die "leader worker recreate failed"
+  verify_node_image "$MASTER_HOST" janus-worker
+  log "   leader worker: recreated"
 fi
 
-for h in tencent jdcloud; do
+for h in "$WORKER1_HOST" "$WORKER2_HOST"; do
   ssh "$h" 'cd /opt/stacks/janus && docker compose up -d --force-recreate --remove-orphans janus' \
     >"$ART/logs/${h}-up.txt" 2>&1 || die "$h recreate failed"
   verify_node_image "$h" janus
@@ -699,7 +772,7 @@ renew_deploy_lock "worker registration wait"
 # fleet. Same extraction as deploy_prod.sh:1054.
 gauge=""
 for i in $(seq 1 90); do
-  body=$(ssh aliyun 'STATS=$(grep "^JANUS_STATS_TOKEN=" /opt/stacks/janus/.env | cut -d= -f2- | tr -d "\"'\''"); [ -n "$STATS" ] || exit 1; printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:48090/metrics' 2>/dev/null || true)
+  body=$(ssh "$MASTER_HOST" 'STATS=$(grep "^JANUS_STATS_TOKEN=" /opt/stacks/janus/.env | cut -d= -f2- | tr -d "\"'\''"); [ -n "$STATS" ] || exit 1; printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:48090/metrics' 2>/dev/null || true)
   gauge=$(printf '%s' "$body" | awk '
     /^janus_workers_available\{/ || /^janus_workers_available / {
       for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+(\.[0-9]+)?$/) { print int($i); exit }
@@ -710,10 +783,10 @@ for i in $(seq 1 90); do
   fi
   sleep 2
   if [ "$i" -eq 90 ]; then
-    ssh aliyun 'docker logs --tail 80 janus' >"$ART/logs/aliyun-master.log" 2>&1 || true
-    ssh aliyun 'docker logs --tail 80 janus-worker' >"$ART/logs/aliyun-worker.log" 2>&1 || true
-    ssh tencent 'docker logs --tail 80 janus' >"$ART/logs/tencent-worker.log" 2>&1 || true
-    ssh jdcloud 'docker logs --tail 80 janus' >"$ART/logs/jdcloud-worker.log" 2>&1 || true
+    ssh "$MASTER_HOST" 'docker logs --tail 80 janus' >"$ART/logs/leader-master.log" 2>&1 || true
+    ssh "$MASTER_HOST" 'docker logs --tail 80 janus-worker' >"$ART/logs/leader-worker.log" 2>&1 || true
+    ssh "$WORKER1_HOST" 'docker logs --tail 80 janus' >"$ART/logs/worker1.log" 2>&1 || true
+    ssh "$WORKER2_HOST" 'docker logs --tail 80 janus' >"$ART/logs/worker2.log" 2>&1 || true
     redact_logs "$COOKIE"
     die "workers_available stuck at '${gauge:-missing}' (want >=3); logs in $ART/logs"
   fi
@@ -721,7 +794,7 @@ done
 echo "workers_available=$gauge" >"$ART/workers_available.txt"
 
 log "== 9. capture /stats/sched snapshot (redacted) =="
-ssh aliyun 'STATS=$(grep "^JANUS_STATS_TOKEN=" /opt/stacks/janus/.env | cut -d= -f2- | tr -d "\"'\''"); printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:48090/stats/sched' \
+ssh "$MASTER_HOST" 'STATS=$(grep "^JANUS_STATS_TOKEN=" /opt/stacks/janus/.env | cut -d= -f2- | tr -d "\"'\''"); printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:48090/stats/sched' \
   >"$ART/stats-sched.json" 2>/dev/null || true
 # Strip any accidental cookie substrings
 redact_logs "$COOKIE"
