@@ -14,6 +14,7 @@
     credit_window_initial/0,
     non_stream_timeout_ms/0,
     stream_timeout_ms/0,
+    stream_inactivity_timeout_ms/0,
     ack_deadline_ms/0,
     initial_chunk_seq/0,
     hello/3,
@@ -47,6 +48,20 @@ non_stream_timeout_ms() -> 120_000.
 
 -spec stream_timeout_ms() -> pos_integer().
 stream_timeout_ms() -> 600_000.
+
+%% Mid-stream INACTIVITY ceiling (2026-10-29): stream_timeout_ms/0 is a
+%% TOTAL budget for the whole stream; producers that never die but
+%% never produce let a request sit for the full 10 minutes while the
+%% client gave up long before. That asymmetry is what made a 300s
+%% client idle timeout look like an unexplained "terminated" with no
+%% gateway-side counterpart (live 2026-10-29: 15 aborted turns,
+%% upstreams "completing" at latency_ms=294473). A stream that goes
+%% this long WITHOUT A SINGLE BYTE is a stalled upstream, and the
+%% gateway must say so in its own words instead of letting the client
+%% die blind. Restarts on every forwarded chunk (progress), so only
+%% true silence trips it. Deliberately BELOW stream_timeout_ms/0.
+-spec stream_inactivity_timeout_ms() -> pos_integer().
+stream_inactivity_timeout_ms() -> 180_000.
 
 -spec ack_deadline_ms() -> pos_integer().
 ack_deadline_ms() -> 5_000.
