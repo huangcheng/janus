@@ -37,6 +37,8 @@
 %% Knobs + pure logic (eunit).
 -export([
     init_knob/0,
+    bucket_cap/0,
+    prune_stale/0,
     enabled/0,
     proxy_headers/0,
     parse_proxy_headers/1,
@@ -57,6 +59,19 @@
 -define(CAPACITY_FLOOR, 24).
 -define(BUCKET_CAP, 8192).
 -define(BUCKET_STALE_MS, 3_600_000).
+%% Sweep hysteresis: trigger the prune at cap+margin, evict down to
+%% cap-slack, so the amortized sweep cost per fresh peer is one
+%% full-sweep per ?SWEEP_MARGIN inserts (never per insert).
+-define(SWEEP_MARGIN, 128).
+-define(SWEEP_SLACK, 64).
+%% Single-flight marker row: the winner of insert_new runs the sweep,
+%% concurrent over-cap arrivals return at once. A sweeper killed by an
+%% exit signal runs no `after` cleanup, so a marker also carries the
+%% sweep start time in its 3rd element and the false branch reclaims
+%% (delete_object of that exact object) any marker older than
+%% ?SWEEP_TTL_MS — a dead sweeper can never block pruning permanently.
+-define(SWEEP_MARKER, '__echo_sweep__').
+-define(SWEEP_TTL_MS, 1_000).
 
 %%%===================================================================
 %%% Knobs (boot-time env -> persistent_term; restart to change)
@@ -262,7 +277,14 @@ allow(IpBin) when is_binary(IpBin) ->
                 bucket_write(IpBin, bucket_step({Cap * 1.0, Now}, Now, Cap, ?REFILL_TOKENS_PER_MS))
         end
     catch
-        _:_ ->
+        Class:Reason ->
+            %% Never fail the (unauthenticated) request on rate-limit
+            %% bookkeeping — but say so: this silent swallow is exactly
+            %% what hid the dead prune for so long.
+            logger:warning(
+                "~p: bucket bookkeeping failed (~p:~p); request admitted anyway",
+                [?MODULE, Class, Reason]
+            ),
             true
     end.
 
@@ -270,36 +292,97 @@ bucket_write(IpBin, {Allowed, {Tokens, Last}}) ->
     _ = ets:insert(?BUCKET, {IpBin, Tokens, Last}),
     %% The endpoint is unauthenticated and keyed by raw peer IP:
     %% address rotation could insert one permanent row per address
-    %% (ocr security high). Insert-time cap: past the limit, evict
-    %% the stalest rows (a full-bucket attacker row is the youngest
-    %% refill-freshest, honest peers survive); idempotent on races.
-    case ets:info(?BUCKET, size) > ?BUCKET_CAP of
-        true -> prune_stale();
+    %% (ocr security high). Insert-time cap with hysteresis: past
+    %% cap+margin, sweep once down to cap-slack (a full-bucket
+    %% attacker row is the youngest refill-freshest, honest peers
+    %% survive); the margin amortizes the sweep so a rotating-source
+    %% attacker pays at most one full sweep per margin fresh peers,
+    %% never O(table) work per request. Idempotent on races.
+    case ets:info(?BUCKET, size) > ?BUCKET_CAP + ?SWEEP_MARGIN of
+        true -> prune_once();
         false -> ok
     end,
     Allowed.
 
+prune_once() ->
+    StartedAt = now_ms(),
+    case ets:insert_new(?BUCKET, {?SWEEP_MARKER, 0, StartedAt}) of
+        true ->
+            try
+                prune_stale()
+            after
+                %% delete_object of OUR exact marker: a plain key
+                %% delete could remove a fresher marker planted by a
+                %% TTL reclaimer while this sweep ran past the TTL.
+                _ = ets:delete_object(?BUCKET, {?SWEEP_MARKER, 0, StartedAt})
+            end;
+        false ->
+            reclaim_stale_marker()
+    end.
+
+reclaim_stale_marker() ->
+    %% try..after does not run when a sweeper dies on an exit signal;
+    %% a marker older than the sweep TTL belongs to no live sweep, so
+    %% take it over. delete_object removes only that exact object — a
+    %% concurrently refreshed marker survives untouched.
+    case ets:lookup(?BUCKET, ?SWEEP_MARKER) of
+        [{?SWEEP_MARKER, 0, StartedAt}] when is_integer(StartedAt) ->
+            case now_ms() - StartedAt > ?SWEEP_TTL_MS of
+                true ->
+                    _ = ets:delete_object(?BUCKET, {?SWEEP_MARKER, 0, StartedAt}),
+                    prune_once();
+                false ->
+                    ok
+            end;
+        _ ->
+            ok
+    end.
+
+%% eunit-visible alias for the ?BUCKET_CAP regression test (the
+%% macro lives in this module; the test derives the invariant from
+%% here so a cap change cannot silently desync the assertion).
+-spec bucket_cap() -> pos_integer().
+bucket_cap() ->
+    ?BUCKET_CAP.
+
 prune_stale() ->
     %% Two passes: stale rows first (Last older than 1 h), then
-    %% oldest-Last rows until under cap. Both bounded per sweep.
+    %% oldest-Last rows down to cap-slack (hysteresis — see
+    %% bucket_write/2). Both bounded per sweep.
     Now = now_ms(),
     _ = ets:select_delete(?BUCKET, [
         {
             {'$1', '$2', '$3'},
             [
+                %% Binary keys only: peer-IP rows. Excludes the
+                %% single-flight marker (an atom key) so a live sweep
+                %% never deletes its own or a peer's marker here.
+                {'is_binary', '$1'},
                 {'is_integer', '$3'},
                 {'<', '$3', Now - ?BUCKET_STALE_MS}
             ],
-            true
+            %% A match-spec body must be a LIST of return expressions;
+            %% a bare `true` is an invalid match program, so
+            %% ets:select_delete/2 raised badarg on every call and
+            %% allow/1's catch-all silently disabled this whole prune.
+            [true]
         }
     ]),
-    case ets:info(?BUCKET, size) > ?BUCKET_CAP of
+    case ets:info(?BUCKET, size) > ?BUCKET_CAP - ?SWEEP_SLACK of
         true ->
+            Keep = ?BUCKET_CAP - ?SWEEP_SLACK,
+            %% Binary (peer-IP) keys only — never evict a sweep marker.
+            Candidates = [R || {K, _, _} = R <- ets:tab2list(?BUCKET), is_binary(K)],
             Oldest = lists:sort(
                 fun({_, _, L1}, {_, _, L2}) -> L1 =< L2 end,
-                ets:tab2list(?BUCKET)
+                Candidates
             ),
-            _ = [ets:delete(?BUCKET, K) || {K, _, _} <- lists:sublist(Oldest, ets:info(?BUCKET, size) - ?BUCKET_CAP)],
+            %% Count relative to the snapshot actually iterated: a
+            %% second live size read races concurrent sweeps (diff can
+            %% go negative -> sublist function_clause -> allow/1's
+            %% catch-all swallows it -> pruning stops again).
+            ToDrop = erlang:max(0, length(Oldest) - Keep),
+            _ = [ets:delete(?BUCKET, K) || {K, _, _} <- lists:sublist(Oldest, ToDrop)],
             ok;
         false ->
             ok
