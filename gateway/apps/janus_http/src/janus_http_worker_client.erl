@@ -636,9 +636,15 @@ deadline_remaining(Deadline) ->
 %% idling for the real interval.
 -define(STREAM_KEEPALIVE_MS, 15_000).
 
+%% An override is honoured only when it is a positive integer BELOW the
+%% inactivity ceiling. A cadence at or above that ceiling would let the
+%% drain tear the stream down before the client ever hears a keepalive,
+%% which is the whole point of the tick — so such a value falls back to
+%% the default rather than silently disabling the feature.
 stream_keepalive_ms() ->
+    Ceiling = janus_worker_wire:stream_inactivity_timeout_ms(),
     case application:get_env(janus, stream_keepalive_ms, ?STREAM_KEEPALIVE_MS) of
-        V when is_integer(V), V > 0 -> V;
+        V when is_integer(V), V > 0, V < Ceiling -> V;
         _ -> ?STREAM_KEEPALIVE_MS
     end.
 

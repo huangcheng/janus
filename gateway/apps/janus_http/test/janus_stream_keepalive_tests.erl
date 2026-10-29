@@ -47,6 +47,31 @@ non_integer_falls_back_test() ->
         application:unset_env(janus, stream_keepalive_ms)
     end.
 
+%% An override at or above the inactivity ceiling is refused: the drain
+%% would tear the stream down before the client heard a keepalive.
+override_at_or_above_ceiling_refused_test() ->
+    Ceiling = janus_worker_wire:stream_inactivity_timeout_ms(),
+    lists:foreach(
+        fun(Bad) ->
+            ok = application:set_env(janus, stream_keepalive_ms, Bad),
+            try
+                ?assertEqual(?DEFAULT_MS, janus_http_worker_client:stream_keepalive_ms())
+            after
+                application:unset_env(janus, stream_keepalive_ms)
+            end
+        end,
+        [Ceiling, Ceiling + 1, Ceiling * 10]
+    ).
+
+%% A valid override below the ceiling is still honoured.
+override_below_ceiling_applies_test() ->
+    ok = application:set_env(janus, stream_keepalive_ms, 5_000),
+    try
+        ?assertEqual(5_000, janus_http_worker_client:stream_keepalive_ms())
+    after
+        application:unset_env(janus, stream_keepalive_ms)
+    end.
+
 %% The cadence must be shorter than the inactivity ceiling, or a stalled
 %% stream would be torn down before the client ever hears a keepalive.
 cadence_under_inactivity_ceiling_test() ->

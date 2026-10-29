@@ -2516,7 +2516,12 @@ anthro_error_object(#{<<"error">> := E}) -> E;
 anthro_error_object(D) when is_map(D) -> D;
 anthro_error_object(_) -> #{}.
 
-stash_upstream_stream_error(Err) when is_map(Err) ->
+%% Accepts a map OR a bare binary: the call-site guard is
+%% `Err when is_map(Err)`, but upstreams also send {"error": "text"} and
+%% anthropic events whose data.error is a plain string. Matching only on
+%% is_map/1 here made the binary clauses of upstream_error_text/1
+%% unreachable, defeating the extraction entirely.
+stash_upstream_stream_error(Err) when is_map(Err); is_binary(Err) ->
     case upstream_error_text(Err) of
         undefined -> ok;
         Text -> put(?UPSTREAM_ERR_KEY, Text), ok
@@ -2826,7 +2831,7 @@ chat_to_anthropic(#{type := <<"chunk">>, data := D}, St) when
     is_map(D)
 ->
     case maps:get(<<"error">>, D, undefined) of
-        Err when is_map(Err) ->
+        Err when is_map(Err); is_binary(Err) ->
             stash_upstream_stream_error(Err),
             {error, translate_unsupported, St};
         _ ->
@@ -3389,7 +3394,7 @@ chat_to_responses_stream(#{type := <<"chunk">>, data := D}, St) when
     is_map(D)
 ->
     case maps:get(<<"error">>, D, undefined) of
-        Err when is_map(Err) ->
+        Err when is_map(Err); is_binary(Err) ->
             stash_upstream_stream_error(Err),
             {error, translate_unsupported, St};
         _ ->

@@ -13,7 +13,10 @@
     maybe_trim/2,
     maybe_inject_stream_usage/4,
     stream_translate_blocked_for/2,
-    responses_stream_translate_enabled/0
+    responses_stream_translate_enabled/0,
+    %% SSE keepalive framing (native path): pure, so eunit can pin the
+    %% event-boundary rule without a socket.
+    sse_at_event_boundary/2
 ]).
 %% failover_start/0 is also called by janus_modality (the modality
 %% entry mints the per-request ref through the same helper);
@@ -1139,38 +1142,34 @@ write_frames(Frames, Req2) ->
 note_sse_line_state(<<>>) ->
     ok;
 note_sse_line_state(Chunk) when is_binary(Chunk) ->
+    %% Previous byte BEFORE this chunk (undefined on the first chunk).
+    %% Read it before overwriting, and let a size-1 chunk use it: the
+    %% "\n\n" pair can straddle the chunk boundary.
     Prev = case get(janus_sse_prev_byte) of
         B when is_integer(B) -> B;
         _ -> undefined
     end,
+    AtBoundary = sse_at_event_boundary(Prev, Chunk),
     put(janus_sse_prev_byte, binary:last(Chunk)),
-    AtBoundary =
-        case {Prev, byte_size(Chunk)} of
-            {_, 0} ->
-                false;
-            {$\n, _} ->
-                binary:last(Chunk) =:= $\n;
-            {undefined, 1} ->
-                %% First byte this request: no framing context yet.
-                false;
-            _ ->
-                binary:last(Chunk) =:= $\n andalso at_event_boundary_inside(Chunk)
-        end,
     put(janus_sse_at_boundary, AtBoundary),
     ok;
 note_sse_line_state(_) ->
     ok.
 
-%% True when this chunk's trailing bytes complete an event (\n\n).
-at_event_boundary_inside(Chunk) ->
+%% Is the stream positioned at an EVENT boundary after this chunk?
+%% Decided from the chunk's trailing bytes alone (plus the carried
+%% previous byte when the chunk is a single byte, where the pair can
+%% straddle the boundary). A size >= 2 chunk never consults Prev, so a
+%% stale value cannot influence it.
+%%
+%% CRLF is legal SSE, but a line always terminates with \n, so an event
+%% boundary is still a blank line: the last two bytes are \n\n.
+sse_at_event_boundary(_Prev, <<>>) ->
+    false;
+sse_at_event_boundary(Prev, Chunk) when is_binary(Chunk) ->
     case byte_size(Chunk) of
-        1 ->
-            %% single byte: depends on the carried previous byte, handled
-            %% by the caller's Prev check.
-            false;
-        _ ->
-            binary:part(Chunk, byte_size(Chunk) - 2, 2) =:= <<"\n\n">> orelse
-                (binary:last(Chunk) =:= $\n andalso get(janus_sse_prev_byte) =:= $\n)
+        1 -> Prev =:= $\n andalso binary:last(Chunk) =:= $\n;
+        N -> binary:part(Chunk, N - 2, 2) =:= <<"\n\n">>
     end.
 
 %% Cowboy returns ok | {ok, Req} on a live socket and errors/throws when
@@ -1723,12 +1722,16 @@ upstream_stream_error_msg() ->
 %% human can act on — this is the gateway saying "the upstream stalled",
 %% which is precisely what the generic 502 used to hide.
 -define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
+-define(STREAM_TIMEOUT_MSG, <<"upstream stream exceeded the total time budget">>).
 
 %% NOTE: this fills the Msg slot of {error, upstream, Msg}, so it must
 %% yield a BINARY. Returning {stalled, Binary} here would fall through
 %% wire_reason/1's non-binary clause, which renders with ~w — the client
 %% would read an Erlang term again, the exact leak this removes.
 sanitize_stream_reason({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
+%% The sibling budget: without this clause the tuple falls through to
+%% wire_reason's ~w rendering and the client reads an Erlang term.
+sanitize_stream_reason({await, timeout}) -> ?STREAM_TIMEOUT_MSG;
 sanitize_stream_reason(Other) -> sanitize_upstream_error(Other).
 
 wire_msg(Msg) when is_atom(Msg) -> atom_to_binary(Msg, utf8);
