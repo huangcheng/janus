@@ -5,6 +5,10 @@
 %%%-------------------------------------------------------------------
 -module(janus_http_proxy).
 
+-define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
+-define(STREAM_TIMEOUT_MSG, <<"upstream stream exceeded the total time budget">>).
+
+
 -include("janus_protocol_translate.hrl").
 
 -export([handle/5, model_field/1]).
@@ -974,6 +978,15 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
 %% is reachable whenever dispatch is not (single node, worker_force_local,
 %% empty pool, failed send, missed ack), so wrapping here — once, at the
 %% seam — keeps degraded mode from raising badarity on every stream.
+%%
+%% KNOWN LIMITATION (verified live 2026-10-29): dropping KeepaliveFun
+%% means SSE keepalives do NOT operate on this path. The provider drain
+%% is a synchronous gun receive loop with no hook to inject a frame
+%% while it waits, so supporting them here needs a change in
+%% janus_providers_http. Consequence: a single-node / degraded
+%% deployment gets the inactivity ceiling but not the client-facing
+%% reassurance — a client can still time out during upstream silence
+%% even though the gateway would have reported the stall.
 normalize_drain_arity({ok, stream, Status, Headers, Drain}) when is_function(Drain, 1) ->
     {ok, stream, Status, Headers, fun(ChunkFun, _KeepaliveFun) -> Drain(ChunkFun) end};
 normalize_drain_arity(Other) ->
@@ -1466,8 +1479,30 @@ native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
         reason => SafeReason,
         client_proto => ClientProto
     }),
+    %% Tell the client WHY the stream ended. Until now this path closed
+    %% with a bare newline, so a mid-stream failure looked like a
+    %% truncation with no cause — the stream simply stopped. An SSE
+    %% comment frame is the safe carrier: it is ignored by any SSE
+    %% parser, so it cannot corrupt a partially-delivered event, yet it
+    %% survives into the client's raw bytes where it explains the close.
+    %% (The translate path already emits a proper error event through
+    %% finalize_sse/3; this is the native/verbatim path.)
+    catch cowboy_req:stream_body(sse_failure_notice(Reason), nofin, Req2),
     catch cowboy_req:stream_body(<<"\n">>, fin, Req2),
     {ok, Req2, State}.
+
+%% Human-readable, single-line, SSE-safe reason for a mid-stream close.
+sse_failure_notice(closed) ->
+    <<>>;
+sse_failure_notice(Reason) ->
+    Text = stream_failure_text(Reason),
+    iolist_to_binary([<<": janus stream failed - ">>, Text, <<"\n\n">>]).
+
+stream_failure_text({body, timeout}) -> ?UPSTREAM_STALLED_MSG;
+stream_failure_text({await, timeout}) -> ?STREAM_TIMEOUT_MSG;
+stream_failure_text({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
+stream_failure_text(closed) -> <<"client disconnected">>;
+stream_failure_text(_) -> <<"upstream error">>.
 
 handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain}, Route, false, Req, State) when
     Status >= 400
@@ -1757,8 +1792,6 @@ trim_partial_utf8(B, I, Extra) ->
 %% tuple and the client would read an Erlang term. Name it in words a
 %% human can act on — this is the gateway saying "the upstream stalled",
 %% which is precisely what the generic 502 used to hide.
--define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
--define(STREAM_TIMEOUT_MSG, <<"upstream stream exceeded the total time budget">>).
 
 %% NOTE: this fills the Msg slot of {error, upstream, Msg}, so it must
 %% yield a BINARY. Returning {stalled, Binary} here would fall through

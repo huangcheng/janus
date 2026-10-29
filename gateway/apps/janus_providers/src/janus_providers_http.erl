@@ -32,6 +32,17 @@
 %% req_214630612184d5da). Hot-tunable via settings key "failover"
 %% field "ttfb_ms"; the distributed failover budget must exceed this
 %% or a stall can never be retried.
+%% Mid-stream silence allowance for the local (non-worker) drain path.
+%% Mirrors janus_worker_wire:stream_inactivity_timeout_ms/0 so both
+%% dispatch paths agree on what "stalled" means.
+drain_idle_ms() ->
+    try janus_worker_wire:stream_inactivity_timeout_ms() of
+        Ms when is_integer(Ms), Ms > 0 -> Ms;
+        _ -> ?BODY_MS
+    catch
+        _:_ -> ?BODY_MS
+    end.
+
 ttfb_ms() ->
     case persistent_term:get({janus, failover_cfg}, undefined) of
         #{<<"ttfb_ms">> := T} when is_integer(T), T >= 1000, T =< 600000 -> T;
@@ -377,8 +388,11 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
             {error, {open, Reason}}
     end.
 
+%% Per-frame wait for a plain (identity) stream: same reasoning as
+%% drain_stream_decoding/4 — silence mid-stream is a stalled upstream,
+%% not a slow one, so it is bounded by the shared inactivity ceiling.
 drain_stream(Conn, Stream, ChunkFun) ->
-    case gun:await(Conn, Stream, ?BODY_MS) of
+    case gun:await(Conn, Stream, drain_idle_ms()) of
         {data, nofin, Data} ->
             _ = ChunkFun(Data),
             drain_stream(Conn, Stream, ChunkFun);
@@ -480,8 +494,15 @@ upstream_decode_gzip_body(Status, RespHeaders, Body, S0) ->
 %% to the {body, _} transport shape (the existing retryable/benching
 %% taxonomy — is_transient({body, _}) is true; the session maps it to
 %% upstream_closed) with the CE detail inside.
+%% Per-frame wait for a DECODED (gzip) stream. Bounded by the shared
+%% mid-stream inactivity ceiling rather than ?BODY_MS: 120s of silence
+%% on a stream that has already started is a stalled upstream, and the
+%% gateway must say so long before a client's own idle timer expires
+%% (verified live 2026-10-29: a single-node deployment had no
+%% inactivity bound at all on this path and a stalled stream hung until
+%% the client gave up).
 drain_stream_decoding(Conn, Stream, ChunkFun, S0) ->
-    case gun:await(Conn, Stream, ?BODY_MS) of
+    case gun:await(Conn, Stream, drain_idle_ms()) of
         {data, nofin, Data} ->
             case janus_wire_enc:inflate_stream_frame(S0, Data) of
                 {ok, Out, S1} ->

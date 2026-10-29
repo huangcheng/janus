@@ -80,8 +80,25 @@ stream_timeout_ms() -> 600_000.
 %% gateway must say so in its own words instead of letting the client
 %% die blind. Restarts on every forwarded chunk (progress), so only
 %% true silence trips it. Deliberately BELOW stream_timeout_ms/0.
+%% Overridable so the live verification driver can shrink the window
+%% instead of idling 180s, and so an operator can tune it per fleet.
 -spec stream_inactivity_timeout_ms() -> pos_integer().
-stream_inactivity_timeout_ms() -> 180_000.
+stream_inactivity_timeout_ms() ->
+    positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", 180_000).
+
+%% A malformed or non-positive override falls back to the default
+%% rather than disarming a timeout: a 0 here would make the inactivity
+%% ceiling inert, which is the failure mode this whole change removes.
+positive_env(Name, Default) ->
+    case os:getenv(Name) of
+        false ->
+            Default;
+        V ->
+            case string:to_integer(string:trim(V)) of
+                {N, ""} when is_integer(N), N > 0 -> N;
+                _ -> Default
+            end
+    end.
 
 -spec ack_deadline_ms() -> pos_integer().
 ack_deadline_ms() -> 5_000.

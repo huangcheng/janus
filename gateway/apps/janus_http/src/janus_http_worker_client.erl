@@ -643,9 +643,26 @@ deadline_remaining(Deadline) ->
 %% the default rather than silently disabling the feature.
 stream_keepalive_ms() ->
     Ceiling = janus_worker_wire:stream_inactivity_timeout_ms(),
-    case application:get_env(janus, stream_keepalive_ms, ?STREAM_KEEPALIVE_MS) of
+    case keepalive_override() of
         V when is_integer(V), V > 0, V < Ceiling -> V;
         _ -> ?STREAM_KEEPALIVE_MS
+    end.
+
+%% app env first (tests), then the environment variable (deploys).
+keepalive_override() ->
+    case application:get_env(janus, stream_keepalive_ms) of
+        {ok, V} ->
+            V;
+        undefined ->
+            case os:getenv("JANUS_STREAM_KEEPALIVE_MS") of
+                false ->
+                    undefined;
+                Raw ->
+                    case string:to_integer(string:trim(Raw)) of
+                        {N, ""} when is_integer(N) -> N;
+                        _ -> undefined
+                    end
+            end
     end.
 
 %% Wait until WHICHEVER comes first: the total stream deadline or the
