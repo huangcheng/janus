@@ -1690,7 +1690,11 @@ upstream_stream_error_msg() ->
 %% which is precisely what the generic 502 used to hide.
 -define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
 
-sanitize_stream_reason({await, no_progress}) -> {stalled, ?UPSTREAM_STALLED_MSG};
+%% NOTE: this fills the Msg slot of {error, upstream, Msg}, so it must
+%% yield a BINARY. Returning {stalled, Binary} here would fall through
+%% wire_reason/1's non-binary clause, which renders with ~w — the client
+%% would read an Erlang term again, the exact leak this removes.
+sanitize_stream_reason({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
 sanitize_stream_reason(Other) -> sanitize_upstream_error(Other).
 
 wire_msg(Msg) when is_atom(Msg) -> atom_to_binary(Msg, utf8);

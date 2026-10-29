@@ -48,6 +48,8 @@
     responses_stream_gatable/1,
     take_upstream_stream_error/0,
     upstream_error_text/1,
+    trunc_200/1,
+    trim_partial_utf8/1,
     %% Dangling tool-call repair (2026-10-28): the proxy entry hook
     %% (native AND translate paths share it).
     repair_dangling_tools/2,
@@ -2430,10 +2432,40 @@ input_or_zero(V) when is_integer(V), V >= 0 -> V.
 bin_or(B, _Default) when is_binary(B), B =/= <<>> -> B;
 bin_or(_, Default) -> Default.
 
+%% Terminal-frame messages carry the UPSTREAM's own words, which are
+%% often non-ASCII (the 2026-10-29 providers replied in Chinese). A raw
+%% byte cut can split a multi-byte codepoint, and the encoder emits such
+%% bytes unescaped — the client would receive invalid UTF-8 JSON and
+%% reject (or fail to parse) the very frame explaining the failure.
 trunc_200(B) when byte_size(B) > 200 ->
-    binary:part(B, 0, 200);
+    trim_partial_utf8(binary:part(B, 0, 200));
 trunc_200(B) ->
     B.
+
+%% Drop an incomplete trailing UTF-8 sequence left by a byte-offset cut.
+%% Mirrors janus_auto:trim_partial_utf8/1 (kept local: the two modules
+%% must not depend on each other for a 20-line helper).
+trim_partial_utf8(B) -> trim_partial_utf8(B, byte_size(B) - 1, 0).
+
+trim_partial_utf8(B, I, _Extra) when I < 0; _Extra >= 3 -> B;
+trim_partial_utf8(B, I, Extra) ->
+    case binary:at(B, I) of
+        C when C < 128 ->
+            B;
+        C when C >= 192 ->
+            Need =
+                if
+                    C < 224 -> 2;
+                    C < 240 -> 3;
+                    true -> 4
+                end,
+            case Need =< Extra + 1 of
+                true -> B;
+                false -> binary:part(B, 0, I)
+            end;
+        _ ->
+            trim_partial_utf8(B, I - 1, Extra + 1)
+    end.
 
 created_now(#sse_st{created = C}) when is_integer(C) ->
     C;
@@ -2470,9 +2502,16 @@ created_now(_) ->
 upstream_error_text(#{<<"message">> := M}) when is_binary(M), M =/= <<>> -> M;
 upstream_error_text(#{<<"error">> := E}) when is_map(E) -> upstream_error_text(E);
 upstream_error_text(#{<<"error">> := E}) when is_binary(E), E =/= <<>> -> E;
+upstream_error_text(E) when is_binary(E), E =/= <<>> -> E;
 upstream_error_text(#{<<"code">> := C}) when is_binary(C), C =/= <<>> -> C;
 upstream_error_text(#{<<"type">> := T}) when is_binary(T), T =/= <<>> -> T;
 upstream_error_text(_) -> undefined.
+
+%% Anthropic SSE error events carry the failure under data.error; some
+%% upstreams flatten it to data directly. Accept both.
+anthro_error_object(#{<<"error">> := E}) -> E;
+anthro_error_object(D) when is_map(D) -> D;
+anthro_error_object(_) -> #{}.
 
 stash_upstream_stream_error(Err) when is_map(Err) ->
     case upstream_error_text(Err) of
@@ -2590,6 +2629,9 @@ anthro_to_chat(#{type := <<"message_delta">>}, St) ->
 anthro_to_chat(#{type := <<"message_stop">>}, St) ->
     {UsageFrames, St1} = chat_pending_usage(St),
     {ok, UsageFrames ++ [<<"data: [DONE]\n\n">>], St1#sse_st{terminal_sent = true}};
+anthro_to_chat(#{type := <<"error">>, data := D}, St) ->
+    stash_upstream_stream_error(anthro_error_object(D)),
+    {error, translate_unsupported, St};
 anthro_to_chat(#{type := <<"error">>}, St) ->
     {error, translate_unsupported, St};
 anthro_to_chat(#{type := _}, St) ->
@@ -3627,6 +3669,9 @@ anthro_to_responses_stream(#{type := <<"message_delta">>}, St) ->
     {ok, [], St};
 anthro_to_responses_stream(#{type := <<"message_stop">>}, St) ->
     responses_finish(St);
+anthro_to_responses_stream(#{type := <<"error">>, data := D}, St) ->
+    stash_upstream_stream_error(anthro_error_object(D)),
+    {error, translate_unsupported, St};
 anthro_to_responses_stream(#{type := <<"error">>}, St) ->
     {error, translate_unsupported, St};
 anthro_to_responses_stream(#{type := _}, St) ->
