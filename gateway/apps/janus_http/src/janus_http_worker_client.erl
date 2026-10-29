@@ -622,6 +622,12 @@ stream_inactivity_deadline() ->
 deadline_remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
 
+%% Client-facing SSE comment cadence. Comfortably under common client
+%% idle timeouts (300s) and under the inactivity ceiling, so a silent
+%% upstream still reassures the client while the gateway keeps its own
+%% deadline running.
+-define(STREAM_KEEPALIVE_MS, 15_000).
+
 %% Wait until WHICHEVER comes first: the total stream deadline or the
 %% inactivity deadline. A stalled-but-alive stream now trips this with
 %% an upstream-shaped reason while the client's own idle timer is
@@ -904,7 +910,14 @@ remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart, LocalFun, Fa
             Err;
         {stream_ready, Prefetch, ExpectSeq, TtfbSent} ->
             Headers = #{<<"content-type">> => <<"text/event-stream">>},
-            Drain = fun(ChunkFun) ->
+            %% Drain/2: ChunkFun consumes UPSTREAM bytes; KeepaliveFun
+            %% (optional) writes a client-facing SSE comment. They are
+            %% distinct because on the translate path ChunkFun feeds an
+            %% SSE PARSER, not the socket — writing a comment there
+            %% would corrupt the upstream stream instead of reassuring
+            %% the client. Called in the HANDLER process either way
+            %% (cowboy's stream_body embeds self()), never in a helper.
+            Drain = fun(ChunkFun, KeepaliveFun) ->
                 try
                     stream_drain_start(
                         JobRef,
@@ -912,6 +925,7 @@ remote_stream(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart, LocalFun, Fa
                         Mon,
                         WorkerNode,
                         ChunkFun,
+                        KeepaliveFun,
                         Prefetch,
                         ExpectSeq,
                         TtfbStart,
@@ -1008,13 +1022,23 @@ stream_preflight_done(JobRef, Done, TtfbStart) ->
     end.
 
 stream_drain_start(
-    JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, Prefetch, ExpectSeq, TtfbStart, TtfbSent
+    JobRef,
+    WorkerSessionPid,
+    Mon,
+    WorkerNode,
+    ChunkFun,
+    KeepaliveFun,
+    Prefetch,
+    ExpectSeq,
+    TtfbStart,
+    TtfbSent
 ) ->
     ok = flush_acks(JobRef),
     case Prefetch of
         {chunk, Seq, Plain} ->
             stream_forward_plain(
-                JobRef, Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent
+                JobRef, Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
+                ExpectSeq, TtfbStart, TtfbSent
             );
         {done, Done, TtfbStart1} ->
             stream_done(JobRef, Done, TtfbStart1, TtfbSent)
@@ -1026,17 +1050,28 @@ stream_drain(
     Mon,
     WorkerNode,
     ChunkFun,
+    KeepaliveFun,
     ExpectSeq,
     TtfbStart,
     TtfbSent,
     Deadline,
     Inactivity
 ) ->
+    %% Wait at most one keepalive tick so a silent-but-alive upstream
+    %% still reassures the client; deadlines are absolute, so this only
+    %% controls WHEN we get to re-check them.
+    Wait = min(deadline_remaining(Deadline, Inactivity), ?STREAM_KEEPALIVE_MS),
     receive
         {janus_chunk, JobRef, _, _, _} = Msg ->
-            stream_chunk(Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent);
+            stream_chunk(
+                Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
+                ExpectSeq, TtfbStart, TtfbSent
+            );
         {janus_chunk, JobRef, _, _} = Msg ->
-            stream_chunk(Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent);
+            stream_chunk(
+                Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
+                ExpectSeq, TtfbStart, TtfbSent
+            );
         {janus_done, JobRef, Done} ->
             case is_dead(JobRef) of
                 true ->
@@ -1071,25 +1106,66 @@ stream_drain(
                 Mon,
                 WorkerNode,
                 ChunkFun,
+                KeepaliveFun,
                 ExpectSeq,
                 TtfbStart,
                 TtfbSent,
                 Deadline,
                 Inactivity
             )
-    after deadline_remaining(Deadline, Inactivity) ->
-        stash_outcome(error),
-        cancel_session(WorkerSessionPid, JobRef),
-        mark_dead(JobRef),
-        flush_job(JobRef),
-        %% No release on timeout (spec Part 0.11 — see remote_unary).
-        %% Distinguish the two budgets: a total-budget trip is the old
-        %% behavior; an inactivity trip means the upstream went silent
-        %% while the stream was still nominally alive.
-        case deadline_remaining(Deadline) of
-            0 -> {error, {await, timeout}};
-            _ -> {error, {await, no_progress}}
+    after Wait ->
+        case deadline_remaining(Deadline, Inactivity) of
+            0 ->
+                stream_drain_timeout(JobRef, WorkerSessionPid, Deadline);
+            _ ->
+                %% A keepalive tick, not a deadline: reassure the CLIENT
+                %% then re-arm. Never touches either deadline — a
+                %% keepalive is not progress, and treating it as such
+                %% would resurrect the unbounded stall it guards against.
+                emit_keepalive(KeepaliveFun),
+                stream_drain(
+                    JobRef,
+                    WorkerSessionPid,
+                    Mon,
+                    WorkerNode,
+                    ChunkFun,
+                    KeepaliveFun,
+                    ExpectSeq,
+                    TtfbStart,
+                    TtfbSent,
+                    Deadline,
+                    Inactivity
+                )
         end
+    end.
+
+%% An SSE comment: legal on every face, carries no data, parsed away by
+%% every conforming client. A dead socket throws
+%% janus_client_disconnect, which must keep propagating like any other
+%% client-write failure on this path.
+emit_keepalive(undefined) ->
+    ok;
+emit_keepalive(KeepaliveFun) ->
+    try
+        KeepaliveFun(<<": keepalive\n\n">>),
+        ok
+    catch
+        throw:janus_client_disconnect -> throw(janus_client_disconnect);
+        _:_ -> ok
+    end.
+
+stream_drain_timeout(JobRef, WorkerSessionPid, Deadline) ->
+    stash_outcome(error),
+    cancel_session(WorkerSessionPid, JobRef),
+    mark_dead(JobRef),
+    flush_job(JobRef),
+    %% No release on timeout (spec Part 0.11 — see remote_unary).
+    %% Distinguish the two budgets: a total-budget trip is the old
+    %% behavior; an inactivity trip means the upstream went silent
+    %% while the stream was still nominally alive.
+    case deadline_remaining(Deadline) of
+        0 -> {error, {await, timeout}};
+        _ -> {error, {await, no_progress}}
     end.
 
 %% Chunk-leg continuation of stream_drain: normalization happens HERE,
@@ -1099,7 +1175,9 @@ stream_drain(
 %% (ocr review: the receive loop never crashes on shape — that would
 %% skip cancel/release/flush), and only for a LIVE job (a dead job's
 %% stragglers keep the drop-only behavior).
-stream_chunk(Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent) ->
+stream_chunk(
+    Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun, ExpectSeq, TtfbStart, TtfbSent
+) ->
     case is_dead(JobRef) of
         true ->
             ok;
@@ -1110,12 +1188,15 @@ stream_chunk(Msg, JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq
                 {janus_chunk, _Ref, Seq, Wire, Meta} ->
                     stream_chunk_decoded(
                         JobRef, Seq, Wire, Meta, WorkerSessionPid, Mon, WorkerNode, ChunkFun,
-                        ExpectSeq, TtfbStart, TtfbSent
+                        KeepaliveFun, ExpectSeq, TtfbStart, TtfbSent
                     )
             end
     end.
 
-stream_chunk_decoded(JobRef, Seq, Wire, Meta, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent) ->
+stream_chunk_decoded(
+    JobRef, Seq, Wire, Meta, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
+    ExpectSeq, TtfbStart, TtfbSent
+) ->
     case decode_chunk(Wire, Meta) of
         {error, Reason} ->
             wire_enc_abort(JobRef, Seq, Reason, WorkerSessionPid);
@@ -1132,14 +1213,16 @@ stream_chunk_decoded(JobRef, Seq, Wire, Meta, WorkerSessionPid, Mon, WorkerNode,
                     })
             end,
             stream_forward_plain(
-                JobRef, Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, Seq + 1, TtfbStart, TtfbSent
+                JobRef, Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
+                Seq + 1, TtfbStart, TtfbSent
             )
     end.
 
 %% Client-bound chunk write (ChunkFun). Sets the pre-byte flag ONLY here
 %% — D4 zero-forward detection must not trust post-done mark_forwarded.
 stream_forward_plain(
-    JobRef, _Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, NextSeq, TtfbStart, TtfbSent
+    JobRef, _Seq, Plain, WorkerSessionPid, Mon, WorkerNode, ChunkFun, KeepaliveFun,
+    NextSeq, TtfbStart, TtfbSent
 ) ->
     try
         ChunkFun(Plain)
@@ -1172,6 +1255,7 @@ stream_forward_plain(
         Mon,
         WorkerNode,
         ChunkFun,
+        KeepaliveFun,
         NextSeq,
         TtfbStart,
         TtfbSent1,

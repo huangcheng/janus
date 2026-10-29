@@ -1002,7 +1002,10 @@ handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Rout
     mark_client_committed(),
     Req2 = cowboy_req:stream_reply(Status, filter_stream_headers(Headers), Req),
     try
-        Drain(fun(Chunk) -> translate_chunk(ClientProto, ProviderProto, Chunk, Req2) end)
+        Drain(
+            fun(Chunk) -> translate_chunk(ClientProto, ProviderProto, Chunk, Req2) end,
+            fun(Frame) -> stream_client_frame(Frame, nofin, Req2) end
+        )
     of
         ok ->
             finish_translate_stream(ClientProto, Route, Req2, State, normal);
@@ -1425,10 +1428,13 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
         Req
     ),
     try
-        Drain(fun(Chunk) ->
-            capture_usage_chunk(Chunk),
-            stream_client_frame(Chunk, nofin, Req2)
-        end)
+        Drain(
+            fun(Chunk) ->
+                capture_usage_chunk(Chunk),
+                stream_client_frame(Chunk, nofin, Req2)
+            end,
+            fun(Frame) -> stream_client_frame(Frame, nofin, Req2) end
+        )
     of
         ok ->
             %% Record BEFORE the final frame so a dying client can
@@ -1719,10 +1725,13 @@ collect_drain(Drain) ->
     Acc = ets:new(janus_stream_acc, [private]),
     try
         case
-            Drain(fun(Chunk) ->
-                ets:insert(Acc, {erlang:unique_integer([monotonic]), Chunk}),
-                ok
-            end)
+            Drain(
+                fun(Chunk) ->
+                    ets:insert(Acc, {erlang:unique_integer([monotonic]), Chunk}),
+                    ok
+                end,
+                undefined
+            )
         of
             ok ->
                 Chunks = [C || {_K, C} <- lists:keysort(1, ets:tab2list(Acc))],
