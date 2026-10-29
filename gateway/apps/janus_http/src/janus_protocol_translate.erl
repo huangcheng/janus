@@ -1175,10 +1175,13 @@ input_items_to_chat(
     %% -> assistant(B) -> tool(A) -> tool(B) — the exact non-adjacent
     %% shape this change exists to remove. Pending therefore rides
     %% through the merge untouched.
-    Acc1 =
+    %% A flush CONSUMES Pending: the deferred messages are now in Acc, so
+    %% carrying the old list forward would emit them a second time at the
+    %% tail (or inside a later message). Only the open-run path keeps it.
+    {Acc1, Pending1} =
         case run_open(Acc) of
-            true -> Acc;
-            false -> flush_pending(Acc, Pending)
+            true -> {Acc, Pending};
+            false -> {flush_pending(Acc, Pending), []}
         end,
     %% Attach as assistant tool_calls; merge with previous assistant if present.
     Call = #{
@@ -1189,10 +1192,10 @@ input_items_to_chat(
     case Acc1 of
         [#{<<"role">> := <<"assistant">>} = A | AccRest] ->
             Calls = maps:get(<<"tool_calls">>, A, []) ++ [Call],
-            input_items_to_chat(Rest, [A#{<<"tool_calls">> => Calls} | AccRest], Pending);
+            input_items_to_chat(Rest, [A#{<<"tool_calls">> => Calls} | AccRest], Pending1);
         _ ->
             Msg = #{<<"role">> => <<"assistant">>, <<"content">> => <<>>, <<"tool_calls">> => [Call]},
-            input_items_to_chat(Rest, [Msg | Acc1], Pending)
+            input_items_to_chat(Rest, [Msg | Acc1], Pending1)
     end;
 input_items_to_chat(
     [#{<<"type">> := <<"function_call_output">>, <<"call_id">> := Id, <<"output">> := Out} | Rest],

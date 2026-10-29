@@ -155,6 +155,26 @@ two_deferred_messages_order_test() ->
     ?assertEqual([<<"first">>], texts([M1])),
     ?assertEqual([<<"second">>], texts([M2])).
 
+%% Two fully closed runs back to back: the function_call clause's
+%% closed-run branch starts a NEW assistant message instead of merging
+%% into the previous run.
+sequential_closed_runs_test() ->
+    Msgs = to_chat([umsg(<<"go">>), fc(<<"c1">>), out(<<"c1">>), fc(<<"c2">>), out(<<"c2">>)]),
+    assert_adjacent(Msgs),
+    ?assertEqual(
+        [<<"user">>, <<"assistant">>, <<"tool">>, <<"assistant">>, <<"tool">>],
+        roles(Msgs)
+    ).
+
+%% A deferred message flushed on a closed run must be CONSUMED: the
+%% function_call clause used to carry the old Pending forward after
+%% flushing it, emitting the text a second time.
+deferred_message_consumed_on_flush_test() ->
+    Msgs = to_chat([fc(<<"A">>), amsg(<<"deferred">>), out(<<"A">>), fc(<<"B">>), out(<<"B">>)]),
+    assert_adjacent(Msgs),
+    Flat = lists:flatten(texts(Msgs)),
+    ?assertEqual(1, length([T || T <- Flat, T =:= <<"deferred">>])).
+
 %% The anthropic leg must satisfy the same invariant via
 %% tool_use/tool_result adjacency.
 interleaved_text_to_anthropic_test() ->

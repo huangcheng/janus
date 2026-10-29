@@ -1126,20 +1126,52 @@ guard_chat_multi_choice(_, _) ->
 write_frames(Frames, Req2) ->
     lists:foreach(fun(F) -> stream_client_frame(F, nofin, Req2) end, Frames).
 
-%% Track whether the last forwarded byte left an SSE line open, so a
-%% keepalive is never spliced into a partial line (see the native
-%% stream path). Only the trailing byte matters: a chunk ending in \n
-%% leaves no line open, anything else does.
+%% Track SSE framing across forwarded chunks so a keepalive is only ever
+%% injected where it cannot corrupt the stream.
+%%
+%% A keepalive frame is ": comment\n\n" — its trailing BLANK LINE
+%% DISPATCHES any pending event. So a line boundary is not enough: for a
+%% multi-line event (anthropic's "event: X\ndata: {...}\n\n"), a chunk
+%% ending right after the "event:" line still ends in \n, and injecting
+%% there would dispatch the event early with no data. What matters is an
+%% EVENT boundary: the previous two bytes were \n\n, which is carried
+%% across chunk boundaries via janus_sse_prev_byte.
 note_sse_line_state(<<>>) ->
     ok;
 note_sse_line_state(Chunk) when is_binary(Chunk) ->
-    case binary:last(Chunk) of
-        $\n -> put(janus_sse_line_open, false);
-        _ -> put(janus_sse_line_open, true)
+    Prev = case get(janus_sse_prev_byte) of
+        B when is_integer(B) -> B;
+        _ -> undefined
     end,
+    put(janus_sse_prev_byte, binary:last(Chunk)),
+    AtBoundary =
+        case {Prev, byte_size(Chunk)} of
+            {_, 0} ->
+                false;
+            {$\n, _} ->
+                binary:last(Chunk) =:= $\n;
+            {undefined, 1} ->
+                %% First byte this request: no framing context yet.
+                false;
+            _ ->
+                binary:last(Chunk) =:= $\n andalso at_event_boundary_inside(Chunk)
+        end,
+    put(janus_sse_at_boundary, AtBoundary),
     ok;
 note_sse_line_state(_) ->
     ok.
+
+%% True when this chunk's trailing bytes complete an event (\n\n).
+at_event_boundary_inside(Chunk) ->
+    case byte_size(Chunk) of
+        1 ->
+            %% single byte: depends on the carried previous byte, handled
+            %% by the caller's Prev check.
+            false;
+        _ ->
+            binary:part(Chunk, byte_size(Chunk) - 2, 2) =:= <<"\n\n">> orelse
+                (binary:last(Chunk) =:= $\n andalso get(janus_sse_prev_byte) =:= $\n)
+    end.
 
 %% Cowboy returns ok | {ok, Req} on a live socket and errors/throws when
 %% the client is gone. Throw janus_client_disconnect so the drain's
@@ -1463,7 +1495,8 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
     %% and corrupt the event (e.g. a truncated `data: {"choices":...`
     %% would swallow the comment). The translate path needs no such
     %% guard — its ChunkFun feeds an SSE parser that buffers leftovers.
-    ok = erase(janus_sse_line_open),
+    _ = erase(janus_sse_line_open),
+    _ = erase(janus_sse_prev_byte),
     try
         Drain(
             fun(Chunk) ->
@@ -1472,12 +1505,13 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
                 stream_client_frame(Chunk, nofin, Req2)
             end,
             fun(Frame) ->
-                case get(janus_sse_line_open) of
+                case get(janus_sse_at_boundary) of
                     true ->
-                        %% Mid-line: skip this tick, the next one will do.
-                        ok;
+                        stream_client_frame(Frame, nofin, Req2);
                     _ ->
-                        stream_client_frame(Frame, nofin, Req2)
+                        %% Mid-event: a keepalive's blank line would
+                        %% dispatch the event early. Skip this tick.
+                        ok
                 end
             end
         )
