@@ -78,6 +78,12 @@ read(Req0, Opts) when is_map(Opts) ->
         cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0)
     ),
     put(janus_request_id, ReqId),
+    %% Quota charge idempotency must NOT key on the client-controlled
+    %% x-request-id: replaying one fixed id suppressed all later
+    %% TPM/daily charges for the key (security-audit run-1). Mint a
+    %% per-request server-side nonce; failover retries within this
+    %% request reuse it via the pdict, so idempotent charging survives.
+    janus_quota:mint_charge_id(),
     put(janus_trace, Trace),
     AuthOpts = #{allow_x_api_key => maps:get(allow_x_api_key, Opts, false)},
     case janus_http_auth:require_agent(Req1, AuthOpts) of

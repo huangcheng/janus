@@ -4,7 +4,8 @@
 %%% RPM / TPM use a rolling 60s bucket; daily uses UTC calendar day.
 %%% NULL limits short-circuit with no ETS writes. Admit must run once
 %%% per client request (outside failover). Token charge is idempotent
-%%% per request_id (pdict + ETS). Modality plugins that only report
+%%% per server-minted charge id (mint_charge_id/0, pdict + ETS) —
+%%% NEVER the client-controlled x-request-id. Modality plugins that only report
 %%% `units` (no prompt/completion) do not advance TPM/daily — RPM still
 %%% applies via admit/1.
 %%% @end
@@ -15,6 +16,8 @@
     ensure/0,
     admit/1,
     charge_tokens/4,
+    charge_nonce/0,
+    mint_charge_id/0,
     retry_after_sec/1,
     kind_code/1,
     tpm_bucket_now/0,
@@ -236,19 +239,42 @@ check_daily(Agent) ->
             end
     end.
 
--spec charge_tokens(binary() | undefined, term(), term(), term()) -> ok.
-charge_tokens(RequestId, AgentKeyId, Prompt, Completion) when
-    is_binary(RequestId), RequestId =/= <<>>, is_integer(AgentKeyId)
+-spec charge_nonce() -> binary().
+%% Server-minted per-request charge idempotency key. The dedup table
+%% keys on this, never on the client-controlled x-request-id: one
+%% replayed header value must not suppress a key's later TPM/daily
+%% charges (security-audit run-1).
+charge_nonce() ->
+    <<"q_", (binary:encode_unsigned(erlang:unique_integer([positive])))/binary>>.
+
+-spec mint_charge_id() -> binary().
+%% Single source of truth for the per-request charge id: every agent
+%% entry point (preamble read/2, modality run_enabled/3) calls this so
+%% the pdict key and nonce shape can never drift between entry points
+%% — a drifted (or missing) mint fails silently straight back to the
+%% replay bypass this fixes. Returns the minted id.
+mint_charge_id() ->
+    Id = charge_nonce(),
+    put(janus_quota_charge_id, Id),
+    %% Full per-request charge-state reset in one place: the previous
+    %% request's exactly-once latch must never survive into this one
+    %% (keep-alive process reuse), whatever face handled it.
+    erase(janus_quota_charged),
+    Id.
+
+-spec charge_tokens(binary(), term(), term(), term()) -> ok.
+charge_tokens(ChargeId, AgentKeyId, Prompt, Completion) when
+    is_binary(ChargeId), ChargeId =/= <<>>, is_integer(AgentKeyId)
 ->
     ensure(),
-    case already_charged(RequestId) of
+    case already_charged(ChargeId) of
         true ->
             ok;
         false ->
             Tokens = tok(Prompt) + tok(Completion),
             case Tokens > 0 of
                 true ->
-                    mark_charged(RequestId),
+                    mark_charged(ChargeId),
                     Bucket = tpm_bucket_now(),
                     _ = ets:update_counter(
                         ?TPM, {AgentKeyId, Bucket}, {2, Tokens}, {{AgentKeyId, Bucket}, 0}
@@ -267,17 +293,17 @@ charge_tokens(RequestId, AgentKeyId, Prompt, Completion) when
 charge_tokens(_, _, _, _) ->
     ok.
 
-already_charged(RequestId) ->
+already_charged(ChargeId) ->
     case get(janus_quota_charged) of
         true ->
             true;
         _ ->
-            ets:member(?CHARGED, RequestId)
+            ets:member(?CHARGED, ChargeId)
     end.
 
-mark_charged(RequestId) ->
+mark_charged(ChargeId) ->
     put(janus_quota_charged, true),
-    ets:insert(?CHARGED, {RequestId, erlang:system_time(second)}),
+    ets:insert(?CHARGED, {ChargeId, erlang:system_time(second)}),
     ok.
 
 tok(N) when is_integer(N), N > 0 -> N;

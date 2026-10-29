@@ -23,6 +23,10 @@ init(Req0, State) ->
     ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
     Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
     put(janus_request_id, ReqId),
+    %% This face never charges, but a keep-alive-reused process could
+    %% carry the PREVIOUS request's nonce — drop it so a future charge
+    %% site here can never dedupe against a stale id.
+    erase(janus_quota_charge_id),
     case janus_files:enabled() of
         false ->
             reply_json(Req1, State, 503, #{

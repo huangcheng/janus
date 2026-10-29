@@ -3232,9 +3232,9 @@ do_track(Status, Route, Usage, Observe) ->
             Usage1 = merge_worker_done_usage(Usage),
             Prompt = maps:get(prompt, Usage1, null),
             Completion = maps:get(completion, Usage1, null),
-            case {get(janus_request_id), maps:get(id, Agent, null)} of
-                {Rid, Aid} when is_binary(Rid), is_integer(Aid) ->
-                    _ = janus_quota:charge_tokens(Rid, Aid, Prompt, Completion);
+            case {get(janus_quota_charge_id), maps:get(id, Agent, null)} of
+                {ChargeId, Aid} when is_binary(ChargeId), is_integer(Aid) ->
+                    _ = janus_quota:charge_tokens(ChargeId, Aid, Prompt, Completion);
                 _ ->
                     ok
             end,

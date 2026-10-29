@@ -102,6 +102,10 @@ run_enabled(Plugin, Req0, State) ->
     ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
     Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
     put(janus_request_id, ReqId),
+    %% Server-side charge nonce (same rationale as the preamble: a
+    %% replayed client x-request-id must never suppress TPM/daily
+    %% charges on modality faces either).
+    janus_quota:mint_charge_id(),
     %% Keep-alive hygiene (observability-depth Task 2): mirror
     %% janus_http_proxy:handle/5's failover erase list — a proxy request
     %% may have run on this same process earlier in the connection's
@@ -407,10 +411,10 @@ record_usage(#{status := _} = Ev0, Route) ->
             end,
         trace_id => janus_trace:trace_id(get(janus_trace))
     },
-    case {ReqId, maps:get(agent_key_id, Ev, null)} of
-        {Rid, Aid} when is_binary(Rid), is_integer(Aid) ->
+    case {get(janus_quota_charge_id), maps:get(agent_key_id, Ev, null)} of
+        {Cid, Aid} when is_binary(Cid), is_integer(Aid) ->
             _ = janus_quota:charge_tokens(
-                Rid, Aid, maps:get(prompt, Ev, null), maps:get(completion, Ev, null)
+                Cid, Aid, maps:get(prompt, Ev, null), maps:get(completion, Ev, null)
             );
         _ ->
             ok
