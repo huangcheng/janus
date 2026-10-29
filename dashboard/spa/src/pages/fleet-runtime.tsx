@@ -72,6 +72,34 @@ type RuntimePayload = {
 
 const SHORT = (node: string) => (node.includes("@") ? node.split("@")[1] : node)
 
+// --- topology layout constants (viewBox units) ---
+// Invariant: same-row chips are always CHIP_W + CHIP_GAP apart, so they can
+// never overlap — the viewBox grows with the fleet instead of packing N
+// fixed-size chips into a fixed canvas. The svg keeps its natural width as
+// a min-width: a narrower container scrolls instead of shrinking the chips
+// to illegibility, a wider one scales them up smoothly (vector text).
+const CHIP_W = 180
+const CHIP_H = 46
+const CHIP_GAP = 14
+const SIDE_PAD = 10
+const MIN_VIEW_W = 640
+const VIEW_H = 240
+const MASTER_Y = 58
+const WORKER_Y = 196
+const MASTER_BOTTOM = MASTER_Y + CHIP_H / 2
+const WORKER_TOP = WORKER_Y - CHIP_H / 2
+
+const rowExtent = (n: number) =>
+  n > 0 ? n * CHIP_W + (n - 1) * CHIP_GAP + 2 * SIDE_PAD : 0
+
+/** SVG <text> never wraps or truncates on its own: chip labels are clipped
+ * by character count (sized against Geist's average advance at 10/12px) so
+ * hostnames and subtitles stay inside the chip; the full value rides the
+ * native <title> tooltip. */
+function fitChipText(s: string, maxChars: number): string {
+  return s.length > maxChars ? `${s.slice(0, maxChars - 1)}…` : s
+}
+
 function fmtMb(bytes: number | undefined): string {
   if (!bytes || Number.isNaN(bytes)) return "—"
   return `${(bytes / 1048576).toFixed(1)} MB`
@@ -142,6 +170,11 @@ export function FleetRuntime({
   )
   const masters = entries.filter(([, r]) => r.ok?.role === "master")
   const workerNodes = entries.filter(([, r]) => r.ok && r.ok.role !== "master")
+  // Both rows are centered on a canvas wide enough for the larger one, so
+  // chips keep their fixed pitch at any fleet size (see layout constants).
+  const viewW = Math.max(MIN_VIEW_W, rowExtent(masters.length), rowExtent(workerNodes.length))
+  const rowX = (i: number, n: number) =>
+    (viewW - (n * CHIP_W + (n - 1) * CHIP_GAP)) / 2 + CHIP_W / 2 + i * (CHIP_W + CHIP_GAP)
   const hasUnsupported = entries.some(([, r]) => (r.error ?? "").includes("unknown_command"))
   const reachByNode = useMemo(() => {
     const m = new Map<string, boolean | null>()
@@ -205,85 +238,118 @@ export function FleetRuntime({
             No snapshot yet — take one to see the fleet topology and per-node runtime.
           </p>
         ) : (
+          <>
           <div className="overflow-x-auto">
-            <div className="min-w-[640px]">
-              <svg
-                viewBox="0 0 720 250"
-                className="h-[250px] w-full"
-                role="img"
-                aria-label="Fleet topology"
-              >
-                {workerNodes.map(([node, r], i) => {
-                  const x = 40 + (640 * (i + 1)) / (workerNodes.length + 1)
-                  const ok = r.ok
-                  const reach = reachByNode.get(node)
-                  const linked = !!ok?.connected.some((c) => masters.some(([m]) => m === c))
-                  const dead = reach === false || (!linked && !!ok)
-                  const rate = fmtRate(flowRate(node))
-                  return (
-                    <g key={node}>
+            <svg
+              viewBox={`0 0 ${viewW} ${VIEW_H}`}
+              className="h-auto w-full"
+              style={{ minWidth: viewW }}
+              role="img"
+              aria-label="Fleet topology"
+            >
+              {/* Edges first, chips after: a line must never paint over a chip. */}
+              {workerNodes.map(([node, r], i) => {
+                const ok = r.ok
+                const reach = reachByNode.get(node)
+                const linkedIdx = masters
+                  .map(([m], mi) => (ok?.connected.some((c) => c === m) ? mi : -1))
+                  .filter((mi) => mi >= 0)
+                const wx = rowX(i, workerNodes.length)
+                // An unlinked worker still gets one dashed "expected but
+                // down" edge into the master row; with no masters at all
+                // there is nothing to originate from.
+                const targets = linkedIdx.length
+                  ? linkedIdx.map((mi) => rowX(mi, masters.length))
+                  : masters.length
+                    ? [viewW / 2]
+                    : []
+                const dead = reach === false || (!linkedIdx.length && !!ok)
+                const rate = fmtRate(flowRate(node))
+                return (
+                  <g key={node}>
+                    {targets.map((mx, ti) => (
                       <line
-                        x1={360}
-                        y1={100}
-                        x2={x}
-                        y2={182}
+                        key={ti}
+                        x1={mx}
+                        y1={MASTER_BOTTOM}
+                        x2={wx}
+                        y2={WORKER_TOP}
                         strokeWidth={1.5}
-                        className={cn(
-                          dead
-                            ? "stroke-destructive/50"
-                            : linked
-                              ? "stroke-foreground/35"
-                              : "stroke-muted-foreground/25",
-                        )}
+                        className={dead ? "stroke-destructive/50" : "stroke-foreground/35"}
                         strokeDasharray={dead ? "4 3" : undefined}
                       />
-                      {rate && rate !== "0/s" && (
-                        <text
-                          x={(360 + x) / 2}
-                          y={(100 + 182) / 2 - 6}
-                          textAnchor="middle"
-                          className="fill-muted-foreground text-[10px] tabular-nums"
-                        >
-                          {rate}
-                        </text>
-                      )}
-                      <NodeChip
-                        x={x}
-                        y={208}
-                        node={node}
-                        result={ok}
-                        dead={dead}
-                        onClick={() => setOpenNode(node)}
-                      />
-                    </g>
-                  )
-                })}
-                {masters.map(([node, r], i) => (
-                  <NodeChip
-                    key={node}
-                    x={360}
-                    y={74}
-                    node={node}
-                    result={r.ok}
-                    dead={false}
-                    row={masters.length}
-                    offset={i}
-                    onClick={() => setOpenNode(node)}
-                  />
-                ))}
-                {entries.length === 0 && !busy && (
-                  <text
-                    x={360}
-                    y={130}
-                    textAnchor="middle"
-                    className="fill-muted-foreground text-sm"
-                  >
-                    {payload?.outcome === "error" ? "no node answered" : "no snapshot data"}
-                  </text>
-                )}
-              </svg>
-            </div>
+                    ))}
+                    {targets.length > 0 && rate && rate !== "0/s" && (
+                      <text
+                        x={(targets[0] + wx) / 2}
+                        y={(MASTER_BOTTOM + WORKER_TOP) / 2 - 6}
+                        textAnchor="middle"
+                        className="fill-muted-foreground text-[10px] tabular-nums"
+                      >
+                        {rate}
+                      </text>
+                    )}
+                    <NodeChip
+                      cx={wx}
+                      cy={WORKER_Y}
+                      node={node}
+                      result={ok}
+                      dead={dead}
+                      onClick={() => setOpenNode(node)}
+                    />
+                  </g>
+                )
+              })}
+              {masters.map(([node, r], i) => (
+                <NodeChip
+                  key={node}
+                  cx={rowX(i, masters.length)}
+                  cy={MASTER_Y}
+                  node={node}
+                  result={r.ok}
+                  dead={false}
+                  master
+                  onClick={() => setOpenNode(node)}
+                />
+              ))}
+              {entries.length === 0 && !busy && (
+                <text
+                  x={viewW / 2}
+                  y={130}
+                  textAnchor="middle"
+                  className="fill-muted-foreground text-sm"
+                >
+                  {payload?.outcome === "error" ? "no node answered" : "no snapshot data"}
+                </text>
+              )}
+            </svg>
           </div>
+          {workerNodes.length > 0 && (
+            <div className="text-muted-foreground mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+              <span className="inline-flex items-center gap-1.5">
+                <svg viewBox="0 0 16 8" className="h-2 w-4" aria-hidden="true">
+                  <line x1="1" y1="4" x2="15" y2="4" strokeWidth="1.5" className="stroke-foreground/35" />
+                </svg>
+                linked
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <svg viewBox="0 0 16 8" className="h-2 w-4" aria-hidden="true">
+                  <line
+                    x1="1"
+                    y1="4"
+                    x2="15"
+                    y2="4"
+                    strokeWidth="1.5"
+                    strokeDasharray="3 2"
+                    className="stroke-destructive/50"
+                  />
+                </svg>
+                unreachable
+              </span>
+              <span>rates are req/s between snapshots · click a node for runtime detail</span>
+            </div>
+          )}
+          </>
         )}
         {payload && payload.outcome !== "ok" && (
           <p className="text-muted-foreground mt-2 text-xs">
@@ -310,49 +376,62 @@ export function FleetRuntime({
 }
 
 function NodeChip({
-  x,
-  y,
+  cx,
+  cy,
   node,
   result,
   dead,
-  row = 1,
-  offset = 0,
+  master = false,
   onClick,
 }: {
-  x: number
-  y: number
+  cx: number
+  cy: number
   node: string
   result?: RuntimeSnapshot
   dead: boolean
-  row?: number
-  offset?: number
+  master?: boolean
   onClick: () => void
 }) {
-  const w = 160
-  const h = 46
-  const spread = (row - 1) * (w + 14)
-  const ox = x - w / 2 - spread / 2 + offset * (w + 14)
-  const oy = y - h / 2
+  const x = cx - CHIP_W / 2
+  const y = cy - CHIP_H / 2
+  const sub = result
+    ? `${result.role} · ${result.process_count} procs · ${fmtMb(result.memory?.total)}`
+    : "no data"
   return (
-    <g transform={`translate(${ox}, ${oy})`} className="cursor-pointer" onClick={onClick}>
+    <g
+      transform={`translate(${x}, ${y})`}
+      role="button"
+      tabIndex={0}
+      aria-label={`${node}${result ? ` — ${result.role}` : ""}${dead ? " (unreachable)" : ""}`}
+      className="group cursor-pointer outline-none"
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          onClick()
+        }
+      }}
+    >
+      <title>{node}</title>
       <rect
-        width={w}
-        height={h}
+        width={CHIP_W}
+        height={CHIP_H}
         rx={10}
-        className={cn(
-          "fill-card",
-          dead ? "stroke-destructive/60" : row === 1 ? "stroke-foreground/70" : "stroke-border",
-        )}
         strokeWidth={1.5}
+        className={cn(
+          dead
+            ? "fill-card stroke-destructive/60"
+            : master
+              ? "fill-primary/[0.06] stroke-primary/45 group-hover:stroke-primary/80"
+              : "fill-card stroke-border group-hover:stroke-foreground/60",
+        )}
       />
-      <circle cx={16} cy={16} r={4} className={cn(dead ? "fill-destructive" : "fill-success")} />
+      <circle cx={16} cy={16} r={4} className={dead ? "fill-destructive" : "fill-success"} />
       <text x={28} y={20} className="fill-foreground text-[12px] font-medium">
-        {SHORT(node)}
+        {fitChipText(SHORT(node), 20)}
       </text>
       <text x={12} y={37} className="fill-muted-foreground text-[10px] tabular-nums">
-        {result
-          ? `${result.role} · ${result.process_count} procs · ${fmtMb(result.memory?.total)}`
-          : "no data"}
+        {fitChipText(sub, 30)}
       </text>
     </g>
   )
@@ -659,7 +738,7 @@ function SupRowLine({ child, mark, depth }: { child: SupChild; mark: TreeMark; d
       )}
     >
       {isSup ? (
-        <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+        <Badge variant="secondary" className="h-4 shrink-0 px-1 text-[10px]">
           sup
         </Badge>
       ) : (
@@ -668,7 +747,13 @@ function SupRowLine({ child, mark, depth }: { child: SupChild; mark: TreeMark; d
         </span>
       )}
       <span
-        className={cn("truncate", child.name ? "" : "text-muted-foreground")}
+        className={cn(
+          // min-w-0 lets the flex child actually shrink, so `truncate`
+          // keeps long registered names inside the sheet (the full name
+          // stays available on the title tooltip).
+          "min-w-0 flex-1 truncate",
+          child.name ? "" : "text-muted-foreground",
+        )}
         title={child.name ?? child.pid}
       >
         {child.name ?? child.pid}
