@@ -175,6 +175,22 @@ deferred_message_consumed_on_flush_test() ->
     Flat = lists:flatten(texts(Msgs)),
     ?assertEqual(1, length([T || T <- Flat, T =:= <<"deferred">>])).
 
+%% A call arriving while siblings' outputs are already emitted must
+%% attach to the assistant that OWNS the run, not start a second turn:
+%% head-only merging split the run into assistant -> tool ->
+%% assistant -> tool -> tool.
+sibling_call_after_emitted_output_test() ->
+    Msgs = to_chat([
+        fc(<<"c1">>), fc(<<"c2">>), out(<<"c1">>), fc(<<"c3">>), out(<<"c2">>), out(<<"c3">>)
+    ]),
+    assert_adjacent(Msgs),
+    ?assertEqual([<<"assistant">>, <<"tool">>, <<"tool">>, <<"tool">>], roles(Msgs)),
+    [Assistant | _] = Msgs,
+    ?assertEqual(
+        [<<"c1">>, <<"c2">>, <<"c3">>],
+        [maps:get(<<"id">>, C) || C <- maps:get(<<"tool_calls">>, Assistant)]
+    ).
+
 %% The anthropic leg must satisfy the same invariant via
 %% tool_use/tool_result adjacency.
 interleaved_text_to_anthropic_test() ->

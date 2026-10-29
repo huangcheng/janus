@@ -1178,8 +1178,9 @@ input_items_to_chat(
     %% A flush CONSUMES Pending: the deferred messages are now in Acc, so
     %% carrying the old list forward would emit them a second time at the
     %% tail (or inside a later message). Only the open-run path keeps it.
+    Open = run_open(Acc),
     {Acc1, Pending1} =
-        case run_open(Acc) of
+        case Open of
             true -> {Acc, Pending};
             false -> {flush_pending(Acc, Pending), []}
         end,
@@ -1189,14 +1190,14 @@ input_items_to_chat(
         <<"type">> => <<"function">>,
         <<"function">> => #{<<"name">> => Name, <<"arguments">> => Args}
     },
-    case Acc1 of
-        [#{<<"role">> := <<"assistant">>} = A | AccRest] ->
-            Calls = maps:get(<<"tool_calls">>, A, []) ++ [Call],
-            input_items_to_chat(Rest, [A#{<<"tool_calls">> => Calls} | AccRest], Pending1);
-        _ ->
-            Msg = #{<<"role">> => <<"assistant">>, <<"content">> => <<>>, <<"tool_calls">> => [Call]},
-            input_items_to_chat(Rest, [Msg | Acc1], Pending1)
-    end;
+    %% Attach to the assistant message that OWNS the run. On an open run
+    %% that message can be buried under tool messages already emitted for
+    %% its siblings (fc c1, fc c2, out c1, fc c3): merging only into the
+    %% head would start a second assistant turn and split the run, which
+    %% is the very shape this change removes. A closed run still merges
+    %% only into an assistant head, so consecutive closed runs stay
+    %% separate turns.
+    input_items_to_chat(Rest, attach_call(Acc1, Call, Open), Pending1);
 input_items_to_chat(
     [#{<<"type">> := <<"function_call_output">>, <<"call_id">> := Id, <<"output">> := Out} | Rest],
     Acc,
@@ -1283,6 +1284,22 @@ leading_tool_ids([#{<<"role">> := <<"tool">>, <<"tool_call_id">> := Id} | Rest],
     leading_tool_ids(Rest, [Id | Acc]);
 leading_tool_ids(Rest, Acc) ->
     {Acc, Rest}.
+
+%% Attach a call to the assistant message that owns the run.
+%%
+%% Open run: the owner may sit below tool messages already emitted for
+%% its siblings, so walk past them and prepend the call there. Tool
+%% messages are in reverse order in Acc, so the walk rebuilds as it goes.
+%%
+%% Closed run: merge only into an assistant HEAD. Falling through to a
+%% new message is what keeps consecutive closed runs as separate turns.
+attach_call([#{<<"role">> := <<"tool">>} = T | Rest], Call, true) ->
+    [T | attach_call(Rest, Call, true)];
+attach_call([#{<<"role">> := <<"assistant">>} = A | AccRest], Call, _Open) ->
+    Calls = maps:get(<<"tool_calls">>, A, []) ++ [Call],
+    [A#{<<"tool_calls">> => Calls} | AccRest];
+attach_call(Acc, Call, _Open) ->
+    [#{<<"role">> => <<"assistant">>, <<"content">> => <<>>, <<"tool_calls">> => [Call]} | Acc].
 
 %% Acc is the reversed accumulator, Pending is in CREATION order:
 %% reverse(flush_pending(Acc, Pending)) = reverse(Acc) ++ Pending, so
