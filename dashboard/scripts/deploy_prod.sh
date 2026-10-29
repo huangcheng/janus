@@ -2112,14 +2112,23 @@ echo "== 8. READ-ONLY production smoke (curl live-check) =="
 SMOKE_RC=0
 smoke_fail() { echo "   FAIL $*"; SMOKE_RC=1; }
 smoke_code() { curl -s -o /dev/null -w '%{http_code}' -m 15 "$@"; }
+# H3 (this script's own rule): credentials go to curl on STDIN
+# (-H @-) so they never appear in a child's argv, readable by any
+# local user via ps/proc. smoke_code_auth is the authenticated twin.
+smoke_code_auth() { # $1=token $2=url
+  printf 'authorization: Bearer %s\n' "$1" \
+    | curl -s -o /dev/null -w '%{http_code}' -m 15 -H @- "$2"
+}
 
 CODE="$(smoke_code "$JANUS_DASH/api/health")"
 [ "$CODE" = 200 ] && echo "   ok   dashboard /api/health (200)" \
   || smoke_fail "dashboard /api/health ($CODE)"
-SMOKE_JWT="$("$PY" - "$JANUS_DASH_PASSWORD" "$JANUS_DASH" <<'PY'
-import json, sys, urllib.request
-body = json.dumps({"password": sys.argv[1]}).encode()
-r = urllib.request.Request(f"{sys.argv[2]}/api/auth/login", data=body,
+SMOKE_JWT="$(JANUS_DASH_PASSWORD="$JANUS_DASH_PASSWORD" "$PY" - "$JANUS_DASH" <<'PY'
+import json, os, sys, urllib.request
+# The password rides the ENVIRONMENT (the channel the keyring already
+# uses), never argv — H3 applies to python children as much as curl.
+body = json.dumps({"password": os.environ["JANUS_DASH_PASSWORD"]}).encode()
+r = urllib.request.Request(f"{sys.argv[1]}/api/auth/login", data=body,
                            headers={"content-type": "application/json"})
 try:
     with urllib.request.urlopen(r, timeout=15) as resp:
@@ -2134,10 +2143,10 @@ else
   smoke_fail "dashboard login"
 fi
 for ep in "api/overview" "api/nodes" "api/alerts" "api/models"; do
-  CODE="$(smoke_code -H "authorization: Bearer $SMOKE_JWT" "$JANUS_DASH/$ep")"
+  CODE="$(smoke_code_auth "$SMOKE_JWT" "$JANUS_DASH/$ep")"
   [ "$CODE" = 200 ] && echo "   ok   GET /$ep (200)" || smoke_fail "GET /$ep ($CODE)"
 done
-CODE="$(smoke_code -H "authorization: Bearer $JANUS_AK" "$JANUS_DASH/v1/models")"
+CODE="$(smoke_code_auth "$JANUS_AK" "$JANUS_DASH/v1/models")"
 [ "$CODE" = 200 ] && echo "   ok   GET /v1/models with agent key (200)" \
   || smoke_fail "GET /v1/models with agent key ($CODE)"
 

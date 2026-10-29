@@ -316,7 +316,7 @@ verify_node() { # $1=alias — the master /stats/sched must answer the sha
   local h="$1" i body
   for i in $(seq 1 30); do
     body="$(ssh_run "${MASTER_ALIAS}" \
-      "T=\$(sed -n 's/^JANUS_STATS_TOKEN=//p' ${PREFIX}/env/janus-gw.env); curl -fsS -m 5 -H \"Authorization: Bearer \$T\" http://127.0.0.1:8090/stats/sched" || true)"
+      "T=\$(sed -n 's/^JANUS_STATS_TOKEN=//p' ${PREFIX}/env/janus-gw.env); printf 'Authorization: Bearer %s\\n' \"\$T\" | curl -fsS -m 5 -H @- http://127.0.0.1:8090/stats/sched" || true)"
     [ -n "${body}" ] || { sleep 2; continue; }
     if printf '%s' "${body}" | grep -q "\"git_sha\":\"${SHA}\""; then
       # every worker on THIS host must be up on the new sha
