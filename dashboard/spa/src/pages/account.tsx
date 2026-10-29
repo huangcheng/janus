@@ -43,7 +43,7 @@ import {
   DialogContent,
   DialogFooter,
 } from "@/components/ui/dialog"
-import { Field, FieldFooter, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldDescription, FieldFooter, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import {
   Table,
@@ -264,7 +264,10 @@ export function Account() {
   return (
     <Layout title="Account" description="Credentials and sign-in security for this console.">
       {error && <ErrorFlash message={error} />}
-      <section className="grid gap-5 rounded-xl border bg-card p-5 shadow-xs sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      {/* Two-column split only from lg: below that the stats stack under
+          the avatar with a divider, instead of squeezing into 60px cells
+          beside it (which wrapped labels and looked detached). */}
+      <section className="grid gap-5 rounded-xl border bg-card p-5 shadow-xs lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-8">
         <div className="flex min-w-0 items-center gap-4">
           <div className="grid size-12 shrink-0 place-items-center rounded-xl bg-primary text-lg font-semibold text-primary-foreground shadow-xs">
             {(status?.username ?? "?").slice(0, 1).toUpperCase()}
@@ -274,18 +277,18 @@ export function Account() {
             <p className="mt-1 text-sm text-muted-foreground">Console operator</p>
           </div>
         </div>
-        <dl className="grid grid-cols-3 gap-4 border-t pt-4 sm:gap-6 sm:border-t-0 sm:pt-0" aria-label="Sign-in methods">
+        <dl className="grid grid-cols-3 gap-6 border-t pt-4 lg:gap-8 lg:border-t-0 lg:pt-0" aria-label="Sign-in methods">
           <div>
-            <dt className="text-xs text-muted-foreground">Password</dt>
-            <dd className="mt-1 text-sm font-medium">{status ? (status.has_password ? "Active" : "Off") : "…"}</dd>
+            <dt className="text-xs whitespace-nowrap text-muted-foreground">Password</dt>
+            <dd className="mt-1 text-sm font-medium whitespace-nowrap">{status ? (status.has_password ? "Active" : "Off") : "…"}</dd>
           </div>
           <div>
-            <dt className="text-xs text-muted-foreground">Two-factor</dt>
-            <dd className="mt-1 text-sm font-medium">{status ? (status.has_totp ? "Enabled" : "Off") : "…"}</dd>
+            <dt className="text-xs whitespace-nowrap text-muted-foreground">Two-factor</dt>
+            <dd className="mt-1 text-sm font-medium whitespace-nowrap">{status ? (status.has_totp ? "Enabled" : "Off") : "…"}</dd>
           </div>
           <div>
-            <dt className="text-xs text-muted-foreground">Passkeys</dt>
-            <dd className="mt-1 text-sm font-medium tabular-nums">{status ? passkeys.length : "…"}</dd>
+            <dt className="text-xs whitespace-nowrap text-muted-foreground">Passkeys</dt>
+            <dd className="mt-1 text-sm font-medium whitespace-nowrap tabular-nums">{status ? passkeys.length : "…"}</dd>
           </div>
         </dl>
       </section>
@@ -373,53 +376,55 @@ function PasswordCard({ status, onDone }: { status: Status | null; onDone: () =>
       </CardHeader>
       <CardContent>
         {err && <ErrorFlash message={err} />}
-        <form onSubmit={submit}>
-          <FieldGroup>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field>
-                <FieldLabel htmlFor="pw-current">Current password</FieldLabel>
-                <Input
-                  id="pw-current"
-                  type="password"
-                  autoComplete="current-password"
-                  value={current}
-                  onChange={(e) => setCurrent(e.target.value)}
-                  required
-                />
-              </Field>
-              <div className="hidden sm:block" aria-hidden />
-              <Field>
-                <FieldLabel htmlFor="pw-next">New password</FieldLabel>
-                <Input
-                  id="pw-next"
-                  type="password"
-                  autoComplete="new-password"
-                  value={next}
-                  onChange={(e) => setNext(e.target.value)}
-                  required
-                  minLength={8}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="pw-confirm">Confirm new password</FieldLabel>
-                <Input
-                  id="pw-confirm"
-                  type="password"
-                  autoComplete="new-password"
-                  value={confirm}
-                  onChange={(e) => setConfirm(e.target.value)}
-                  required
-                  minLength={8}
-                />
-              </Field>
-            </div>
-            <FieldFooter className="border-t pt-4">
-              <Button type="submit" disabled={busy}>
-                {busy && <LoaderCircle className="animate-spin" />}
-                Update password
-              </Button>
-            </FieldFooter>
-          </FieldGroup>
+        {/* Single column at a capped measure: a settings form reads best as
+            a quiet stack — equal field widths, one rhythm, one action at
+            the foot. Two-column halves with a divider left the sparse card
+            looking misaligned. */}
+        <form onSubmit={submit} className="max-w-sm">
+          <div className="flex flex-col gap-4">
+            <Field>
+              <FieldLabel htmlFor="pw-current">Current password</FieldLabel>
+              <Input
+                id="pw-current"
+                type="password"
+                autoComplete="current-password"
+                value={current}
+                onChange={(e) => setCurrent(e.target.value)}
+                required
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="pw-next">New password</FieldLabel>
+              <Input
+                id="pw-next"
+                type="password"
+                autoComplete="new-password"
+                value={next}
+                onChange={(e) => setNext(e.target.value)}
+                required
+                minLength={8}
+              />
+              <FieldDescription>At least 8 characters.</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="pw-confirm">Confirm new password</FieldLabel>
+              <Input
+                id="pw-confirm"
+                type="password"
+                autoComplete="new-password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                required
+                minLength={8}
+              />
+            </Field>
+          </div>
+          <FieldFooter className="mt-6">
+            <Button type="submit" disabled={busy}>
+              {busy && <LoaderCircle className="animate-spin" />}
+              Update password
+            </Button>
+          </FieldFooter>
         </form>
       </CardContent>
     </Card>
