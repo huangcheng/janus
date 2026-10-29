@@ -1,0 +1,14 @@
+-- TF-A.0b capability marker (reorder spec
+-- docs/superpowers/specs/2026-10-11-geo-affinity-and-auto-tier-reorder-design.md
+-- Hard sequencing / D8 / D36): a deliberate NO-OP migration. Its
+-- schema_migrations.applied_at row IS the deliverable - the warm-up
+-- watermark for the dashboard reorder loop D36 scoring (only rows
+-- stamped at/after this instant count) and the capability the gateway
+-- checks before accepting auto_router_reorder.enabled=true (refused
+-- while absent, surfaced as usage_attempt_rows in /stats). The
+-- usage_events schema already carries attempt/is_terminal (migration
+-- 008) - per-attempt rows are a writer behavior change shipped in the
+-- same PR.
+-- Statement-free BY DESIGN: the sqlite runner executes statements via
+-- esqlite3:exec (no result rows) so a bare SELECT would fail there.
+-- Comment-only text and zero semicolons keep the splitter idle.

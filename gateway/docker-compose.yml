@@ -1,0 +1,75 @@
+services:
+  janus:
+    # Build locally, or pull the CI image instead:
+    #   image: ghcr.io/huangcheng/janus:main
+    build: .
+    ports:
+      # Publish both planes on host loopback; front with Caddy for TLS.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8090:8090"
+    environment:
+      # Omit JANUS_DB_* to use SQLite at JANUS_SQLITE_PATH
+      JANUS_SQLITE_PATH: /var/lib/janus/janus.db
+      # Shared token the standalone dashboard presents when polling /stats.
+      # JANUS_STATS_TOKEN: change-me
+      # Local judge sidecar (loopback :8191 via network_mode: service:janus).
+      JANUS_JUDGE_TOKEN: ${JANUS_JUDGE_TOKEN:-}
+    volumes:
+      - janus_data:/var/lib/janus
+
+  janus-judge:
+    build: sidecars/janus_judge
+    network_mode: "service:janus"
+    depends_on:
+      - janus
+    environment:
+      JANUS_JUDGE_TOKEN: ${JANUS_JUDGE_TOKEN:-}
+      # Dev default: golden fixtures (see sidecars/janus_judge/README.md).
+      JANUS_JUDGE_FIXTURE: ${JANUS_JUDGE_FIXTURE:-1}
+      JANUS_JUDGE_CACHE: /var/lib/janus-judge
+    volumes:
+      - janus_judge_cache:/var/lib/janus-judge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/healthz', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  janus-pg:
+    profiles: ["postgres"]
+    build: .
+    ports:
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:8091:8090"
+    environment:
+      JANUS_DB_HOST: postgres
+      JANUS_DB_PORT: "5432"
+      JANUS_DB_USER: janus
+      JANUS_DB_PASSWORD: janus
+      JANUS_DB_NAME: janus
+    depends_on:
+      - postgres
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: janus
+      POSTGRES_PASSWORD: janus
+      POSTGRES_DB: janus
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - janus_pg:/var/lib/postgresql/data
+
+volumes:
+  janus_data:
+  janus_judge_cache:
+  janus_pg:

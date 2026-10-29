@@ -1,0 +1,16 @@
+.env
+.env.*
+*.env
+!*.env.example
+_build/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+data/
+artifacts/
+reports/
+.cursor/
+.superpowers/

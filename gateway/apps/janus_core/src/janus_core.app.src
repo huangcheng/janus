@@ -1,0 +1,32 @@
+{application, janus_core, [
+    {description, "Janus core: DB adapter, ETS config cache, LB"},
+    {vsn, "0.1.0"},
+    {registered, [
+        janus_core_sup,
+        janus_config,
+        janus_lb,
+        janus_model_sync,
+        janus_usage,
+        janus_ops_tail,
+        janus_task_run,
+        janus_ets_heir,
+        janus_geo,
+        janus_worker_pool,
+        janus_worker_dispatch
+    ]},
+    {mod, {janus_core_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        epgsql,
+        esqlite,
+        thoas,
+        locus,
+        crypto,
+        inets,
+        ssl,
+        public_key
+    ]},
+    {env, []},
+    {modules, []}
+]}.

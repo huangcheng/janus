@@ -1,0 +1,94 @@
+%%%-------------------------------------------------------------------
+%%% @doc Agent API key auth for Cowboy handlers.
+%%% Bearer preferred; `/v1/messages` may also send `x-api-key`.
+%%% @end
+%%%-------------------------------------------------------------------
+-module(janus_http_auth).
+
+-export([require_agent/1, require_agent/2, bearer_token/1, agent_token/2]).
+
+-spec require_agent(cowboy_req:req()) ->
+    {ok, map(), cowboy_req:req()} | {error, cowboy_req:req()}.
+require_agent(Req) ->
+    require_agent(Req, #{allow_x_api_key => false}).
+
+-spec require_agent(cowboy_req:req(), map()) ->
+    {ok, map(), cowboy_req:req()} | {error, cowboy_req:req()}.
+require_agent(Req, Opts) when is_map(Opts) ->
+    case agent_token(Req, Opts) of
+        {ok, Token} ->
+            verify_token(Token, Req);
+        error ->
+            {error, unauthorized(Req, <<"missing bearer token">>)}
+    end.
+
+-spec agent_token(cowboy_req:req(), map()) -> {ok, binary()} | error.
+agent_token(Req, Opts) ->
+    case bearer_token(Req) of
+        {ok, _} = Ok ->
+            Ok;
+        error ->
+            case maps:get(allow_x_api_key, Opts, false) of
+                true -> x_api_key(Req);
+                false -> error
+            end
+    end.
+
+-spec bearer_token(cowboy_req:req()) -> {ok, binary()} | error.
+bearer_token(Req) ->
+    case cowboy_req:header(<<"authorization">>, Req) of
+        <<"Bearer ", Rest/binary>> when Rest =/= <<>> -> {ok, Rest};
+        <<"bearer ", Rest/binary>> when Rest =/= <<>> -> {ok, Rest};
+        _ -> error
+    end.
+
+x_api_key(Req) ->
+    case cowboy_req:header(<<"x-api-key">>, Req) of
+        Key when is_binary(Key), Key =/= <<>> -> {ok, Key};
+        _ -> error
+    end.
+
+verify_token(Token, Req) ->
+    Prefix = janus_api_keys:prefix(Token),
+    case first_matching_key(Token, janus_catalog:lookup_api_keys(Prefix)) of
+        {ok, #{enabled := false}} ->
+            {error, unauthorized(Req, <<"api key disabled">>)};
+        {ok, Meta} ->
+            {ok, Meta, Req};
+        error ->
+            {error, unauthorized(Req, <<"invalid api key">>)}
+    end.
+
+first_matching_key(_Token, []) ->
+    error;
+first_matching_key(Token, [#{key_hash := Hash} = Meta | Rest]) ->
+    case janus_api_keys:verify(Token, Hash) of
+        true -> {ok, Meta};
+        false -> first_matching_key(Token, Rest)
+    end;
+first_matching_key(Token, [_ | Rest]) ->
+    first_matching_key(Token, Rest).
+
+unauthorized(Req, Msg) ->
+    logger:warning(#{
+        what => janus_agent_reject,
+        status => 401,
+        code => unauthorized,
+        method => cowboy_req:method(Req),
+        path => cowboy_req:path(Req),
+        request_id => get(janus_request_id)
+    }),
+    janus_metrics:inc(requests_total, #{
+        endpoint => janus_http_classify:endpoint(cowboy_req:path(Req)),
+        protocol => janus_http_classify:protocol(cowboy_req:path(Req)),
+        status_class => <<"4xx">>
+    }),
+    put(janus_req_counted, true),
+    Body = thoas:encode(#{
+        error => #{
+            message => Msg,
+            type => <<"authentication_error">>,
+            code => <<"unauthorized">>
+        }
+    }),
+    cowboy_req:reply(401, #{<<"content-type">> => <<"application/json">>}, Body, Req).

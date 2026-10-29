@@ -1,0 +1,72 @@
+-module(janus_core_app).
+-behaviour(application).
+
+-export([start/2, stop/1]).
+
+start(_StartType, _StartArgs) ->
+    _ = janus_log:setup(),
+    %% Build provenance (v2.1 C.3): env JANUS_GIT_SHA -> persistent_term
+    %% BEFORE anything may read it (both roles — /stats/sched on master,
+    %% hello git_sha on worker reads the env directly, same source).
+    ok = janus_build:init(),
+    %% Fleet knob env -> persistent_term BEFORE the supervisor builds
+    %% its child list (spec Part 0.1): the child-list condition reads
+    %% the env var directly, hook-path knob checks read only the PT key.
+    ok = janus_fleet:init_knob(),
+    case janus_role:resolve() of
+        {error, Reason} ->
+            {error, {bad_role, Reason}};
+        {ok, _Role} ->
+            start_supervised()
+    end.
+
+start_supervised() ->
+    case janus_core_sup:start_link() of
+        {ok, _Pid} = Ok ->
+            %% Quota ETS before any Cowboy request (Slice Q).
+            _ = janus_quota:ensure(),
+            maybe_auto_seed(),
+            Ok;
+        Err ->
+            Err
+    end.
+
+stop(_State) ->
+    ok.
+
+maybe_auto_seed() ->
+    case env_truthy(os:getenv("JANUS_AUTO_SEED")) of
+        true ->
+            spawn(fun() ->
+                try
+                    case janus_seed:from_file() of
+                        ok ->
+                            logger:info(#{what => janus_auto_seed_ok});
+                        {error, Reason} ->
+                            logger:error(#{
+                                what => janus_auto_seed_failed,
+                                reason => janus_seed:sanitize_error(Reason)
+                            })
+                    end
+                catch
+                    Class:CatchReason:Stack ->
+                        logger:error(#{
+                            what => janus_auto_seed_crashed,
+                            class => Class,
+                            reason => janus_seed:sanitize_error(CatchReason),
+                            stack => janus_seed:redact_stack(Stack)
+                        })
+                end
+            end);
+        false ->
+            ok
+    end.
+
+env_truthy(false) ->
+    false;
+env_truthy("") ->
+    false;
+env_truthy(Val) when is_list(Val) ->
+    lists:member(string:lowercase(Val), ["1", "true", "yes", "on"]);
+env_truthy(_) ->
+    false.

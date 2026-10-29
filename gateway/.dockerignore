@@ -1,0 +1,23 @@
+# Keep the build context lean — the SPA stage only needs spa/package*.json
+# and spa sources; the release stage needs rebar/apps/config.
+.git
+_build
+**/_build
+data
+docs
+design
+.cursor
+scripts
+# Bare-metal deploy (2026-10-15 spec F5c): the relx overlay + the
+# runtime image need exactly these two script files.
+!scripts/lib
+!scripts/lib/janus_vm_args.sh
+!scripts/release
+!scripts/release/janus.wrap
+priv
+apps/janus_dashboard/spa/node_modules
+apps/janus_dashboard/spa/dist
+apps/janus_dashboard/priv/www
+*.beam
+erl_crash.dump
+docker-compose.yml

@@ -1,0 +1,5 @@
+[Unit]
+Description=Janus Postgres nightly dump
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/janus-pg-backup

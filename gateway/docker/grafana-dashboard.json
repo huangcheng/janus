@@ -1,0 +1,233 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping the Janus admin plane (:8090/metrics)",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    }
+  ],
+  "uid": "janus-overview",
+  "title": "Janus Gateway",
+  "description": "Janus gateway overview. Counters are node-local and reset on node restart — every counter panel uses rate(), which handles resets; sum across instances where noted. Catalog drift = max(janus_catalog_generation) != min(janus_catalog_generation) across instances.",
+  "tags": ["janus"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "options": [],
+        "regex": "",
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "annotations": {"list": []},
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate (all nodes)",
+      "description": "Client LLM requests by terminal outcome. Counters are node-local; summed across instances.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (endpoint, status_class) (rate(janus_requests_total[5m]))",
+          "legendFormat": "{{endpoint}} {{status_class}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Error ratio (4xx+5xx, all nodes)",
+      "description": "Share of client requests ending in 4xx/5xx, summed across instances.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(janus_requests_total{status_class=~\"4xx|5xx\"}[5m])) / sum(rate(janus_requests_total[5m]))",
+          "legendFormat": "error ratio",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "p95 request duration",
+      "description": "End-to-end proxied request duration by protocol/stream (streams include client drain). Early rejects never enter this histogram.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 0, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, protocol, stream) (rate(janus_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{protocol}} stream={{stream}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Upstream error rate by provider",
+      "description": "Terminal upstream outcomes (4xx/5xx) per second per provider, summed across instances. Failover inner attempts are excluded by the gateway.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider) (rate(janus_upstream_requests_total{status_class=~\"4xx|5xx\"}[5m]))",
+          "legendFormat": "{{provider}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Catalog generation per node",
+      "description": "Serving catalog generation per node. Drift alert: max(janus_catalog_generation) != min(janus_catalog_generation) across instances.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "fieldConfig": {
+        "defaults": {"unit": "none", "custom": {"drawStyle": "line", "fillOpacity": 0, "showPoints": "never", "lineInterpolation": "stepAfter"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "janus_catalog_generation",
+          "legendFormat": "{{instance}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Usage writer",
+      "description": "Buffered rows (gauge, per node) and dropped rows per second (counter, summed). Drops mean usage_events rows lost.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "fieldConfig": {
+        "defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "janus_usage_writer_buffered_rows",
+          "legendFormat": "buffered {{instance}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(janus_usage_writer_dropped_total[5m]))",
+          "legendFormat": "dropped/s",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "LB stats rate",
+      "description": "LB/entitlement/failover counters from janus_lb:stats/0. Cumulative per node; summable and rateable across nodes.",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stat) (rate(janus_lb_stats_total[5m]))",
+          "legendFormat": "{{stat}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Uptime per node",
+      "description": "VM wall-clock uptime. A drop to ~0 between scrapes means the node restarted (all node-local counters reset with it).",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {"colorMode": "none", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "value_and_name"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "janus_uptime_seconds",
+          "legendFormat": "{{instance}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+name: ci
+
+# Merge-to-main policy (2026-10-14): CI builds ONLY on main merges and
+# manual dispatch — feature work happens on develop / short-lived
+# branches and is NOT built per-push (Actions budget discipline).
+#
+# Test suites were deleted repo-wide (2026-10-18, see AGENTS.md
+# "Verification"): no eunit, no e2e, no Playwright. CI is now a
+# compile + format gate only; runtime verification is browser + curl
+# live-checks against a real stack.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: gateway
+
+jobs:
+  erlang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          rebar3-version: "3.24"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: rebar-${{ runner.os }}-otp27-${{ hashFiles('rebar.lock') }}
+          restore-keys: rebar-${{ runner.os }}-otp27-
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Format check
+        run: rebar3 fmt --check

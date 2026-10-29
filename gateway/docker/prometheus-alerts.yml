@@ -1,0 +1,122 @@
+# Example Prometheus alert rules for a Janus gateway fleet
+# (observability-depth plan, Task 9). Sibling of the example scrape config
+# (prometheus.yml) and Grafana dashboard (grafana-dashboard.json) in this
+# directory.
+#
+# Every metric name below is rendered by the gateway's own registry —
+# apps/janus_http/src/janus_metrics_render.erl (?FAMILIES, lines 21-69);
+# names and label names (status_class / protocol / le) were re-verified
+# against that file as of this commit. Re-verify when the registry changes.
+#
+# Import: reference this file from your prometheus.yml and reload:
+#
+#   rule_files:
+#     - /etc/prometheus/prometheus-alerts.yml   # path as mounted
+#
+# Validate before rollout:
+#
+#   docker run --rm --entrypoint promtool -v "$PWD/docker:/rules" \
+#     prom/prometheus:latest check rules /rules/prometheus-alerts.yml
+#
+# Scoping + semantics worth knowing before tuning:
+#   - Scrape MASTERS (the catalog-owning nodes). A worker's optional
+#     loopback-only admin plane reports janus_catalog_generation 0 /
+#     janus_catalog_ready 0 (janus_config is master-only), which would
+#     false-fire the two catalog rules below.
+#   - Counters are node-local and reset on restart — always rate() them.
+#   - janus_requests_total{status_class="5xx"} counts terminal client
+#     outcomes; early local rejects land in 4xx, never 5xx.
+#   - janus_request_duration_seconds is end-to-end; streams include client
+#     drain, so long streams legitimately inflate high quantiles.
+#   - janus_usage_writer_dropped_total is OMITTED while the writer is down
+#     (never a fabricated 0); increase() then has no data and the rule is
+#     silent — writer-down shows up as a stalled/growing
+#     janus_usage_writer_buffered_rows instead.
+groups:
+  - name: janus
+    interval: 30s
+    rules:
+      # >5% of terminal client outcomes are 5xx over a 10m window,
+      # sustained another 10m — failover exhausted or the master itself
+      # erroring. Division by a ~0 denominator yields NaN (no fire) on
+      # idle fleets.
+      - alert: JanusHigh5xxRatio
+        expr: sum(rate(janus_requests_total{status_class="5xx"}[10m])) / sum(rate(janus_requests_total[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Janus 5xx ratio above 5% (fleet-wide, 10m)
+          description: More than 5% of terminal client outcomes have been 5xx for 10m straight.
+
+      # p95 end-to-end latency above 30s per client protocol, sustained
+      # 10m. Tune to the deployment's streaming mix (see the duration
+      # semantics note above).
+      - alert: JanusHighRequestLatencyP95
+        expr: histogram_quantile(0.95, sum by (le, protocol) (rate(janus_request_duration_seconds_bucket[10m]))) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Janus p95 latency above 30s ({{ $labels.protocol }})
+          description: p95 of end-to-end request duration has exceeded 30s for 10m straight.
+
+      # A route in LB cooldown is normal after upstream errors; one STILL
+      # cooling after 15m means a flapping upstream or a key that never
+      # recovers.
+      - alert: JanusLbRoutesCoolingPersistent
+        expr: janus_lb_routes_cooling > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: LB routes cooling on {{ $labels.instance }} for 15m
+          description: At least one route has been continuously cooling for 15m — check provider/key health.
+
+      # ANY usage-event drop: the writer drops only on buffer overflow, so
+      # usage rows (token/billing accounting) are being lost. No `for:` —
+      # the increase over 10m IS the event; requiring continuity would
+      # miss a one-time overflow.
+      - alert: JanusUsageWriterDropping
+        expr: increase(janus_usage_writer_dropped_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Usage writer dropped events on {{ $labels.instance }}
+          description: usage_events are being dropped (writer buffer overflow) — usage data is lost.
+
+      # Serving catalog still cold 5m after boot — the node never finished
+      # loading from Postgres; request handling on it is degraded.
+      - alert: JanusCatalogCold
+        expr: janus_catalog_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Catalog cold on {{ $labels.instance }} for 5m
+          description: janus_catalog_ready has been 0 for 5m — the serving catalog never warmed.
+
+      # Catalog generation drift between masters for 10m — one master
+      # missed the hot-reload NOTIFY and is serving a stale catalog.
+      # Masters only (see the scoping note in the header).
+      - alert: JanusCatalogGenerationDrift
+        expr: max(janus_catalog_generation) != min(janus_catalog_generation)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Catalog generation drift between masters
+          description: max != min janus_catalog_generation for 10m — a master is serving a stale catalog.
+
+      # Scheduler has published a snapshot (the pool was up) but NO worker
+      # is dispatchable for 5m — the master local-fallbacks everything;
+      # capacity is degraded even though clients still get served. A brief
+      # empty pool during rolling restarts is normal, hence the 5m grace.
+      - alert: JanusWorkerPoolEmpty
+        expr: janus_sched_workers_available == 0 and janus_sched_snapshot_gen > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: No dispatchable workers on {{ $labels.instance }} for 5m
+          description: janus_sched_workers_available is 0 with a live scheduler snapshot — master is local-fallback only.

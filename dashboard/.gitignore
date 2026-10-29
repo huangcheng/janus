@@ -1,0 +1,42 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+spa/node_modules/
+spa/dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.worktrees/
+spa/tsconfig.tsbuildinfo
+.e2e-artifacts/
+
+# bare-metal deploy (spec 2026-10-15-bare-metal-deploy): build outputs
+# and the operator's real inventory (the committed EXAMPLE template
+# lives in the janus repo's deploy/inventory.env.example)
+bare-artifacts/
+deploy/inventory.env
+
+# graphify analysis tool output
+graphify-out/
+
+# Local OCR review artifacts
+.ocr-*
+
+# impeccable design skill (npx impeccable install) — local harness copies
+.agents/
+.claude/
+.codex/
+.cursor/
+.dsh/
+.gemini/
+.omp/
+.opencode/
+.pi/
+.qoder/
+
+# Operator-local CI scripts (live copies live on the CI host /opt/ci)
+scripts/swr_ci_janus.sh
+scripts/swr_worker_flip.sh
+.zcode/

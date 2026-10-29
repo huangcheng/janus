@@ -1,0 +1,45 @@
+.rebar3
+_build
+*.beam
+.erlang.cookie
+erl_crash.dump
+rebar3.crashdump
+.DS_Store
+*.swp
+docs/
+
+# Local API runtime: SQLite, copied seed, secrets (keep scripts/local.env.example)
+data/
+.env
+.env.*
+*.env
+!*.env.example
+seed*.json
+seed*.yaml
+seed*.yml
+!seed*.example.json
+!seed*.example.yaml
+!seed*.example.yml
+
+# Dashboard SPA (Docker copies dist → priv/www)
+apps/janus_dashboard/spa/node_modules/
+apps/janus_dashboard/spa/dist/
+apps/janus_dashboard/spa/**/.vite/
+apps/janus_dashboard/spa/tsconfig.tsbuildinfo
+apps/janus_dashboard/priv/www/
+
+!docs/WSL2-DEV.md
+!docs/SCHEMA_ETS_CONTRACT.md
+docs/audit*/
+!docs/audit*/SYNTHESIS.md
+fixtures
+# App test fixtures are repo content (janus_http wire captures, janus_core
+# fleet TLS chains) — the bare `fixtures` rule targets operator capture dirs.
+!apps/*/test/fixtures/
+
+# Agent worktrees
+.worktrees/
+
+
+# Bare-metal release artifacts (scripts/build_bare_release.sh output)
+bare-artifacts/

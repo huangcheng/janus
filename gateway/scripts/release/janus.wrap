@@ -1,0 +1,37 @@
+#!/bin/sh
+# shellcheck shell=sh
+# bin/janus wrapper for the BARE-METAL release (spec
+# 2026-10-15-bare-metal-deploy F5c). scripts/build_bare_release.sh
+# renames the relx-generated start script to bin/janus.real and
+# installs this wrapper as bin/janus INSIDE the tarball (a build-time,
+# scripted step — never a post-extract hand patch on nodes, which
+# would silently fork on every <sha> swap).
+#
+# It renders vm.args + the TLS dist optfile through the SAME
+# scripts/lib/janus_vm_args.sh the container entrypoint uses (shipped
+# in the tarball at etc/janus_vm_args.sh via the relx overlay), then
+# execs the real start script with the caller's arguments — systemd's
+# `janus-gw.service` ExecStart=.../bin/janus foreground lands here.
+#
+# All JANUS_* knobs are identical to docker-entrypoint.sh (see the lib
+# header for the full enumeration); env comes from the generated
+# systemd EnvironmentFile instead of docker env_file.
+set -eu
+# No "--" on dirname/cd: the wrapper may run under minimal sh's whose
+# dirname lacks it (busybox); a $0 starting with "-" is impossible for
+# a release bin script.
+wrap_dir="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
+rel_root="$(CDPATH='' cd "$wrap_dir/.." && pwd)"
+
+# Bundled bookworm libcrypto/libssl: RHEL-family OpenSSL builds lack
+# the SM4 ciphers the crypto NIF resolves at load (live bug on
+# RHEL-family fleet nodes). Scoped to THIS process tree
+# only — never put it in the unit envfile, where it would leak into
+# system tools (curl, yum) and break them.
+export LD_LIBRARY_PATH="$rel_root/lib/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# shellcheck disable=SC1091
+. "$rel_root/etc/janus_vm_args.sh"
+
+janus_vm_render "$rel_root"
+exec "$wrap_dir/janus.real" "$@"

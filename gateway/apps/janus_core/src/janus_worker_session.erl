@@ -1,0 +1,771 @@
+%%% @doc Per-job worker session (spec §3.2 / §4).
+%%%
+%%% Monitors the master session pid, acks, runs upstream I/O via
+%%% `janus_providers_http` (`post/3`, `post_stream/3`, `get/3`), and
+%%% relays chunk/done/error. Stream jobs credit-gate chunks (seq from 0);
+%%% non-stream jobs emit a single `janus_done` with the full body.
+%%%
+%%% Stream drain runs in a child process so cancel/timeout can
+%%% `exit(Pid, kill)` even while gun:await is blocked.
+%%%
+%%% Wire compression (spec 2026-10-12-wire-compression D2/F1/D7/F7):
+%%% the dispatch-passed capability (4th run/4 arg) gates ENCODING —
+%%% `zlib` chunks carry one independent complete zlib stream in the
+%%% 5-tuple `chunk/4` form and `done` compresses ONLY the body value
+%%% (`enc => zlib` top-level); `janus_wire_enc` re-checks env +
+%%% threshold and owns the dir=out counters + identity fallback.
+%%% Error payloads are NEVER compressed (D2). Credits count CHUNKS —
+%%% compression changes nothing about admission (F7).
+%%%
+%%% W.1b TEST-ONLY fault injection (spec §4): JANUS_WIRE_ENC_CORRUPT_
+%%% AFTER=<N> (read ONCE at run start) corrupts the compressed message
+%%% at seq N — see maybe_corrupt_wire/2. Never set in production.
+-module(janus_worker_session).
+
+-export([run/3, run/4]).
+
+-define(PDICT_CREDITS, janus_worker_credits).
+-define(PDICT_SEQ, janus_worker_seq).
+-define(PDICT_JOB, janus_worker_job_ref).
+-define(PDICT_MASTER, janus_worker_master).
+-define(PDICT_MASTER_MON, janus_worker_master_mon).
+-define(PDICT_WORKER, janus_worker_http_pid).
+%% Scheduler v2 (spec A.3, Task C): upstream duration start (mono ms),
+%% the additive `internal` job flag (probes — three-seam exclusion),
+%% and the additive `provider_id` (per-(worker, provider) EWMA
+%% attribution on the dispatcher).
+-define(PDICT_UPSTREAM_START, janus_worker_upstream_start).
+-define(PDICT_INTERNAL, janus_worker_internal).
+-define(PDICT_PROVIDER, janus_worker_provider).
+%% Wire compression capability (identity | zlib) — captured at spawn
+%% time from the dispatcher's per-dist-session state; NEVER re-read
+%% mid-job (F1).
+-define(PDICT_WIRE_ENC, janus_worker_wire_enc).
+%% W.1b TEST-ONLY fault-injection seam (spec
+%% 2026-10-12-wire-compression §4): JANUS_WIRE_ENC_CORRUPT_AFTER=<N>
+%% read ONCE at run start (never per chunk on the hot path); when the
+%% message at seq N actually compressed, its zlib payload ships with
+%% one flipped byte — a REAL corrupt wire message driving the
+%% master-side F2 abort for the W.1b E2E. Never set in production
+%% (worker dispatch warns at boot).
+-define(PDICT_CORRUPT_AFTER, janus_worker_corrupt_after).
+%% Part C classification body caps (entitlement-failover / D4): error-
+%% status stream bodies are buffered into janus_done instead of chunked
+%% so the master can remap pre-forward into failover_decide. Truncate
+%% at 64KB / 30s — only code/message fields matter for classify.
+-define(ERR_BODY_MAX, 65536).
+-define(ERR_BODY_MS, 30_000).
+
+%% Legacy form: identity capability (old callers / eunit).
+-spec run(binary(), pid(), map()) -> ok.
+run(JobRef, MasterSessionPid, Fields) ->
+    run(JobRef, MasterSessionPid, Fields, identity).
+
+-spec run(binary(), pid(), map(), identity | zlib) -> ok.
+run(JobRef, MasterSessionPid, Fields, WireEnc) when
+    is_binary(JobRef), is_pid(MasterSessionPid), is_map(Fields)
+->
+    MasterMon = monitor(process, MasterSessionPid),
+    put(?PDICT_JOB, JobRef),
+    put(?PDICT_MASTER, MasterSessionPid),
+    put(?PDICT_MASTER_MON, MasterMon),
+    put(?PDICT_CREDITS, 0),
+    put(?PDICT_SEQ, janus_worker_wire:initial_chunk_seq()),
+    put(?PDICT_INTERNAL, maps:get(internal, Fields, false) =:= true),
+    put(?PDICT_PROVIDER, maps:get(provider_id, Fields, undefined)),
+    %% Observability-depth Task 3: UNCONDITIONAL per job — an old
+    %% master's wire map lacks `trace_id' (from_trace_id(undefined)
+    %% mints a fresh trace) and must still overwrite any previous job's
+    %% trace in this process. Only the trace-id crosses the wire; the
+    %% traceparent's parent-id is minted HERE on the executing node,
+    %% once per job (one job = one upstream attempt). The keydelete is
+    %% rolling-deploy insurance: a new master strips the header at wire
+    %% assembly, an old master never sends it — a stray one must still
+    %% never produce a duplicate traceparent.
+    Trace = janus_trace:from_trace_id(maps:get(trace_id, Fields, undefined)),
+    put(janus_trace, Trace),
+    Fields1 = Fields#{
+        headers => [
+            janus_trace:upstream_header(Trace)
+            | lists:keydelete(<<"traceparent">>, 1, maps:get(headers, Fields))
+        ]
+    },
+    put(?PDICT_WIRE_ENC, WireEnc),
+    put(?PDICT_CORRUPT_AFTER, janus_wire_enc:corrupt_after_from_env()),
+    MasterSessionPid ! janus_worker_wire:job_ack(JobRef, self()),
+    TimeoutMs = maps:get(timeout_ms, Fields1),
+    TRef = erlang:send_after(TimeoutMs, self(), job_timeout),
+    try
+        case maps:get(stream, Fields1) of
+            true ->
+                run_stream(Fields1);
+            false ->
+                run_unary(Fields1)
+        end
+    catch
+        throw:cancelled ->
+            ok;
+        throw:master_down ->
+            ok;
+        throw:timeout ->
+            emit_error(timeout, <<"job timeout_ms exceeded">>);
+        throw:{gun_error, Code, Message} ->
+            emit_error(Code, Message);
+        Class:Reason:Stack ->
+            logger:error(#{
+                what => janus_worker_session_crashed,
+                class => Class,
+                reason => redact(Reason),
+                stack => janus_seed:redact_stack(Stack)
+            }),
+            emit_error(internal, <<"session crashed">>)
+    after
+        case get(?PDICT_WORKER) of
+            undefined -> ok;
+            WPid when is_pid(WPid) -> exit(WPid, kill)
+        end,
+        _ = erlang:cancel_timer(TRef),
+        demonitor(MasterMon, [flush]),
+        erase(?PDICT_JOB),
+        erase(?PDICT_MASTER),
+        erase(?PDICT_MASTER_MON),
+        erase(?PDICT_CREDITS),
+        erase(?PDICT_SEQ),
+        erase(?PDICT_WORKER),
+        erase(?PDICT_UPSTREAM_START),
+        erase(?PDICT_INTERNAL),
+        erase(?PDICT_PROVIDER),
+        erase(janus_trace),
+        erase(?PDICT_WIRE_ENC),
+        erase(?PDICT_CORRUPT_AFTER)
+    end,
+    ok.
+
+%%%===================================================================
+%%% Unary (non-stream)
+%%%===================================================================
+
+run_unary(#{method := Method, url := Url, headers := Headers, body := Body0} = _Fields) ->
+    put(?PDICT_UPSTREAM_START, erlang:monotonic_time(millisecond)),
+    Body = iolist_to_binary(Body0),
+    case target_from_url(Url) of
+        {ok, Target} ->
+            Self = self(),
+            {HttpPid, HttpMon} = spawn_monitor(fun() ->
+                Result = unary_http(Method, Target, Headers, Body),
+                Self ! {http_result, self(), Result}
+            end),
+            put(?PDICT_WORKER, HttpPid),
+            wait_unary(HttpPid, HttpMon);
+        {error, Reason} ->
+            throw({gun_error, connect, fmt_bin(Reason)})
+    end.
+
+unary_http(get, Target, Headers, _Body) ->
+    %% get/3 timeout: use non-stream budget from wire as the per-await cap;
+    %% overall wall clock is still enforced by the session timer.
+    janus_providers_http:get(Target, Headers, janus_worker_wire:non_stream_timeout_ms());
+unary_http(post, Target, Headers, Body) ->
+    %% post/3 uses fixed gun TTFB/body budgets; session timer is the
+    %% job-level wall clock (may kill the HTTP worker early).
+    janus_providers_http:post(Target, Headers, Body);
+unary_http(Method, _Target, _Headers, _Body) ->
+    {error, {unsupported_method, Method}}.
+
+wait_unary(HttpPid, HttpMon) ->
+    receive
+        {http_result, HttpPid, {ok, Status, _RespHeaders, RespBody}} ->
+            demonitor(HttpMon, [flush]),
+            ensure_clear_control(),
+            emit_done(Status, RespBody);
+        {http_result, HttpPid, {error, Reason}} ->
+            demonitor(HttpMon, [flush]),
+            {Code, Msg} = map_gun_error(Reason),
+            throw({gun_error, Code, Msg});
+        job_timeout ->
+            kill_worker(HttpPid, HttpMon),
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef ->
+                    kill_worker(HttpPid, HttpMon),
+                    throw(cancelled);
+                _ ->
+                    wait_unary(HttpPid, HttpMon)
+            end;
+        {'DOWN', Mon, process, _Pid, Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon ->
+                    kill_worker(HttpPid, HttpMon),
+                    throw(master_down);
+                _ ->
+                    case Mon of
+                        HttpMon ->
+                            throw(
+                                {gun_error, internal,
+                                    <<"http worker died: ", (fmt_bin(Reason))/binary>>}
+                            );
+                        _ ->
+                            wait_unary(HttpPid, HttpMon)
+                    end
+            end;
+        {janus_credit, _JobRef, _N} ->
+            %% Non-stream ignores credits.
+            wait_unary(HttpPid, HttpMon)
+    end.
+
+%%%===================================================================
+%%% Stream — drain in a child so session can kill on cancel/timeout
+%%%===================================================================
+
+run_stream(#{url := Url, headers := Headers, body := Body0} = _Fields) ->
+    put(?PDICT_UPSTREAM_START, erlang:monotonic_time(millisecond)),
+    Body = iolist_to_binary(Body0),
+    case target_from_url(Url) of
+        {ok, Target} ->
+            Self = self(),
+            {DrainPid, DrainMon} = spawn_monitor(fun() ->
+                stream_worker(Self, Target, Headers, Body)
+            end),
+            put(?PDICT_WORKER, DrainPid),
+            wait_stream(DrainPid, DrainMon);
+        {error, Reason} ->
+            throw({gun_error, connect, fmt_bin(Reason)})
+    end.
+
+stream_worker(Session, Target, Headers, Body) ->
+    %% Exit if the session dies while we wait for continue/stop.
+    SessionMon = monitor(process, Session),
+    case janus_providers_http:post_stream(Target, Headers, Body) of
+        {ok, Status, _RespHeaders, Drain} when is_function(Drain, 1) ->
+            Session ! {stream_open, self(), Status},
+            Result =
+                try
+                    Drain(fun(Chunk) ->
+                        Session ! {stream_chunk, self(), Chunk},
+                        receive
+                            {stream_continue, Session} ->
+                                ok;
+                            {stream_stop, Session} ->
+                                throw(stopped);
+                            {'DOWN', SessionMon, process, Session, _} ->
+                                throw(stopped)
+                        end
+                    end)
+                catch
+                    throw:stopped ->
+                        {error, cancelled}
+                end,
+            demonitor(SessionMon, [flush]),
+            Session ! {stream_drain_done, self(), Result};
+        {error, Reason} ->
+            demonitor(SessionMon, [flush]),
+            Session ! {stream_open_error, self(), Reason}
+    end.
+
+wait_stream(DrainPid, DrainMon) ->
+    receive
+        {stream_open, DrainPid, Status} when Status >= 400 ->
+            %% Error-status streams: buffer into done.body (D4) so the
+            %% master can enter Part C before any client forward. Do not
+            %% chunk — chunks would force provisional-200 stream_reply.
+            wait_stream_error_body(
+                DrainPid, DrainMon, Status, <<>>, erlang:monotonic_time(millisecond)
+            );
+        {stream_open, DrainPid, Status} ->
+            wait_stream_body(DrainPid, DrainMon, Status);
+        {stream_open_error, DrainPid, Reason} ->
+            demonitor(DrainMon, [flush]),
+            {Code, Msg} = map_gun_error(Reason),
+            throw({gun_error, Code, Msg});
+        job_timeout ->
+            kill_worker(DrainPid, DrainMon),
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef ->
+                    kill_worker(DrainPid, DrainMon),
+                    throw(cancelled);
+                _ ->
+                    wait_stream(DrainPid, DrainMon)
+            end;
+        {'DOWN', Mon, process, _Pid, Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon ->
+                    kill_worker(DrainPid, DrainMon),
+                    throw(master_down);
+                _ ->
+                    case Mon of
+                        DrainMon ->
+                            throw(
+                                {gun_error, internal,
+                                    <<"stream worker died: ", (fmt_bin(Reason))/binary>>}
+                            );
+                        _ ->
+                            wait_stream(DrainPid, DrainMon)
+                    end
+            end;
+        {janus_credit, JobRef, N} when is_integer(N), N > 0 ->
+            case get(?PDICT_JOB) of
+                JobRef -> put(?PDICT_CREDITS, get(?PDICT_CREDITS) + N);
+                _ -> ok
+            end,
+            wait_stream(DrainPid, DrainMon)
+    end.
+
+%% Collect error-status stream body for janus_done (no master chunks).
+wait_stream_error_body(DrainPid, DrainMon, Status, Acc, StartMs) ->
+    Remain = max(0, ?ERR_BODY_MS - (erlang:monotonic_time(millisecond) - StartMs)),
+    receive
+        {stream_chunk, DrainPid, Bin} when is_binary(Bin) ->
+            Acc1 = <<Acc/binary, Bin/binary>>,
+            case byte_size(Acc1) >= ?ERR_BODY_MAX of
+                true ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    ensure_clear_control(),
+                    emit_done(Status, binary:part(Acc1, 0, ?ERR_BODY_MAX));
+                false ->
+                    DrainPid ! {stream_continue, self()},
+                    wait_stream_error_body(DrainPid, DrainMon, Status, Acc1, StartMs)
+            end;
+        {stream_drain_done, DrainPid, ok} ->
+            demonitor(DrainMon, [flush]),
+            ensure_clear_control(),
+            emit_done(Status, Acc);
+        {stream_drain_done, DrainPid, {error, cancelled}} ->
+            demonitor(DrainMon, [flush]),
+            throw(cancelled);
+        {stream_drain_done, DrainPid, {error, Reason}} ->
+            demonitor(DrainMon, [flush]),
+            %% Partial body still classifies better than a bare gun error
+            %% when the upstream already answered with Status.
+            case Acc of
+                <<>> ->
+                    {Code, Msg} = map_gun_error(Reason),
+                    throw({gun_error, Code, Msg});
+                _ ->
+                    ensure_clear_control(),
+                    emit_done(Status, Acc)
+            end;
+        job_timeout ->
+            DrainPid ! {stream_stop, self()},
+            kill_worker(DrainPid, DrainMon),
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(cancelled);
+                _ ->
+                    wait_stream_error_body(DrainPid, DrainMon, Status, Acc, StartMs)
+            end;
+        {'DOWN', Mon, process, _Pid, Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(master_down);
+                _ ->
+                    case Mon of
+                        DrainMon ->
+                            case Acc of
+                                <<>> ->
+                                    throw(
+                                        {gun_error, internal,
+                                            <<"stream worker died: ", (fmt_bin(Reason))/binary>>}
+                                    );
+                                _ ->
+                                    ensure_clear_control(),
+                                    emit_done(Status, Acc)
+                            end;
+                        _ ->
+                            wait_stream_error_body(DrainPid, DrainMon, Status, Acc, StartMs)
+                    end
+            end;
+        {janus_credit, JobRef, N} when is_integer(N), N > 0 ->
+            %% Credits unused on the error-collect path (no chunks out).
+            case get(?PDICT_JOB) of
+                JobRef -> put(?PDICT_CREDITS, get(?PDICT_CREDITS) + N);
+                _ -> ok
+            end,
+            wait_stream_error_body(DrainPid, DrainMon, Status, Acc, StartMs)
+    after Remain ->
+        DrainPid ! {stream_stop, self()},
+        kill_worker(DrainPid, DrainMon),
+        ensure_clear_control(),
+        emit_done(Status, Acc)
+    end.
+
+wait_stream_body(DrainPid, DrainMon, Status) ->
+    receive
+        {stream_chunk, DrainPid, Bin} when is_binary(Bin) ->
+            try
+                await_credit_then_send(Bin)
+            catch
+                throw:Stop ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(Stop)
+            end,
+            DrainPid ! {stream_continue, self()},
+            wait_stream_body(DrainPid, DrainMon, Status);
+        {stream_drain_done, DrainPid, ok} ->
+            demonitor(DrainMon, [flush]),
+            ensure_clear_control(),
+            emit_done(Status, undefined);
+        {stream_drain_done, DrainPid, {error, cancelled}} ->
+            demonitor(DrainMon, [flush]),
+            throw(cancelled);
+        {stream_drain_done, DrainPid, {error, Reason}} ->
+            demonitor(DrainMon, [flush]),
+            {Code, Msg} = map_gun_error(Reason),
+            throw({gun_error, Code, Msg});
+        job_timeout ->
+            DrainPid ! {stream_stop, self()},
+            kill_worker(DrainPid, DrainMon),
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(cancelled);
+                _ ->
+                    wait_stream_body(DrainPid, DrainMon, Status)
+            end;
+        {'DOWN', Mon, process, _Pid, Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon ->
+                    DrainPid ! {stream_stop, self()},
+                    kill_worker(DrainPid, DrainMon),
+                    throw(master_down);
+                _ ->
+                    case Mon of
+                        DrainMon ->
+                            throw(
+                                {gun_error, internal,
+                                    <<"stream worker died: ", (fmt_bin(Reason))/binary>>}
+                            );
+                        _ ->
+                            wait_stream_body(DrainPid, DrainMon, Status)
+                    end
+            end;
+        {janus_credit, JobRef, N} when is_integer(N), N > 0 ->
+            case get(?PDICT_JOB) of
+                JobRef -> put(?PDICT_CREDITS, get(?PDICT_CREDITS) + N);
+                _ -> ok
+            end,
+            wait_stream_body(DrainPid, DrainMon, Status)
+    end.
+
+await_credit_then_send(Bin) ->
+    case get(?PDICT_CREDITS) of
+        N when is_integer(N), N > 0 ->
+            put(?PDICT_CREDITS, N - 1),
+            Seq = get(?PDICT_SEQ),
+            JobRef = get(?PDICT_JOB),
+            Master = get(?PDICT_MASTER),
+            Master ! send_chunk(JobRef, Seq, Bin),
+            put(?PDICT_SEQ, Seq + 1),
+            ok;
+        _ ->
+            receive
+                {janus_credit, JobRef, N} when is_integer(N), N > 0 ->
+                    case get(?PDICT_JOB) of
+                        JobRef ->
+                            put(?PDICT_CREDITS, get(?PDICT_CREDITS) + N),
+                            await_credit_then_send(Bin);
+                        _ ->
+                            await_credit_then_send(Bin)
+                    end;
+                {janus_cancel, JobRef} ->
+                    case get(?PDICT_JOB) of
+                        JobRef -> throw(cancelled);
+                        _ -> await_credit_then_send(Bin)
+                    end;
+                job_timeout ->
+                    throw(timeout);
+                {'DOWN', Mon, process, _Pid, _Reason} ->
+                    case get(?PDICT_MASTER_MON) of
+                        Mon -> throw(master_down);
+                        _ -> await_credit_then_send(Bin)
+                    end
+            end
+    end.
+
+kill_worker(Pid, Mon) ->
+    exit(Pid, kill),
+    demonitor(Mon, [flush]),
+    flush_worker_msgs(Pid).
+
+flush_worker_msgs(Pid) ->
+    receive
+        {http_result, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_open, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_open_error, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_chunk, Pid, _} -> flush_worker_msgs(Pid);
+        {stream_drain_done, Pid, _} -> flush_worker_msgs(Pid);
+        {'DOWN', _Mon, process, Pid, _} -> flush_worker_msgs(Pid)
+    after 0 ->
+        ok
+    end.
+
+%% Reject late cancel/timeout/DOWN before emitting done.
+ensure_clear_control() ->
+    receive
+        job_timeout ->
+            throw(timeout);
+        {janus_cancel, JobRef} ->
+            case get(?PDICT_JOB) of
+                JobRef -> throw(cancelled);
+                _ -> ensure_clear_control()
+            end;
+        {'DOWN', Mon, process, _Pid, _Reason} ->
+            case get(?PDICT_MASTER_MON) of
+                Mon -> throw(master_down);
+                _ -> ensure_clear_control()
+            end;
+        {janus_credit, _JobRef, _N} ->
+            ensure_clear_control()
+    after 0 ->
+        ok
+    end.
+
+%%%===================================================================
+%%% Emit helpers
+%%%===================================================================
+
+%% done/error maps gain the OPTIONAL `rtt_ms` float key — the RAW
+%% per-job upstream duration (spec A.3). Error completions DO carry it
+%% (the master writes passive rtt rows for them); internal (probe)
+%% jobs carry NEITHER the key NOR an EWMA report (the three-seam
+%% exclusion, spec E.6). The worker's passive EWMA feed is SEPARATE:
+%% successful (status < 400) non-internal completions only.
+emit_done(Status, Body) ->
+    JobRef = get(?PDICT_JOB),
+    Master = get(?PDICT_MASTER),
+    Fields0 = #{
+        usage => undefined,
+        status => Status,
+        trailers => #{},
+        body => Body
+    },
+    {Fields1, RttMs} = with_rtt_ms(Fields0),
+    Fields = maybe_compress_done_body(Fields1),
+    Master ! janus_worker_wire:done(JobRef, Fields),
+    case RttMs =/= undefined andalso Status < 400 of
+        true -> report_duration(RttMs);
+        false -> ok
+    end,
+    ok.
+
+%%%===================================================================
+%%% Wire compression send helpers (spec 2026-10-12-wire-compression)
+%%%===================================================================
+
+%% Capability-gated chunk send (F1: env + ack both already decided by
+%% the dispatcher; `maybe_deflate` re-checks env + threshold and bumps
+%% the dir=out counters — chunks/bytes/deflate-time — itself, with the
+%% identity fallback emitting NO enc key). One INDEPENDENT complete
+%% zlib stream per message (D2). The constructors validate before the
+%% send (bad enc crashes the sender — a worker-side bug, loud).
+send_chunk(JobRef, Seq, Bin) ->
+    case get(?PDICT_WIRE_ENC) of
+        zlib ->
+            case janus_wire_enc:maybe_deflate(Bin) of
+                {zlib, Wire} ->
+                    janus_worker_wire:chunk(
+                        JobRef, Seq, maybe_corrupt_wire(Seq, Wire), #{enc => zlib}
+                    );
+                {identity, Plain} ->
+                    janus_worker_wire:chunk(JobRef, Seq, Plain)
+            end;
+        _Identity ->
+            %% D9 partition symmetry (ocr review): the identity leg
+            %% (worker env off / master did not advertise) still bumps
+            %% the out-identity buckets — the in-side counts every
+            %% plain chunk it receives, so out must too.
+            janus_wire_enc:bump({wire_enc_chunks_total, {out, identity}}, 1),
+            janus_wire_enc:bump({wire_enc_bytes_total, {out, identity}}, byte_size(Bin)),
+            janus_worker_wire:chunk(JobRef, Seq, Bin)
+    end.
+
+%% D2: compress ONLY the body field value (binary, non-empty); the
+%% `enc => zlib` tag rides TOP-LEVEL alongside usage/status/trailers
+%% (and the additive rtt_ms — a float, never a compression candidate),
+%% all staying plaintext. `undefined`/empty bodies skip untouched
+%% (stream completions carry no body). Deflate failure => identity
+%% fallback + warning (D7 — inside maybe_deflate).
+%%
+%% W.1b seam note: the done body counts as the wire message at seq =
+%% chunks-sent-so-far (`?PDICT_SEQ` is 0 for unary jobs — their done
+%% body IS the job's seq-0 compressed payload; stream done bodies are
+%% never compressed, so the seam cannot touch them).
+maybe_compress_done_body(#{body := Body} = Fields) when is_binary(Body), Body =/= <<>> ->
+    case get(?PDICT_WIRE_ENC) of
+        zlib ->
+            case janus_wire_enc:maybe_deflate(Body) of
+                {zlib, Wire} ->
+                    Fields#{
+                        body => maybe_corrupt_wire(get(?PDICT_SEQ), Wire), enc => zlib
+                    };
+                {identity, _Plain} -> Fields
+            end;
+        _Identity ->
+            %% D9 partition symmetry (ocr review): the master counts
+            %% every plaintext done body in the in-identity buckets,
+            %% so the identity out-leg bumps here too.
+            janus_wire_enc:bump({wire_enc_chunks_total, {out, identity}}, 1),
+            janus_wire_enc:bump({wire_enc_bytes_total, {out, identity}}, byte_size(Body)),
+            Fields
+    end;
+maybe_compress_done_body(Fields) ->
+    Fields.
+
+%% W.1b TEST-ONLY seam (spec 2026-10-12-wire-compression §4): when the
+%% env armed a seq AND this message's seq matches AND the payload
+%% actually compressed (callers only reach here on the {zlib, Wire}
+%% leg — an identity payload at seq N is skipped untouched), flip ONE
+%% byte in the middle of the Wire binary. A middle flip breaks the
+%% deflate stream or its adler32 trailer (either fails inflate on the
+%% master — the F2 abort) while keeping the size and shape of a real
+%% message. The ?PDICT_CORRUPT_AFTER read is a pdict get, never an
+%% os:getenv (env is read ONCE per session at run start).
+maybe_corrupt_wire(Seq, Wire) when is_integer(Seq), is_binary(Wire) ->
+    case get(?PDICT_CORRUPT_AFTER) of
+        N when is_integer(N), N >= 0, N =:= Seq ->
+            logger:warning(#{
+                what => janus_wire_enc_corrupt_fired,
+                seq => Seq,
+                note => test_only_fault_injection_seam
+            }),
+            corrupt_middle_byte(Wire);
+        _ ->
+            Wire
+    end.
+
+corrupt_middle_byte(Wire) when byte_size(Wire) > 0 ->
+    Pos = byte_size(Wire) div 2,
+    <<Head:Pos/binary, Byte, Tail/binary>> = Wire,
+    <<Head/binary, (Byte bxor 16#FF), Tail/binary>>.
+
+emit_error(Code, Message) when is_atom(Code), is_binary(Message) ->
+    JobRef = get(?PDICT_JOB),
+    Master = get(?PDICT_MASTER),
+    {ErrFields, _RttMs} = with_rtt_ms(#{code => Code, message => Message}),
+    case janus_worker_wire:error(JobRef, Code, Message, ErrFields) of
+        {ok, Err} ->
+            Master ! Err;
+        {error, _} ->
+            ok
+    end,
+    ok.
+
+%% Merge `rtt_ms` into the completion map for NORMAL jobs; internal
+%% jobs keep the plain map (no key). Returns {Map, RttMs | undefined}.
+with_rtt_ms(Map) ->
+    case get(?PDICT_INTERNAL) of
+        true ->
+            {Map, undefined};
+        _ ->
+            case get(?PDICT_UPSTREAM_START) of
+                Start when is_integer(Start) ->
+                    Elapsed = float(max(0, erlang:monotonic_time(millisecond) - Start)),
+                    {Map#{rtt_ms => Elapsed}, Elapsed};
+                _ ->
+                    {Map, undefined}
+            end
+    end.
+
+%% Report the successful per-job duration to the dispatcher (the EWMA
+%% must survive across per-job sessions — the dispatcher owns it, spec
+%% Task C). Only sent when the job carried `provider_id` (per-provider
+%% attribution); a missing dispatcher (eunit / boot race) is tolerated.
+report_duration(RttMs) ->
+    case get(?PDICT_PROVIDER) of
+        ProviderId when ProviderId =/= undefined ->
+            try
+                janus_worker_dispatch ! {job_duration, ProviderId, RttMs}
+            catch
+                _:_ -> ok
+            end,
+            ok;
+        _ ->
+            ok
+    end.
+
+%%%===================================================================
+%%% URL / error mapping
+%%%===================================================================
+
+target_from_url(Url) ->
+    case janus_providers_http:parse_base(Url) of
+        {ok, Host, Port, Path0, Tls} ->
+            Path1 =
+                case Path0 of
+                    <<>> -> <<"/">>;
+                    _ -> Path0
+                end,
+            Path = append_query(Path1, Url),
+            {ok, #{host => Host, port => Port, path => Path, tls => Tls}};
+        {error, _} = Err ->
+            Err
+    end.
+
+append_query(Path, Url) ->
+    case uri_string:parse(Url) of
+        #{query := Q} when is_binary(Q), byte_size(Q) > 0 ->
+            <<Path/binary, $?, Q/binary>>;
+        #{query := Q} when is_list(Q), Q =/= [] ->
+            <<Path/binary, $?, (list_to_binary(Q))/binary>>;
+        _ ->
+            Path
+    end.
+
+map_gun_error({open, Reason}) ->
+    {connect, fmt_bin({open, Reason})};
+map_gun_error({await_up, Reason}) ->
+    case looks_tls(Reason) of
+        true -> {tls, fmt_bin({await_up, Reason})};
+        false -> {connect, fmt_bin({await_up, Reason})}
+    end;
+map_gun_error({content_encoding, V}) ->
+    %% PR2 (spec 2026-10-12-wire-compression D6): upstream CE violation
+    %% or gzip decode failure — same transport family as a closed body;
+    %% the proxy's is_transient({content_encoding, _}) benches the
+    %% provider and the local leg classifies retryable.
+    {upstream_closed, fmt_bin({content_encoding, V})};
+map_gun_error({await, timeout}) ->
+    {timeout, <<"upstream await timeout">>};
+map_gun_error({await, Reason}) ->
+    {upstream_closed, fmt_bin({await, Reason})};
+map_gun_error({body, timeout}) ->
+    {timeout, <<"upstream body timeout">>};
+map_gun_error({body, Reason}) ->
+    {upstream_closed, fmt_bin({body, Reason})};
+map_gun_error({unsupported_method, Method}) ->
+    {internal, fmt_bin({unsupported_method, Method})};
+map_gun_error(timeout) ->
+    {timeout, <<"timeout">>};
+map_gun_error(cancelled) ->
+    {internal, <<"cancelled">>};
+map_gun_error(Reason) ->
+    {internal, fmt_bin(Reason)}.
+
+looks_tls(Reason) ->
+    Bin = fmt_bin(Reason),
+    case
+        binary:matches(string:lowercase(Bin), [<<"tls">>, <<"ssl">>, <<"handshake">>, <<"cert">>])
+    of
+        [] -> false;
+        _ -> true
+    end.
+
+fmt_bin(Term) ->
+    iolist_to_binary(io_lib:format("~0p", [Term])).
+
+redact(Reason) ->
+    %% Never log job headers/body; keep crash reasons opaque-ish.
+    fmt_bin(Reason).

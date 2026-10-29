@@ -1,0 +1,7 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir fastapi uvicorn asyncpg cryptography httpx PyJWT python-multipart jsonschema rfc3339-validator
+COPY app/ app/
+COPY docs/schemas/config-backup-v1.schema.json docs/schemas/config-backup-v1.schema.json
+COPY pyproject.toml .
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8091"]

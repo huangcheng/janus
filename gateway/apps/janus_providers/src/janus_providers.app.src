@@ -1,0 +1,9 @@
+{application, janus_providers, [
+    {description, "Janus upstream provider adapters"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {janus_providers_app, []}},
+    {applications, [kernel, stdlib, inets, ssl, thoas, gun, janus_core]},
+    {env, []},
+    {modules, []}
+]}.

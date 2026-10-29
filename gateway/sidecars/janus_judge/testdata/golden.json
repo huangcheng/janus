@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "system_prefix": "You route requests to model tiers.",
+      "user_prefix": "User asks for code completion.",
+      "labels": ["fast", "big"],
+      "tier": "fast",
+      "scores": {"fast": 0.71, "big": 0.29}
+    },
+    {
+      "system_prefix": "You route requests to model tiers.",
+      "user_prefix": "User asks for long document analysis.",
+      "labels": ["fast", "big", "flagship"],
+      "tier": "big",
+      "scores": {"fast": 0.12, "big": 0.58, "flagship": 0.30}
+    }
+  ]
+}
