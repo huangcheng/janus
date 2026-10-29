@@ -1166,8 +1166,18 @@ input_items_to_chat(
     Acc,
     Pending
 ) ->
-    %% A call ENDS any tool run: flush pending image messages first.
-    Acc1 = flush_pending(Acc, Pending),
+    %% A call ends the run only when the trailing run is CLOSED. While
+    %% calls are still unanswered the call being attached belongs to the
+    %% SAME run: flushing here put a deferred message BETWEEN two calls
+    %% (call A, text, call B, outputs) and produced assistant(A) -> text
+    %% -> assistant(B) -> tool(A) -> tool(B) — the exact non-adjacent
+    %% shape this change exists to remove. Pending therefore rides
+    %% through the merge untouched.
+    Acc1 =
+        case run_open(Acc) of
+            true -> Acc;
+            false -> flush_pending(Acc, Pending)
+        end,
     %% Attach as assistant tool_calls; merge with previous assistant if present.
     Call = #{
         <<"id">> => Id,
@@ -1177,10 +1187,10 @@ input_items_to_chat(
     case Acc1 of
         [#{<<"role">> := <<"assistant">>} = A | AccRest] ->
             Calls = maps:get(<<"tool_calls">>, A, []) ++ [Call],
-            input_items_to_chat(Rest, [A#{<<"tool_calls">> => Calls} | AccRest], []);
+            input_items_to_chat(Rest, [A#{<<"tool_calls">> => Calls} | AccRest], Pending);
         _ ->
             Msg = #{<<"role">> => <<"assistant">>, <<"content">> => <<>>, <<"tool_calls">> => [Call]},
-            input_items_to_chat(Rest, [Msg | Acc1], [])
+            input_items_to_chat(Rest, [Msg | Acc1], Pending)
     end;
 input_items_to_chat(
     [#{<<"type">> := <<"function_call_output">>, <<"call_id">> := Id, <<"output">> := Out} | Rest],
