@@ -962,7 +962,19 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
     %% latency EWMA. Retried attempts overwrite it — attribution always
     %% lands on the route that produced the terminal result.
     put(janus_upstream_ms, erlang:monotonic_time(millisecond) - T0),
-    Result.
+    normalize_drain_arity(Result).
+
+%% Drain arity normalization: the LOCAL adapter returns the provider's
+%% 1-arity drain (janus_providers_http:post_stream/3), while the
+%% master->worker seam returns a 2-arity drain that also accepts a
+%% client keepalive writer. Every caller now expects 2. The local path
+%% is reachable whenever dispatch is not (single node, worker_force_local,
+%% empty pool, failed send, missed ack), so wrapping here — once, at the
+%% seam — keeps degraded mode from raising badarity on every stream.
+normalize_drain_arity({ok, stream, Status, Headers, Drain}) when is_function(Drain, 1) ->
+    {ok, stream, Status, Headers, fun(ChunkFun, _KeepaliveFun) -> Drain(ChunkFun) end};
+normalize_drain_arity(Other) ->
+    Other.
 
 %% Include_usage injection: only provider openai_chat (never send
 %% stream_options to anthropic/responses upstreams, C3), for clients
@@ -1113,6 +1125,21 @@ guard_chat_multi_choice(_, _) ->
 
 write_frames(Frames, Req2) ->
     lists:foreach(fun(F) -> stream_client_frame(F, nofin, Req2) end, Frames).
+
+%% Track whether the last forwarded byte left an SSE line open, so a
+%% keepalive is never spliced into a partial line (see the native
+%% stream path). Only the trailing byte matters: a chunk ending in \n
+%% leaves no line open, anything else does.
+note_sse_line_state(<<>>) ->
+    ok;
+note_sse_line_state(Chunk) when is_binary(Chunk) ->
+    case binary:last(Chunk) of
+        $\n -> put(janus_sse_line_open, false);
+        _ -> put(janus_sse_line_open, true)
+    end,
+    ok;
+note_sse_line_state(_) ->
+    ok.
 
 %% Cowboy returns ok | {ok, Req} on a live socket and errors/throws when
 %% the client is gone. Throw janus_client_disconnect so the drain's
@@ -1430,13 +1457,29 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
         filter_stream_headers(Headers),
         Req
     ),
+    %% A keepalive comment may only be appended at an SSE LINE BOUNDARY.
+    %% This path forwards upstream bytes verbatim, so a chunk can end
+    %% mid-line; injecting ": keepalive" there would be parsed as data
+    %% and corrupt the event (e.g. a truncated `data: {"choices":...`
+    %% would swallow the comment). The translate path needs no such
+    %% guard — its ChunkFun feeds an SSE parser that buffers leftovers.
+    ok = erase(janus_sse_line_open),
     try
         Drain(
             fun(Chunk) ->
                 capture_usage_chunk(Chunk),
+                ok = note_sse_line_state(Chunk),
                 stream_client_frame(Chunk, nofin, Req2)
             end,
-            fun(Frame) -> stream_client_frame(Frame, nofin, Req2) end
+            fun(Frame) ->
+                case get(janus_sse_line_open) of
+                    true ->
+                        %% Mid-line: skip this tick, the next one will do.
+                        ok;
+                    _ ->
+                        stream_client_frame(Frame, nofin, Req2)
+                end
+            end
         )
     of
         ok ->

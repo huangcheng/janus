@@ -68,6 +68,7 @@
     deadline_remaining/1,
     deadline_remaining/2,
     classify_stream_timeout/2,
+    stream_keepalive_ms/0,
     parse_affinity_node/1,
     affinity_opts_from_provider/1,
     video_path/1,
@@ -631,8 +632,15 @@ deadline_remaining(Deadline) ->
 %% Client-facing SSE comment cadence. Comfortably under common client
 %% idle timeouts (300s) and under the inactivity ceiling, so a silent
 %% upstream still reassures the client while the gateway keeps its own
-%% deadline running.
+%% deadline running. Overridable so tests can observe a tick without
+%% idling for the real interval.
 -define(STREAM_KEEPALIVE_MS, 15_000).
+
+stream_keepalive_ms() ->
+    case application:get_env(janus, stream_keepalive_ms, ?STREAM_KEEPALIVE_MS) of
+        V when is_integer(V), V > 0 -> V;
+        _ -> ?STREAM_KEEPALIVE_MS
+    end.
 
 %% Wait until WHICHEVER comes first: the total stream deadline or the
 %% inactivity deadline. A stalled-but-alive stream now trips this with
@@ -1077,7 +1085,7 @@ stream_drain(
     %% Wait at most one keepalive tick so a silent-but-alive upstream
     %% still reassures the client; deadlines are absolute, so this only
     %% controls WHEN we get to re-check them.
-    Wait = min(deadline_remaining(Deadline, Inactivity), ?STREAM_KEEPALIVE_MS),
+    Wait = min(deadline_remaining(Deadline, Inactivity), stream_keepalive_ms()),
     receive
         {janus_chunk, JobRef, _, _, _} = Msg ->
             stream_chunk(
@@ -1144,7 +1152,7 @@ stream_drain(
                 %% then re-arm. Never touches either deadline — a
                 %% keepalive is not progress, and treating it as such
                 %% would resurrect the unbounded stall it guards against.
-                emit_keepalive(KeepaliveFun),
+                emit_keepalive(KeepaliveFun, JobRef, WorkerSessionPid),
                 stream_drain(
                     JobRef,
                     WorkerSessionPid,
@@ -1162,19 +1170,42 @@ stream_drain(
     end.
 
 %% An SSE comment: legal on every face, carries no data, parsed away by
-%% every conforming client. A dead socket throws
-%% janus_client_disconnect, which must keep propagating like any other
-%% client-write failure on this path.
-emit_keepalive(undefined) ->
+%% every conforming client.
+%%
+%% A dead socket must tear the job down, not be swallowed: letting the
+%% loop re-arm would keep generating (and billing) tokens into a socket
+%% nobody reads until a deadline finally fires. So the disconnect path
+%% runs the same cleanup as a failed chunk write (cancel the worker,
+%% mark the job dead, drain its mailbox) before rethrowing.
+%%
+%% Other failures are logged once and tolerated — a persistently broken
+%% writer would otherwise silently re-arm every tick, hiding real bugs
+%% in the keepalive path.
+emit_keepalive(undefined, _JobRef, _WorkerSessionPid) ->
     ok;
-emit_keepalive(KeepaliveFun) ->
+emit_keepalive(KeepaliveFun, JobRef, WorkerSessionPid) ->
     try
         KeepaliveFun(<<": keepalive\n\n">>),
         ok
     catch
-        throw:janus_client_disconnect -> throw(janus_client_disconnect);
-        _:_ -> ok
+        throw:janus_client_disconnect ->
+            stash_outcome(cancelled),
+            cancel_session(WorkerSessionPid, JobRef),
+            mark_dead(JobRef),
+            flush_job(JobRef),
+            throw(janus_client_disconnect);
+        Class:Reason ->
+            logger:warning(#{
+                what => janus_sse_keepalive_failed,
+                class => Class,
+                reason => sanitize_keepalive_reason(Reason)
+            }),
+            ok
     end.
+
+sanitize_keepalive_reason(R) when is_atom(R) -> R;
+sanitize_keepalive_reason({T, _}) when is_atom(T) -> T;
+sanitize_keepalive_reason(_) -> keepalive_error.
 
 stream_drain_timeout(JobRef, WorkerSessionPid, TotalLeft, InactivityLeft) ->
     stash_outcome(error),
