@@ -46,6 +46,26 @@ credit_window_initial() -> 32.
 -spec non_stream_timeout_ms() -> pos_integer().
 non_stream_timeout_ms() -> 120_000.
 
+%% TOTAL age cap for one stream, anchored once at drain start (2026-10-29).
+%%
+%% Before that change the drain recomputed this instant on every
+%% forwarded chunk, so a healthy stream could never reach it and the cap
+%% was effectively inert. It is now a real ceiling: a stream still open
+%% at 600s is torn down whichever of the two budgets fires.
+%%
+%% Why 600s: production logs on the aliyun master (4.3h window, 1840
+%% requests, 1616 streaming) show p50 7.2s, p90 22.6s, p99 150s,
+%% p99.9 250s, max 295.8s. There are ZERO completed requests at or above
+%% 300s, which is exactly pi's client idle timeout — those streams were
+%% cut client-side and never recorded, so the tail is LEFT-CENSORED and
+%% this data cannot measure the real upper bound. What it does show is
+%% that the healthy long tail sits around 250s, so 600s keeps ~2.4x
+%% headroom on a normal stream. Raising it would only extend how long a
+%% pathological non-terminating provider holds a pool slot (the trip
+%% path releases on inactivity but NOT on the total budget, matching the
+%% long-standing "no release on timeout" policy). Revisit if a
+%% legitimately longer generation shape appears — that would need a
+%% configurable knob, not a bigger constant.
 -spec stream_timeout_ms() -> pos_integer().
 stream_timeout_ms() -> 600_000.
 
