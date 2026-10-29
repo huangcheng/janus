@@ -613,8 +613,21 @@ flush_acks(JobRef) ->
 stream_deadline() ->
     erlang:monotonic_time(millisecond) + janus_worker_wire:stream_timeout_ms().
 
+%% Inactivity deadline: restarts on every forwarded chunk so it measures
+%% SILENCE, not total stream age. Bounded by the total deadline in
+%% deadline_remaining/2 (whichever fires first).
+stream_inactivity_deadline() ->
+    erlang:monotonic_time(millisecond) + janus_worker_wire:stream_inactivity_timeout_ms().
+
 deadline_remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
+
+%% Wait until WHICHEVER comes first: the total stream deadline or the
+%% inactivity deadline. A stalled-but-alive stream now trips this with
+%% an upstream-shaped reason while the client's own idle timer is
+%% still armed, instead of both sides timing out independently.
+deadline_remaining(Deadline, Inactivity) ->
+    min(deadline_remaining(Deadline), deadline_remaining(Inactivity)).
 
 %%--------------------------------------------------------------------
 %% Scheduler v2 casts (Task C, spec Part 0.11 / A.3 / A.4) + v2.1 B.1
@@ -1008,7 +1021,16 @@ stream_drain_start(
     end.
 
 stream_drain(
-    JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent, Deadline
+    JobRef,
+    WorkerSessionPid,
+    Mon,
+    WorkerNode,
+    ChunkFun,
+    ExpectSeq,
+    TtfbStart,
+    TtfbSent,
+    Deadline,
+    Inactivity
 ) ->
     receive
         {janus_chunk, JobRef, _, _, _} = Msg ->
@@ -1044,15 +1066,30 @@ stream_drain(
             %% Carries the ORIGINAL deadline — a stale ack cannot restart
             %% the timeout window (H1).
             stream_drain(
-                JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, ExpectSeq, TtfbStart, TtfbSent, Deadline
+                JobRef,
+                WorkerSessionPid,
+                Mon,
+                WorkerNode,
+                ChunkFun,
+                ExpectSeq,
+                TtfbStart,
+                TtfbSent,
+                Deadline,
+                Inactivity
             )
-    after deadline_remaining(Deadline) ->
+    after deadline_remaining(Deadline, Inactivity) ->
         stash_outcome(error),
         cancel_session(WorkerSessionPid, JobRef),
         mark_dead(JobRef),
         flush_job(JobRef),
         %% No release on timeout (spec Part 0.11 — see remote_unary).
-        {error, {await, timeout}}
+        %% Distinguish the two budgets: a total-budget trip is the old
+        %% behavior; an inactivity trip means the upstream went silent
+        %% while the stream was still nominally alive.
+        case deadline_remaining(Deadline) of
+            0 -> {error, {await, timeout}};
+            _ -> {error, {await, no_progress}}
+        end
     end.
 
 %% Chunk-leg continuation of stream_drain: normalization happens HERE,
@@ -1130,7 +1167,16 @@ stream_forward_plain(
     %% A forwarded chunk is progress: the inactivity window restarts from
     %% an absolute instant (never from a stray message — H1).
     stream_drain(
-        JobRef, WorkerSessionPid, Mon, WorkerNode, ChunkFun, NextSeq, TtfbStart, TtfbSent1, stream_deadline()
+        JobRef,
+        WorkerSessionPid,
+        Mon,
+        WorkerNode,
+        ChunkFun,
+        NextSeq,
+        TtfbStart,
+        TtfbSent1,
+        stream_deadline(),
+        stream_inactivity_deadline()
     ).
 
 %% Done-leg continuation of stream_drain (decode already done).
