@@ -46,6 +46,8 @@
     stream_translate_blocked/2,
     %% Phase-2 dispatch gate eligibility (the knob lives in the proxy)
     responses_stream_gatable/1,
+    take_upstream_stream_error/0,
+    upstream_error_text/1,
     %% Dangling tool-call repair (2026-10-28): the proxy entry hook
     %% (native AND translate paths share it).
     repair_dangling_tools/2,
@@ -2440,6 +2442,43 @@ created_now(_) ->
 %%    id, 64 calls, 1MiB total args). Phase-1 contract: the caller
 %%    terminates the stream on this tuple; the 1.9 ship unit wires the
 %%    full C2 target-format error event.
+
+%%% --- upstream in-band error text -----------------------------------
+%% An upstream can report failure INSIDE the stream ("error" object on
+%% a chat chunk) long after the 200 + headers committed. The mapper
+%% fails closed, but the PROVIDER's words must survive: the generic
+%% "unsupported stream construct" naming nothing sent operators
+%% hunting a translate bug that did not exist (live 2026-10-29: a
+%% deepseek stream failed at 58s with exactly that string while the
+%% provider had named its own reason). Recorded here, read by the proxy
+%% from the process dictionary it already uses for request-scoped state.
+
+-define(UPSTREAM_ERR_KEY, janus_sse_upstream_error).
+
+%% Chat-shaped error object: {error: {message, type, code}} or a bare
+%% string under "error".
+upstream_error_text(#{<<"message">> := M}) when is_binary(M), M =/= <<>> -> M;
+upstream_error_text(#{<<"error">> := E}) when is_map(E) -> upstream_error_text(E);
+upstream_error_text(#{<<"error">> := E}) when is_binary(E), E =/= <<>> -> E;
+upstream_error_text(#{<<"code">> := C}) when is_binary(C), C =/= <<>> -> C;
+upstream_error_text(#{<<"type">> := T}) when is_binary(T), T =/= <<>> -> T;
+upstream_error_text(_) -> undefined.
+
+stash_upstream_stream_error(Err) when is_map(Err) ->
+    case upstream_error_text(Err) of
+        undefined -> ok;
+        Text -> put(?UPSTREAM_ERR_KEY, Text), ok
+    end;
+stash_upstream_stream_error(_) ->
+    ok.
+
+%% The proxy asks for it once the translate fold reported the failure.
+take_upstream_stream_error() ->
+    case erase(?UPSTREAM_ERR_KEY) of
+        undefined -> undefined;
+        Text -> Text
+    end.
+
 -spec translate_sse(atom(), atom(), map(), #sse_st{}) ->
     {ok, [iodata()], #sse_st{}}
     | {error, translate_unsupported, #sse_st{}}
@@ -2733,6 +2772,7 @@ chat_to_anthropic(#{type := <<"chunk">>, data := D}, St) when
 ->
     case maps:get(<<"error">>, D, undefined) of
         Err when is_map(Err) ->
+            stash_upstream_stream_error(Err),
             {error, translate_unsupported, St};
         _ ->
             {StartFrames, St1} = anthropic_ensure_start(D, St),
@@ -3295,6 +3335,7 @@ chat_to_responses_stream(#{type := <<"chunk">>, data := D}, St) when
 ->
     case maps:get(<<"error">>, D, undefined) of
         Err when is_map(Err) ->
+            stash_upstream_stream_error(Err),
             {error, translate_unsupported, St};
         _ ->
             St1 = resp_capture_model(D, resp_capture_usage(D, St)),

@@ -1017,7 +1017,7 @@ handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Rout
                 Route,
                 Req2,
                 State,
-                {error, upstream, sanitize_upstream_error(DrainReason)}
+                {error, upstream, sanitize_stream_reason(DrainReason)}
             )
     catch
         throw:{janus_translate, Kind, Msg} ->
@@ -1074,9 +1074,12 @@ translate_chunk(ClientProto, ProviderProto, Chunk, Req2) ->
                                 StNext;
                             {error, translate_unsupported, StNext} ->
                                 put(janus_sse_state, StNext),
+                                %% Prefer the PROVIDER's own words when it
+                                %% reported the failure in band; fall back
+                                %% to the generic string only when it gave
+                                %% us nothing to quote.
                                 throw(
-                                    {janus_translate, upstream,
-                                        <<"upstream sent an unsupported stream construct">>}
+                                    {janus_translate, upstream, upstream_stream_error_msg()}
                                 );
                             {error, tool_args_cap, StNext} ->
                                 %% C5 accumulator cap (args/calls/total or
@@ -1626,6 +1629,26 @@ wire_enc_abort_reason(R) -> ?IS_WIRE_ENC_ABORT(R).
 wire_reason({error, Kind, Msg}) when is_binary(Msg) -> {error, Kind, Msg};
 wire_reason({error, Kind, Msg}) -> {error, Kind, wire_msg(Msg)};
 wire_reason(Other) -> Other.
+
+%% The provider's in-band error text when the stream fold captured one,
+%% else the generic construct message. The upstream's own words are what
+%% makes a mid-stream failure actionable.
+upstream_stream_error_msg() ->
+    case janus_protocol_translate:take_upstream_stream_error() of
+        undefined -> <<"upstream sent an unsupported stream construct">>;
+        Text -> Text
+    end.
+
+%% Upstream silence in the middle of a stream (janus_worker_wire:
+%% stream_inactivity_timeout_ms/0). The worker client reports it as
+%% {await, no_progress}; sanitize_upstream_error/1 would keep it a
+%% tuple and the client would read an Erlang term. Name it in words a
+%% human can act on — this is the gateway saying "the upstream stalled",
+%% which is precisely what the generic 502 used to hide.
+-define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
+
+sanitize_stream_reason({await, no_progress}) -> {stalled, ?UPSTREAM_STALLED_MSG};
+sanitize_stream_reason(Other) -> sanitize_upstream_error(Other).
 
 wire_msg(Msg) when is_atom(Msg) -> atom_to_binary(Msg, utf8);
 wire_msg(Msg) -> unicode:characters_to_binary(io_lib:format("~w", [Msg])).
