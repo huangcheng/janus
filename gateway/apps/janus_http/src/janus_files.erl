@@ -28,6 +28,16 @@
 -define(MAX_FILE_BYTES, 52_428_800).    %% 50 MiB per file
 -define(QUOTA_BYTES, 10_737_418_240).  %% 10 GiB per agent key
 -define(MATERIALIZE_TEXT_CAP, 262_144). %% 256 KiB inlined per text file
+%% Per-REQUEST expansion bounds (security-audit run-1): every admitted
+%% request expands first, so the aggregate must be bounded like every
+%% other intake path — a max reference count and an aggregate expanded-
+%% byte budget, plus per-request memoization so one repeated id expands
+%% once. Mirrors janus_multipart's MAX_PARTS discipline.
+-define(MAX_FILE_REFS, 64).
+%% Above the base64 of one legal 50 MiB image (~66.7 MB): a single
+%% legitimate file must never 413, so the budget bounds the AGGREGATE
+%% (roughly one full-size image plus headroom), not each part.
+-define(MAX_EXPAND_BYTES, 72 * 1024 * 1024).
 -define(ID_PREFIX, <<"file-janus-">>).
 
 %% Feature knob — same doctrine as the modality gates: settings key
@@ -211,32 +221,176 @@ has_references(RawBody) when is_binary(RawBody) ->
         binary:match(RawBody, <<"file_data">>) =/= nomatch orelse
         binary:match(RawBody, <<"input_file">>) =/= nomatch.
 
--spec materialize(pos_integer(), map()) -> map().
+-spec materialize(pos_integer(), map()) -> map() | {error, file_expansion_limit}.
 %% Chat shape: messages[].content parts.
 materialize(AgentKeyId, #{<<"messages">> := Messages} = Body) when is_list(Messages) ->
-    Body#{<<"messages">> := [materialize_message(AgentKeyId, M) || M <- Messages]};
+    case walk(AgentKeyId, Messages, chat, fresh_budget()) of
+        {ok, Messages1, _Budget} -> Body#{<<"messages">> := Messages1};
+        {error, Reason} -> {error, Reason}
+    end;
 %% Responses shape (dsh and other Responses-face clients): input
 %% items' content parts use input_file/input_text/input_image.
 materialize(AgentKeyId, #{<<"input">> := Items} = Body) when is_list(Items) ->
-    Body#{<<"input">> := [materialize_response_item(AgentKeyId, I) || I <- Items]};
+    case walk(AgentKeyId, Items, responses, fresh_budget()) of
+        {ok, Items1, _Budget} -> Body#{<<"input">> := Items1};
+        {error, Reason} -> {error, Reason}
+    end;
 materialize(_AgentKeyId, Body) ->
     Body.
 
-materialize_response_item(AgentKeyId, #{<<"content">> := Parts} = Item) when is_list(Parts) ->
-    Item#{<<"content">> := [materialize_response_part(AgentKeyId, P) || P <- Parts]};
-materialize_response_item(_AgentKeyId, Item) ->
-    Item.
+%% ---------------------------------------------------------------------------
+%% Budgeted structural walk (security-audit run-1): every admitted
+%% request expands file references BEFORE routing, so the aggregate
+%% expansion must be bounded like every other intake path — max
+%% reference count (?MAX_FILE_REFS), aggregate expanded-byte budget
+%% (?MAX_EXPAND_BYTES), and a per-request memo cache so one repeated
+%% file id expands once regardless of reference count. Any bound trip
+%% aborts the whole rewrite with {error, file_expansion_limit}.
+%% ---------------------------------------------------------------------------
 
-materialize_response_part(AgentKeyId, #{<<"type">> := <<"input_file">>} = Part) ->
-    case file_payload(Part) of
-        {janus_id, Id} ->
-            to_response_part(expand_janus_file(AgentKeyId, Id));
-        {inline, Filename, DataUri} ->
-            to_response_part(expand_inline_file(Filename, DataUri));
-        foreign ->
-            Part
+fresh_budget() ->
+    #{refs => 0, bytes => 0, cache => #{}}.
+
+%% walk/4 rewrites a list of items (messages or input items); items
+%% with a "content" list recurse into their parts.
+walk(_AgentKeyId, [], _Face, Budget) ->
+    {ok, [], Budget};
+walk(AgentKeyId, [Item | Rest], Face, Budget) when is_map(Item) ->
+    case walk_parts_of(Item, AgentKeyId, Face, Budget) of
+        {ok, Item1, Budget1} ->
+            case walk(AgentKeyId, Rest, Face, Budget1) of
+                {ok, Rest1, Budget2} -> {ok, [Item1 | Rest1], Budget2};
+                {error, Reason} -> {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end;
-materialize_response_part(_AgentKeyId, Part) ->
+walk(AgentKeyId, [Item | Rest], Face, Budget) ->
+    %% Non-map list members pass through untouched — with the ORIGINAL
+    %% key and face, so later items still expand and still charge.
+    case walk(AgentKeyId, Rest, Face, Budget) of
+        {ok, Rest1, Budget1} -> {ok, [Item | Rest1], Budget1};
+        {error, Reason} -> {error, Reason}
+    end.
+
+%% A message/item with a content array: rewrite each part. The chat
+%% face spells parts {type: "file"}; the Responses face spells them
+%% {type: "input_file"} — both carry the same payload shapes.
+walk_parts_of(#{<<"content">> := Parts} = Item, AgentKeyId, Face, Budget) when is_list(Parts) ->
+    case walk_parts(AgentKeyId, Parts, Face, Budget) of
+        {ok, Parts1, Budget1} -> {ok, Item#{<<"content">> := Parts1}, Budget1};
+        {error, Reason} -> {error, Reason}
+    end;
+walk_parts_of(Item, _AgentKeyId, _Face, Budget) ->
+    {ok, Item, Budget}.
+
+walk_parts(_AgentKeyId, [], _Face, Budget) ->
+    {ok, [], Budget};
+walk_parts(AgentKeyId, [Part | Rest], Face, Budget) when is_map(Part) ->
+    case expand_part(AgentKeyId, Part, Face, Budget) of
+        {ok, Part1, Budget1} ->
+            case walk_parts(AgentKeyId, Rest, Face, Budget1) of
+                {ok, Rest1, Budget2} -> {ok, [Part1 | Rest1], Budget2};
+                {error, Reason} -> {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
+walk_parts(AgentKeyId, [Part | Rest], Face, Budget) ->
+    %% Non-map parts pass through untouched; the remainder keeps
+    %% walking so a later bound trip still surfaces as the error.
+    case walk_parts(AgentKeyId, Rest, Face, Budget) of
+        {ok, Rest1, Budget1} -> {ok, [Part | Rest1], Budget1};
+        {error, Reason} -> {error, Reason}
+    end.
+
+expand_part(AgentKeyId, #{<<"type">> := <<"file">>} = Part, chat, Budget) ->
+    expand_payload(AgentKeyId, Part, fun identity_part/1, Budget);
+expand_part(AgentKeyId, #{<<"type">> := <<"input_file">>} = Part, responses, Budget) ->
+    expand_payload(AgentKeyId, Part, fun to_response_part/1, Budget);
+expand_part(_AgentKeyId, Part, _Face, Budget) ->
+    {ok, Part, Budget}.
+
+expand_payload(AgentKeyId, Part, Convert, Budget) ->
+    case file_payload(Part) of
+        %% Gateway-owned reference: memoized fetch + expand — a
+        %% repeated id expands once, then every extra occurrence is
+        %% free (still ref-counted against ?MAX_FILE_REFS).
+        {janus_id, Id} ->
+            case maps:get({id, Id}, maps:get(cache, Budget), undefined) of
+                {ChatPart, RawSize} when is_map(ChatPart), is_integer(RawSize) ->
+                    charge(Convert(ChatPart), RawSize, Budget);
+                _ ->
+                    case expand_janus_file(AgentKeyId, Id) of
+                        {ChatPart, RawSize} when is_map(ChatPart), is_integer(RawSize) ->
+                            Cache = maps:get(cache, Budget),
+                            charge(
+                                Convert(ChatPart),
+                                RawSize,
+                                Budget#{cache => Cache#{{id, Id} => {ChatPart, RawSize}}}
+                            );
+                        {note, NotePart} ->
+                            %% not_found / unavailable notes are tiny and
+                            %% not attacker-amplifiable — but still count
+                            %% the reference so a flood of bogus ids
+                            %% cannot dodge the ref cap.
+                            charge_note(Convert(NotePart), Budget)
+                    end
+            end;
+        %% OpenAI inline file object: bytes ride the request itself —
+        %% same budget, no store round trip, no memo (distinct data
+        %% URIs rarely repeat).
+        {inline, Filename, DataUri} ->
+            case expand_inline_file(Filename, DataUri) of
+                Expanded when is_map(Expanded) ->
+                    charge(Convert(Expanded), Budget);
+                {note, NotePart} ->
+                    charge_note(Convert(NotePart), Budget)
+            end;
+        %% Foreign provider file ids / unknown shapes: not our business.
+        foreign ->
+            {ok, Part, Budget}
+    end.
+
+%% A note part charges the ref count but zero bytes: notes are
+%% gateway-authored and tiny, so they cannot amplify memory — only
+%% their OCCURRENCES are bounded.
+charge_note(Note, Budget) ->
+    Refs = maps:get(refs, Budget) + 1,
+    case Refs > ?MAX_FILE_REFS of
+        true -> {error, file_expansion_limit};
+        false -> {ok, Note, Budget#{refs => Refs}}
+    end.
+
+charge(Expanded, Budget) ->
+    charge(Expanded, 0, Budget).
+
+%% RawBytes is the stored-blob floor for gateway-owned references: the
+%% budget must bound the bytes the request MATERIALIZIES, not just the
+%% bytes the emitted part carries — a 50 MiB text file emits a
+%% truncated 256 KiB part but still pulls the full blob through the
+%% process.
+charge(Expanded, RawBytes, Budget) ->
+    Refs = maps:get(refs, Budget) + 1,
+    case Refs > ?MAX_FILE_REFS of
+        true ->
+            {error, file_expansion_limit};
+        false ->
+            Bytes = maps:get(bytes, Budget) + erlang:max(expanded_size(Expanded), RawBytes),
+            case Bytes > ?MAX_EXPAND_BYTES of
+                true -> {error, file_expansion_limit};
+                false -> {ok, Expanded, Budget#{refs => Refs, bytes => Bytes}}
+            end
+    end.
+
+expanded_size(#{<<"image_url">> := Url}) when is_binary(Url) -> byte_size(Url);
+expanded_size(#{<<"image_url">> := #{<<"url">> := Url}}) -> byte_size(Url);
+expanded_size(#{<<"text">> := Text}) when is_binary(Text) -> byte_size(Text);
+expanded_size(#{<<"input_image">> := U}) when is_binary(U) -> byte_size(U);
+expanded_size(#{<<"input_text">> := T}) when is_binary(T) -> byte_size(T);
+expanded_size(_) -> 0.
+
+identity_part(Part) ->
     Part.
 
 %% The expand pipeline emits chat-shape parts; a Responses body must
@@ -247,27 +401,6 @@ to_response_part(#{<<"type">> := <<"text">>, <<"text">> := T}) ->
 to_response_part(#{<<"type">> := <<"image_url">>, <<"image_url">> := #{<<"url">> := U}}) ->
     #{<<"type">> => <<"input_image">>, <<"image_url">> => U};
 to_response_part(Part) ->
-    Part.
-
-materialize_message(AgentKeyId, #{<<"content">> := Parts} = Msg) when is_list(Parts) ->
-    Msg#{<<"content">> := [materialize_part(AgentKeyId, P) || P <- Parts]};
-materialize_message(_AgentKeyId, Msg) ->
-    Msg.
-
-materialize_part(AgentKeyId, #{<<"type">> := <<"file">>} = Part) ->
-    case file_payload(Part) of
-        %% Gateway-owned reference: fetch + expand.
-        {janus_id, Id} ->
-            expand_janus_file(AgentKeyId, Id);
-        %% OpenAI inline file object: bytes ride the request itself
-        %% (no upload) — same expansion pipeline, no store round trip.
-        {inline, Filename, DataUri} ->
-            expand_inline_file(Filename, DataUri);
-        %% Foreign provider file ids / unknown shapes: not our business.
-        foreign ->
-            Part
-    end;
-materialize_part(_AgentKeyId, Part) ->
     Part.
 
 %% The OpenAI surface spells file references two ways: the flat
@@ -309,7 +442,7 @@ expand_inline_file(Filename, DataUri) ->
                     text_part(Filename, Mime, Bytes)
             end;
         {error, bad_data_uri} ->
-            note(<<"file part carries an unparsable data URI">>)
+            {note, note(<<"file part carries an unparsable data URI">>)}
     end.
 
 parse_data_uri(<<"data:", Rest/binary>>) ->
@@ -340,23 +473,28 @@ expand_janus_file(AgentKeyId, Id) ->
         {ok, Meta, Bytes} ->
             Mime = maps:get(content_type, Meta),
             Filename = maps:get(filename, Meta),
-            case is_image(Mime) of
-                true ->
-                    #{
-                        <<"type">> => <<"image_url">>,
-                        <<"image_url">> => #{
-                            <<"url">> =>
-                                <<"data:", Mime/binary, ";base64,",
-                                  (base64:encode(Bytes))/binary>>
-                        }
-                    };
-                false ->
-                    text_part(Filename, Mime, Bytes)
-            end;
+            Part =
+                case is_image(Mime) of
+                    true ->
+                        #{
+                            <<"type">> => <<"image_url">>,
+                            <<"image_url">> => #{
+                                <<"url">> =>
+                                    <<"data:", Mime/binary, ";base64,",
+                                      (base64:encode(Bytes))/binary>>
+                            }
+                        };
+                    false ->
+                        text_part(Filename, Mime, Bytes)
+                end,
+            %% The raw blob size rides with the part so the budget
+            %% charges the materialized bytes (truncated text parts
+            %% would otherwise under-count by the truncation).
+            {Part, byte_size(Bytes)};
         {error, not_found} ->
-            note(<<"file not found: ", Id/binary>>);
+            {note, note(<<"file not found: ", Id/binary>>)};
         {error, Reason} ->
-            note(<<"file unavailable: ", (fmt(Reason))/binary>>)
+            {note, note(<<"file unavailable: ", (fmt(Reason))/binary>>)}
     end.
 
 text_part(Filename, Mime, Bytes) ->
@@ -443,3 +581,26 @@ unique_id() ->
 
 fmt(T) when is_binary(T) -> T;
 fmt(T) -> list_to_binary(io_lib:format("~p", [T])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+raw_floor_memo_test() ->
+    %% A cached stored-file reference must charge the RAW blob floor
+    %% (60 MB here), not the emitted part's size: two refs of one
+    %% cached 60 MB blob exceed the 72 MB budget even though the
+    %% emitted parts are small (security-audit run-1: the budget
+    %% bounds materialized work, so truncation must not under-count).
+    Img = #{<<"type">> => <<"text">>, <<"text">> => <<"tiny">>},
+    Base = fresh_budget(),
+    Budget = Base#{
+        cache => #{{id, <<"file-janus-x">>} => {Img, 60_000_000}}
+    },
+    Ref = #{<<"type">> => <<"file">>, <<"file_id">> => <<"file-janus-x">>},
+    Msg = #{<<"role">> => <<"user">>, <<"content">> => [Ref, Ref]},
+    ?assertEqual(
+        {error, file_expansion_limit},
+        walk(1, [Msg], chat, Budget)
+    ).
+
+-endif.

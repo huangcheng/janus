@@ -176,30 +176,41 @@ handle_body(openai_decisions, Agent, Body, Req, State) ->
 handle_body(ClientProto, Agent, Body, Req, State) ->
     case thoas:decode(Body) of
         {ok, Map} when is_map(Map) ->
-            {Body1, Map1} = maybe_materialize_files(Agent, Body, Map),
-            {Body2, Map2} = maybe_repair_tools(ClientProto, Body1, Map1),
-            maybe_count_images(ClientProto, Map2),
-            case extract_model(ClientProto, Map1) of
-                {ok, Model} ->
-                    %% Seed before the allowlist reject so the reject log
-                    %% names the client's raw model, not just the
-                    %% (unset) resolved one.
-                    put(janus_requested_model, Model),
-                    case model_allowed(Agent, Model) of
-                        false ->
-                            reply_err(
-                                ClientProto,
-                                Req,
-                                State,
-                                403,
-                                <<"model_not_allowed">>,
-                                <<"model not in allowlist">>
-                            );
-                        true ->
-                            proxy_model(ClientProto, Model, Body2, Map2, Req, State, Agent)
-                    end;
-                {error, Msg} ->
-                    reply_err(ClientProto, Req, State, 400, <<"invalid_request">>, Msg)
+            case maybe_materialize_files(Agent, Body, Map) of
+                {error, file_expansion_limit} ->
+                    reply_err(
+                        ClientProto,
+                        Req,
+                        State,
+                        413,
+                        <<"file_expansion_limit">>,
+                        <<"request exceeds the file-reference count or expansion budget">>
+                    );
+                {Body1, Map1} ->
+                    {Body2, Map2} = maybe_repair_tools(ClientProto, Body1, Map1),
+                    maybe_count_images(ClientProto, Map2),
+                    case extract_model(ClientProto, Map1) of
+                        {ok, Model} ->
+                            %% Seed before the allowlist reject so the reject log
+                            %% names the client's raw model, not just the
+                            %% (unset) resolved one.
+                            put(janus_requested_model, Model),
+                            case model_allowed(Agent, Model) of
+                                false ->
+                                    reply_err(
+                                        ClientProto,
+                                        Req,
+                                        State,
+                                        403,
+                                        <<"model_not_allowed">>,
+                                        <<"model not in allowlist">>
+                                    );
+                                true ->
+                                    proxy_model(ClientProto, Model, Body2, Map2, Req, State, Agent)
+                            end;
+                        {error, Msg} ->
+                            reply_err(ClientProto, Req, State, 400, <<"invalid_request">>, Msg)
+                    end
             end;
         {ok, _} ->
             reply_err(
@@ -223,8 +234,15 @@ handle_body(ClientProto, Agent, Body, Req, State) ->
 maybe_materialize_files(#{id := AgentKeyId}, RawBody, Map) ->
     case janus_files:enabled() andalso janus_files:has_references(RawBody) of
         true ->
-            Map1 = janus_files:materialize(AgentKeyId, Map),
-            {thoas:encode(Map1), Map1};
+            case janus_files:materialize(AgentKeyId, Map) of
+                {error, file_expansion_limit} ->
+                    %% Per-request expansion bound tripped (reference
+                    %% count or aggregate bytes): reject BEFORE the
+                    %% unbounded re-encode (security-audit run-1).
+                    {error, file_expansion_limit};
+                Map1 when is_map(Map1) ->
+                    {thoas:encode(Map1), Map1}
+            end;
         false ->
             {RawBody, Map}
     end;
