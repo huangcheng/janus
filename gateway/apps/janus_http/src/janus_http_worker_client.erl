@@ -55,6 +55,12 @@
 %%%-------------------------------------------------------------------
 -module(janus_http_worker_client).
 
+-ifdef(TEST).
+%% Export-only test seam (v16 audit verifier convention): the drain
+%% relay's terminal-abort cleanup is otherwise unreachable from eunit.
+-export([stream_forward_plain/13]).
+-endif.
+
 -export([
     call/6,
     unary_post/5,
@@ -1183,9 +1189,7 @@ emit_keepalive(KeepaliveFun, JobRef, WorkerSessionPid) ->
     catch
         throw:janus_client_disconnect ->
             stash_outcome(cancelled),
-            cancel_session(WorkerSessionPid, JobRef),
-            mark_dead(JobRef),
-            flush_job(JobRef),
+            ok = terminal_chunkfun_cleanup(WorkerSessionPid, JobRef),
             throw(janus_client_disconnect);
         Class:Reason ->
             logger:warning(#{
@@ -1318,10 +1322,35 @@ stream_forward_plain(
     catch
         throw:janus_client_disconnect ->
             stash_outcome(cancelled),
-            cancel_session(WorkerSessionPid, JobRef),
-            mark_dead(JobRef),
-            flush_job(JobRef),
-            throw(janus_client_disconnect)
+            ok = terminal_chunkfun_cleanup(WorkerSessionPid, JobRef),
+            throw(janus_client_disconnect);
+        throw:{janus_translate, _Kind, _Msg} = TranslateAbort ->
+            %% Terminal translate abort (untranslatable construct, 1 MiB
+            %% leftover cap, tool-args cap, multi-choice guard): the job
+            %% is dead to the master either way. Same terminal cleanup
+            %% as wire_enc_abort/4 — cancel the worker session, kill
+            %% stragglers, first-write-wins outcome, release the
+            %% reservation NOW (the stream_drain_timeout inactivity
+            %% rationale: never pin a pool slot past a terminal abort) —
+            %% then rethrow so the proxy still finalizes the client with
+            %% the provider's own words (security-audit run-1).
+            ok = terminal_chunkfun_cleanup(WorkerSessionPid, JobRef),
+            ok = stash_usage_outcome(<<"translate_abort">>),
+            throw(TranslateAbort);
+        Class:Reason:Stacktrace ->
+            %% A relay CRASH (badarg out of capture_usage_chunk, a
+            %% case_clause on an unexpected provider shape — this relay
+            %% also carries passthrough streams whose ChunkFun only
+            %% captures usage) is as terminal for the job as the
+            %% explicit throws: the same session/reservation leak would
+            %% follow, billed to the operator. Run the cleanup, label
+            %% the outcome with the NEUTRAL stream_relay_crash (never
+            %% translate_*, which the dashboard would misattribute),
+            %% and re-raise with the original class so the proxy
+            %% catch-all sees exactly what was raised.
+            ok = terminal_chunkfun_cleanup(WorkerSessionPid, JobRef),
+            ok = stash_usage_outcome(<<"stream_relay_crash">>),
+            erlang:raise(Class, Reason, Stacktrace)
     end,
     %% TTFB on the FIRST forwarded chunk (spec A.4).
     TtfbSent1 = maybe_send_ttfb(JobRef, TtfbStart, TtfbSent),
@@ -1484,6 +1513,18 @@ decode_done(Done) when is_map(Done) ->
 %% is the spec's distinguishing `wire_enc_inflate_fail` string: the
 %% proxy's note_usage_outcome(error) is FIRST-WRITE-WINS and stays
 %% inert once the binary is present.
+%% Terminal cleanup shared by every ChunkFun abort path in the relay
+%% (client disconnect, translate abort, relay crash): cancel the
+%% worker session, mark the job dead, flush stragglers, and RELEASE
+%% the reservation now — never pin a pool slot past a terminal abort
+%% (the stream_drain_timeout inactivity rationale).
+terminal_chunkfun_cleanup(WorkerSessionPid, JobRef) ->
+    ok = cancel_session(WorkerSessionPid, JobRef),
+    ok = mark_dead(JobRef),
+    ok = flush_job(JobRef),
+    ok = sched_release(JobRef),
+    ok.
+
 wire_enc_abort(JobRef, Seq, Reason, WorkerSessionPid) ->
     logger:error(#{
         what => janus_wire_enc_inflate_fail,

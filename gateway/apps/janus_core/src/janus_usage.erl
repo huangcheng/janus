@@ -716,4 +716,8 @@ outcome_bin(<<"failed">>) -> <<"failed">>;
 outcome_bin(<<"cancelled">>) -> <<"cancelled">>;
 outcome_bin(<<"truncated">>) -> <<"truncated">>;
 outcome_bin(<<"wire_enc_inflate_fail">>) -> <<"wire_enc_inflate_fail">>;
+%% Worker-relay terminal aborts (security-audit run-1): distinguish
+%% them from node loss in usage_events the same way.
+outcome_bin(<<"translate_abort">>) -> <<"translate_abort">>;
+outcome_bin(<<"stream_relay_crash">>) -> <<"stream_relay_crash">>;
 outcome_bin(_) -> null.
