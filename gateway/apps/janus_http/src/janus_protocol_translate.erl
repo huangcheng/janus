@@ -1153,11 +1153,9 @@ input_items_to_chat([], Acc, Pending) ->
 input_items_to_chat(
     [#{<<"type">> := <<"message">>, <<"role">> := Role, <<"content">> := C} | Rest], Acc, Pending
 ) ->
-    %% A message ends any tool run: flush before it.
-    Acc1 = flush_pending(Acc, Pending),
     case response_message_content_to_chat(C) of
         {ok, Content} ->
-            input_items_to_chat(Rest, [#{<<"role">> => chat_role(Role), <<"content">> => Content} | Acc1], []);
+            push_chat_message(chat_role(Role), Content, Rest, Acc, Pending);
         {error, _} = Err ->
             Err
     end;
@@ -1191,13 +1189,15 @@ input_items_to_chat(
         {ok, Msgs} ->
             %% [ToolMsg] or [ToolMsg, ImgUserMsg]: the tool message
             %% lands in the run; the image carrier WAITS in Pending
-            %% (flushed after the run — adjacency note above).
+            %% (flushed after the run — adjacency note above). Pending
+            %% holds CREATION order (see flush_pending/2), so deferred
+            %% messages append — several of them must not reverse.
             {Acc1, Pending1} =
                 case Msgs of
                     [ToolMsg] ->
                         {[ToolMsg | Acc], Pending};
                     [ToolMsg, UserMsg] ->
-                        {[ToolMsg | Acc], [UserMsg | Pending]}
+                        {[ToolMsg | Acc], Pending ++ [UserMsg]}
                 end,
             input_items_to_chat(Rest, Acc1, Pending1);
         {error, _} = Err ->
@@ -1211,11 +1211,9 @@ input_items_to_chat([#{<<"type">> := <<"reasoning">>} | Rest], Acc, Pending) ->
 input_items_to_chat([#{<<"role">> := Role, <<"content">> := C} | Rest], Acc, Pending) when
     is_binary(Role)
 ->
-    %% A message ends any tool run: flush before it.
-    Acc1 = flush_pending(Acc, Pending),
     case response_message_content_to_chat(C) of
         {ok, Content} ->
-            input_items_to_chat(Rest, [#{<<"role">> => chat_role(Role), <<"content">> => Content} | Acc1], []);
+            push_chat_message(chat_role(Role), Content, Rest, Acc, Pending);
         {error, _} ->
             {error, {translate_unsupported, <<"invalid input item">>}}
     end;
@@ -1224,9 +1222,55 @@ input_items_to_chat([#{<<"type">> := _} | _], _, _) ->
 input_items_to_chat(_, _, _) ->
     {error, {translate_unsupported, <<"invalid responses input">>}}.
 
-%% Acc is the reversed accumulator; Pending (creation order) must land
-%% AFTER the tool run in FINAL order: reverse(Pending, Acc) yields
-%% [..., toolMsgs..., pending...final-order] — see input_items_to_chat/3.
+%% A message arriving INSIDE a tool run cannot become a standalone chat
+%% message: strict upstreams require assistant(tool_calls) to be
+%% followed IMMEDIATELY by its tool messages, so anything emitted in
+%% between 400s the whole request. Responses ordering is FREE (the
+%% spec pairs results by call_id), so clients legally send assistant
+%% text between a function_call and its function_call_output (live
+%% 2026-10-29: dashscope "tool_calls must be followed by tool
+%% messages", minimax "(2013) tool call result does not follow tool
+%% call"; the dangling repair misses it because the call IS answered —
+%% just not adjacently). Such messages WAIT in Pending and land after
+%% the run, exactly like the image carriers.
+%%
+%% A message with no run open is a real boundary: flush Pending and
+%% emit in place. Openness is "some call in the trailing tool run is
+%% still unanswered", NOT "the previous message was a tool message" —
+%% the run is closed the moment every call has its result.
+push_chat_message(Role, Content, Rest, Acc, Pending) ->
+    case run_open(Acc) of
+        true ->
+            Msg = #{<<"role">> => Role, <<"content">> => Content},
+            input_items_to_chat(Rest, Acc, Pending ++ [Msg]);
+        false ->
+            Acc1 = flush_pending(Acc, Pending),
+            input_items_to_chat(Rest, [#{<<"role">> => Role, <<"content">> => Content} | Acc1], [])
+    end.
+
+%% True when Acc's trailing run (assistant tool_calls + the tool
+%% messages already emitted for it) still has an unanswered call.
+run_open(Acc) ->
+    {Answered, Rest} = leading_tool_ids(Acc, []),
+    case Rest of
+        [#{<<"role">> := <<"assistant">>, <<"tool_calls">> := TCs} | _] when
+            is_list(TCs), TCs =/= []
+        ->
+            Required = [Id || #{<<"id">> := Id} <- TCs, is_binary(Id)],
+            not lists:all(fun(I) -> lists:member(I, Answered) end, Required);
+        _ ->
+            false
+    end.
+
+leading_tool_ids([#{<<"role">> := <<"tool">>, <<"tool_call_id">> := Id} | Rest], Acc) when is_binary(Id) ->
+    leading_tool_ids(Rest, [Id | Acc]);
+leading_tool_ids(Rest, Acc) ->
+    {Acc, Rest}.
+
+%% Acc is the reversed accumulator, Pending is in CREATION order:
+%% reverse(flush_pending(Acc, Pending)) = reverse(Acc) ++ Pending, so
+%% the deferred messages land AFTER the tool run in their original
+%% order. Appending (never prepending) is what keeps that order.
 flush_pending(Acc, []) ->
     Acc;
 flush_pending(Acc, Pending) ->
