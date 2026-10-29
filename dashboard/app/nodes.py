@@ -827,10 +827,18 @@ async def _worker_probe_loop() -> None:
     """
     while True:
         try:
+            # Resolve the egress policy ONCE per cycle, like every
+            # sibling stats reader (health poller, log/ops pullers,
+            # maintenance reload): with dash.egress_policy ON the
+            # global JANUS_STATS_TOKEN must never leave this box by
+            # dashboard action — a hardcoded policy_on=False here sent
+            # the fleet-wide admin bearer off-box every probe cycle
+            # (security-audit run-1).
+            policy_on = await egress.egress_policy_on()
             rows = []
             try:
                 rows = await database.fetch(
-                    "SELECT stats_host, stats_port, stats_token_ciphertext FROM gateway_nodes WHERE enabled"
+                    "SELECT id, name, stats_host, stats_port, stats_token_ciphertext FROM gateway_nodes WHERE enabled"
                 )
             except Exception:
                 logger.debug("probe loop: gateway rows fetch failed", exc_info=True)
@@ -842,9 +850,10 @@ async def _worker_probe_loop() -> None:
                     row["stats_host"],
                     row["stats_token_ciphertext"],
                     config.stats_token,
-                    policy_on=False,
+                    policy_on=policy_on,
                 )
                 if not token:
+                    egress.note_skipped_no_token(f'node:{row["id"]}', row["stats_host"])
                     continue
                 try:
                     url = stats_url(row["stats_host"], row["stats_port"], "/stats/fleet/command")
