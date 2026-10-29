@@ -237,21 +237,28 @@ stream_worker(Session, Target, Headers, Body) ->
     %% Exit if the session dies while we wait for continue/stop.
     SessionMon = monitor(process, Session),
     case janus_providers_http:post_stream(Target, Headers, Body) of
-        {ok, Status, _RespHeaders, Drain} when is_function(Drain, 1) ->
+        {ok, Status, _RespHeaders, Drain} when is_function(Drain, 2) ->
             Session ! {stream_open, self(), Status},
             Result =
                 try
-                    Drain(fun(Chunk) ->
-                        Session ! {stream_chunk, self(), Chunk},
-                        receive
-                            {stream_continue, Session} ->
-                                ok;
-                            {stream_stop, Session} ->
-                                throw(stopped);
-                            {'DOWN', SessionMon, process, Session, _} ->
-                                throw(stopped)
-                        end
-                    end)
+                    %% The worker session is the upstream relay: its
+                    %% chunks go to the MASTER, not to a client, so
+                    %% there is nothing to reassure here. Keepalives are
+                    %% a master-side concern (janus_http_worker_client).
+                    Drain(
+                        fun(Chunk) ->
+                            Session ! {stream_chunk, self(), Chunk},
+                            receive
+                                {stream_continue, Session} ->
+                                    ok;
+                                {stream_stop, Session} ->
+                                    throw(stopped);
+                                {'DOWN', SessionMon, process, Session, _} ->
+                                    throw(stopped)
+                            end
+                        end,
+                        undefined
+                    )
                 catch
                     throw:stopped ->
                         {error, cancelled}

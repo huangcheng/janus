@@ -21,6 +21,9 @@
 ]).
 
 -define(UA, <<"opencode/2.0.15">>).
+-type drain_fun() :: fun((fun((binary()) -> ok), keepalive_fun()) -> ok | {error, term()}).
+-type keepalive_fun() :: fun((binary()) -> ok) | undefined.
+
 -define(CONNECT_MS, 5000).
 -define(TTFB_MS_DEFAULT, 120000).
 -define(BODY_MS, 120000).
@@ -41,6 +44,14 @@ drain_idle_ms() ->
         _ -> ?BODY_MS
     catch
         _:_ -> ?BODY_MS
+    end.
+
+keepalive_ms() ->
+    try janus_worker_wire:stream_keepalive_ms() of
+        Ms when is_integer(Ms), Ms > 0 -> Ms;
+        _ -> 15_000
+    catch
+        _:_ -> 15_000
     end.
 
 ttfb_ms() ->
@@ -293,9 +304,21 @@ get(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, TimeoutMs)
     end.
 
 %% Stream POST: returns a drain fun that yields raw body chunks then closes gun.
-%% DrainFun(ChunkFun) -> ok | {error, term()} where ChunkFun(binary()) -> ok.
+%%
+%% DrainFun(ChunkFun, KeepaliveFun) -> ok | {error, term()}
+%%   ChunkFun(binary())     -> ok   consumes UPSTREAM bytes
+%%   KeepaliveFun(binary()) -> ok   writes a CLIENT-facing SSE comment,
+%%                                  or `undefined` when the caller has no
+%%                                  client socket (an error-body collect).
+%%
+%% The two are separate because they are not the same sink: on the
+%% translate path ChunkFun feeds an SSE PARSER, so a keepalive frame
+%% written there would corrupt the upstream stream instead of
+%% reassuring the client. KeepaliveFun is called from inside the drain
+%% loop whenever it has been silent long enough, which is the only
+%% place that can see the silence.
 -spec post_stream(map(), [{binary(), binary()}], binary()) ->
-    {ok, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
+    {ok, pos_integer(), map(), drain_fun()}
     | {error, term()}.
 post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Body) ->
     Transport =
@@ -322,13 +345,13 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
                                     %% frames is a truncated stream by
                                     %% definition (no trailer ever
                                     %% arrives) — fail-closed on drain.
-                                    Drain = fun(_ChunkFun) ->
+                                    Drain = fun(_ChunkFun, _KeepaliveFun) ->
                                         gun:close(Conn),
                                         {error, {body, {content_encoding, inflate_incomplete}}}
                                     end,
                                     {ok, Status, headers_map(RespHeaders), Drain};
                                 identity ->
-                                    Drain = fun(_ChunkFun) ->
+                                    Drain = fun(_ChunkFun, _KeepaliveFun) ->
                                         gun:close(Conn),
                                         ok
                                     end,
@@ -342,10 +365,10 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
                                 gzip ->
                                     case janus_wire_enc:inflate_stream_open() of
                                         {ok, St0} ->
-                                            Drain = fun(ChunkFun) ->
+                                            Drain = fun(ChunkFun, KeepaliveFun) ->
                                                 try
                                                     drain_stream_decoding(
-                                                        Conn, Stream, ChunkFun, St0
+                                                        Conn, Stream, ChunkFun, KeepaliveFun, St0
                                                     )
                                                 after
                                                     _ = janus_wire_enc:inflate_stream_close(St0),
@@ -361,9 +384,9 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
                                             {error, {content_encoding, OpenReason}}
                                     end;
                                 identity ->
-                                    Drain = fun(ChunkFun) ->
+                                    Drain = fun(ChunkFun, KeepaliveFun) ->
                                         try
-                                            drain_stream(Conn, Stream, ChunkFun)
+                                            drain_stream(Conn, Stream, ChunkFun, KeepaliveFun)
                                         after
                                             gun:close(Conn)
                                         end
@@ -389,20 +412,75 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
     end.
 
 %% Per-frame wait for a plain (identity) stream: same reasoning as
-%% drain_stream_decoding/4 — silence mid-stream is a stalled upstream,
+%% drain_stream_decoding/5 — silence mid-stream is a stalled upstream,
 %% not a slow one, so it is bounded by the shared inactivity ceiling.
-drain_stream(Conn, Stream, ChunkFun) ->
-    case gun:await(Conn, Stream, drain_idle_ms()) of
+drain_stream(Conn, Stream, ChunkFun, KeepaliveFun) ->
+    drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, idle_deadline(), tick_deadline()).
+
+%% StallDeadline is an ABSOLUTE instant that only a forwarded chunk
+%% resets — that is what makes the inactivity ceiling a real bound.
+%% next_tick/2 caps each individual wait so a silent stretch still gets
+%% a keepalive, but it never moves StallDeadline, so a permanently
+%% silent upstream trips the ceiling instead of keepaliving forever.
+%% (gun:await/3 cannot be cancelled, so the tick IS the wait
+%% granularity; the deadline is what keeps that safe.)
+drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, StallDeadline, TickDeadline) ->
+    case gun:await(Conn, Stream, next_tick(StallDeadline, TickDeadline)) of
         {data, nofin, Data} ->
             _ = ChunkFun(Data),
-            drain_stream(Conn, Stream, ChunkFun);
+            drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, idle_deadline(), tick_deadline());
         {data, fin, Data} ->
             _ = ChunkFun(Data),
             ok;
+        {error, timeout} ->
+            case expired(StallDeadline) of
+                true ->
+                    {error, {body, timeout}};
+                false ->
+                    emit_keepalive(KeepaliveFun),
+                    drain_stream(
+                        Conn, Stream, ChunkFun, KeepaliveFun, StallDeadline, tick_deadline()
+                    )
+            end;
         {error, Reason} ->
             {error, {body, Reason}};
         Other ->
             {error, {unexpected_body, Other}}
+    end.
+
+%% The inactivity ceiling: only a forwarded chunk resets this.
+idle_deadline() ->
+    erlang:monotonic_time(millisecond) + drain_idle_ms().
+
+%% The next keepalive tick: a SHORTER, independent instant, re-armed on
+%% every wakeup. Using idle_deadline/0 for both made next_tick/2 always
+%% return the full stall window, so gun:await slept straight through it
+%% and the keepalive branch was unreachable.
+tick_deadline() ->
+    erlang:monotonic_time(millisecond) + keepalive_ms().
+
+expired(Deadline) ->
+    Deadline - erlang:monotonic_time(millisecond) =< 0.
+
+%% Never sleep past the stall deadline, and never past one keepalive
+%% tick. Always at least 1ms so gun:await cannot spin.
+next_tick(StallDeadline, TickDeadline) ->
+    max(1, min(deadline_in(StallDeadline), deadline_in(TickDeadline))).
+
+deadline_in(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
+
+%% SSE comment frame: legal on every face, carries no data, discarded by
+%% every conforming parser. A dead client raises here, which propagates
+%% as a drain error exactly like a failed chunk write.
+emit_keepalive(undefined) ->
+    ok;
+emit_keepalive(KeepaliveFun) ->
+    try
+        KeepaliveFun(<<": keepalive\n\n">>),
+        ok
+    catch
+        _:_ -> ok
     end.
 
 %% Upstream gzip seam (spec 2026-10-12-wire-compression G2/F3/F5/D5).
@@ -501,13 +579,22 @@ upstream_decode_gzip_body(Status, RespHeaders, Body, S0) ->
 %% (verified live 2026-10-29: a single-node deployment had no
 %% inactivity bound at all on this path and a stalled stream hung until
 %% the client gave up).
-drain_stream_decoding(Conn, Stream, ChunkFun, S0) ->
-    case gun:await(Conn, Stream, drain_idle_ms()) of
+drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0) ->
+    drain_stream_decoding(
+        Conn, Stream, ChunkFun, KeepaliveFun, S0, idle_deadline(), tick_deadline()
+    ).
+
+%% Same deadline discipline as drain_stream/6: StallDeadline resets only
+%% on a forwarded chunk, the tick deadline only paces keepalives.
+drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0, StallDeadline, TickDeadline) ->
+    case gun:await(Conn, Stream, next_tick(StallDeadline, TickDeadline)) of
         {data, nofin, Data} ->
             case janus_wire_enc:inflate_stream_frame(S0, Data) of
                 {ok, Out, S1} ->
                     _ = ChunkFun(Out),
-                    drain_stream_decoding(Conn, Stream, ChunkFun, S1);
+                    drain_stream_decoding(
+                        Conn, Stream, ChunkFun, KeepaliveFun, S1, idle_deadline(), tick_deadline()
+                    );
                 {error, Reason} ->
                     {error, {body, {content_encoding, Reason}}}
             end;
@@ -521,6 +608,16 @@ drain_stream_decoding(Conn, Stream, ChunkFun, S0) ->
                     end;
                 {error, Reason} ->
                     {error, {body, {content_encoding, Reason}}}
+            end;
+        {error, timeout} ->
+            case expired(StallDeadline) of
+                true ->
+                    {error, {body, timeout}};
+                false ->
+                    emit_keepalive(KeepaliveFun),
+                    drain_stream_decoding(
+                        Conn, Stream, ChunkFun, KeepaliveFun, S0, StallDeadline, tick_deadline()
+                    )
             end;
         {error, Reason} ->
             {error, {body, Reason}};

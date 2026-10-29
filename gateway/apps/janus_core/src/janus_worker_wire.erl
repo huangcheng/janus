@@ -15,6 +15,7 @@
     non_stream_timeout_ms/0,
     stream_timeout_ms/0,
     stream_inactivity_timeout_ms/0,
+    stream_keepalive_ms/0,
     ack_deadline_ms/0,
     initial_chunk_seq/0,
     hello/3,
@@ -80,6 +81,43 @@ stream_timeout_ms() -> 600_000.
 %% gateway must say so in its own words instead of letting the client
 %% die blind. Restarts on every forwarded chunk (progress), so only
 %% true silence trips it. Deliberately BELOW stream_timeout_ms/0.
+%% Client-facing SSE comment cadence. Lives here (not in janus_http) so
+%% janus_providers can use it without depending on the HTTP app — the
+%% dependency runs janus_http -> janus_providers, never the reverse.
+%% Kept below the inactivity ceiling so a silent stream is always
+%% reassured at least once before it is torn down.
+-spec stream_keepalive_ms() -> pos_integer().
+stream_keepalive_ms() ->
+    Ceiling = stream_inactivity_timeout_ms(),
+    case keepalive_setting() of
+        V when is_integer(V), V > 0, V < Ceiling -> V;
+        _ -> default_keepalive_ms(Ceiling)
+    end.
+
+%% application env first (tests set it in-process), then the OS
+%% environment (deploys set it via -e), then the built-in default.
+keepalive_setting() ->
+    case application:get_env(janus_core, stream_keepalive_ms) of
+        {ok, V} ->
+            V;
+        undefined ->
+            case os:getenv("JANUS_STREAM_KEEPALIVE_MS") of
+                false ->
+                    undefined;
+                Raw ->
+                    case string:to_integer(string:trim(Raw)) of
+                        {N, ""} when is_integer(N) -> N;
+                        _ -> undefined
+                    end
+            end
+    end.
+
+%% The default must still respect the ceiling, otherwise a very small
+%% JANUS_STREAM_INACTIVITY_TIMEOUT_MS would leave a keepalive that can
+%% never fire before the stream dies.
+default_keepalive_ms(Ceiling) when Ceiling > 1 -> min(15_000, Ceiling - 1);
+default_keepalive_ms(_Ceiling) -> 15_000.
+
 %% Overridable so the live verification driver can shrink the window
 %% instead of idling 180s, and so an operator can tune it per fleet.
 -spec stream_inactivity_timeout_ms() -> pos_integer().

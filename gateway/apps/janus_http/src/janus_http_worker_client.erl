@@ -629,41 +629,11 @@ stream_inactivity_deadline() ->
 deadline_remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
 
-%% Client-facing SSE comment cadence. Comfortably under common client
-%% idle timeouts (300s) and under the inactivity ceiling, so a silent
-%% upstream still reassures the client while the gateway keeps its own
-%% deadline running. Overridable so tests can observe a tick without
-%% idling for the real interval.
--define(STREAM_KEEPALIVE_MS, 15_000).
-
-%% An override is honoured only when it is a positive integer BELOW the
-%% inactivity ceiling. A cadence at or above that ceiling would let the
-%% drain tear the stream down before the client ever hears a keepalive,
-%% which is the whole point of the tick — so such a value falls back to
-%% the default rather than silently disabling the feature.
+%% The cadence itself lives in janus_core so janus_providers can share
+%% it without a dependency cycle; this is the thin accessor the drain
+%% and its tests use.
 stream_keepalive_ms() ->
-    Ceiling = janus_worker_wire:stream_inactivity_timeout_ms(),
-    case keepalive_override() of
-        V when is_integer(V), V > 0, V < Ceiling -> V;
-        _ -> ?STREAM_KEEPALIVE_MS
-    end.
-
-%% app env first (tests), then the environment variable (deploys).
-keepalive_override() ->
-    case application:get_env(janus, stream_keepalive_ms) of
-        {ok, V} ->
-            V;
-        undefined ->
-            case os:getenv("JANUS_STREAM_KEEPALIVE_MS") of
-                false ->
-                    undefined;
-                Raw ->
-                    case string:to_integer(string:trim(Raw)) of
-                        {N, ""} when is_integer(N) -> N;
-                        _ -> undefined
-                    end
-            end
-    end.
+    janus_worker_wire:stream_keepalive_ms().
 
 %% Wait until WHICHEVER comes first: the total stream deadline or the
 %% inactivity deadline. A stalled-but-alive stream now trips this with

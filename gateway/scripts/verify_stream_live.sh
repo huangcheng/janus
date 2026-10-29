@@ -37,22 +37,19 @@ JANUS_PORT="${JANUS_PORT:-18081}"
 # Scenario 1's stall MUST stay well under the inactivity ceiling,
 # otherwise the gateway correctly tears the stream down before it
 # resumes and the scenario proves nothing.
-#   scenario 1: stall 2.0s  << ceiling 3.5s  -> survives, tokens resume
-#   scenario 2: stall forever > ceiling      -> gateway terminates
+#   scenario 1: stall 4.0s < ceiling 6.0s -> survives, keepalives fire
+#   scenario 2: stall forever > ceiling   -> gateway terminates
 TEST_API_KEY="${TEST_API_KEY:-sk-fake-live-test}"
-TEST_KEEPALIVE_MS="${TEST_KEEPALIVE_MS:-1000}"
-TEST_INACTIVITY_MS="${TEST_INACTIVITY_MS:-3500}"
+TEST_KEEPALIVE_MS="${TEST_KEEPALIVE_MS:-800}"
+TEST_INACTIVITY_MS="${TEST_INACTIVITY_MS:-6000}"
 
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.log
 
-BOOT_CMD='apk add --no-cache build-base git >/dev/null 2>&1; chmod +x rebar3; export REBAR_BASE_DIR=/build; mkdir -p /build;
-# rebar3 trusts file mtimes, and the bind-mounted checkout always looks
-# OLDER than the cached beams in /build, so an incremental compile
-# silently keeps stale .beam files. Drop the project apps beams (not the
-# fetched deps) to force a real rebuild on every run.
-rm -rf /build/default/lib/janus /build/default/lib/janus_core /build/default/lib/janus_http /build/default/lib/janus_providers /build/default/lib/janus_util;
-./rebar3 compile >/tmp/compile.log 2>&1 || { echo COMPILE_FAILED; tail -40 /tmp/compile.log; exit 1; }; exec erl -noshell -pa /build/default/lib/*/ebin -eval "application:ensure_all_started(janus), io:format(\"janus_up~n\"), receive after infinity -> ok end."'
+# NOTE: this is one single-quoted shell string. Keep it comment-free —
+# a '#' inside it comments out everything to the end of the LINE, which
+# silently skipped the compile and the erl launch.
+BOOT_CMD='apk add --no-cache build-base git >/dev/null 2>&1; chmod +x rebar3; export REBAR_BASE_DIR=/build; mkdir -p /build; rm -rf /build/default/lib/janus /build/default/lib/janus_core /build/default/lib/janus_http /build/default/lib/janus_providers /build/default/lib/janus_util; ./rebar3 compile >/tmp/compile.log 2>&1 || { echo COMPILE_FAILED; tail -40 /tmp/compile.log; exit 1; }; exec erl -noshell -pa /build/default/lib/*/ebin -eval "application:ensure_all_started(janus), io:format(\"janus_up~n\"), receive after infinity -> ok end."'
 
 PASS=0
 FAIL=0
@@ -78,7 +75,7 @@ say "== artifacts: $ARTIFACT_DIR"
 # ---------------------------------------------------------------- upstream
 say "== starting fake SSE upstream on :$UPSTREAM_PORT"
 python3 "$GW/scripts/fake_sse_upstream.py" \
-    --port "$UPSTREAM_PORT" --prelude-events 2 --silent-ms 2000 \
+    --port "$UPSTREAM_PORT" --prelude-events 2 --silent-ms 4000 \
     >"$ARTIFACT_DIR/upstream.log" 2>&1 &
 UP_PID=$!
 for _ in $(seq 1 100); do
@@ -151,20 +148,17 @@ say "   client received $(wc -c <"$ARTIFACT_DIR/client-a.txt") bytes"
 # 1. KEEPALIVE frames on the real wire.
 #
 # This harness runs a SINGLE node, so the empty worker pool routes every
-# request through the local adapter, whose drain is the provider's
-# 1-arity gun loop — normalize_drain_arity/1 documents that keepalives
-# do NOT operate there. So this run asserts the OPPOSITE: that the
-# absence is the documented, non-crashing behavior (the bug fixed in
-# 6aa9592 was a hard badarity crash on this exact path). A separate
-# two-node run is required to observe keepalive frames.
+# request through the local adapter — the provider's own gun drain loop.
+# That path must now emit keepalives too, or a single-node / degraded
+# deployment leaves its clients to time out in silence.
 KA=$(grep -c ': keepalive' "$ARTIFACT_DIR/client-a.txt" 2>/dev/null || true)
 KA=${KA:-0}
 if grep -q 'badarity' "$ARTIFACT_DIR/server.log" 2>/dev/null; then
     bad "local-path drain raised badarity (the degraded-mode crash regression)"
-elif [[ "$KA" -eq 0 ]]; then
-    ok "single-node local path: no keepalive, as documented, and no badarity"
+elif [[ "$KA" -ge 1 ]]; then
+    ok "keepalive frames observed on the LOCAL path (n=$KA)"
 else
-    ok "keepalive frames observed on the local path (n=$KA) — update the documented limitation"
+    bad "local path emitted no keepalive during a 4s stall at an 800ms cadence"
 fi
 
 # 1b. They must be SSE comments, not spliced into payload lines.

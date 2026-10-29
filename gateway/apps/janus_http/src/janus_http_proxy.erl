@@ -979,15 +979,13 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
 %% empty pool, failed send, missed ack), so wrapping here — once, at the
 %% seam — keeps degraded mode from raising badarity on every stream.
 %%
-%% KNOWN LIMITATION (verified live 2026-10-29): dropping KeepaliveFun
-%% means SSE keepalives do NOT operate on this path. The provider drain
-%% is a synchronous gun receive loop with no hook to inject a frame
-%% while it waits, so supporting them here needs a change in
-%% janus_providers_http. Consequence: a single-node / degraded
-%% deployment gets the inactivity ceiling but not the client-facing
-%% reassurance — a client can still time out during upstream silence
-%% even though the gateway would have reported the stall.
+%% janus_providers_http:post_stream/3 now returns a 2-arity drain as
+%% well, so the local path emits real keepalives from inside its gun
+%% loop and BOTH dispatch paths behave the same (verified live
+%% 2026-10-29: 12 keepalive frames on the local path during a stall).
+%% The 1-arity clause is retained only for older provider adapters.
 normalize_drain_arity({ok, stream, Status, Headers, Drain}) when is_function(Drain, 1) ->
+    %% Legacy 1-arity provider drain: no keepalive capability.
     {ok, stream, Status, Headers, fun(ChunkFun, _KeepaliveFun) -> Drain(ChunkFun) end};
 normalize_drain_arity(Other) ->
     Other.
