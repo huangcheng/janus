@@ -1711,8 +1711,44 @@ wire_reason(Other) -> Other.
 %% makes a mid-stream failure actionable.
 upstream_stream_error_msg() ->
     case janus_protocol_translate:take_upstream_stream_error() of
-        undefined -> <<"upstream sent an unsupported stream construct">>;
-        Text -> Text
+        undefined ->
+            <<"upstream sent an unsupported stream construct">>;
+        Text ->
+            %% Provider-controlled text entering a client-visible frame.
+            %% Bound it the way the sibling relay paths do
+            %% (upstream_err_msg/1 caps at 400, the error detail at 600);
+            %% without this a misbehaving upstream could push its whole
+            %% 1 MiB SSE frame into the terminal error event.
+            trunc_utf8(Text, 400)
+    end.
+
+%% Byte-capped, codepoint-safe (the message is JSON-encoded downstream,
+%% and a split multi-byte sequence would produce invalid UTF-8).
+trunc_utf8(B, Max) when is_binary(B), byte_size(B) > Max ->
+    trim_partial_utf8(binary:part(B, 0, Max));
+trunc_utf8(B, _Max) ->
+    B.
+
+trim_partial_utf8(B) -> trim_partial_utf8(B, byte_size(B) - 1, 0).
+
+trim_partial_utf8(B, I, _Extra) when I < 0; _Extra >= 3 ->
+    B;
+trim_partial_utf8(B, I, Extra) ->
+    case binary:at(B, I) of
+        C when C < 128 -> B;
+        C when C >= 192 ->
+            Need =
+                if
+                    C < 224 -> 2;
+                    C < 240 -> 3;
+                    true -> 4
+                end,
+            case Need =< Extra + 1 of
+                true -> B;
+                false -> binary:part(B, 0, I)
+            end;
+        _ ->
+            trim_partial_utf8(B, I - 1, Extra + 1)
     end.
 
 %% Upstream silence in the middle of a stream (janus_worker_wire:
