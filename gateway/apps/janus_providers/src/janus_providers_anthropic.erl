@@ -46,7 +46,7 @@ messages(Route, Body, ReqMap) ->
 
 -spec messages(map(), binary(), map(), map()) ->
     {ok, pos_integer(), map(), binary()}
-    | {ok, stream, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
+    | {ok, stream, pos_integer(), map(), janus_providers_http:drain_fun()}
     | {error, term()}.
 messages(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
     Stream = maps:get(stream, Opts, false) =:= true,

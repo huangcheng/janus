@@ -6,7 +6,14 @@
 
 %% Pure seam helpers (spec 2026-10-12-wire-compression F5/D5 — eunit;
 %% mirrors the wire module's pure-seam export pattern).
--export([maybe_ae/2, upstream_ce_classify/2, ae_requested/1]).
+-export([maybe_ae/2, upstream_ce_classify/2, ae_requested/1,
+    %% Exported for eunit: the drain deadline arithmetic is pure, and a
+    %% regression on the degraded/local path would otherwise only show
+    %% up in production.
+    next_tick/2,
+    expired/1,
+    idle_action/2
+]).
 
 -export([
     user_agent/0,
@@ -23,6 +30,9 @@
 -define(UA, <<"opencode/2.0.15">>).
 -type drain_fun() :: fun((fun((binary()) -> ok), keepalive_fun()) -> ok | {error, term()}).
 -type keepalive_fun() :: fun((binary()) -> ok) | undefined.
+%% Exported so the adapters reference this shape instead of restating
+%% it — there is no dialyzer gate in CI, so a drift would go unnoticed.
+-export_type([drain_fun/0, keepalive_fun/0]).
 
 -define(CONNECT_MS, 5000).
 -define(TTFB_MS_DEFAULT, 120000).
@@ -46,13 +56,13 @@ drain_idle_ms() ->
         _:_ -> ?BODY_MS
     end.
 
+%% janus_core is a hard dependency of this app and
+%% janus_worker_wire:stream_keepalive_ms/0 is total (always a positive
+%% integer below the inactivity ceiling), so this is a direct
+%% delegation — no fallback, and no second copy of the default that
+%% could drift.
 keepalive_ms() ->
-    try janus_worker_wire:stream_keepalive_ms() of
-        Ms when is_integer(Ms), Ms > 0 -> Ms;
-        _ -> 15_000
-    catch
-        _:_ -> 15_000
-    end.
+    janus_worker_wire:stream_keepalive_ms().
 
 ttfb_ms() ->
     case persistent_term:get({janus, failover_cfg}, undefined) of
@@ -415,31 +425,39 @@ post_stream(#{host := Host, port := Port, path := Path, tls := Tls}, Headers, Bo
 %% drain_stream_decoding/5 — silence mid-stream is a stalled upstream,
 %% not a slow one, so it is bounded by the shared inactivity ceiling.
 drain_stream(Conn, Stream, ChunkFun, KeepaliveFun) ->
-    drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, idle_deadline(), tick_deadline()).
+    KaMs = keepalive_ms(),
+    drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, KaMs, idle_deadline(), tick_deadline(KaMs)).
 
 %% StallDeadline is an ABSOLUTE instant that only a forwarded chunk
 %% resets — that is what makes the inactivity ceiling a real bound.
-%% next_tick/2 caps each individual wait so a silent stretch still gets
+%% TickDeadline caps each individual wait so a silent stretch still gets
 %% a keepalive, but it never moves StallDeadline, so a permanently
 %% silent upstream trips the ceiling instead of keepaliving forever.
 %% (gun:await/3 cannot be cancelled, so the tick IS the wait
-%% granularity; the deadline is what keeps that safe.)
-drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, StallDeadline, TickDeadline) ->
+%% granularity; the un-reset stall deadline is what keeps that safe.)
+drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, KaMs, StallDeadline, TickDeadline) ->
     case gun:await(Conn, Stream, next_tick(StallDeadline, TickDeadline)) of
         {data, nofin, Data} ->
             _ = ChunkFun(Data),
-            drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, idle_deadline(), tick_deadline());
+            drain_stream(
+                Conn, Stream, ChunkFun, KeepaliveFun, KaMs, idle_deadline(), tick_deadline(KaMs)
+            );
         {data, fin, Data} ->
             _ = ChunkFun(Data),
             ok;
         {error, timeout} ->
-            case expired(StallDeadline) of
-                true ->
+            case idle_action(StallDeadline, KeepaliveFun) of
+                stalled ->
                     {error, {body, timeout}};
-                false ->
-                    emit_keepalive(KeepaliveFun),
+                keepalive ->
                     drain_stream(
-                        Conn, Stream, ChunkFun, KeepaliveFun, StallDeadline, tick_deadline()
+                        Conn,
+                        Stream,
+                        ChunkFun,
+                        KeepaliveFun,
+                        KaMs,
+                        StallDeadline,
+                        tick_deadline(KaMs)
                     )
             end;
         {error, Reason} ->
@@ -448,40 +466,24 @@ drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, StallDeadline, TickDeadline) 
             {error, {unexpected_body, Other}}
     end.
 
-%% The inactivity ceiling: only a forwarded chunk resets this.
-idle_deadline() ->
-    erlang:monotonic_time(millisecond) + drain_idle_ms().
-
-%% The next keepalive tick: a SHORTER, independent instant, re-armed on
-%% every wakeup. Using idle_deadline/0 for both made next_tick/2 always
-%% return the full stall window, so gun:await slept straight through it
-%% and the keepalive branch was unreachable.
-tick_deadline() ->
-    erlang:monotonic_time(millisecond) + keepalive_ms().
-
-expired(Deadline) ->
-    Deadline - erlang:monotonic_time(millisecond) =< 0.
-
-%% Never sleep past the stall deadline, and never past one keepalive
-%% tick. Always at least 1ms so gun:await cannot spin.
-next_tick(StallDeadline, TickDeadline) ->
-    max(1, min(deadline_in(StallDeadline), deadline_in(TickDeadline))).
-
-deadline_in(Deadline) ->
-    max(0, Deadline - erlang:monotonic_time(millisecond)).
-
 %% SSE comment frame: legal on every face, carries no data, discarded by
-%% every conforming parser. A dead client raises here, which propagates
-%% as a drain error exactly like a failed chunk write.
+%% every conforming parser.
+%%
+%% Failures PROPAGATE, deliberately (OCR caught the opposite here): the
+%% proxy signals a dead client with throw(janus_client_disconnect), and
+%% both stream handlers depend on that throw to abort the drain, close
+%% gun and account the request as cancelled/499. Swallowing it meant a
+%% client dying during upstream silence went unnoticed — the loop held
+%% the connection open, kept consuming (and billing) upstream tokens
+%% until the stall ceiling fired, then blamed the UPSTREAM for it
+%% ("upstream stalled", 502, provider benched). It also hid a genuine
+%% wiring bug in KeepaliveFun, which is exactly what the live harness
+%% exists to catch. Symmetric with the chunk path, which propagates.
 emit_keepalive(undefined) ->
     ok;
 emit_keepalive(KeepaliveFun) ->
-    try
-        KeepaliveFun(<<": keepalive\n\n">>),
-        ok
-    catch
-        _:_ -> ok
-    end.
+    KeepaliveFun(<<": keepalive\n\n">>),
+    ok.
 
 %% Upstream gzip seam (spec 2026-10-12-wire-compression G2/F3/F5/D5).
 %% Request side: Accept-Encoding: gzip is emitted ONLY here (structural
@@ -580,20 +582,28 @@ upstream_decode_gzip_body(Status, RespHeaders, Body, S0) ->
 %% inactivity bound at all on this path and a stalled stream hung until
 %% the client gave up).
 drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0) ->
+    KaMs = keepalive_ms(),
     drain_stream_decoding(
-        Conn, Stream, ChunkFun, KeepaliveFun, S0, idle_deadline(), tick_deadline()
+        Conn, Stream, ChunkFun, KeepaliveFun, S0, KaMs, idle_deadline(), tick_deadline(KaMs)
     ).
 
-%% Same deadline discipline as drain_stream/6: StallDeadline resets only
+%% Same deadline discipline as drain_stream/7: StallDeadline resets only
 %% on a forwarded chunk, the tick deadline only paces keepalives.
-drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0, StallDeadline, TickDeadline) ->
+drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0, KaMs, StallDeadline, TickDeadline) ->
     case gun:await(Conn, Stream, next_tick(StallDeadline, TickDeadline)) of
         {data, nofin, Data} ->
             case janus_wire_enc:inflate_stream_frame(S0, Data) of
                 {ok, Out, S1} ->
                     _ = ChunkFun(Out),
                     drain_stream_decoding(
-                        Conn, Stream, ChunkFun, KeepaliveFun, S1, idle_deadline(), tick_deadline()
+                        Conn,
+                        Stream,
+                        ChunkFun,
+                        KeepaliveFun,
+                        S1,
+                        KaMs,
+                        idle_deadline(),
+                        tick_deadline(KaMs)
                     );
                 {error, Reason} ->
                     {error, {body, {content_encoding, Reason}}}
@@ -610,19 +620,60 @@ drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0, StallDeadline, T
                     {error, {body, {content_encoding, Reason}}}
             end;
         {error, timeout} ->
-            case expired(StallDeadline) of
-                true ->
+            case idle_action(StallDeadline, KeepaliveFun) of
+                stalled ->
                     {error, {body, timeout}};
-                false ->
-                    emit_keepalive(KeepaliveFun),
+                keepalive ->
                     drain_stream_decoding(
-                        Conn, Stream, ChunkFun, KeepaliveFun, S0, StallDeadline, tick_deadline()
+                        Conn,
+                        Stream,
+                        ChunkFun,
+                        KeepaliveFun,
+                        S0,
+                        KaMs,
+                        StallDeadline,
+                        tick_deadline(KaMs)
                     )
             end;
         {error, Reason} ->
             {error, {body, Reason}};
         Other ->
             {error, {unexpected_body, Other}}
+    end.
+
+%% The inactivity ceiling: only a forwarded chunk resets this.
+idle_deadline() ->
+    erlang:monotonic_time(millisecond) + drain_idle_ms().
+
+%% The next keepalive tick: a SHORTER, independent instant, re-armed on
+%% every wakeup. Using one instant for both made next_tick/2 always
+%% return the full stall window, so gun:await slept straight through it
+%% and the keepalive branch was unreachable (0 frames observed live).
+tick_deadline(KaMs) ->
+    erlang:monotonic_time(millisecond) + KaMs.
+
+expired(Deadline) ->
+    Deadline - erlang:monotonic_time(millisecond) =< 0.
+
+%% Never sleep past the stall deadline, and never past one keepalive
+%% tick. Always at least 1ms so gun:await cannot spin.
+next_tick(StallDeadline, TickDeadline) ->
+    max(1, min(deadline_in(StallDeadline), deadline_in(TickDeadline))).
+
+deadline_in(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
+
+%% What a wakeup with no data means: the stall ceiling has passed (fail
+%% closed) or this was merely a quiet stretch (reassure and re-arm).
+%% Shared by both drain variants so the tick/stall interplay cannot
+%% drift between them — the gzip loop is the harder one to notice.
+idle_action(StallDeadline, KeepaliveFun) ->
+    case expired(StallDeadline) of
+        true ->
+            stalled;
+        false ->
+            emit_keepalive(KeepaliveFun),
+            keepalive
     end.
 
 collect_body(Conn, Stream, Acc) ->

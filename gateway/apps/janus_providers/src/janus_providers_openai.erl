@@ -88,7 +88,7 @@ chat_completions(Route, Body, ReqMap) ->
 
 -spec chat_completions(map(), binary(), map(), map()) ->
     {ok, pos_integer(), map(), binary()}
-    | {ok, stream, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
+    | {ok, stream, pos_integer(), map(), janus_providers_http:drain_fun()}
     | {error, term()}.
 chat_completions(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
     call(Route, ReqMap, <<"/chat/completions">>, Opts).
@@ -101,7 +101,7 @@ responses(Route, Body, ReqMap) ->
 
 -spec responses(map(), binary(), map(), map()) ->
     {ok, pos_integer(), map(), binary()}
-    | {ok, stream, pos_integer(), map(), fun((fun((binary()) -> ok)) -> ok | {error, term()})}
+    | {ok, stream, pos_integer(), map(), janus_providers_http:drain_fun()}
     | {error, term()}.
 responses(Route, _Body, ReqMap, Opts) when is_map(Route), is_map(ReqMap), is_map(Opts) ->
     %% Gateway is stateless — DEFAULT store off when the client

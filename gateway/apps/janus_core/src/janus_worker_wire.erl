@@ -81,6 +81,13 @@ stream_timeout_ms() -> 600_000.
 %% gateway must say so in its own words instead of letting the client
 %% die blind. Restarts on every forwarded chunk (progress), so only
 %% true silence trips it. Deliberately BELOW stream_timeout_ms/0.
+
+%% Overridable so the live verification driver can shrink the window
+%% instead of idling 180s, and so an operator can tune it per fleet.
+-spec stream_inactivity_timeout_ms() -> pos_integer().
+stream_inactivity_timeout_ms() ->
+    positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", 180_000).
+
 %% Client-facing SSE comment cadence. Lives here (not in janus_http) so
 %% janus_providers can use it without depending on the HTTP app — the
 %% dependency runs janus_http -> janus_providers, never the reverse.
@@ -115,18 +122,15 @@ keepalive_setting() ->
 %% The default must still respect the ceiling, otherwise a very small
 %% JANUS_STREAM_INACTIVITY_TIMEOUT_MS would leave a keepalive that can
 %% never fire before the stream dies.
-default_keepalive_ms(Ceiling) when Ceiling > 1 -> min(15_000, Ceiling - 1);
-default_keepalive_ms(_Ceiling) -> 15_000.
-
-%% Overridable so the live verification driver can shrink the window
-%% instead of idling 180s, and so an operator can tune it per fleet.
--spec stream_inactivity_timeout_ms() -> pos_integer().
-stream_inactivity_timeout_ms() ->
-    positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", 180_000).
+%% One clause: the old `Ceiling =< 1 -> 15_000' arm returned a cadence
+%% far ABOVE the ceiling — exactly the "keepalive that can never fire"
+%% this is supposed to prevent — and `Ceiling - 1' for tiny ceilings
+%% produced a 1ms flood. Clamping keeps the invariant for EVERY ceiling.
+default_keepalive_ms(Ceiling) -> max(1, min(15_000, Ceiling - 1)).
 
 %% A malformed or non-positive override falls back to the default
-%% rather than disarming a timeout: a 0 here would make the inactivity
-%% ceiling inert, which is the failure mode this whole change removes.
+%% rather than disarming a timeout: a 0 there would make the ceiling
+%% inert, which is the failure mode this whole change removes.
 positive_env(Name, Default) ->
     case os:getenv(Name) of
         false ->

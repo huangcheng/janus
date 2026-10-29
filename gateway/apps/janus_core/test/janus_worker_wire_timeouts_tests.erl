@@ -14,6 +14,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+-define(DEFAULT_KA, 15_000).
+
 %% The inactivity ceiling only means anything if it fires FIRST.
 inactivity_shorter_than_total_test() ->
     ?assert(
@@ -26,6 +28,52 @@ inactivity_shorter_than_total_test() ->
 %% leave the gateway reporting a stall the client never lives to read.
 inactivity_under_client_idle_default_test() ->
     ?assert(janus_worker_wire:stream_inactivity_timeout_ms() < 300_000).
+
+%% The keepalive must fire BEFORE the ceiling tears the stream down,
+%% otherwise the client never hears it. This module owns the knob, so it
+%% owns the invariant.
+keepalive_below_ceiling_test() ->
+    ?assert(
+        janus_worker_wire:stream_keepalive_ms() <
+            janus_worker_wire:stream_inactivity_timeout_ms()
+    ).
+
+%% ...and below the client idle default too, or it is useless.
+keepalive_under_client_idle_default_test() ->
+    ?assert(janus_worker_wire:stream_keepalive_ms() < 300_000).
+
+keepalive_positive_test() ->
+    ?assert(janus_worker_wire:stream_keepalive_ms() > 0).
+
+%% An override at or above the ceiling is refused: such a cadence could
+%% never fire before the stream died.
+keepalive_override_at_ceiling_refused_test() ->
+    Ceiling = janus_worker_wire:stream_inactivity_timeout_ms(),
+    lists:foreach(
+        fun(Bad) ->
+            ok = application:set_env(janus_core, stream_keepalive_ms, Bad),
+            try
+                ?assertEqual(?DEFAULT_KA, janus_worker_wire:stream_keepalive_ms())
+            after
+                application:unset_env(janus_core, stream_keepalive_ms)
+            end
+        end,
+        [Ceiling, Ceiling + 1, Ceiling * 4]
+    ).
+
+%% Garbage in the app env falls back rather than crashing a drain.
+keepalive_garbage_env_falls_back_test() ->
+    lists:foreach(
+        fun(Bad) ->
+            ok = application:set_env(janus_core, stream_keepalive_ms, Bad),
+            try
+                ?assertEqual(?DEFAULT_KA, janus_worker_wire:stream_keepalive_ms())
+            after
+                application:unset_env(janus_core, stream_keepalive_ms)
+            end
+        end,
+        [0, -5, <<"nope">>, undefined, 1.5]
+    ).
 
 %% Guards against a zero/negative value silently disabling the window.
 positive_test() ->

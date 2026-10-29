@@ -238,37 +238,48 @@ stream_worker(Session, Target, Headers, Body) ->
     SessionMon = monitor(process, Session),
     case janus_providers_http:post_stream(Target, Headers, Body) of
         {ok, Status, _RespHeaders, Drain} when is_function(Drain, 2) ->
-            Session ! {stream_open, self(), Status},
-            Result =
-                try
-                    %% The worker session is the upstream relay: its
-                    %% chunks go to the MASTER, not to a client, so
-                    %% there is nothing to reassure here. Keepalives are
-                    %% a master-side concern (janus_http_worker_client).
-                    Drain(
-                        fun(Chunk) ->
-                            Session ! {stream_chunk, self(), Chunk},
-                            receive
-                                {stream_continue, Session} ->
-                                    ok;
-                                {stream_stop, Session} ->
-                                    throw(stopped);
-                                {'DOWN', SessionMon, process, Session, _} ->
-                                    throw(stopped)
-                            end
-                        end,
-                        undefined
-                    )
-                catch
-                    throw:stopped ->
-                        {error, cancelled}
-                end,
-            demonitor(SessionMon, [flush]),
-            Session ! {stream_drain_done, self(), Result};
+            drain_worker_stream(Session, SessionMon, Status, Drain);
+        {ok, Status, _RespHeaders, Drain} when is_function(Drain, 1) ->
+            %% Defensive: janus_http_proxy:normalize_drain_arity/1 tolerates
+            %% a 1-arity provider drain, so this seam must too — otherwise
+            %% a stale adapter raises case_clause inside the spawned child
+            %% and the client sees only "stream worker died".
+            drain_worker_stream(
+                Session, SessionMon, Status, fun(CF, _KA) -> Drain(CF) end
+            );
         {error, Reason} ->
             demonitor(SessionMon, [flush]),
             Session ! {stream_open_error, self(), Reason}
     end.
+
+drain_worker_stream(Session, SessionMon, Status, Drain) ->
+    Session ! {stream_open, self(), Status},
+    Result =
+        try
+            %% The worker session is the upstream relay: its chunks go to
+            %% the MASTER, not to a client, so there is nothing to
+            %% reassure here. Keepalives are a master-side concern
+            %% (janus_http_worker_client).
+            Drain(
+                fun(Chunk) ->
+                    Session ! {stream_chunk, self(), Chunk},
+                    receive
+                        {stream_continue, Session} ->
+                            ok;
+                        {stream_stop, Session} ->
+                            throw(stopped);
+                        {'DOWN', SessionMon, process, Session, _} ->
+                            throw(stopped)
+                    end
+                end,
+                undefined
+            )
+        catch
+            throw:stopped ->
+                {error, cancelled}
+        end,
+    demonitor(SessionMon, [flush]),
+    Session ! {stream_drain_done, self(), Result}.
 
 wait_stream(DrainPid, DrainMon) ->
     receive
