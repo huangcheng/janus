@@ -75,6 +75,42 @@ keepalive_garbage_env_falls_back_test() ->
         [0, -5, <<"nope">>, undefined, 1.5]
     ).
 
+%% The invariant must hold for EVERY configurable input, not just the
+%% defaults: a tiny ceiling must not collapse onto its own keepalive.
+keepalive_strictly_below_ceiling_for_tiny_ceilings_test() ->
+    lists:foreach(
+        fun(Idle) ->
+            ok = application:set_env(janus_core, stream_inactivity_timeout_ms, Idle),
+            try
+                C = janus_worker_wire:stream_inactivity_timeout_ms(),
+                K = janus_worker_wire:stream_keepalive_ms(),
+                ?assert(K < C)
+            after
+                application:unset_env(janus_core, stream_inactivity_timeout_ms)
+            end
+        end,
+        [1, 2, 10, 100, 1_000, 6_000]
+    ).
+
+%% ...and for a tiny EXPLICIT cadence, which must be floored rather than
+%% turning the drain into a ~1 kHz wakeup flood.
+keepalive_explicit_tiny_is_floored_test() ->
+    lists:foreach(
+        fun(Ka) ->
+            ok = application:set_env(janus_core, stream_keepalive_ms, Ka),
+            try
+                ?assert(janus_worker_wire:stream_keepalive_ms() >= 50),
+                ?assert(
+                    janus_worker_wire:stream_keepalive_ms() <
+                        janus_worker_wire:stream_inactivity_timeout_ms()
+                )
+            after
+                application:unset_env(janus_core, stream_keepalive_ms)
+            end
+        end,
+        [1, 2, 49]
+    ).
+
 %% Guards against a zero/negative value silently disabling the window.
 positive_test() ->
     ?assert(janus_worker_wire:stream_inactivity_timeout_ms() > 0),

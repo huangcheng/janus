@@ -17,9 +17,11 @@ default_when_unset_test() ->
     ?assertEqual(?DEFAULT_MS, janus_http_worker_client:stream_keepalive_ms()).
 
 override_applies_test() ->
-    ok = application:set_env(janus_core, stream_keepalive_ms, 25),
+    %% Must stay at or above the floor (50ms): a smaller explicit cadence
+    %% is clamped, which is covered by the janus_core suite.
+    ok = application:set_env(janus_core, stream_keepalive_ms, 200),
     try
-        ?assertEqual(25, janus_http_worker_client:stream_keepalive_ms())
+        ?assertEqual(200, janus_http_worker_client:stream_keepalive_ms())
     after
         application:unset_env(janus_core, stream_keepalive_ms)
     end.

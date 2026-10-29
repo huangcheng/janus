@@ -36,6 +36,14 @@
     validate/1
 ]).
 
+%% Floors for the two stream-timing knobs. MIN_IDLE_MS exists so the
+%% ceiling is always meaningfully larger than the keepalive cadence
+%% (ceiling - 1 must be > 0 for the cadence to be strictly below it);
+%% MIN_KEEPALIVE_MS stops an explicit tiny cadence from turning the
+%% drain loop and the client into a ~1 kHz wakeup flood.
+-define(MIN_IDLE_MS, 1_000).
+-define(MIN_KEEPALIVE_MS, 50).
+
 -define(VSN, 1).
 -define(METHODS, [get, post, put, delete, patch]).
 -define(ERROR_CODES, [timeout, connect, tls, upstream_closed, internal]).
@@ -84,9 +92,15 @@ stream_timeout_ms() -> 600_000.
 
 %% Overridable so the live verification driver can shrink the window
 %% instead of idling 180s, and so an operator can tune it per fleet.
+%% Floored at MIN_IDLE_MS: a tiny ceiling is not a useful config (it
+%% would tear down healthy streams instantly) and it breaks the
+%% keepalive invariant, which needs strictly ceiling > keepalive to
+%% give the keepalive any chance to fire. Flooring at the SOURCE is the
+%% only way to guarantee that for every input; clamping on the
+%% keepalive side cannot, since ceiling-1 == ceiling when ceiling == 1.
 -spec stream_inactivity_timeout_ms() -> pos_integer().
 stream_inactivity_timeout_ms() ->
-    positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", 180_000).
+    max(?MIN_IDLE_MS, positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", 180_000)).
 
 %% Client-facing SSE comment cadence. Lives here (not in janus_http) so
 %% janus_providers can use it without depending on the HTTP app — the
@@ -97,8 +111,13 @@ stream_inactivity_timeout_ms() ->
 stream_keepalive_ms() ->
     Ceiling = stream_inactivity_timeout_ms(),
     case keepalive_setting() of
-        V when is_integer(V), V > 0, V < Ceiling -> V;
-        _ -> default_keepalive_ms(Ceiling)
+        V when is_integer(V), V > 0, V < Ceiling ->
+            %% The floor applies to EXPLICIT values too: a 1ms cadence is
+            %% a ~1 kHz wakeup flood on the drain loop and on the client,
+            %% which is the failure mode the floor exists to prevent.
+            max(?MIN_KEEPALIVE_MS, V);
+        _ ->
+            default_keepalive_ms(Ceiling)
     end.
 
 %% application env first (tests set it in-process), then the OS
@@ -119,14 +138,12 @@ keepalive_setting() ->
             end
     end.
 
-%% The default must still respect the ceiling, otherwise a very small
-%% JANUS_STREAM_INACTIVITY_TIMEOUT_MS would leave a keepalive that can
-%% never fire before the stream dies.
-%% One clause: the old `Ceiling =< 1 -> 15_000' arm returned a cadence
-%% far ABOVE the ceiling — exactly the "keepalive that can never fire"
-%% this is supposed to prevent — and `Ceiling - 1' for tiny ceilings
-%% produced a 1ms flood. Clamping keeps the invariant for EVERY ceiling.
-default_keepalive_ms(Ceiling) -> max(1, min(15_000, Ceiling - 1)).
+%% Always strictly BELOW the ceiling, so the client is reassured at
+%% least once before the stream is torn down. The ceiling is floored at
+%% MIN_IDLE_MS, so Ceiling - 1 > 0 always holds and this cannot collapse
+%% onto the ceiling.
+default_keepalive_ms(Ceiling) ->
+    max(?MIN_KEEPALIVE_MS, min(15_000, Ceiling - 1)).
 
 %% A malformed or non-positive override falls back to the default
 %% rather than disarming a timeout: a 0 there would make the ceiling
