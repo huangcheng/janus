@@ -1,0 +1,752 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/huangcheng/janus/main/dashboard/docs/schemas/config-backup-v1.schema.json",
+  "title": "Janus config backup — providers, agent keys, router config",
+  "description": "Portable, environment-independent config export for the Janus LLM gateway. Secrets stay encrypted (JSEC ciphertext / HMAC hashes pass through); DB-internal ids never appear — every cross-reference is a natural key (provider name, model name, key hash). Convention follows the published-schema pattern of omp (canonical $id + optional $schema self-reference in documents, e.g. oh-my-pi's mcp-schema.json) and the pi/omp providers-keys-router config triad. See docs/CONFIG-BACKUP.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "kind",
+    "taken_at",
+    "source",
+    "crypto",
+    "providers",
+    "agent_keys",
+    "router",
+    "integrity"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional self-reference to this schema's canonical $id (editor autocomplete/validation), per the omp published-schema convention. Exporters SHOULD write it. EXCLUDED from payload_sha256 (like 'integrity') so editors may add/remove it freely."
+    },
+    "version": {
+      "const": 1,
+      "type": "integer",
+      "description": "Format version. Checked by the lenient pre-read (numeric >1 incl. floats → unsupported_version; bools excluded explicitly — Python isinstance(True, int) is True); this const runs only after it. Integral floats (1.0) pass via JSON Schema numeric equality."
+    },
+    "kind": {
+      "const": "janus-config-backup"
+    },
+    "taken_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC export time, RFC 3339 (e.g. 2026-10-13T03:15:00Z). Validators MUST enable format assertion (format is annotation-only by default in 2020-12)."
+    },
+    "host": {
+      "type": "string",
+      "description": "Source host label (informational only; never gates restore). EXCLUDED from payload_sha256 (like 'integrity' and '$schema') — strip it before sharing a document off-host (C10) without breaking integrity."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config_generation",
+        "schema_migrations"
+      ],
+      "properties": {
+        "config_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schema_migrations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Applied schema_migrations versions at export time. REQUIRED and non-empty: absent/empty is schema_invalid (400). Restore compares the payload-derived required set against the TARGET's applied migrations (target lagging → migration_pending); this list feeds the lead warning (target ahead) and forensics."
+        },
+        "dashboard_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Dashboard git sha or image tag at export time (informational)."
+        }
+      }
+    },
+    "crypto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_key_encryption",
+        "agent_key_hash"
+      ],
+      "properties": {
+        "provider_key_encryption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scheme",
+            "ciphertext_encoding",
+            "key_ids",
+            "canary",
+            "canary_key_id"
+          ],
+          "properties": {
+            "scheme": {
+              "const": "JSEC-1"
+            },
+            "ciphertext_encoding": {
+              "const": "base64"
+            },
+            "key_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true,
+              "description": "DERIVED by the exporter from the actual providers[].keys[].key_id values, sorted ascending. Restore preflight re-derives the set from the payload and requires exact equality (both directions — a stale or trimmed list is schema_invalid), then trial-decrypts EVERY provider-key envelope against the target keyring."
+            },
+            "canary": {
+              "type": "string",
+              "contentEncoding": "base64",
+              "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+              "description": "Standard padded base64 (RFC 4648, +/ alphabet) of the raw bytes. JSEC envelope of the constant 'janus-config-backup-canary-v1', encrypted with the source's ACTIVE key (canary_key_id). Preflight decrypts it AND asserts plaintext == constant; a canary failure is a WARNING (the source's active key may legitimately be absent from a rotated target keyring) — the authoritative gate is the per-envelope trial-decrypt. Minted fresh per export (random GCM nonce); with no writes in between, two exports of an unchanged config differ ONLY in taken_at, canary, payload_sha256 (C3). Minted BEFORE the hash is computed; the hash covers it."
+            },
+            "canary_key_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The envelope key id the canary was sealed with (source's active key at export). Preflight decrypts the canary with exactly this id — no guessing on rotated keyrings."
+            }
+          }
+        },
+        "agent_key_hash": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scheme",
+            "hash_encoding",
+            "pepper_canary_hash"
+          ],
+          "properties": {
+            "scheme": {
+              "const": "HMAC-SHA256"
+            },
+            "hash_encoding": {
+              "const": "base64",
+              "description": "Encoding of the key_hash_b64 rows (not of the hex pepper_canary_hash)."
+            },
+            "pepper_canary_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "SHA256('janus-pepper-canary-v1' || JANUS_API_KEY_PEPPER), hex — same convention as scripts/lib/janus_backup_common.sh. Restore refuses agent_keys when the target pepper's canary differs (pepper_mismatch), unless allow_foreign_keys=1 skips the section entirely."
+            }
+          }
+        }
+      }
+    },
+    "providers": {
+      "type": "array",
+      "description": "Sorted by name. Empty array is valid (exports no providers).",
+      "items": {
+        "$ref": "#/$defs/provider"
+      },
+      "uniqueItems": true
+    },
+    "agent_keys": {
+      "type": "array",
+      "description": "Sorted by key_hash_b64 (the row identity). Hashes only — plaintext agent keys are unrecoverable by design.",
+      "items": {
+        "$ref": "#/$defs/agent_key"
+      },
+      "uniqueItems": true
+    },
+    "router": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "models",
+        "routes",
+        "auto_router",
+        "auto_router_reorder"
+      ],
+      "properties": {
+        "models": {
+          "type": "array",
+          "description": "Bound public model names, sorted by name.",
+          "items": {
+            "$ref": "#/$defs/bound_model"
+          },
+          "uniqueItems": true
+        },
+        "routes": {
+          "type": "array",
+          "description": "model_routes rows, sorted by (model, provider) — the identity slot (the live DB's PRIMARY KEY (model_id, provider_id)).",
+          "items": {
+            "$ref": "#/$defs/route"
+          },
+          "uniqueItems": true
+        },
+        "auto_router": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/auto_router"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "settings.auto_router value verbatim; null when never configured. v1: null sections are SKIPPED on restore in both merge and replace modes (never reset to defaults)."
+        },
+        "auto_router_reorder": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/auto_router_reorder"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "settings.auto_router_reorder knob value verbatim; null when never configured (defaults apply). Same skip-on-null rule as auto_router."
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_sha256"
+      ],
+      "properties": {
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA256 hex of the canonical JSON (sort_keys, separators=(',',':'), ensure_ascii=False — same convention as app/auto_router_rules.canonical) of the whole document with 'integrity', '$schema' AND 'host' removed. Verification recomputes over the PARSED document re-serialized canonically (never over raw bytes; numbers rely on same-process shortest-repr round-trip). Computed AFTER the canary is minted — the hash covers crypto.canary. Guards ACCIDENTAL corruption only; it is unkeyed and is not tamper-evidence."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "base_url",
+        "protocol",
+        "enabled",
+        "region_tag",
+        "affinity_node",
+        "allow_internal",
+        "keys",
+        "listings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_url": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "protocol": {
+          "enum": [
+            "openai_chat",
+            "anthropic_messages",
+            "openai_responses",
+            "openai_decisions"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "region_tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "affinity_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allow_internal": {
+          "type": "boolean",
+          "description": "SSRF break-glass flag. Restore treats a true value as an audited break-glass write (same as the Providers page)."
+        },
+        "keys": {
+          "type": "array",
+          "description": "May be empty — a provider with zero keys is legal (create_provider allows it). Merge identity is the exact ciphertext bytes (provider_keys has no narrower natural key); key_id is NOT an identity. Sorted by secret_ciphertext_b64 (deterministic export).",
+          "items": {
+            "$ref": "#/$defs/provider_key"
+          },
+          "uniqueItems": true
+        },
+        "listings": {
+          "type": "array",
+          "description": "provider_models rows (name/enabled/modality only — the pass-through 'meta' column is deliberately excluded; sync re-populates it). Sorted by name.",
+          "items": {
+            "$ref": "#/$defs/listing"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "provider_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key_id",
+        "weight",
+        "enabled",
+        "secret_ciphertext_b64"
+      ],
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The stable JSEC envelope key id — NOT the dashboard display label 'kid#rowid'. Preflight rejects a payload where the same key_id carries ciphertext that does not decrypt under that id."
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "No DB CHECK on the live fleet (verified); restore never re-imposes the page's ≥1 rule — a weight-0 row restores as 0 (with a plan warning)."
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "secret_ciphertext_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "description": "Standard padded base64 (RFC 4648, +/ alphabet) of the raw bytes. JSEC envelope bytes, base64. Pass-through: export never decrypts, restore never re-encrypts. Preflight trial-decrypts EVERY envelope (documents are tens of KB — full coverage is cheap), so a corrupt or mislabeled envelope fails before any write. Duplicate ciphertext bytes within ONE provider are rejected (duplicate_secret); the same bytes across DIFFERENT providers only warn (a shared physical key is weird but legal). Note: the same plaintext secret encrypted on two hosts yields different envelopes (random nonce) — cross-host merge accumulates such key pairs by design (idempotent per ciphertext, not per plaintext)."
+        }
+      }
+    },
+    "listing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "modality"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "modality": {
+          "enum": [
+            "chat",
+            "image",
+            "tts",
+            "asr",
+            "video",
+            "computer"
+          ]
+        }
+      }
+    },
+    "agent_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prefix",
+        "key_hash_b64",
+        "enabled",
+        "model_names"
+      ],
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Display/debug label only — NOT unique, NOT identity. Identity is key_hash_b64."
+        },
+        "key_hash_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "pattern": "^[A-Za-z0-9+/]{43}=$",
+          "description": "32-byte HMAC-SHA256 digest, base64 (44 chars, one '=' pad — the pattern pins the length). Row identity on merge-restore (matches the api_keys_key_hash_uidx unique index)."
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "null = no preference. For NEW rows the file value is kept when present; on a hash-match against an existing row, the DB's existing created_at is preserved and the file value is ignored (all other mutable fields upsert)."
+        },
+        "rpm_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional in the schema; the exporter ALWAYS emits it (null when unset). Restore: INSERT ⇒ column default; hash-match UPDATE: present-null writes NULL (the file means unlimited); an ABSENT field preserves the DB value (defensive — a conforming exporter never omits it)."
+        },
+        "tpm_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional in the schema; the exporter ALWAYS emits it (null when unset). Restore: INSERT ⇒ column default; hash-match UPDATE: present-null writes NULL (the file means unlimited); an ABSENT field preserves the DB value (defensive — a conforming exporter never omits it)."
+        },
+        "daily_token_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional in the schema; the exporter ALWAYS emits it (null when unset). Restore: INSERT ⇒ column default; hash-match UPDATE: present-null writes NULL (the file means unlimited); an ABSENT field preserves the DB value (defensive — a conforming exporter never omits it)."
+        },
+        "model_names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "not": {
+            "contains": {
+              "const": "janus-auto"
+            }
+          },
+          "description": "Grant list, sorted ascending. EMPTY = unrestricted (all models) — the gateway semantics, not an omission. janus-auto is never grantable (dashboard rejects it on write; migration 022 stripped it on migrate) — this is a code-verified invariant, not a schema whim. Orphan names (naming no current surface item) are LEGAL and round-trip warn-and-keep (parity with the live Keys page). Restore preflight validates non-orphan names against the post-write agent-visible surface (bound models ∪ provider listings)."
+        }
+      }
+    },
+    "bound_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "const": "janus-auto"
+          },
+          "description": "Bound public model name; the virtual model (janus-auto) is never a bound model."
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "provider",
+        "weight",
+        "priority",
+        "enabled"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "const": "janus-auto"
+          },
+          "description": "Bound model name; never the virtual model (janus-auto)."
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upstream_model_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Listing name on the provider; null = the bound model's own name. A plain FIELD of the route, NOT part of its identity: route identity is the (model, provider) slot (the live PRIMARY KEY). File-vs-target divergence on this field ⇒ UPDATE + plan warning; two file routes into one (model, provider) slot (in ANY upstream form, incl. null vs own-name) ⇒ preflight duplicate_name. Absent ≡ null (normalized before compare)."
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Ordering weight; no DB CHECK exists (verified via a live pg describe) — any integer passes through."
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "auto_router": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "judge_model",
+        "tiers",
+        "default_tier",
+        "fast_ctx_tokens",
+        "big_ctx_tokens",
+        "max_ctx_tokens",
+        "judge_timeout_ms",
+        "cache_ttl_sec",
+        "markers"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "judge_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "null = judge DISABLED (preflight skips the surface check entirely). Non-null must be in the post-write agent-visible surface (not restricted to bound models); restore reuses the PUT /api/settings/auto-router surface check, which already handles the openai_decisions exclusion."
+        },
+        "tiers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "fast",
+            "big",
+            "flagship"
+          ],
+          "properties": {
+            "fast": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true,
+              "not": {
+                "contains": {
+                  "const": "janus-auto"
+                }
+              }
+            },
+            "big": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true,
+              "not": {
+                "contains": {
+                  "const": "janus-auto"
+                }
+              }
+            },
+            "flagship": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true,
+              "not": {
+                "contains": {
+                  "const": "janus-auto"
+                }
+              }
+            }
+          },
+          "description": "Members must be mutually exclusive across tiers and bound on Router — restore re-validates both (same rule as PUT /api/settings/auto-router)."
+        },
+        "default_tier": {
+          "enum": [
+            "fast",
+            "big",
+            "flagship"
+          ]
+        },
+        "fast_ctx_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "big_ctx_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_ctx_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "judge_timeout_ms": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "cache_ttl_sec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "markers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Trigger phrases — semantically a SET: exported sorted ascending, compared set-equal (C3/C14); re-hash may sort them."
+        },
+        "tier_failover_enabled": {
+          "type": "boolean",
+          "description": "Optional (D11). After key failover exhausts, try the next model in the same janus-auto tier (pre-commit only). Default false when omitted; gateway default off."
+        },
+        "tier_failover_max_names": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Optional (D11). Cap distinct same-tier names attempted per client request. Default 3 when omitted; gateway clamps to [1, 8]."
+        },
+        "judge_backend": {
+          "enum": [
+            "off",
+            "online",
+            "local"
+          ],
+          "description": "Judge pipeline selector. local = kev sidecar at local_judge.endpoint; restore reuses the gateway's PUT validation (loopback-only endpoint enforced there)."
+        },
+        "local_judge": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/local_judge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Local judge sidecar settings (artifact pinning, loopback endpoint, inflight cap). Null = section never configured; v1 restore skips null sections."
+        },
+        "judge_max_inflight": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Online-judge concurrency cap."
+        },
+        "media_token_allowance": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Extra token budget allowance per media part before a request leaves the fast tier."
+        },
+        "max_media_parts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Media parts above this count skip the judge (fast tier)."
+        }
+      }
+    },
+    "auto_router_reorder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "interval_sec",
+        "window_sec",
+        "min_samples",
+        "min_improve_ratio",
+        "min_success_rate",
+        "manual_hold_sec",
+        "dry_run"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval_sec": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 86400
+        },
+        "window_sec": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800
+        },
+        "min_samples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "min_improve_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "min_success_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "manual_hold_sec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      }
+    },
+    "local_judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 8
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "ensure_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_max_inflight": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
