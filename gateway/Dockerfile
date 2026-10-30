@@ -159,8 +159,14 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 COPY scripts/lib/janus_vm_args.sh /usr/local/lib/janus/janus_vm_args.sh
 USER root
 ARG APK_MIRROR=https://mirrors.aliyun.com
+# Explicit modes, not umask-dependent: a checkout made with umask 027
+# yields 750/640 source files, COPY preserves that, and the non-root
+# janus user then cannot READ the entrypoint or the sourced vm-args
+# renderer ("Permission denied" at exec -- seen on a host with umask
+# 027). chmod the pair world-readable before dropping privileges.
 RUN set -eux; \
-    chmod +x /docker-entrypoint.sh; \
+    chmod 755 /docker-entrypoint.sh; \
+    chmod 644 /usr/local/lib/janus/janus_vm_args.sh; \
     cp /etc/apk/repositories /tmp/apk-repos.orig; \
     for m in "${APK_MIRROR}" https://dl-cdn.alpinelinux.org; do \
       sed "s#https://dl-cdn.alpinelinux.org#${m}#g" /tmp/apk-repos.orig > /etc/apk/repositories; \
