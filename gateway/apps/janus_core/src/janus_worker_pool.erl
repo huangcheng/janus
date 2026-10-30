@@ -1197,17 +1197,34 @@ sort_tier(Candidates, Opts) ->
             false ->
                 [{sort_key_plain(M, N), N} || {N, M} <- Candidates];
             true ->
-                Fallback =
-                    case [R || {_N, M} <- Candidates, R <- [rtt_key(ProviderId, M)], is_number(R)] of
-                        [] -> infinity;
-                        Known -> lists:min(Known)
-                    end,
+                Fallback = optimism_key(Candidates, ProviderId),
                 [{sort_key_rtt(ProviderId, Fallback, M, N), N} || {N, M} <- Candidates]
         end,
     [N || {_Key, N} <- lists:sort(Keyed)].
 
 rtt_key(ProviderId, M) ->
     maps:get(ProviderId, maps:get(rtt_map, M, #{}), undefined).
+
+%% The cold-start key handed to candidates that are unmeasured but CAN
+%% still be measured: the fastest value anyone reports, so a fresh node
+%% is treated as possibly-fastest rather than assumed slowest.
+%%
+%% Only sampling-capable members are considered, and only they receive
+%% it — a member that will never report rtt_ms (sched_v < 2, or samples
+%% dropped by clamp_rtt/1) must not hold the lead forever. With no
+%% capable candidate the fallback is `infinity`, which for an
+%% all-old-version fleet is the pre-change behaviour.
+optimism_key(Candidates, ProviderId) ->
+    case [
+        R
+     || {_N, M} <- Candidates,
+        maps:get(can_sample, M, true),
+        R <- [rtt_key(ProviderId, M)],
+        is_number(R)
+    ] of
+        [] -> infinity;
+        Known -> lists:min(Known)
+    end.
 
 %% v1 shape: (inflight, name).
 sort_key_plain(M, N) ->
@@ -1216,8 +1233,16 @@ sort_key_plain(M, N) ->
 sort_key_rtt(ProviderId, Fallback, M, N) ->
     RttKey =
         case rtt_key(ProviderId, M) of
-            R when is_number(R) -> R;
-            _ -> Fallback
+            R when is_number(R) ->
+                R;
+            _ ->
+                %% An unmeasured node that can never be measured gets no
+                %% optimism: it ranks last, exactly as before, instead
+                %% of leading the order forever.
+                case maps:get(can_sample, M, true) of
+                    true -> Fallback;
+                    false -> infinity
+                end
         end,
     {RttKey, maps:get(inflight, M, 0), N}.
 
@@ -2374,6 +2399,11 @@ build_snapshot(#state{pool = #{members := Members}, ewma = Ewma}) ->
             %% legacy env-class region (v1 behavior).
             geo_region => member_geo_region(M),
             rtt_map => maps:get(Node, RttByNode, #{}),
+            %% Sampling capability: a worker advertising sched_v < 2
+            %% never reports rtt_ms, so it can never acquire an ?RTT
+            %% cell. sort_tier/2 must not grant it the cold-start
+            %% optimism, or it would lead the order forever.
+            can_sample => maps:get(sched_v, M, 1) >= 2,
             observed_ewma_ms => observed_ewma(maps:get(Node, Ewma, none)),
             demote_ms => demote_ms(Node, Ewma)
         }}

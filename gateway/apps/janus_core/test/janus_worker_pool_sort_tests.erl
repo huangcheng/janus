@@ -12,12 +12,25 @@
 
 %% A candidate map shaped the way build_snapshot/1 produces them.
 cand(Node, Rtt, Inflight) ->
+    cand(Node, Rtt, Inflight, true).
+
+%% CanSample mirrors build_snapshot/1's `can_sample` (sched_v >= 2): a
+%% worker advertising an older sched_v never reports rtt_ms, so it can
+%% never acquire an ?RTT cell.
+cand(Node, Rtt, Inflight, CanSample) ->
     RttMap =
         case Rtt of
             none -> #{};
             _ -> #{7 => Rtt}
         end,
-    {Node, #{inflight => Inflight, rtt_map => RttMap, capacity => 100, draining => false}}.
+    {Node,
+        #{
+            inflight => Inflight,
+            rtt_map => RttMap,
+            capacity => 100,
+            draining => false,
+            can_sample => CanSample
+        }}.
 
 opts() -> #{rtt_enabled => true, provider_id => 7}.
 
@@ -73,6 +86,21 @@ rtt_disabled_uses_inflight_only_test() ->
     ),
     %% b has fewer inflight; a's excellent rtt must be ignored.
     ?assertEqual([b, a], Order).
+
+%% A worker that can NEVER be sampled (old sched_v) must not hold the
+%% cold-start lead forever: it ranks last, exactly as before, instead of
+%% out-ranking every measured node indefinitely.
+unmeasurable_node_ranks_last_test() ->
+    Order = ordered([cand(fast, 100, 50), cand(old, none, 0, false)]),
+    ?assertEqual([fast, old], Order).
+
+%% ...and it is excluded from the optimism key: the key comes from
+%% `fast` (100), so the fresh node ties with it. If `slow`'s 9000 were
+%% counted the minimum would still be 100, so assert the position that
+%% actually distinguishes the two: fresh must be ahead of `slow`.
+unmeasurable_excluded_from_optimism_test() ->
+    Order = ordered([cand(slow, 9_000, 0, false), cand(fast, 100, 0), cand(fresh, none, 0)]),
+    ?assertEqual([fast, fresh, slow], Order).
 
 %% Two unmeasured nodes both key on the fleet minimum, so inflight
 %% decides between them — the optimism does not disable balancing.
