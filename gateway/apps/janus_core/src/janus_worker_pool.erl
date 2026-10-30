@@ -120,6 +120,10 @@
     advance_divergence/4,
     %% Geo-affinity pure seams (spec 2026-10-11 D4/D15/D18).
     effective_geo/4,
+    %% Capacity override precedence (worker-capacity-override spec Part 1):
+    %% the PURE 3-arity form, so override-wins / bad-value-fallback /
+    %% absent-entry are assertable without a running config server.
+    effective_capacity/3,
     mismatch_step/4
 ]).
 
@@ -2385,6 +2389,93 @@ republish(State) ->
 %%% Scheduler v2 — snapshot builder (spec Part C)
 %%%===================================================================
 
+%% Shared read-path capacity resolution (worker-capacity-override spec
+%% Part 1 "Read path"): settings override > the capacity the worker
+%% declared in its hello > infinity. BOTH capacity emitters call this
+%% (`build_snapshot/1` — the number `reserve_loop/5` enforces — and the
+%% member branch of `workers_view/6` — the dashboard cell the operator
+%% edits), or the override appears broken exactly where it is watched.
+%%
+%% The two maps are keyed differently BY DESIGN: the member map's key is
+%% the node ATOM, the settings map's key is the node's long-name BINARY,
+%% so the lookup converts.
+%%
+%% The read path never refuses: an override entry that is not a positive
+%% integer is ignored (one warning per node per distinct value) and the
+%% declared value applies — a malformed settings row must not take a node
+%% out of rotation. Absent entry = the normal deployment.
+%%
+%% The sticky-drained branch of `workers_view/6` deliberately does NOT
+%% call this: it hardcodes `capacity => infinity` because a sticky node
+%% takes no new work, so an override there is meaningless.
+-spec effective_capacity(node(), map()) -> pos_integer() | infinity.
+effective_capacity(Node, M) ->
+    effective_capacity(Node, maps:get(capacity, M, infinity), janus_config:worker_capacity_overrides()).
+
+%% Pure seam (eunit): the precedence rule governs admission for every
+%% node, so it is separable from the persistent_term read.
+-spec effective_capacity(node(), pos_integer() | infinity, map()) -> pos_integer() | infinity.
+effective_capacity(Node, Declared, Overrides) when is_map(Overrides) ->
+    case maps:find(atom_to_binary(Node, utf8), Overrides) of
+        {ok, N} when is_integer(N), N >= 1 ->
+            N;
+        {ok, Bad} ->
+            warn_capacity_override(Node, Bad),
+            Declared;
+        error ->
+            Declared
+    end.
+
+%% An override whose name matches no live member is otherwise SILENTLY
+%% inert: a typo, or a worker that has not hello'd yet, leaves the
+%% operator believing a ceiling is applied. The spec puts member matching
+%% at read time precisely so this can be reported here; warn once per
+%% distinct unreferenced name, since this runs on every republish.
+-spec warn_unused_capacity_overrides([node()]) -> ok.
+warn_unused_capacity_overrides(LiveNodes) ->
+    Live = [atom_to_binary(N, utf8) || N <- LiveNodes],
+    maps:foreach(
+        fun(Name, _Val) ->
+            case lists:member(Name, Live) of
+                true -> ok;
+                false -> warn_once({capacity_override_unused, Name}, fun() ->
+                    logger:warning(#{
+                        what => janus_worker_pool_capacity_override_unused,
+                        node => Name,
+                        hint => <<"no live worker carries this name; the override is inert">>
+                    })
+                end)
+            end
+        end,
+        janus_config:worker_capacity_overrides()
+    ).
+
+%% One warning per node per distinct value (janus_catalog's warn_once
+%% shape): this runs on EVERY snapshot republish (<= 250 ms dirty-flush /
+%% 30 s tick) and every `sched_stats` call, so an undeduped warning would
+%% flood the log for one malformed row. Keying on the VALUE re-arms the
+%% warning whenever the resolved value changes, so a row that is fixed and
+%% later broken differently speaks again — the case an operator needs.
+%% Bounded by fleet size, not by the free-form settings content.
+warn_capacity_override(Node, Bad) ->
+    warn_once({capacity_override, Node, Bad}, fun() ->
+        logger:warning(#{
+            what => janus_worker_pool_capacity_override_bad,
+            node => Node,
+            override => Bad,
+            hint => <<"not a positive integer; declared capacity applies">>
+        })
+    end).
+
+warn_once(Key, Fun) ->
+    case get({janus_worker_pool_warned, Key}) of
+        undefined ->
+            put({janus_worker_pool_warned, Key}, true),
+            Fun();
+        _ ->
+            ok
+    end.
+
 %% Joins pool worker records + unexpired sched_rtt cells + EWMA state;
 %% precomputes per-candidate demote_ms (exclude-self, spec A.4).
 %% Provider geo is NOT in the worker-keyed snapshot — it lives in the
@@ -2396,10 +2487,17 @@ republish(State) ->
 build_snapshot(#state{pool = #{members := Members}, ewma = Ewma}) ->
     Now = now_mono(),
     RttByNode = rtt_by_node(Now),
+    %% Report overrides that name no live member (typo / not-yet-hello'd).
+    %% Rides the republish so the once-per-name warning lands without a
+    %% second settings subscriber.
+    ok = warn_unused_capacity_overrides(maps:keys(Members)),
     [
         {Node, #{
             inflight => reserve_count(Node),
-            capacity => maps:get(capacity, M, infinity),
+            %% The ENFORCED ceiling: `candidate_capacity/2` reads this
+            %% field and `reserve_loop/5` compares the reserve count
+            %% against it (worker-capacity-override spec Part 1).
+            capacity => effective_capacity(Node, M),
             draining => maps:get(draining, M, false),
             %% Geo-affinity D15: the EFFECTIVE geo (worker-geo overlay
             %% precedence, age-checked) feeds the EXISTING narrowing
@@ -3297,6 +3395,12 @@ sched_stats_map(#state{pool = Pool, ewma = Ewma, wire_enc_relay = Relay, load = 
 %% ALL expired => null / 0, never 0-valued ms); `would_demote` is null
 %% when the EWMA is unknown or health is off. Deterministic order
 %% (sorted by node) so the JSON is stable.
+%%
+%% `capacity` is the EFFECTIVE ceiling (override-resolved, the same
+%% number the scheduler enforces); `declared_capacity` is the ADDITIVE
+%% raw member-map value so an operator editing the cell can see what
+%% the override displaced. The sticky branch below carries neither —
+%% it hardcodes infinity.
 workers_view(#{members := Members} = Pool, Ewma, Counters, HealthOn, Load) ->
     Now = now_mono(),
     %% Deterministic order (sorted by node) so the JSON is stable; the
@@ -3316,7 +3420,16 @@ workers_view(#{members := Members} = Pool, Ewma, Counters, HealthOn, Load) ->
                     node => Node,
                     status => up,
                     sticky => maps:is_key(Node, maps:get(sticky, Pool, #{})),
-                    capacity => maps:get(capacity, M, infinity),
+                    %% Same resolution the snapshot enforces, so the
+                    %% cell being edited cannot disagree with the
+                    %% scheduler (worker-capacity-override spec Part 1
+                    %% "Read path").
+                    capacity => effective_capacity(Node, M),
+                    %% ADDITIVE: the member map's raw declared value,
+                    %% so the UI can show "declared 48, overridden to
+                    %% 24" instead of a single unexplained number.
+                    %% Equals `capacity` when no override applies.
+                    declared_capacity => maps:get(capacity, M, infinity),
                     region => maps:get(region, M, undefined),
                     sched_v => maps:get(sched_v, M, 1),
                     draining => maps:get(draining, M, false),

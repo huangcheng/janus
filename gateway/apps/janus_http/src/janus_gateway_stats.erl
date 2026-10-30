@@ -500,6 +500,12 @@ worker_json(R) when is_map(R) ->
         status => to_bin(maps:get(status, R, up)),
         sticky => maps:get(sticky, R, false) =:= true,
         capacity => capacity_json(maps:get(capacity, R, infinity)),
+        %% ADDITIVE (worker-capacity-override spec Part 1): the member
+        %% map's raw declared value, so the editable cell can show what an
+        %% override displaced. This list is an ALLOW-LIST — a field the
+        %% pool reports but this function does not name never reaches
+        %% /stats/sched, and the dashboard cell renders nothing.
+        declared_capacity => capacity_json(maps:get(declared_capacity, R, infinity)),
         region => nullable_bin(maps:get(region, R, undefined)),
         sched_v => maps:get(sched_v, R, 1),
         draining => maps:get(draining, R, false) =:= true,
