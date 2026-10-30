@@ -1286,6 +1286,140 @@ async def put_sched(request: Request, user: dict = Depends(require_auth)):
     return {"config": cfg, "generation": gen}
 
 
+# ---------------------------------------------------------------------------
+# Worker capacity overrides (worker-capacity-override spec Part 1): one shared
+# settings key holding {worker long name: integer ceiling}. The gateway
+# resolves override > hello-declared > infinity on both capacity read paths,
+# so this row is the operator's only no-redeploy capacity knob.
+#
+# The key is an OBJECT shared by every node, so the write is a locked
+# read-modify-write (same shape as the reorder-knob PUT): without FOR UPDATE
+# two operators editing DIFFERENT nodes would each merge over their own stale
+# copy and one ceiling would vanish.
+# ---------------------------------------------------------------------------
+_WORKER_CAPACITY_KEY = "worker_capacity"
+# Explicit ceiling (M2 convention: the gateway uses the value verbatim, it
+# does not clamp). Far above any real host's in-flight jobs, so a fat-finger
+# (an extra zero, a pasted 2**31) cannot turn the soft cap into no cap.
+_WORKER_CAPACITY_MAX = 10_000
+# Erlang long name: `name@host`. Deliberately permissive on the host part —
+# the live member list is NOT a valid check (it excludes drained-sticky and
+# not-yet-hello'd workers, so a pre-hello override would be wrongly refused);
+# an unknown name is the gateway's to report, at read time.
+_WORKER_NODE_RE = re.compile(r"^[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+$")
+_WORKER_NODE_MAX_LEN = 253
+
+
+def _worker_capacity_map(raw) -> dict:
+    """The stored override object, or {} when absent/corrupt/not an object.
+
+    A corrupt row is served as empty rather than raising: the gateway treats
+    an unreadable value the same way (override ignored, declared applies), so
+    the UI must not disagree with the data plane."""
+    stored = _parse_stored_json(raw, _WORKER_CAPACITY_KEY)
+    if isinstance(stored, dict):
+        return stored
+    if stored is not None:
+        logger.warning(
+            "settings %s: stored value is %s, not a JSON object; serving an empty map "
+            "(a following PUT will overwrite the row)",
+            _WORKER_CAPACITY_KEY,
+            type(stored).__name__,
+        )
+    return {}
+
+
+@router.get("/worker-capacity")
+async def get_worker_capacity(user: dict = Depends(require_auth)):
+    row = await database.fetchrow(
+        "SELECT value FROM settings WHERE key = $1", _WORKER_CAPACITY_KEY
+    )
+    cfg = _worker_capacity_map(row["value"]) if row else {}
+    return {
+        "source": "db" if row is not None else "default",
+        "config": cfg,
+        "max": _WORKER_CAPACITY_MAX,
+    }
+
+
+@router.put("/worker-capacity")
+async def put_worker_capacity(request: Request, user: dict = Depends(require_auth)):
+    """Set or clear ONE worker's capacity ceiling inside the shared map.
+
+    `{node, capacity}` sets; `{node, capacity: null}` (or `capacity`
+    omitted) clears — clearing DELETES the key, it never stores null, so
+    the gateway's `maps:find` reads it as absent.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise _err(400, "invalid", "body must be a JSON object")
+    unknown = set(body) - {"node", "capacity"}
+    if unknown:
+        raise _err(400, "invalid", f"unknown fields: {sorted(unknown)}")
+
+    node = body.get("node")
+    node = node.strip() if isinstance(node, str) else ""
+    if not node or len(node) > _WORKER_NODE_MAX_LEN or not _WORKER_NODE_RE.match(node):
+        raise _err(
+            400,
+            "invalid",
+            "node must be an Erlang long name (janus@host), "
+            f"at most {_WORKER_NODE_MAX_LEN} chars",
+        )
+
+    raw = body.get("capacity")
+    if raw is None:
+        capacity = None
+    else:
+        # bool is a subclass of int — reject True/False explicitly, matching
+        # the sibling knob validators.
+        if type(raw) is not int or not (1 <= raw <= _WORKER_CAPACITY_MAX):
+            raise _err(
+                400,
+                "invalid",
+                f"capacity must be an integer in [1, {_WORKER_CAPACITY_MAX}] "
+                "or null to clear the override",
+            )
+        capacity = raw
+
+    async with database.transaction() as tx:
+        # Seed before locking: FOR UPDATE takes NO lock when the row does not
+        # exist yet, and this key is created here (no migration seeds it). Two
+        # first-time PUTs for DIFFERENT nodes would both read {}, and the
+        # loser's ON CONFLICT DO UPDATE would replace the whole blob — the
+        # exact lost ceiling the lock above is supposed to prevent. The
+        # seeding INSERT conflicts inside the transaction, so the two
+        # transactions serialise and the second one locks a committed row.
+        await tx.execute(
+            "INSERT INTO settings (key, value) VALUES ($1, '{}'::jsonb) "
+            "ON CONFLICT (key) DO NOTHING",
+            _WORKER_CAPACITY_KEY,
+        )
+        row = await tx.fetchrow(
+            "SELECT value FROM settings WHERE key = $1 FOR UPDATE",
+            _WORKER_CAPACITY_KEY,
+        )
+        merged = _worker_capacity_map(row["value"]) if row else {}
+        if capacity is None:
+            merged.pop(node, None)
+        else:
+            merged[node] = capacity
+        payload = json.dumps(merged, ensure_ascii=False)
+        await tx.execute(
+            "INSERT INTO settings (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            _WORKER_CAPACITY_KEY,
+            payload,
+        )
+        gen = await database.bump_generation(tx)
+    audit.log(
+        "settings.worker_capacity",
+        node,
+        f"gen={gen} capacity={'(cleared)' if capacity is None else capacity}",
+    )
+    return {"config": merged, "node": node, "capacity": capacity, "generation": gen}
+
+
 @router.get("/model_sync")
 async def get_model_sync(user: dict = Depends(require_auth)):
     return await _settings_blob("model_sync", _MODEL_SYNC_DEFAULTS)

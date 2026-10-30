@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, Plus, Power, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api, apiFetch } from "../api"
@@ -46,6 +46,10 @@ import {
 import { Tooltip } from "@/components/ui/tooltip"
 
 const STALE_MS = 60_000
+
+// Fallback ceiling for the client-side pre-check until GET
+// /settings/worker-capacity reports the server's own maximum.
+const CAPACITY_MAX_FALLBACK = 10_000
 
 type Health = {
   status: string
@@ -118,6 +122,9 @@ type Worker = {
   status?: string | null
   region?: string | null
   capacity?: number | null
+  /** Capacity the worker declared in its hello (post-clamp). Differs from
+   * `capacity` exactly when a settings override is in force. */
+  declared_capacity?: number | null
   inflight?: number | null
   draining?: boolean
   sticky?: boolean
@@ -214,6 +221,48 @@ export function Nodes() {
     const t = setInterval(load, 10000)
     return () => clearInterval(t)
   }, [])
+
+  // --- capacity overrides (worker-capacity-override spec Part 1) ---
+  // The settings map is read separately from /api/nodes: the row's
+  // `capacity` only reflects an override once the gateway has polled the
+  // new generation AND the dashboard has re-scraped /stats/sched, so the
+  // map is what proves "an override is in force" the moment the write
+  // lands. `overrides` is only ever replaced by a server answer.
+  const [overrides, setOverrides] = useState<Record<string, number>>({})
+  const [capacityMax, setCapacityMax] = useState<number>(CAPACITY_MAX_FALLBACK)
+  const loadOverrides = () =>
+    api<{ config?: Record<string, unknown>; max?: number }>("/settings/worker-capacity")
+      .then((r) => {
+        const cfg: Record<string, number> = {}
+        for (const [k, v] of Object.entries(r.config ?? {})) {
+          if (typeof v === "number") cfg[k] = v
+        }
+        setOverrides(cfg)
+        if (typeof r.max === "number") setCapacityMax(r.max)
+      })
+      // A failed read must not blank the worker table; it degrades to
+      // "no overrides known", the same shape /api/nodes uses for pins.
+      .catch(() => {})
+
+  useEffect(() => {
+    loadOverrides()
+    const t = setInterval(loadOverrides, 10000)
+    return () => clearInterval(t)
+  }, [])
+
+  /** Write ONE node's ceiling (null clears). Throws on failure so the cell
+   * can revert visibly — the caller must not swallow it. */
+  const saveCapacity = async (node: string, capacity: number | null) => {
+    const r = await api<{ config?: Record<string, unknown> }>("/settings/worker-capacity", {
+      method: "PUT",
+      body: { node, capacity },
+    })
+    const cfg: Record<string, number> = {}
+    for (const [k, v] of Object.entries(r.config ?? {})) {
+      if (typeof v === "number") cfg[k] = v
+    }
+    setOverrides(cfg)
+  }
 
   const act = async (fn: () => Promise<any>, ok: string) => {
     try {
@@ -691,7 +740,13 @@ export function Nodes() {
                       <PinnedProvidersCell pinned={pinByNode.get(w.node) ?? []} />
                     </TableCell>
                     <TableCell className="tabular-nums text-xs">
-                      {dash(w.inflight)} / {dash(w.capacity)}
+                      <span>{dash(w.inflight)} / </span>
+                      <CapacityCell
+                        worker={w}
+                        override={overrides[w.node]}
+                        max={capacityMax}
+                        onSave={saveCapacity}
+                      />
                     </TableCell>
                     <TableCell className="tabular-nums">{dash(w.dispatched_total)}</TableCell>
                     <TableCell className="tabular-nums text-xs">
@@ -937,6 +992,199 @@ function WorkerStatus({
     <Badge variant={variant as "success" | "warning" | "secondary"} className="text-[10px]">
       {label}
     </Badge>
+  )
+}
+
+/** Editable half of the `In-flight / Capacity` cell (worker-capacity-override
+ * spec Part 1). Click to edit, Enter saves, Escape cancels, empty clears the
+ * override.
+ *
+ * Two deliberate departures from the Note cell's pattern:
+ * - the editor stays OPEN with the previous value while the write is in
+ *   flight, and a failure restores that value visibly with the reason
+ *   inline. `saveNote` closes before awaiting, so a rejected save leaves a
+ *   stale value on screen — for capacity that means the operator believes a
+ *   host is protected when it is not.
+ * - an override is shown as an override, not as a bare number: the settings
+ *   map (not the row) decides, so a ceiling equal to the declared value is
+ *   still flagged, and the declared value stays visible next to it.
+ */
+function CapacityCell({
+  worker,
+  override,
+  max,
+  onSave,
+}: {
+  worker: Worker
+  override: number | undefined
+  max: number
+  onSave: (node: string, capacity: number | null) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  // Enter also fires blur; a state flag set in the same batch would let both
+  // arms through and write twice, so the in-flight guard is a ref. `open`
+  // mirrors the editing state in a ref for the same reason: a blur that the
+  // browser delivers as the input unmounts (Escape, or a successful save)
+  // would otherwise re-enter commit with the PREVIOUS `override` prop and
+  // write a stale value.
+  const busy = useRef(false)
+  const editingRef = useRef(false)
+  // Re-focus after a failed save: disabling the input while the write is in
+  // flight drops focus, and the operator fixing the number should not have to
+  // click back into the cell. An effect, not a call inside the catch, because
+  // the input is still disabled there.
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    if (err === null) return
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [err])
+
+  // The value previously applied to this node: the settings override when
+  // one exists, else the gateway's effective capacity. This is what a
+  // failed write restores.
+  const previous = override !== undefined ? String(override) : dash(worker.capacity)
+  const declared = worker.declared_capacity ?? null
+  // Only the member branch of the gateway's workers view resolves an
+  // override; a sticky-drained row reports capacity ∞.
+  //
+  // The test is `sticky`, NOT `declared_capacity === undefined`: the stats
+  // allow-list ALWAYS emits declared_capacity, defaulting a missing one to
+  // null, so an undefined check is never true and a sticky row would
+  // forever claim a ceiling is "about to apply" when the gateway ignores
+  // it outright.
+  const memberRow = worker.sticky !== true
+  // The settings write landed but the row's capacity has not caught up yet
+  // (config poll + one flush window / tick). Reporting it as applied would
+  // overstate how fast the ceiling bites.
+  const pending = memberRow && override !== undefined && (worker.capacity ?? null) !== override
+
+  const open = () => {
+    editingRef.current = true
+    setEditing(true)
+    setErr(null)
+    setDraft(override !== undefined ? String(override) : "")
+  }
+
+  const close = () => {
+    editingRef.current = false
+    setEditing(false)
+  }
+
+  const commit = async (raw: string) => {
+    if (!editingRef.current || busy.current) return
+    const text = raw.trim()
+    let next: number | null
+    if (text === "") {
+      next = null
+    } else {
+      // Client-side pre-check only — the server re-validates and answers 400.
+      const n = Number(text)
+      if (!/^\d+$/.test(text) || !Number.isInteger(n) || n < 1 || n > max) {
+        setErr(`an integer in [1, ${max}], or empty to clear`)
+        // Restore the OPENING draft, not `previous`: `previous` falls back
+        // to the DECLARED capacity when no override exists, so refilling it
+        // would arm an unintended write on the next blur (the operator
+        // clicks away to abandon, and 48 becomes a real override).
+        setDraft(override !== undefined ? String(override) : "")
+        return
+      }
+      next = n
+    }
+    if (next === (override ?? null)) {
+      close()
+      return
+    }
+    busy.current = true
+    setSaving(true)
+    setErr(null)
+    try {
+      await onSave(worker.node, next)
+      close()
+      setDraft("")
+      toast.success(next === null ? `Capacity override cleared for ${shortNode(worker.node)}` : `Capacity override ${next} set for ${shortNode(worker.node)}`)
+    } catch (e: any) {
+      // Restore the OPENING draft (same expression `open()` seeds), never
+      // `previous`: when no override exists `previous` is the DECLARED
+      // capacity, so refilling it would arm an unintended write on the
+      // next blur — the operator clicks away and 48 becomes an override.
+      setDraft(override !== undefined ? String(override) : "")
+      setErr(e?.message || "save failed")
+      toast.error(e?.message || "capacity save failed")
+    } finally {
+      busy.current = false
+      setSaving(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <span className="inline-flex flex-col gap-0.5">
+        <input
+          ref={inputRef}
+          autoFocus
+          value={draft}
+          disabled={saving}
+          aria-label={`Edit capacity override for ${worker.node}`}
+          onChange={(e) => { setDraft(e.target.value); setErr(null) }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void commit(draft)
+            // Escape is ignored mid-write: closing the editor while the
+            // request is in flight would hide which value is being applied.
+            if (e.key === "Escape" && !saving) { close(); setErr(null) }
+          }}
+          onBlur={() => void commit(draft)}
+          placeholder={declared === null ? "declared: ∞" : `declared: ${declared}`}
+          className="w-20 rounded border bg-background px-1.5 py-0.5 text-xs tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50"
+        />
+        {saving ? (
+          <span className="text-[10px] text-muted-foreground">saving… (was {previous})</span>
+        ) : err ? (
+          <span className="max-w-40 text-[10px] text-destructive" role="alert">
+            {err}
+          </span>
+        ) : null}
+      </span>
+    )
+  }
+
+  return (
+    <Tooltip
+      content={
+        override !== undefined
+          ? `Capacity OVERRIDE in force: ${override}${
+              declared === null ? " (worker declared ∞)" : declared === override ? "" : ` (worker declared ${declared})`
+            }.${memberRow ? "" : " This row is sticky-drained, so the gateway does not apply the ceiling to it."} Clear it by editing the cell to empty. Soft cap only — affinity-pinned picks and master-local fallback bypass it.`
+          : `No override — this is the capacity the worker declared${
+              worker.capacity === null || worker.capacity === undefined
+                ? " (∞: it declared nothing)"
+                : ` (${worker.capacity})`
+            }. Click to set a ceiling. Soft cap only — affinity-pinned picks and master-local fallback bypass it.`
+      }
+    >
+      <button
+        type="button"
+        title="Edit capacity override"
+        aria-label={`Edit capacity override for ${worker.node} (current ${previous})`}
+        onClick={open}
+        className="inline-flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+      >
+        {override !== undefined ? (
+          <span className="font-medium text-warning underline decoration-dotted underline-offset-2">
+            {override}
+          </span>
+        ) : (
+          <span>{dash(worker.capacity)}</span>
+        )}
+        {override !== undefined && memberRow && declared !== override && (
+          <span className="text-[10px] text-muted-foreground/80">decl {declared === null ? "∞" : declared}</span>
+        )}
+        {pending && <Badge variant="secondary" className="text-[10px]">pending</Badge>}
+      </button>
+    </Tooltip>
   )
 }
 
