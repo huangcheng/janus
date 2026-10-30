@@ -34,7 +34,9 @@ apps/janus_dashboard/priv/www/
 
 !docs/WSL2-DEV.md
 !docs/SCHEMA_ETS_CONTRACT.md
-docs/audit*/
+# Same descent rule as above: `docs/audit*/` would exclude the directory
+# and make the negation dead. CONTENTS only.
+docs/audit*/*
 !docs/audit*/SYNTHESIS.md
 fixtures
 # App test fixtures are repo content (janus_http wire captures, janus_core

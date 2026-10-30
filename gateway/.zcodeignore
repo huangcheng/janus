@@ -6,7 +6,7 @@ erl_crash.dump
 rebar3.crashdump
 .DS_Store
 *.swp
-docs/
+docs/*
 
 # Local API runtime: SQLite, copied seed, secrets (keep scripts/local.env.example)
 data/
@@ -30,6 +30,7 @@ apps/janus_dashboard/priv/www/
 
 !docs/WSL2-DEV.md
 !docs/SCHEMA_ETS_CONTRACT.md
+docs/audit/*
 !docs/audit/SYNTHESIS.md
 
 # ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
