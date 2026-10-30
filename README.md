@@ -98,8 +98,9 @@ docker compose -f gateway/docker-compose.yml logs -f janus
 ```
 
 Running from a shell works too, but you need a working C compiler: the
-SQLite backend is a NIF (`esqlite`), and a host where that NIF fails to
-link will start the app with a broken DB rather than refuse.
+SQLite backend is a NIF (`esqlite`). If that NIF cannot be loaded the
+gateway refuses to start — `application:ensure_all_started(janus)`
+returns `{error, {janus_core, …}}` — so a failure is loud, not silent.
 
 ```bash
 cd gateway
