@@ -233,7 +233,7 @@ export function Nodes() {
     setNoteEdit(null)
     if (note === (w.note ?? "")) return
     try {
-      await apiFetch("/api/nodes/workers/note", {
+      await apiFetch("/nodes/workers/note", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ node: w.node, note }),

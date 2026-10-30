@@ -58,12 +58,17 @@ function errorFromBody(data: { error?: { message?: string; code?: string } }, re
     code?: string
     [k: string]: unknown
   }
-  return new ApiError(
-    message ?? res.statusText ?? "HTTP " + res.status,
-    code ?? "error",
-    res.status,
-    rest,
-  )
+  // `??` alone still renders a BLANK toast when the server sends an
+  // empty message string (or a body shape we do not understand, e.g.
+  // FastAPI's `{"detail": "Not Found"}` on a 404 from a mistyped
+  // path). Fall back to the HTTP status so an error is never silent.
+  const text =
+    message && message.trim()
+      ? message
+      : res.statusText && res.statusText.trim()
+        ? res.statusText
+        : "HTTP " + res.status
+  return new ApiError(text, code ?? "error", res.status, rest)
 }
 
 async function authorizedFetch(path: string, init: RequestInit): Promise<Response> {
