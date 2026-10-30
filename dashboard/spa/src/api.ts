@@ -58,16 +58,25 @@ function errorFromBody(data: { error?: { message?: string; code?: string } }, re
     code?: string
     [k: string]: unknown
   }
-  // `??` alone still renders a BLANK toast when the server sends an
-  // empty message string (or a body shape we do not understand, e.g.
-  // FastAPI's `{"detail": "Not Found"}` on a 404 from a mistyped
-  // path). Fall back to the HTTP status so an error is never silent.
-  const text =
-    message && message.trim()
-      ? message
-      : res.statusText && res.statusText.trim()
-        ? res.statusText
-        : "HTTP " + res.status
+  // Never render a blank toast. `??` alone was not enough: an empty
+  // message string passed straight through, and a 404 from a mistyped
+  // path answers with FastAPI's `{"detail":"Not Found"}`, which has no
+  // `error.message` at all, so the operator saw "".
+  //
+  // The payload is only TYPED as a string; `nodes.py` also sends
+  // `{"error":{"code":"gateway_error","message":<parsed body>}}` where
+  // the value is an object. Trimming that blindly threw a TypeError
+  // inside the error path and lost the real code/status, so the type
+  // is checked and unknown payloads are stringified.
+  let text = ""
+  if (typeof message === "string" && message.trim()) {
+    text = message
+  } else if (typeof message === "object" && message !== null) {
+    text = JSON.stringify(message)
+  }
+  if (!text) {
+    text = res.statusText.trim() ? res.statusText : "HTTP " + res.status
+  }
   return new ApiError(text, code ?? "error", res.status, rest)
 }
 
