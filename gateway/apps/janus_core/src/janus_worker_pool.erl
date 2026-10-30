@@ -392,9 +392,10 @@ reserve_count_live(Node) ->
     end.
 
 %% Live per-provider RTT cell (B.2 SORT KEY): reads the {Node,
-%% ProviderId} row's Ewma when unexpired; NO cell (never sampled or
-%% expired) yields an EMPTY map — select_v2's unknown-last (infinity)
-%% rule, unchanged from v2.
+%% ProviderId} row's Ewma when unexpired. NO cell (never sampled, or
+%% expired) yields an EMPTY map, which sort_tier/2 reads as UNMEASURED
+%% and keys on the fleet minimum (see its COLD-START note) — not on
+%% `infinity`, which used to rank a fresh node last forever.
 rtt_cell_live(Node, ProviderId) ->
     Now = now_mono(),
     try
@@ -1159,26 +1160,66 @@ known_tag(B) when is_binary(B), B =/= <<>> ->
 known_tag(_) ->
     false.
 
-%% Tier 5 — sort by `{rtt_key, inflight, name}`: rtt_key =
-%% `rtt_map[provider_id]` or `infinity` when absent — the atom sorts
-%% after all floats in Erlang term order (unknown-rtt sorts LAST, no
-%% tuple sentinel). `rtt_enabled = false` forces `rtt_key := infinity`
-%% for ALL candidates => exactly v1's `(inflight, name)`.
+%% Tier 5 — sort by `{rtt_key, inflight, name}`.
+%%
+%% rtt_key is `rtt_map[provider_id]` for a MEASURED node. An UNMEASURED
+%% node keys on the FASTEST measured value, deliberately not the median.
+%%
+%% COLD-START (2026-10-30): an unmeasured node used to key on `infinity`,
+%% so it sorted after every measured node and never received the request
+%% that would have produced its first sample — a freshly added worker sat
+%% at dispatched=0 until unrelated load pushed the fleet into
+%% `capacity_exhausted`.
+%%
+%% The median is NOT enough to fix that: rtt_key is the PRIMARY sort
+%% element, so a median-keyed node still ranks behind every node faster
+%% than the median at ANY inflight (a single fast node with spare
+%% capacity keeps taking all traffic). Keying it on the fleet minimum
+%% instead makes it jointly-fastest, so `inflight` decides and it gets
+%% load — and therefore its first samples — immediately. The optimism is
+%% self-correcting: once real samples land, the node keys on its true
+%% value.
+%%
+%% `rtt_enabled = false` skips the computation entirely and keys every
+%% candidate on `infinity`, which reduces the sort to exactly v1's
+%% `(inflight, name)`.
 sort_tier(Candidates, Opts) ->
     RttOn = maps:get(rtt_enabled, Opts, false) =:= true,
     ProviderId = maps:get(provider_id, Opts, undefined),
-    SortKey = fun({N, M}) ->
-        RttKey =
-            case RttOn of
-                true ->
-                    maps:get(ProviderId, maps:get(rtt_map, M, #{}), infinity);
-                false ->
-                    infinity
-            end,
-        {RttKey, maps:get(inflight, M, 0), N}
-    end,
-    Sorted = lists:sort(fun(A, B) -> SortKey(A) =< SortKey(B) end, Candidates),
-    [N || {N, _} <- Sorted].
+    %% With the knob OFF the rtt element is dropped ENTIRELY rather than
+    %% set to a shared sentinel: rtt_map is populated from the ?RTT
+    %% table regardless of the knob (passive writes are not gated), so
+    %% "fall back to infinity" would still let a measured candidate key
+    %% on its real rtt and the sort would NOT reduce to v1. The key is
+    %% therefore built in two shapes.
+    Keyed =
+        case RttOn of
+            false ->
+                [{sort_key_plain(M, N), N} || {N, M} <- Candidates];
+            true ->
+                Fallback =
+                    case [R || {_N, M} <- Candidates, R <- [rtt_key(ProviderId, M)], is_number(R)] of
+                        [] -> infinity;
+                        Known -> lists:min(Known)
+                    end,
+                [{sort_key_rtt(ProviderId, Fallback, M, N), N} || {N, M} <- Candidates]
+        end,
+    [N || {_Key, N} <- lists:sort(Keyed)].
+
+rtt_key(ProviderId, M) ->
+    maps:get(ProviderId, maps:get(rtt_map, M, #{}), undefined).
+
+%% v1 shape: (inflight, name).
+sort_key_plain(M, N) ->
+    {maps:get(inflight, M, 0), N}.
+
+sort_key_rtt(ProviderId, Fallback, M, N) ->
+    RttKey =
+        case rtt_key(ProviderId, M) of
+            R when is_number(R) -> R;
+            _ -> Fallback
+        end,
+    {RttKey, maps:get(inflight, M, 0), N}.
 
 %%%===================================================================
 %%% Pure scheduler v2 math (spec A.3/A.4/0.3 — eunit seams)
