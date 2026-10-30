@@ -24,9 +24,17 @@
     terminate/2,
     code_change/3
 ]).
+%% Worker capacity override read seam (worker-capacity-override spec
+%% Part 1). Absent key = no override, hence the defaulted accessor.
+-export([worker_capacity_overrides/0]).
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_POLL_MS, 2000).
+%% Spell this key consistently with the deferred pool-side reader
+%% (effective_capacity/2 in janus_worker_pool): a -define is module-local,
+%% so that module repeats the literal. A typo at either site is silently
+%% inert rather than a compile error — worth knowing before renaming.
+-define(PT_WORKER_CAPACITY, {janus, worker_capacity_cfg}).
 
 -record(state, {
     ready = false :: boolean(),
@@ -321,6 +329,7 @@ distribute_settings(Rows) ->
     maybe_clear_absent(Present, <<"sched">>, fun janus_sched_knobs:put_sched_raw/1),
     maybe_clear_absent(Present, <<"model_sync">>, fun janus_sched_knobs:put_model_sync_raw/1),
     maybe_clear_absent(Present, <<"fleet">>, fun janus_sched_knobs:put_fleet_raw/1),
+    maybe_clear_absent(Present, <<"worker_capacity">>, fun clear_worker_capacity/1),
     lists:foreach(
         fun
             (#{key := <<"failover">>, value := V}) ->
@@ -438,6 +447,33 @@ distribute_settings(Rows) ->
                             what => janus_settings_bad_value, key => models_dev
                         })
                 end;
+            %% Worker capacity overrides (worker-capacity-override spec
+            %% Part 1): JSON object of worker Erlang long name -> integer
+            %% ceiling. Consumed by the pool's effective capacity
+            %% resolution (spec Part 1 "Read path", effective_capacity/2 —
+            %% lands with the read-path change); a missing/absent key
+            %% means the declared capacity applies. No per-entry
+            %% validation here — write-time validation is the
+            %% dashboard's job; read time ignores malformed entries.
+            (#{key := <<"worker_capacity">>, value := V}) ->
+                case decode_json(V) of
+                    {ok, Map} when is_map(Map) ->
+                        %% PT is written BEFORE the poke so the pool's
+                        %% republish reads the new value. The put is GATED
+                        %% on a real change: persistent_term:put/2 is
+                        %% VM-wide (it invalidates every process's PT
+                        %% references), and this clause re-enters on EVERY
+                        %% settings generation bump, so an unconditional put
+                        %% would pay that cost for unrelated key edits.
+                        Old = persistent_term:get(?PT_WORKER_CAPACITY, undefined),
+                        Changed = Old =/= Map,
+                        Changed andalso persistent_term:put(?PT_WORKER_CAPACITY, Map),
+                        poke_capacity_changed(Changed);
+                    _ ->
+                        logger:warning(#{
+                            what => janus_settings_bad_value, key => worker_capacity
+                        })
+                end;
             (#{key := <<"auto_router">>, value := V}) ->
                 case decode_json(V) of
                     {ok, Map} when is_map(Map) ->
@@ -505,6 +541,46 @@ maybe_clear_absent(Present, Key, PutFun) ->
         true -> ok;
         false -> PutFun(undefined)
     end.
+
+%% @doc Live worker capacity overrides (worker long name -> ceiling).
+%% Absent key is the NORMAL state (no override row), so this is a
+%% defaulted read: a bare `persistent_term:get/1` would raise `badarg`
+%% inside the pool gen_server and take the scheduler down.
+-spec worker_capacity_overrides() -> map().
+worker_capacity_overrides() ->
+    persistent_term:get(?PT_WORKER_CAPACITY, #{}).
+
+%% maybe_clear_absent/3 only ever calls this with `undefined`.
+-spec clear_worker_capacity(undefined) -> ok.
+clear_worker_capacity(undefined) ->
+    %% Erase (not put(undefined)): a stale override must not survive
+    %% deletion of the settings row. erase/1 RETURNS false on a missing
+    %% key, which is also the poke gate — no override is the common
+    %% deployment, and an unrelated settings edit must not move the
+    %% scheduler's snapshot generation.
+    Erased = persistent_term:erase(?PT_WORKER_CAPACITY),
+    %% Same poke as the write path: a REMOVED override must also land
+    %% within the dirty-flush window, not wait for the 30 s tick.
+    poke_capacity_changed(Erased).
+
+%% Mark the pool dirty so `build_snapshot/1` republishes on the
+%% <= 250 ms flush instead of waiting for the 30 s tick or an unrelated
+%% worker event (spec Part 1 "Read path" — staleness is real).
+%% Changed=false skips the cast entirely: every generation bump runs
+%% distribute_settings/1, so an unconditional poke would republish an
+%% identical snapshot on every unrelated key edit and every boot.
+%% Inner tag `capacity_changed` has an explicit handle_cast clause in
+%% janus_worker_pool — the `{sched, 2, Unknown}` catch-all there drops
+%% AND counts unrecognised tags, so a rename is invisible, not loud.
+%% No catch: gen_server:cast/2 returns ok immediately for a local atom
+%% destination even when that name is unregistered, so it cannot raise
+%% here and a catch would be dead code (mirroring release/1's catch, which
+%% guards a DIFFERENT shape — a call, not a cast).
+-spec poke_capacity_changed(boolean()) -> ok.
+poke_capacity_changed(true) ->
+    ok = gen_server:cast(janus_worker_pool, {sched, 2, capacity_changed});
+poke_capacity_changed(false) ->
+    ok.
 
 maybe_apply_model_sync_interval(Present) ->
     case lists:member(<<"model_sync">>, Present) of

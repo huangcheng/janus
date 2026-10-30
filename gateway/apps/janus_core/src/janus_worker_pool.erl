@@ -1585,6 +1585,14 @@ handle_cast({sched, 2, {probe, _JobSpec}}, State) ->
         true -> {noreply, do_probe(State)};
         false -> {noreply, State}
     end;
+handle_cast({sched, 2, capacity_changed}, State) ->
+    %% worker-capacity-override spec Part 1 ("Read path"): a settings
+    %% write publishes `{janus, worker_capacity_cfg}` then pokes the
+    %% pool so `build_snapshot/1` republishes on the <= 250 ms
+    %% dirty-flush instead of waiting for the 30 s tick or an
+    %% unrelated worker event. The pool re-reads PT at republish
+    %% time, so no state field is needed.
+    {noreply, mark_dirty(State)};
 handle_cast({sched, 2, Unknown}, State) ->
     %% Unknown `{sched, 2, _}` inner tag (a newer worker's load/probe
     %% cast against this master): dropped + counted.
