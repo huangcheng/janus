@@ -14,3 +14,6 @@ artifacts/
 reports/
 .cursor/
 .superpowers/
+
+# Local audit/review scratch output — not repo content.
+.audit-notes/
