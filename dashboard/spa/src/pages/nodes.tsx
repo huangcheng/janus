@@ -143,7 +143,14 @@ type Worker = {
   /** Dashboard-side TCP reach probe of the worker's dist port; null
    * before the first probe cycle, ok=null when the host can't be
    * resolved from the node name. */
-  reach?: { ok: boolean | null; checked_at: number; error: string | null } | null
+  reach?: {
+    ok: boolean | null
+    checked_at: number
+    error: string | null
+    /** The verdict came from a direct TCP dial because the authoritative
+     * dist probe did not run this cycle — the WEAKER signal. */
+    dist_unavailable?: boolean
+  } | null
 }
 
 type Fleet = {
@@ -947,25 +954,36 @@ function WorkerStatus({
   status?: string | null
   sticky?: boolean
   draining?: boolean
-  reach?: { ok: boolean | null; checked_at: number; error: string | null } | null
+  reach?: Worker["reach"]
 }) {
-  // The probe outranks the master's cached hello: a worker whose dist
-  // port cannot be reached AND that the master no longer reports up is
-  // down. A probe failure alone is NOT proof of death — locked-down
-  // workers (cloud security groups drop inbound dist ports; the mesh
-  // dials master→... worker-initiated) read unreachable from the
-  // dashboard forever while being perfectly healthy, so when the master
-  // still says up the probe failure shows as a muted "no probe" note.
+  // The dist probe outranks the master's cached hello: a worker the mesh
+  // cannot reach AND that the master no longer reports up is down.
+  //
+  // A DIRECT-TCP failure is NOT that signal. It dials the worker's dist
+  // port forward, and a locked-down worker (security group admits only the
+  // master's inbound; the mesh dials worker->master) drops it while being
+  // perfectly healthy. So when `dist_unavailable` marks the verdict as the
+  // fallback, a failure stays a muted note rather than turning the row red
+  // — otherwise one pool_ping blip (a deploy, a slow worker) reads as an
+  // outage.
   if (reach && reach.ok === false) {
     const ago = Math.max(0, Math.round((Date.now() - reach.checked_at * 1000) / 1000))
-    if (status === "up") {
+    if (status === "up" || reach.dist_unavailable === true) {
       return (
         <Badge
           variant="outline"
           className="text-[10px] text-muted-foreground"
-          title={`dist port not reachable from the dashboard (probed ${ago}s ago) — typically a locked-down security group; the master link is up`}
+          title={
+            reach.dist_unavailable === true
+              ? `pool_ping was unavailable this cycle, so the dashboard fell back to a direct TCP dial (probed ${ago}s ago). A locked-down worker drops that dial while its worker→master link is healthy; this is not proof of an outage.`
+              : `dist port not reachable from the dashboard (probed ${ago}s ago) — typically a locked-down security group; the master link is up`
+          }
         >
-          up · no probe
+          {/* Never assert "up" from the probe: the master may report
+              `sticky` (no new work) or omit a status entirely, and this
+              branch now also covers the weak-signal case. Take the label
+              from the status the master actually reported. */}
+          {status === "up" ? "up · no probe" : "no probe"}
         </Badge>
       )
     }

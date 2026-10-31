@@ -52,6 +52,12 @@ _sched: dict[int, dict[str, Any]] = {}
 # worker's dist port from the dashboard gives a truthful reach state
 # within one probe cycle; ok=False drives the "unreachable" pill.
 _worker_reach: dict[str, dict[str, Any]] = {}
+# Cycles where the authoritative (dist) probe did not run and direct TCP was
+# used instead. A non-zero rate means the Nodes page may under-report
+# health; exposed on /api/nodes so the condition is visible.
+_reach_fallback_total = 0
+# One log line per process while the fallback is in use (see the emit site).
+_reach_fallback_warned = False
 _worker_probe_task: asyncio.Task | None = None
 
 
@@ -391,6 +397,18 @@ async def assemble_nodes_payload(
         "fleet": fleet,
         "fleet_effective": fleet_effective,
         "scraped_at": max(scraped_ats),
+        # How many probe cycles fell back to direct TCP because pool_ping
+        # was unavailable. Non-zero means a `reach.ok === false` on this
+        # payload came from the WEAKER signal, so the Nodes page should not
+        # read it as proof of death (locked-down workers drop the forward
+        # dial while their worker->master mesh is healthy).
+        "reach_fallback_total": _reach_fallback_total,
+        # Per-worker, not an aggregate: ONE worker falling back does not
+        # make another worker's TCP verdict weak, and the SPA reads the
+        # flag off each row.
+        "reach_via_tcp": [
+            w["node"] for w in workers if (w.get("reach") or {}).get("dist_unavailable")
+        ],
     }
 
 
@@ -825,6 +843,8 @@ async def _worker_probe_loop() -> None:
     (version skew) or errors — the probe stays functional across a
     partial rollout.
     """
+    global _reach_fallback_total, _reach_fallback_warned
+
     while True:
         try:
             # Resolve the egress policy ONCE per cycle, like every
@@ -845,6 +865,7 @@ async def _worker_probe_loop() -> None:
 
             results: dict[str, dict[str, Any]] = {}
             used_dist = False
+            dist_unavailable = False
             for row in rows:
                 token = egress.stats_token_for(
                     row["stats_host"],
@@ -902,7 +923,21 @@ async def _worker_probe_loop() -> None:
                     continue
 
             if not used_dist:
-                # Fallback: direct TCP (pre-pool_ping behavior)
+                # Fallback: direct TCP (pre-pool_ping behavior).
+                #
+                # This path is a LAST RESORT and its verdict is weaker than
+                # a dist ping: it dials the worker's dist port FORWARD, and
+                # a locked-down worker (security group allows only the
+                # master's inbound) drops it while being perfectly healthy.
+                # The dist mesh dials worker->master, so only pool_ping sees
+                # the truth.
+                #
+                # `dist_unavailable` records that the authoritative probe
+                # did not run this cycle, so the cycle does not turn a
+                # blanket "could not dial" into a health verdict. It is the
+                # difference between "the node is down" and "we could not
+                # ask the node that knows".
+                dist_unavailable = True
                 names = sorted(
                     {
                         w.get("node")
@@ -932,6 +967,7 @@ async def _worker_probe_loop() -> None:
                             "checked_at": time.time(),
                             "error": None,
                             "via": "tcp",
+                            "dist_unavailable": dist_unavailable,
                         }
                     except Exception as e:
                         results[name] = {
@@ -939,8 +975,37 @@ async def _worker_probe_loop() -> None:
                             "checked_at": time.time(),
                             "error": str(e),
                             "via": "tcp",
+                            "dist_unavailable": dist_unavailable,
                         }
 
+            if dist_unavailable:
+                # Observable: a flapping dist probe must not be invisible.
+                # One line per cycle (not per node) so a persistent
+                # condition does not flood while a blip still leaves a mark.
+                _reach_fallback_total += 1
+                # Worded for EVERY path that lands here: `not used_dist` is
+                # also true when the gateway-rows fetch failed, when every
+                # row was skipped for lack of a token, when the pinned
+                # client refused, or when /stats/fleet/command answered
+                # non-200 or an unparsable body. Naming only pool_ping
+                # would send an operator looking in the wrong place.
+                #
+                # Once per transition, not once per cycle: a persistent
+                # condition must not write the same line to the ring every
+                # 30 s forever.
+                if not _reach_fallback_warned:
+                    _reach_fallback_warned = True
+                    logger.warning(
+                        "worker reach probe: the authoritative dist probe did "
+                        "not run this cycle; %d node(s) judged by direct TCP "
+                        "only (weaker signal — locked-down workers will read "
+                        "unreachable)",
+                        len(results),
+                    )
+            else:
+                # The authoritative probe ran: re-arm the once-per-process
+                # warning so a LATER fallback episode is not silent.
+                _reach_fallback_warned = False
             _worker_reach.update(results)
             for name in list(_worker_reach):
                 if name not in results:
@@ -986,3 +1051,4 @@ async def stop_monitor() -> None:
             pass
         _worker_probe_task = None
         logger.info("worker reach probe stopped")
+
