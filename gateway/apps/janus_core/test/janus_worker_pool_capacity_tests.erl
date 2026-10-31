@@ -59,3 +59,29 @@ atom_binary_key_mismatch_test() ->
         48,
         janus_worker_pool:effective_capacity(node(), 48, #{<<"10.0.0.5">> => 24})
     ).
+%% --- Part 2: suspect-adjusted load ---------------------------------------
+%%
+%% The load figure shown to sort_tier/2 and the dashboard is
+%% reserve - suspect, and the clamp at 0 is the invariant that matters: a
+%% purge and a release can race on the same job, so the subtraction can go
+%% negative, and a negative load would rank a node that is AT capacity as
+%% the least loaded candidate in the fleet.
+
+%% Ordinary case: some slots are suspect, the rest are real work.
+suspect_adjusted_subtracts_test() ->
+    ?assertEqual(18, janus_worker_pool:suspect_adjusted(25, 7)).
+
+%% No suspects: the raw reserve passes through.
+suspect_adjusted_no_suspects_test() ->
+    ?assertEqual(25, janus_worker_pool:suspect_adjusted(25, 0)).
+
+%% Every slot suspect: an idle node reports 0, not its raw reserve.
+suspect_adjusted_all_suspect_test() ->
+    ?assertEqual(0, janus_worker_pool:suspect_adjusted(25, 25)).
+
+%% THE CLAMP: more suspects than reservations must read as 0, never
+%% negative. This is reachable when a purge and a caller-side release race.
+suspect_adjusted_clamps_at_zero_test() ->
+    ?assertEqual(0, janus_worker_pool:suspect_adjusted(3, 5)),
+    ?assertEqual(0, janus_worker_pool:suspect_adjusted(0, 1)),
+    ?assertEqual(0, janus_worker_pool:suspect_adjusted(0, 0)).

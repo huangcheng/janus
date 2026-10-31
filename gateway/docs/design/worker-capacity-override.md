@@ -258,7 +258,22 @@ papered over:
 That is a deliberate trade: the alternative (admitting against
 `reserve − suspect`) converts a phantom-load problem into an
 over-admission problem, and over-admission is the failure that takes a
-host down. Invariant 4 below is weakened accordingly.
+host down. Invariant 7 states the trade.
+
+**Consequence that must be handled, not just documented.** Because the
+sort ranks a suspect-laden node as *least* loaded while admission still
+refuses it, that node becomes the FIRST candidate on every pick, takes an
+increment, fails the capacity check, rolls back and bumps
+`capacity_exhausted` — per pick, for up to the purge age. That is wasted
+work on the dispatch hot path and it pollutes an operator-facing counter
+for a node that is actually idle.
+
+The admission path therefore needs one guard the sort cannot give it: a
+candidate whose *suspect-adjusted* load is already at capacity is not a
+useful candidate, so `reserve_loop/5` skips it the same way it skips a
+draining node — before incrementing, not after. `?RESERVE` remains the
+number compared; the skip only avoids attempting a candidate that is
+known to fail.
 
 ### Who marks a slot suspect
 

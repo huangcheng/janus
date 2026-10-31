@@ -132,6 +132,9 @@
     %% the PURE 3-arity form, so override-wins / bad-value-fallback /
     %% absent-entry are assertable without a running config server.
     effective_capacity/3,
+    %% Suspect-adjusted load (worker-capacity-override spec Part 2): the
+    %% clamp is the invariant worth pinning.
+    suspect_adjusted/2,
     mismatch_step/4
 ]).
 
@@ -171,6 +174,9 @@
 %% atomically clear a job's suspect contribution when freeing its reservation.
 %% Heir'd like sched_tracked — a master restart cold-clears it (accepted).
 -define(SUSPECT, sched_suspect).
+%% Per-node suspect total, kept alongside ?SUSPECT so the load figure is
+%% an O(1) read (see suspect_count/1).
+-define(SUSPECT_COUNT, sched_suspect_count).
 
 %% Knob flags: boot-time env read ONCE into persistent_term (spec Part
 %% C — restart to change). GEO/PROBE knobs live in `janus_geo`.
@@ -446,8 +452,27 @@ reserve_loop([], _Snapshot, _Opts, _JobRef, FirstReason) ->
     local_fallback(first_reason(FirstReason, drained));
 reserve_loop([Node | Rest], Snapshot, Opts, JobRef, FirstReason) ->
     Pinned = maps:get(affinity_node, Opts, undefined) =:= Node,
-    case live_draining(Node) of
-        false ->
+    %% Known-doomed skip (worker-capacity-override spec Part 2): the sort
+    %% ranks a suspect-laden node as LEAST loaded (reserve - suspect) while
+    %% admission compares the RAW counter, so without this guard every pick
+    %% would select that node, increment, fail, roll back and bump
+    %% capacity_exhausted — repeatedly, on the hot path, for a node that is
+    %% actually idle. Skipping before the increment keeps the counter clean
+    %% (an attempted-and-rolled-back pick is NOT an exhaustion signal).
+    %% `?RESERVE` is still the number compared; this only avoids trying a
+    %% candidate that is already known to fail.
+    Doomed =
+        case Pinned of
+            true ->
+                false;
+            false ->
+                case candidate_capacity(Node, Snapshot) of
+                    infinity -> false;
+                    Cap -> suspect_reserve_count(Node) >= Cap
+                end
+        end,
+    case not Doomed andalso live_draining(Node) =:= false of
+        true ->
             Count = ets:update_counter(?RESERVE, Node, {2, 1}, {Node, 0}),
             Capacity = candidate_capacity(Node, Snapshot),
             OverCapacity = not Pinned andalso Capacity =/= infinity andalso Count > Capacity,
@@ -483,7 +508,7 @@ reserve_loop([Node | Rest], Snapshot, Opts, JobRef, FirstReason) ->
                     ok = bump(capacity_exhausted),
                     reserve_loop(Rest, Snapshot, Opts, JobRef, first_reason(FirstReason, capacity))
             end;
-        true ->
+        false ->
             Reason =
                 case Pinned of
                     true -> drained_pin;
@@ -1619,7 +1644,19 @@ handle_cast({sched, 2, {suspect, JobRef}}, State) ->
         {Node, _At, _ProviderId, false} ->
             %% Internal rows (probes) never reach the suspect path —
             %% they never hold a reservation. Only non-Internal rows.
-            _ = ets:insert(?SUSPECT, {JobRef, Node}),
+            New = ets:insert_new(?SUSPECT, {JobRef, Node}),
+            New andalso bump_suspect(Node),
+            %% Re-validate: a concurrent caller-side release (release/1 ->
+            %% take_and_maybe_decrement/1) can take the tracked row between
+            %% the lookup above and this insert. That release already ran
+            %% clear_suspect/1 and found nothing, so the entry just written
+            %% would be an orphan — it would suppress this node's load
+            %% figure with no reservation behind it until the next
+            %% reconcile tick, and no take path would ever clear it.
+            case ets:member(?TRACKED, JobRef) of
+                true -> ok;
+                false -> clear_suspect(JobRef)
+            end,
             ok = bump(suspect_mark);
         _ ->
             ok
@@ -2312,7 +2349,10 @@ ensure_sched_tables() ->
         adopt_or_create(?WORKERS, Opts, Heir),
         adopt_or_create(?RTT, Opts, Heir),
         adopt_or_create(?TRACKED, Opts ++ [{write_concurrency, true}], Heir),
-        adopt_or_create(?SUSPECT, Opts, Heir)
+        %% write_concurrency: the suspect table is written from the pool
+        %% gen_server AND taken from caller-side release paths.
+        adopt_or_create(?SUSPECT, Opts ++ [{write_concurrency, true}], Heir),
+        adopt_or_create(?SUSPECT_COUNT, Opts ++ [{write_concurrency, true}], Heir)
     ],
     %% Owner-local counters (tolerant bump pattern, janus_geo
     %% precedent): they died with the previous owner; the name is free.
@@ -3779,18 +3819,42 @@ reserve_count(Node) ->
 %% suspect by a timeout arm). The load figure is reserve - suspect.
 %% Keyed by JobRef (not Node) so clear_suspect/1 takes atomically;
 %% per-node aggregation uses ets:select_count/2 on the small table.
+%% Per-node suspect total, O(1): the ?SUSPECT table stays keyed by JobRef
+%% (so clear_suspect/1 is a single atomic take), and this counter is
+%% bumped/decremented in the same two places. A select_count/2 traversal
+%% here would run on EVERY workers_view call and every pick (through
+%% reserve_count_live/1) — a full scan of a table that grows with the
+%% timeout rate, precisely on the hot path.
 suspect_count(Node) ->
     try
-        ets:select_count(?SUSPECT, [{{'_', Node}, [], [true]}])
+        ets:lookup_element(?SUSPECT_COUNT, Node, 2, 0)
     catch
         _:_ -> 0
+    end.
+
+bump_suspect(Node) ->
+    _ = ets:update_counter(?SUSPECT_COUNT, Node, {2, 1}, {Node, 0}),
+    ok.
+
+drop_suspect(Node) ->
+    %% Decrement floor at 0: a purge and a release racing on the same job
+    %% must not drive the per-node figure negative and silently over-admit.
+    try
+        case ets:update_counter(?SUSPECT_COUNT, Node, {2, -1, 0, 0}, {Node, 0}) of
+            _ -> ok
+        end
+    catch
+        _:_ -> ok
     end.
 
 %% Clear a job's suspect entry atomically (single-owner rule): called
 %% from take_and_maybe_decrement/1 only, so a slot can never be freed
 %% without its suspect contribution going with it.
 clear_suspect(JobRef) ->
+    %% Only the winner of the take may decrement: a job cleared twice (purge
+    %% racing a release) must not subtract twice from the per-node total.
     try ets:take(?SUSPECT, JobRef) of
+        [{JobRef, Node}] -> drop_suspect(Node);
         _ -> ok
     catch
         _:_ -> ok
@@ -3802,7 +3866,15 @@ clear_suspect(JobRef) ->
 %% reconcile_counters/2 and node_drain_idle_ready/1, which must keep
 %% reading the raw counter.
 suspect_reserve_count(Node) ->
-    max(0, reserve_count(Node) - suspect_count(Node)).
+    suspect_adjusted(reserve_count(Node), suspect_count(Node)).
+
+%% Pure seam (worker-capacity-override spec Part 2): reserve minus suspect,
+%% clamped at 0. The clamp is load-bearing — purify and release can race on
+%% the same job, and a negative load figure would rank a node as
+%% least-loaded while it is at capacity.
+-spec suspect_adjusted(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+suspect_adjusted(Reserve, Suspect) when is_integer(Reserve), is_integer(Suspect) ->
+    max(0, Reserve - Suspect).
 
 reserve_nodes() ->
     try
