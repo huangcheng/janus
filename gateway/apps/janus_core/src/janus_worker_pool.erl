@@ -29,6 +29,14 @@
 %%%   (pick's winner inserts directly; {@link release/1} is the
 %%%   caller-side `ets:take` + conditional decrement). Probes insert
 %%%   rows with `Internal => true` and never decrement.</li>
+%%% <li>`sched_suspect` — `JobRef => Node` (worker-capacity-override
+%%%   spec Part 2): the set of reservations whose owning job is KNOWN
+%%%   DEAD (a timeout path called `mark_dead/1` but kept the slot, spec
+%%%   Part 0.11). The load figure is `reserve - suspect`; the admission
+%%%   counter stays raw `?RESERVE`. Keyed by JobRef (not Node) so the
+%%%   SINGLE owner `take_and_maybe_decrement/1` atomically frees both a
+%%%   slot and its suspect contribution in one take. Heir'd — a master
+%%%   restart cold-clears it (accepted, documented).</li>
 %%% </ul>
 %%%
 %%% v2.1 A.2 inflight single-source: the member `inflight` map (the v1
@@ -158,6 +166,11 @@
 -define(RTT, sched_rtt).
 -define(TRACKED, sched_tracked).
 -define(COUNTERS, sched_counters).
+%% Reservation-integrity suspect table (worker-capacity-override spec Part 2):
+%% keyed by JobRef so take_and_maybe_decrement/1 (the single owner) can
+%% atomically clear a job's suspect contribution when freeing its reservation.
+%% Heir'd like sched_tracked — a master restart cold-clears it (accepted).
+-define(SUSPECT, sched_suspect).
 
 %% Knob flags: boot-time env read ONCE into persistent_term (spec Part
 %% C — restart to change). GEO/PROBE knobs live in `janus_geo`.
@@ -388,12 +401,13 @@ live_snapshot(Snapshot, PickOpts) ->
 
 %% Live reservation count (A.2): public table, read_concurrency —
 %% caller-side, tolerant of the missing-table window.
+%% Live reservation count for the SORT path (A.2): reserve minus
+%% suspect so a node recovering from a dist hiccup is not demoted for
+%% work that is already dead (worker-capacity-override spec Part 2).
+%% Has exactly ONE caller (live_snapshot/2); delegates to the shared
+%% helper so the subtraction cannot drift from the dashboard's.
 reserve_count_live(Node) ->
-    try
-        ets:lookup_element(?RESERVE, Node, 2, 0)
-    catch
-        _:_ -> 0
-    end.
+    suspect_reserve_count(Node).
 
 %% Live per-provider RTT cell (B.2 SORT KEY): reads the {Node,
 %% ProviderId} row's Ewma when unexpired. NO cell (never sampled, or
@@ -717,6 +731,10 @@ note_inflight(Node, Delta) when is_atom(Node), (Delta =:= 1 orelse Delta =:= -1)
 %% the health/rtt feeds would be silently lost whenever the pool is
 %% merely busy). A dead/stuck pool proceeds (its casts were dropped
 %% with it; the tables are public — the decrement stays correct).
+%%
+%% Worker-capacity-override spec Part 2: release also clears any
+%% suspect entry (via take_and_maybe_decrement/1) — the SINGLE-OWNER
+%% rule prevents double-decrement of the suspect counter.
 -spec release(binary()) -> ok.
 release(JobRef) when is_binary(JobRef) ->
     %% Barrier timeout = the pool was too busy to drain the FIFO in
@@ -1589,6 +1607,26 @@ handle_cast({sched, 2, {probe, _JobSpec}}, State) ->
         true -> {noreply, do_probe(State)};
         false -> {noreply, State}
     end;
+handle_cast({sched, 2, {suspect, JobRef}}, State) ->
+    %% Worker-capacity-override spec Part 2: a timeout arm already
+    %% called mark_dead/1 and flushed the job. The pool resolves the
+    %% node from the tracked row it still holds — the reservation
+    %% stays, but the load figure now excludes it (reserve - suspect).
+    %% A cast for an already-released purged row (no tracked row,
+    %% or the inactivity arm's pre-released path) is a safe no-op:
+    %% no tracked row → no node → nothing to mark.
+    case tracked_row(JobRef) of
+        {Node, _At, _ProviderId, false} ->
+            %% Internal rows (probes) never reach the suspect path —
+            %% they never hold a reservation. Only non-Internal rows.
+            _ = ets:insert(?SUSPECT, {JobRef, Node}),
+            ok = bump(suspect_mark);
+        _ ->
+            ok
+    end,
+    %% Mark dirty: the suspect count changed the load figure visible
+    %% in the snapshot and dashboard — republish within 250 ms.
+    {noreply, mark_dirty(State)};
 handle_cast({sched, 2, capacity_changed}, State) ->
     %% worker-capacity-override spec Part 1 ("Read path"): a settings
     %% write publishes `{janus, worker_capacity_cfg}` then pokes the
@@ -2273,7 +2311,8 @@ ensure_sched_tables() ->
         adopt_or_create(?RESERVE, Opts ++ [{write_concurrency, true}], Heir),
         adopt_or_create(?WORKERS, Opts, Heir),
         adopt_or_create(?RTT, Opts, Heir),
-        adopt_or_create(?TRACKED, Opts ++ [{write_concurrency, true}], Heir)
+        adopt_or_create(?TRACKED, Opts ++ [{write_concurrency, true}], Heir),
+        adopt_or_create(?SUSPECT, Opts, Heir)
     ],
     %% Owner-local counters (tolerant bump pattern, janus_geo
     %% precedent): they died with the previous owner; the name is free.
@@ -2297,6 +2336,7 @@ ensure_sched_tables() ->
 reset_adopted_tables() ->
     _ = ets:delete_all_objects(?RESERVE),
     _ = ets:delete_all_objects(?TRACKED),
+    _ = ets:delete_all_objects(?SUSPECT),
     %% sched_rtt resets here too: an adopted table may carry
     %% pre-v2.1 5-tuple rows that no prune/TTL path matches —
     %% the reset makes boot actually cold for this table (ocr).
@@ -2569,6 +2609,13 @@ sched_rtt_rows() ->
 %% decrement `ets:update_counter(?RESERVE, Node, {2, -1}, {Node, 0})`.
 %% Wrapped in try: a badarg at table-shutdown (dead pool, mid-adopt)
 %% skips the decrement and NEVER double-applies.
+%%
+%% Worker-capacity-override spec Part 2 (SINGLE-OWNER rule): this
+%% helper is the ONE place a reservation slot is freed, so it is also
+%% the ONE place the suspect contribution for that slot is freed — a
+%% taken row also `ets:take`s its ?SUSPECT entry (keyed by JobRef), so
+%% a slot can never be freed without its suspect component going with
+%% it (the purge-suspect double-decrement the reviews flagged).
 take_and_maybe_decrement(JobRef) ->
     %% The try scopes the TAKE only: a taken row must be reported
     %% as taken even when the decrement throws (table torn down
@@ -2583,6 +2630,11 @@ take_and_maybe_decrement(JobRef) ->
         end,
     case Taken of
         [{JobRef, {Node, _ReservedAt, _ProviderId, false}}] ->
+            %% Clear the suspect entry FIRST (or in the same breath as
+            %% the decrement): if this job was marked suspect, its load
+            %% exclusion must die with the slot. `ets:take/2` is a no-op
+            %% when the row is absent (never suspect).
+            _ = clear_suspect(JobRef),
             Decr =
                 try
                     _ = ets:update_counter(?RESERVE, Node, {2, -1}, {Node, 0}),
@@ -2592,6 +2644,10 @@ take_and_maybe_decrement(JobRef) ->
                 end,
             {taken, Node, Decr};
         [{JobRef, {Node, _ReservedAt, _ProviderId, true}}] ->
+            %% Probes never hold a reservation and never get marked
+            %% suspect; clearing is still harmless and keeps the
+            %% single-owner rule uniform.
+            _ = clear_suspect(JobRef),
             {taken, Node, false};
         [] ->
             none;
@@ -3433,7 +3489,13 @@ workers_view(#{members := Members} = Pool, Ewma, Counters, HealthOn, Load) ->
                     region => maps:get(region, M, undefined),
                     sched_v => maps:get(sched_v, M, 1),
                     draining => maps:get(draining, M, false),
-                    inflight => reserve_count(Node),
+                    %% The dashboard cell shows REAL work: reserve minus
+                    %% suspect, clamped at 0 — the number an operator
+                    %% tunes against (spec Part 2). NOT reserve_count/1:
+                    %% that function is ALSO used by reconcile_counters/2
+                    %% and node_drain_idle_ready/1, which must keep the
+                    %% raw counter.
+                    inflight => suspect_reserve_count(Node),
                     %% Capacity observability (2026-10-28): the
                     %% worker's latest self-reported beam split
                     %% (total/processes/binary/ets, MB) — null until
@@ -3566,8 +3628,32 @@ geo_requested_safe() ->
 reconcile(Now, State) ->
     State1 = purge_tracked(Now, State),
     NewExcess = reconcile_counters(tracked_rows(), State#state.excess_seen),
+    %% Worker-capacity-override spec Part 2: suspect ⊆ tracked must
+    %% hold — a suspect entry whose tracked row is gone (concurrent
+    %% release / nodedown between the take and this tick) is drift.
+    %% Purge already freed both in take_and_maybe_decrement/1; this
+    %% prunes any residue so the load figure cannot stay suppressed.
+    ok = reconcile_suspect(),
     prune_absent_nodes(State1#state.pool),
     State1#state{excess_seen = NewExcess}.
+
+%% Suspect counter heal (Part 2): the suspect table is keyed by JobRef
+%% and must stay a SUBSET of the tracked table — a suspect entry is
+%% only meaningful while its reservation slot still exists. Any suspect
+%% JobRef no longer in sched_tracked is stale (its slot was freed by a
+%% path that ran before the suspect cast landed, or by nodedown) and is
+%% removed. This is the suspect counterpart of reconcile_counters/2's
+%% reserve heal — without it a stale entry would suppress the load
+%% figure until the next master restart.
+reconcile_suspect() ->
+    try
+        Tracked = sets:from_list([J || {J, _} <- tracked_rows()], [{version, 2}]),
+        Stale = [J || {J, _} <- ets:tab2list(?SUSPECT), not sets:is_element(J, Tracked)],
+        lists:foreach(fun(J) -> _ = ets:take(?SUSPECT, J) end, Stale),
+        ok
+    catch
+        _:_ -> ok
+    end.
 
 %% Purge tracked entries older than PURGE_AGE_MS measured from
 %% ReservedAtMono (silently-lost jobs can no longer pin a capacity slot
@@ -3687,6 +3773,36 @@ reserve_count(Node) ->
     catch
         _:_ -> 0
     end.
+
+%% Worker-capacity-override spec Part 2: per-node suspect count — the
+%% number of reservations whose owning job is known dead (marked
+%% suspect by a timeout arm). The load figure is reserve - suspect.
+%% Keyed by JobRef (not Node) so clear_suspect/1 takes atomically;
+%% per-node aggregation uses ets:select_count/2 on the small table.
+suspect_count(Node) ->
+    try
+        ets:select_count(?SUSPECT, [{{'_', Node}, [], [true]}])
+    catch
+        _:_ -> 0
+    end.
+
+%% Clear a job's suspect entry atomically (single-owner rule): called
+%% from take_and_maybe_decrement/1 only, so a slot can never be freed
+%% without its suspect contribution going with it.
+clear_suspect(JobRef) ->
+    try ets:take(?SUSPECT, JobRef) of
+        _ -> ok
+    catch
+        _:_ -> ok
+    end.
+
+%% Worker-capacity-override spec Part 2: the LOAD FIGURE for sort and
+%% display — reserve minus suspect, clamped at 0. Do NOT put this
+%% subtraction inside reserve_count/1: that function is ALSO used by
+%% reconcile_counters/2 and node_drain_idle_ready/1, which must keep
+%% reading the raw counter.
+suspect_reserve_count(Node) ->
+    max(0, reserve_count(Node) - suspect_count(Node)).
 
 reserve_nodes() ->
     try

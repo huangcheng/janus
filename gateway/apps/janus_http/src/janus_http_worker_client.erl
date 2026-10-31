@@ -492,6 +492,7 @@ dispatch(WorkerNode, JobRef, Fields, WantStream, LocalFun, Fallback) ->
                     case wait_ack(JobRef, WorkerNode) of
                         {error, ack_timeout} ->
                             mark_dead(JobRef),
+                            sched_suspect(JobRef),
                             cancel_dispatch(WorkerNode, JobRef),
                             flush_job(JobRef),
                             %% Ack-miss: the reservation stays PENDING
@@ -665,6 +666,17 @@ sched_cast(Msg) ->
     end,
     ok.
 
+%% Worker-capacity-override spec Part 2: mark a dead-but-unreleased
+%% reservation SUSPECT so the load figure (reserve - suspect) stops
+%% counting it. Only the four non-releasing timeout arms call this —
+%% the inactivity arm of stream_drain_timeout/4 already releases (its
+%% reservation is gone, so a suspect cast would be a no-op). Sent AFTER
+%% mark_dead/1 (the discriminator) as a `{sched, 2, _}` cast: the pool
+%% resolves the node from the tracked row it still holds; a cast for an
+%% already-released row is a no-op.
+sched_suspect(JobRef) ->
+    sched_cast({sched, 2, {suspect, JobRef}}).
+
 %% v2.1 B.1: release is CALLER-SIDE — `ets:take` + conditional pinned
 %% decrement inside janus_worker_pool:release/1 (never a gen_server
 %% call on the completion path), then the {touched, Node} poke cast
@@ -769,6 +781,7 @@ remote_unary(JobRef, WorkerSessionPid, Mon, WorkerNode, Fields, TtfbStart, Local
         stash_outcome(error),
         cancel_session(WorkerSessionPid, JobRef),
         mark_dead(JobRef),
+        sched_suspect(JobRef),
         flush_job(JobRef),
         %% Stream/unary timeout with a live worker session: NO release
         %% (spec Part 0.11 — release on done/error/worker_lost/send-fail
@@ -1000,6 +1013,7 @@ stream_preflight(JobRef, WorkerSessionPid, Mon, WorkerNode, TtfbStart, Deadline)
         stash_outcome(error),
         cancel_session(WorkerSessionPid, JobRef),
         mark_dead(JobRef),
+        sched_suspect(JobRef),
         flush_job(JobRef),
         {error, {await, timeout}}
     end.
@@ -1224,6 +1238,13 @@ stream_drain_timeout(JobRef, WorkerSessionPid, TotalLeft, InactivityLeft) ->
     %% the {janus_error, _} path that releases in the same situation.
     case classify_stream_timeout(TotalLeft, InactivityLeft) of
         timeout ->
+            %% The TOTAL-budget arm keeps the slot (spec Part 0.11),
+            %% exactly like remote_unary's timeout — but the job is
+            %% dead, so it must be marked SUSPECT so the load figure
+            %% (reserve - suspect) excludes it. The inactivity arm
+            %% below already releases, so it must NOT be marked (a
+            %% suspect cast for a released row is a no-op anyway).
+            sched_suspect(JobRef),
             {error, {await, timeout}};
         no_progress ->
             ok = sched_release(JobRef),
