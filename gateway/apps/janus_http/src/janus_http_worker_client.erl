@@ -500,6 +500,25 @@ dispatch(WorkerNode, JobRef, Fields, WantStream, LocalFun, Fallback) ->
                             %% master executes locally. Purge reclaims.
                             ok = note_dispatch_local(ack_miss),
                             LocalFun();
+                        {error, {worker_rejected, _Code, _Msg}} ->
+                            %% Mirror of the timeout branch with ONE
+                            %% deliberate difference: the reservation is
+                            %% RELEASED, not left suspect. The worker
+                            %% refused before admitting the job
+                            %% (dispatch returned its state unchanged, no
+                            %% session spawned), so nothing can still be
+                            %% running on that node — a suspect row here
+                            %% would be a phantom slot for the very event
+                            %% class this path is about (spec
+                            %% ack-path-signalling.md). cancel_dispatch is
+                            %% a no-op toward such a worker; kept for
+                            %% teardown symmetry.
+                            mark_dead(JobRef),
+                            cancel_dispatch(WorkerNode, JobRef),
+                            flush_job(JobRef),
+                            ok = sched_release(JobRef),
+                            ok = note_dispatch_local(worker_rejected),
+                            LocalFun();
                         {ok, WorkerSessionPid} ->
                             Mon = monitor(process, WorkerSessionPid),
                             %% TTFB clock starts at ack receipt (spec A.4).
@@ -536,19 +555,46 @@ finish_remote(Mon) ->
     demonitor(Mon, [flush]),
     ok.
 
+%% `!' to a {Name, Node} destination never raises — it returns the
+%% message whether the node is down or the name is unregistered — so the
+%% try/catch that stood here could not fire and send_failed was 0 by
+%% construction. erlang:send/3 with [noconnect] is the only primitive
+%% that reports undeliverability: it returns `noconnect' when the master
+%% has no connection to that node (e.g. mid rolling-deploy flap), which
+%% resolves the dispatch immediately instead of after the ack deadline.
+%% nosuspend is deliberately not used — the pool mailbox is not a
+%% bottleneck here and it would add a blocking classification nobody
+%% needs (spec ack-path-signalling.md, Defect 2).
 send_job(WorkerNode, JobMsg) ->
-    try
-        {janus_worker_dispatch, WorkerNode} ! JobMsg,
-        ok
-    catch
-        _:_ -> {error, send_failed}
+    case erlang:send({janus_worker_dispatch, WorkerNode}, JobMsg, [noconnect]) of
+        ok -> ok;
+        _ -> {error, send_failed}
     end.
 
 wait_ack(JobRef, WorkerNode) ->
     Deadline = janus_worker_wire:ack_deadline_ms(),
     receive
         {janus_job_ack, JobRef, WorkerSessionPid} when is_pid(WorkerSessionPid) ->
-            {ok, WorkerSessionPid}
+            {ok, WorkerSessionPid};
+        {janus_error, JobRef, #{code := Code, message := Msg}} ->
+            %% The worker's refusal (janus_worker_dispatch:maybe_reject/3
+            %% via janus_worker_wire:error/3) arrives in milliseconds;
+            %% without this clause it sat unread while the caller waited
+            %% out the full deadline and the failure was reported as
+            %% ack_timeout — a time problem that did not happen. Strict
+            %% JobRef match: an error for another job must not be
+            %% consumed here. The map pattern REQUIRES both keys, so a
+            %% malformed error falls through to the deadline instead of
+            %% crashing the session. Logged here, like the timeout below:
+            %% this is where the worker's own reason is first known.
+            logger:warning(#{
+                what => janus_worker_rejected,
+                worker_node => WorkerNode,
+                job_ref => binary:encode_hex(JobRef),
+                code => Code,
+                message => Msg
+            }),
+            {error, {worker_rejected, Code, Msg}}
     after Deadline ->
         logger:warning(#{
             what => janus_worker_ack_timeout,
