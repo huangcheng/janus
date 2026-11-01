@@ -323,7 +323,12 @@ sched_json(Data) when is_map(Data) ->
             ack_miss => Ctr({dispatch_local, ack_miss}),
             %% v2.1 Part E: the unary worker_lost fallback reason (a
             %% VALUE addition to the enum — schema_version stays 1).
-            unary_fallback => Ctr({dispatch_local, unary_fallback})
+            unary_fallback => Ctr({dispatch_local, unary_fallback}),
+            %% Ack-path signalling: the worker refused the job (see
+            %% docs/design/ack-path-signalling.md). Distinct from ack_miss
+            %% so an operator can tell "the worker said no" from "the
+            %% worker never answered". Same VALUE-addition rule.
+            worker_rejected => Ctr({dispatch_local, worker_rejected})
         },
         capacity_exhausted_total => Ctr(capacity_exhausted),
         health_demote_total => Ctr(health_demote),

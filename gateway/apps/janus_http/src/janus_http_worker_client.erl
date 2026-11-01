@@ -482,9 +482,22 @@ dispatch(WorkerNode, JobRef, Fields, WantStream, LocalFun, Fallback) ->
             LocalFun();
         {ok, JobMsg} ->
             case send_job(WorkerNode, JobMsg) of
-                {error, _} ->
+                {error, SendReason} ->
                     %% Send-fail: release + dispatch_local{send_fail}
                     %% (spec Part 0.11 / Part C metrics).
+                    %%
+                    %% Logged with node attribution: send_failed was dead
+                    %% code until erlang:send/3 [noconnect] made it
+                    %% reachable, so this is the FIRST time a dist flap
+                    %% shows up here. Without the node name a nodedown
+                    %% wave is visible only as an aggregate counter, with
+                    %% nothing saying which peer went away.
+                    logger:warning(#{
+                        what => janus_worker_send_failed,
+                        worker_node => WorkerNode,
+                        job_ref => binary:encode_hex(JobRef),
+                        reason => SendReason
+                    }),
                     ok = sched_release(JobRef),
                     ok = note_dispatch_local(send_fail),
                     LocalFun();

@@ -164,6 +164,8 @@ type Fleet = {
     drained_pin?: number
     send_fail?: number
     ack_miss?: number
+    /** The worker refused the job (not-yet-acked hello, invalid job). */
+    worker_rejected?: number
   }
 } | null
 
@@ -1253,6 +1255,7 @@ function FleetStrip({ fleet, stale, disabled }: { fleet: Fleet; stale: boolean; 
     "drained_pin",
     "send_fail",
     "ack_miss",
+    "worker_rejected",
   ]
   return (
     <div className={"border-b px-6 py-3 text-xs " + (stale ? "text-muted-foreground" : "")}>
