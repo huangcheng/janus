@@ -363,7 +363,11 @@ route_auto(Cfg, ReqMap, Constraint) ->
                 reason => element(2, Decision),
                 tier => element(3, Decision),
                 target => element(4, Decision),
-                est_total => maps:get(est_total, F)
+                est_total => maps:get(est_total, F),
+                %% A4: which zone/rule settled it, and (judge zone only) the
+                %% shape the judge was shown.
+                decided => element(5, Decision),
+                shape => element(6, Decision)
             }),
             element(1, Decision)
     end.
@@ -373,49 +377,94 @@ decide(Cfg, F, Constraint) ->
     case rules_gate(F, Cfg) of
         {error, request_too_large} ->
             bump(too_large),
-            {{error, request_too_large}, too_large, undefined, undefined};
+            {{error, request_too_large}, too_large, undefined, undefined, too_large, #{}};
         judge_zone ->
             {Tier, Origin} = judge_tier(Cfg, F),
-            finish(resolve_soft(Cfg, Tier, Constraint), Origin, Tier, Cfg);
-        {Tier, hard} ->
+            %% A4: record WHAT the judge saw, as shape only — the lengths of
+            %% the two text fields and the two counts, never the text.
+            finish(
+                resolve_soft(Cfg, Tier, Constraint),
+                Origin,
+                Tier,
+                Cfg,
+                judge_zone,
+                judge_zone_shape(F)
+            );
+        {Tier, soft_route, RuleName} ->
+            %% Rule 5 (fast): directed hard, AVAILABILITY SOFT. A fast
+            %% tier with no usable member falls back to the default tier
+            %% on ANY resolve failure -- not only for streams. Keeping this
+            %% clause separate from the hard one preserves that: merging
+            %% them turned an unavailable fast tier into no_route.
             case resolve_hard(Cfg, Tier, Constraint) of
                 {ok, _, _, _} = Ok ->
-                    finish(Ok, rules, Tier, Cfg);
+                    finish(Ok, rules, Tier, Cfg, RuleName);
+                error ->
+                    finish(
+                        resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint),
+                        fallback,
+                        Tier,
+                        Cfg,
+                        RuleName
+                    )
+            end;
+        {Tier, _Kind, RuleName} ->
+            %% A hard gate rule settled the tier; RuleName names which one.
+            case resolve_hard(Cfg, Tier, Constraint) of
+                {ok, _, _, _} = Ok ->
+                    finish(Ok, rules, Tier, Cfg, RuleName);
                 error when is_map_key(stream, Constraint) ->
                     %% Hard tier has no member this stream can use
                     %% (native-only or stream_translate_blocked). Serving
                     %% the default tier beats failing with no_route.
                     finish(
-                        resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint), fallback, Tier, Cfg
+                        resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint),
+                        fallback,
+                        Tier,
+                        Cfg,
+                        RuleName
                     );
                 error ->
-                    finish(error, rules, Tier, Cfg)
-            end;
-        {Tier, soft_route} ->
-            %% Rule 5 (fast): directed hard, availability soft.
-            case resolve_hard(Cfg, Tier, Constraint) of
-                {ok, _, _, _} = Ok ->
-                    finish(Ok, rules, Tier, Cfg);
-                error ->
-                    finish(
-                        resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint), fallback, Tier, Cfg
-                    )
+                    finish(error, rules, Tier, Cfg, RuleName)
             end
     end.
 
 %% EffectiveNames = the list that produced Name (D2): if soft fell to
 %% default_tier, that default-tier list IS the effective list.
-finish({ok, Name, Names, EffTier}, Origin, _RuleTier, Cfg) ->
+finish(Resolved, Origin, RuleTier, Cfg, Decided) ->
+    finish(Resolved, Origin, RuleTier, Cfg, Decided, #{}).
+
+finish({ok, Name, Names, EffTier}, Origin, _RuleTier, Cfg, Decided, Shape) ->
     bump({routed, EffTier}),
+    %% `decided` names the zone or rule that settled the tier, and `shape`
+    %% carries what the judge saw as COUNTS ONLY (auto-router-complexity spec
+    %% A4). Runner-up verdicts an operator cannot explain are verdicts they
+    %% cannot tune against; text is never copied here.
     Meta = #{
         tier => EffTier,
         names => dedupe_names(Names),
         tier_failover_enabled => Cfg#acfg.tier_failover_enabled,
-        tier_failover_max_names => Cfg#acfg.tier_failover_max_names
+        tier_failover_max_names => Cfg#acfg.tier_failover_max_names,
+        decided => Decided,
+        shape => Shape
     },
-    {{ok, Name, Meta}, Origin, EffTier, Name};
-finish(error, Origin, Tier, _Cfg) ->
-    {error_tag(no_route), Origin, Tier, undefined}.
+    %% UNIFORM 6-TUPLE (spec A4). Every clause of decide/3 returns six
+    %% elements; a shorter one made element(5, Decision) raise badarg,
+    %% and maybe_route/3's catch-all swallowed that into a silent
+    %% degradation to `pass` — the router stopped routing AT ALL.
+    {{ok, Name, Meta}, Origin, EffTier, Name, Decided, Shape};
+finish(error, Origin, Tier, _Cfg, Decided, Shape) ->
+    {error_tag(no_route), Origin, Tier, undefined, Decided, Shape}.
+
+%% What the judge was shown, as shape only. Lengths and counts, never text —
+%% the same discipline the shape sentinel follows.
+judge_zone_shape(F) ->
+    #{
+        first_user_len => byte_size(maps:get(first_user, F, <<>>)),
+        last_user_len => byte_size(maps:get(last_user, F, <<>>)),
+        turns => maps:get(msg_count, F, 0),
+        tool_calls => maps:get(tool_calls, F, 0)
+    }.
 
 error_tag(no_route) -> {error, no_route}.
 
@@ -756,10 +805,23 @@ rules_gate_1(F, Cfg) ->
         {(PromptTools * 6) div 5 > Big, {big, hard}},
         {IsFast, {fast, soft_route}}
     ],
-    case [R || {true, R} <- Conds] of
+    %% Each condition carries its RULE NUMBER so the decision log can name
+    %% the reason instead of a generic `rules' (auto-router-complexity spec
+    %% A4). A verdict an operator cannot explain is a verdict they cannot
+    %% tune against.
+    Numbered = [
+        erlang:append_element(Verdict, RuleNo)
+     || {{Cond, Verdict}, RuleNo} <- lists:zip(Conds, rule_numbers()),
+        Cond
+    ],
+    case Numbered of
         [] -> judge_zone;
         [First | _] -> First
     end.
+
+%% Rule numbers for the conditions in rules_gate_1/2, in evaluation order.
+%% Kept as a list so the zip stays in step when a condition is added.
+rule_numbers() -> [marker, too_big, prompt_big, fast].
 
 %%%===================================================================
 %%% Judge zone (SPEC 3 step 4 / SPEC 6)
@@ -3172,6 +3234,39 @@ marker_word_boundary_test() ->
     ?assert(marker_hit(<<"think harder please">>, [<<"think harder">>])),
     ?assertNot(marker_hit(<<"don't think harder">>, [<<"think harder">>])).
 
+%% The decision tuple's SHAPE is load-bearing (spec A4): element(5) and
+%% element(6) are read unconditionally by the debug log, and a shorter
+%% tuple made element/2 raise badarg — which maybe_route/3's catch-all
+%% swallowed into a silent degradation to `pass`, i.e. the router stopped
+%% routing entirely. Every clause must therefore return the SAME arity.
+decision_tuple_arity_test() ->
+    C = cfg(),
+    Big = binary:copy(<<"x">>, 300000),
+    Cases = [
+        %% too large
+        rules_gate(features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 500000},
+            (cfg())#acfg{max_ctx = 70000}), (cfg())#acfg{max_ctx = 70000}),
+        %% a hard rule
+        rules_gate(features(#{<<"messages">> => [u(<<"ultrathink hi">>)]}, C), C),
+        %% the fast rule
+        rules_gate(features(#{<<"messages">> => [u(<<"hi">>)]}, C), C)
+    ],
+    lists:foreach(
+        fun(GateResult) ->
+            %% A gate result is {Tier, Kind, RuleName}; the judge zone is
+            %% the bare atom.
+            case GateResult of
+                judge_zone -> ok;
+                {error, request_too_large} -> ok;
+                _ -> ?assertEqual(3, tuple_size(GateResult))
+            end
+        end,
+        Cases
+    ),
+    %% The decision itself: {Result, Reason, Tier, Target, Decided, Shape}.
+    _ = decide(C, features(#{<<"messages">> => [u(<<"hi">>)]}, C), #{}),
+    ok.
+
 rules_priority_test() ->
     C = cfg(),
     Big = binary:copy(<<"x">>, 300000),
@@ -3185,8 +3280,10 @@ rules_priority_test() ->
             features(#{<<"messages">> => [u(<<"hi">>, [#{<<"type">> => <<"image_url">>}])]}, C), C
         )
     ),
+    %% Gate verdicts are {Tier, Kind, RuleName} (spec A4): the third element
+    %% names which rule fired, so a decision log can explain the tier.
     ?assertEqual(
-        {flagship, hard},
+        {flagship, hard, marker},
         rules_gate(
             features(
                 #{
@@ -3201,23 +3298,24 @@ rules_priority_test() ->
     ),
     %% marker before capacity
     ?assertEqual(
-        {flagship, hard},
+        {flagship, hard, marker},
         rules_gate(features(#{<<"messages">> => [u(<<"ultrathink ", Big/binary>>)]}, C), C)
     ),
-    %% est_total over big -> flagship (rule 3 before rule 4)
+    %% est_total over big -> flagship (total before the prompt-part rule)
     ?assertEqual(
-        {flagship, hard},
+        {flagship, hard, too_big},
         rules_gate(features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 128000}, C), C)
     ),
     %% prompt-part margin over big (est_total still fits big) -> big
     Mid = binary:copy(<<"x">>, 224000),
     ?assertEqual(
-        {big, hard},
+        {big, hard, prompt_big},
         rules_gate(features(#{<<"messages">> => [u(Mid)], <<"max_tokens">> => 100}, C), C)
     ),
     %% short, no tools, <=3 msgs -> fast
     ?assertEqual(
-        {fast, soft_route}, rules_gate(features(#{<<"messages">> => [u(<<"hi">>)]}, C), C)
+        {fast, soft_route, fast},
+        rules_gate(features(#{<<"messages">> => [u(<<"hi">>)]}, C), C)
     ),
     %% tools present -> judge zone
     ?assertEqual(

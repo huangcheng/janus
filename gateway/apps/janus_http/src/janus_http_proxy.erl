@@ -99,6 +99,8 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_failover_unclassified_retried),
     %% janus-auto same-tier next-name snapshot (design 2026-10-15 D2).
     erase(janus_auto_tier),
+    erase(janus_auto_decided),
+    erase(janus_auto_shape),
     erase(janus_auto_tier_names),
     erase(janus_auto_names_attempted),
     erase(janus_auto_tier_failover),
@@ -370,6 +372,11 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State, Agent) ->
             %% non-member names still set none.
             put(janus_req_model, Target),
             put(janus_auto_tier, maps:get(tier, Meta)),
+            %% A4: which zone/rule settled the tier, and what a judge saw
+            %% (shape only). Rides the request-scoped pdict the walk already
+            %% uses, so the usage row and the logs agree.
+            put(janus_auto_decided, maps:get(decided, Meta, undefined)),
+            put(janus_auto_shape, maps:get(shape, Meta, undefined)),
             put(janus_auto_tier_names, maps:get(names, Meta, [])),
             put(janus_auto_names_attempted, [Target]),
             put(janus_auto_tier_failover, maps:get(tier_failover_enabled, Meta, false)),
@@ -387,6 +394,8 @@ proxy_model(ClientProto, ModelName, Body, Map, Req, State, Agent) ->
                     Allowed = [N || N <- maps:get(names, Meta, []), model_allowed(Agent, N)],
                     put(janus_req_model, ModelName),
                     put(janus_auto_tier, maps:get(tier, Meta)),
+                    put(janus_auto_decided, maps:get(decided, Meta, undefined)),
+                    put(janus_auto_shape, maps:get(shape, Meta, undefined)),
                     put(janus_auto_tier_names, Allowed),
                     put(janus_auto_names_attempted, [ModelName]),
                     put(janus_auto_tier_failover, maps:get(tier_failover_enabled, Meta, false)),
@@ -2093,6 +2102,11 @@ maybe_advance_tier_name(ClientProto, Route, Map, Result, Classified, Req, State,
             logger:info(#{
                 what => janus_auto_walk_gate_closed,
                 tier => get(janus_auto_tier),
+                %% A4: which zone/rule settled this tier, and what a judge
+                %% was shown (shape only). Without these a surprising tier
+                %% is unexplainable without replaying the request.
+                decided => get(janus_auto_decided),
+                shape => get(janus_auto_shape),
                 enabled => get(janus_auto_tier_failover),
                 committed => client_committed(),
                 names => get(janus_auto_tier_names),
@@ -2120,6 +2134,8 @@ maybe_advance_tier_name(ClientProto, Route, Map, Result, Classified, Req, State,
                     logger:info(#{
                         what => janus_auto_walk_exhausted,
                         tier => get(janus_auto_tier),
+                        decided => get(janus_auto_decided),
+                        shape => get(janus_auto_shape),
                         why => Why,
                         names => get(janus_auto_tier_names),
                         attempted => pd(janus_auto_names_attempted, [])

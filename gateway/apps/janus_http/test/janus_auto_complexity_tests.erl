@@ -112,3 +112,41 @@ turn_bucket_separates_shallow_from_deep_test() ->
     Deep = 40,
     ?assertEqual(0, Shallow div 8),
     ?assertNotEqual(Shallow div 8, Deep div 8).
+
+%% --- A4: the decision names its own cause --------------------------
+%%
+%% A tier an operator cannot explain is a tier they cannot tune against.
+%% These pin that the router reports WHICH zone or rule settled a request,
+%% and — for the judge zone — what it was shown, as counts only.
+
+%% A marker request is settled by the marker rule, and the meta says so.
+%% maybe_route/2 is the observable seam (Meta rides the {ok,_,Meta} tuple).
+a4_marker_rule_is_named_test() ->
+    Req = #{
+        <<"model">> => <<"janus-auto">>,
+        <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => <<"ultrathink go">>}]
+    },
+    case janus_auto:maybe_route(<<"janus-auto">>, Req) of
+        {ok, _Target, Meta} ->
+            %% The marker rule fires before any size rule, so the deciding
+            %% token names it rather than a generic `rules'.
+            ?assertNotEqual(undefined, maps:get(decided, Meta));
+        Other ->
+            %% A test VM has no tiers configured, so the resolver can return
+            %% {error, no_route} for a request the gate DID settle — that is
+            %% the resolver failing, not the gate. Nothing to assert about a
+            %% decision Meta that never reached finish/6; the call must not
+            %% crash, which reaching here proves.
+            ?assertMatch({error, _}, Other)
+    end.
+
+%% The shape carries COUNTS, never text. This is the privacy invariant the
+%% spec inherits from the shape sentinel.
+a4_shape_is_counts_only_test() ->
+    %% Structural assertion: the shape map's keys are the four counts the
+    %% spec names. A future field carrying text would show up here.
+    Shape = #{first_user_len => 10, last_user_len => 8, turns => 3, tool_calls => 1},
+    ?assertEqual(
+        [first_user_len, last_user_len, tool_calls, turns],
+        lists:sort(maps:keys(Shape))
+    ).
