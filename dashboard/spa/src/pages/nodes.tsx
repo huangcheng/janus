@@ -166,6 +166,8 @@ type Fleet = {
     ack_miss?: number
     /** The worker refused the job (not-yet-acked hello, invalid job). */
     worker_rejected?: number
+    /** v2.1 Part E: unary worker_lost fallback. */
+    unary_fallback?: number
   }
 } | null
 
@@ -1255,6 +1257,7 @@ function FleetStrip({ fleet, stale, disabled }: { fleet: Fleet; stale: boolean; 
     "drained_pin",
     "send_fail",
     "ack_miss",
+    "unary_fallback",
     "worker_rejected",
   ]
   return (

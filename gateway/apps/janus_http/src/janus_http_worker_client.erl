@@ -482,7 +482,7 @@ dispatch(WorkerNode, JobRef, Fields, WantStream, LocalFun, Fallback) ->
             LocalFun();
         {ok, JobMsg} ->
             case send_job(WorkerNode, JobMsg) of
-                {error, SendReason} ->
+                {error, {send_failed, SendReason}} ->
                     %% Send-fail: release + dispatch_local{send_fail}
                     %% (spec Part 0.11 / Part C metrics).
                     %%
@@ -581,7 +581,11 @@ finish_remote(Mon) ->
 send_job(WorkerNode, JobMsg) ->
     case erlang:send({janus_worker_dispatch, WorkerNode}, JobMsg, [noconnect]) of
         ok -> ok;
-        _ -> {error, send_failed}
+        %% Keep the primitive's own verdict: `noconnect' (the master has no
+        %% link to that node) is the ONLY case this can report today, and
+        %% collapsing it to a bare `send_failed' would make the caller's log
+        %% say nothing the atom does not already say.
+        Other -> {error, {send_failed, Other}}
     end.
 
 wait_ack(JobRef, WorkerNode) ->
