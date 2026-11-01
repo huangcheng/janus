@@ -645,6 +645,15 @@
           "type": "integer",
           "minimum": 1,
           "description": "Media parts above this count skip the judge (fast tier)."
+        },
+        "complexity_terms": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Complexity lexicon for the auto router (auto-router-complexity spec A2): a short request naming a hard task is routed into the JUDGE zone instead of straight to fast. Not a flagship pin — a lexicon matches words. Empty (the default) keeps the pre-spec routing. Semantically a SET: exported sorted ascending so a reorder is not a change."
         }
       }
     },

@@ -64,6 +64,12 @@ DEFAULTS = {
     "judge_timeout_ms": 1500,
     "cache_ttl_sec": 300,
     "markers": ["ultrathink", "think harder"],
+    # Complexity lexicon (auto-router-complexity spec A2): a short request
+    # that NAMES a hard task is routed INTO the judge zone instead of
+    # straight to fast. EMPTY by default so an upgrade changes nothing; the
+    # gateway's janus_auto:default_complexity_terms/0 carries the
+    # recommended list an operator can apply.
+    "complexity_terms": [],
     # D11 / janus-auto same-tier next-name failover (gateway defaults off).
     "tier_failover_enabled": False,
     "tier_failover_max_names": 3,
@@ -440,6 +446,10 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     markers = cfg.get("markers", DEFAULTS["markers"])
     if not isinstance(markers, list) or not all(isinstance(m, str) and m.strip() for m in markers):
         raise _err(400, "invalid", "markers must be a list of strings")
+
+    terms = cfg.get("complexity_terms", DEFAULTS["complexity_terms"])
+    if not isinstance(terms, list) or not all(isinstance(t, str) and t.strip() for t in terms):
+        raise _err(400, "invalid", "complexity_terms must be a list of strings")
     cfg["markers"] = [m.strip() for m in markers]
 
     # D11: same-tier next-name failover knobs (gateway clamp [1, 8]).

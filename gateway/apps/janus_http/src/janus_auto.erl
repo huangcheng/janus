@@ -16,6 +16,9 @@
 
 -export([start_link/0]).
 -export([maybe_route/2, maybe_route/3, direct_walk/1, stats/0, snapshot/0, apply_db_settings/1]).
+%% The recommended (NOT default) lexicon, so the dashboard can offer it and
+%% the docs can stay in step with it.
+-export([default_complexity_terms/0]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -72,6 +75,13 @@
     media_allow :: pos_integer(),
     max_media :: pos_integer(),
     markers :: [binary()],
+    %% Complexity lexicon (auto-router-complexity spec A2): a short request
+    %% that NAMES a hard task is routed INTO the judge zone instead of
+    %% straight to fast. NOT a flagship pin — a lexicon matches words, and
+    %% "设计一个 hello world" is trivial. Default EMPTY per the repository's
+    %% default-off discipline; the documented recommended list is applied by
+    %% the operator.
+    complexity_terms :: [binary()],
     %% Same-tier next-name failover (design 2026-10-15 D11): default off.
     tier_failover_enabled :: boolean(),
     tier_failover_max_names :: pos_integer()
@@ -241,6 +251,11 @@ snapshot() ->
                 E -> E
             end,
         default_tier => atom_to_binary(Cfg#acfg.default_tier, utf8),
+        %% The active lexicon, so an operator can confirm whether the lever
+        %% is actually on, and the recommended list so the dashboard can
+        %% offer it without duplicating the table in two languages.
+        complexity_terms => Cfg#acfg.complexity_terms,
+        complexity_terms_recommended => default_complexity_terms(),
         tiers => #{
             fast => Fast,
             big => Big,
@@ -434,6 +449,7 @@ features(ReqMap, Cfg) ->
             MaxOut = max_out(ReqMap),
             EstTotal = PromptEst + MediaAllow + ToolsEst + MaxOut,
             {LastUser, HasUser} = last_user_text(Msgs),
+            {FirstUser, _HasAny} = first_user_text(Msgs),
             #{
                 prompt_est => PromptEst,
                 media => Media,
@@ -446,6 +462,17 @@ features(ReqMap, Cfg) ->
                 marker => HasUser andalso marker_hit(string:lowercase(LastUser), Cfg#acfg.markers),
                 sys_prefix => bin_part(sys_text(Msgs), 256),
                 last_user => bin_part(LastUser, 1200),
+                %% Conversation head (auto-router-complexity spec A1): in an
+                %% agent loop the TASK is stated at the start and the tail is
+                %% often just `continue', so a judge shown only the tail is
+                %% judging a pronoun. Capped like last_user so a client
+                %% cannot balloon the judge request.
+                first_user => bin_part(FirstUser, 1200),
+                %% Tool calls already ATTEMPTED (assistant messages carrying
+                %% tool_calls). A session that has called tools ten times is
+                %% not the same request as one that has called none, even at
+                %% identical token counts.
+                tool_calls => count_tool_calls(Msgs),
                 out_budget => out_budget_line(MaxOut),
                 tools_fp => erlang:phash2(maps:get(<<"tools">>, ReqMap, undefined))
             };
@@ -491,6 +518,39 @@ responses_input_to_messages(Items) ->
                 {true, #{<<"role">> => <<"user">>, <<"content">> => T}};
             (#{<<"type">> := <<"input_text">>, <<"content">> := T}) when is_binary(T) ->
                 {true, #{<<"role">> => <<"user">>, <<"content">> => T}};
+            %% Responses-style tool traffic (auto-router-complexity spec A1).
+            %% Without these two clauses every function_call item was dropped,
+            %% so `tool_calls' read 0 and `turns' undercounted on EXACTLY the
+            %% agent-loop traffic this signal exists for — /v1/responses is
+            %% the dominant agent face. Mapped to the Chat shape the counter
+            %% and the judge body understand: an assistant message carrying
+            %% tool_calls, and the matching tool result.
+            (#{<<"type">> := <<"function_call">>, <<"call_id">> := Id} = M) when is_binary(Id) ->
+                Name = maps:get(<<"name">>, M, <<"tool">>),
+                Args = maps:get(<<"arguments">>, M, <<"{}">>),
+                {true, #{
+                    <<"role">> => <<"assistant">>,
+                    <<"content">> => <<>>,
+                    <<"tool_calls">> => [
+                        #{
+                            <<"id">> => Id,
+                            <<"type">> => <<"function">>,
+                            <<"function">> => #{<<"name">> => Name, <<"arguments">> => Args}
+                        }
+                    ]
+                }};
+            (#{<<"type">> := <<"function_call_output">>, <<"call_id">> := Id} = M) when
+                is_binary(Id)
+            ->
+                %% Content is deliberately NOT carried: this list feeds token
+                %% ESTIMATION and shape counting, and the output text already
+                %% rode the request body that produced est_total. A short
+                %% placeholder keeps `turns' honest without double-counting.
+                {true, #{
+                    <<"role">> => <<"tool">>,
+                    <<"tool_call_id">> => Id,
+                    <<"content">> => <<"(tool output)">>
+                }};
             (_) ->
                 false
         end,
@@ -569,6 +629,30 @@ last_user_text(Msgs) ->
                     end
             end
     end.
+
+%% Earliest user-role message, the mirror of last_user_text/1. Returns
+%% <<>> when the request has no user message at all (a pure system request),
+%% which the judge input renders as the "(no user message)" placeholder.
+first_user_text(Msgs) ->
+    case [M || M <- Msgs, maps:get(<<"role">>, M, undefined) =:= <<"user">>] of
+        [] ->
+            {<<>>, false};
+        [First | _] ->
+            case message_content(First) of
+                {Bin, _} -> {Bin, true};
+                none -> {<<>>, false}
+            end
+    end.
+
+%% Assistant messages that carry a non-empty tool_calls list.
+count_tool_calls(Msgs) ->
+    length([
+        ok
+     || M <- Msgs,
+        maps:get(<<"role">>, M, undefined) =:= <<"assistant">>,
+        is_list(maps:get(<<"tool_calls">>, M, undefined)),
+        maps:get(<<"tool_calls">>, M, []) =/= []
+    ]).
 
 tools_field(ReqMap) ->
     case maps:get(<<"tools">>, ReqMap, undefined) of
@@ -652,8 +736,15 @@ rules_gate_1(F, Cfg) ->
     PromptTools = maps:get(prompt_est, F) + maps:get(tools_est, F),
     Big = Cfg#acfg.big_ctx,
     Fast = Cfg#acfg.fast_ctx,
+    %% Complexity lexicon (auto-router-complexity spec A2): scanned over
+    %% BOTH the head and the tail, because the `continue' case states its
+    %% complexity at the head. Evaluated BEFORE IsFast so a hit prevents the
+    %% fast route rather than competing with it — that ordering is the whole
+    %% point: this is the signal a pure token threshold cannot carry.
+    Complex = complexity_hit(F, Cfg),
     IsFast =
-        not maps:get(tools, F) andalso
+        not Complex andalso
+            not maps:get(tools, F) andalso
             Est < Fast andalso
             maps:get(msg_count, F) =< 3,
     Conds = [
@@ -1015,9 +1106,22 @@ do_local_judge(Parent, Ref, Cfg, F, Hash, Identity) ->
                                     <<>> -> <<"(no user message)">>;
                                     U -> U
                                 end,
+                            %% Same three additive keys as the online
+                            %% decisions body (spec A1) — a local judge must
+                            %% not answer from a narrower view than an online
+                            %% one, or the same request would route
+                            %% differently by backend.
+                            FirstPrefix =
+                                case maps:get(first_user, F, <<>>) of
+                                    <<>> -> <<"(no user message)">>;
+                                    FU -> FU
+                                end,
                             Body = #{
                                 <<"system_prefix">> => maps:get(sys_prefix, F, <<>>),
                                 <<"user_prefix">> => UserPrefix,
+                                <<"first_user_prefix">> => FirstPrefix,
+                                <<"turns">> => maps:get(msg_count, F, 0),
+                                <<"tool_calls">> => maps:get(tool_calls, F, 0),
                                 <<"out_budget">> => maps:get(out_budget, F, <<>>),
                                 <<"labels">> => Labels
                             },
@@ -1163,11 +1267,23 @@ judge_decisions_body(JM, F, Labels) ->
             <<>> -> <<"(no user message)">>;
             U -> U
         end,
+    %% Head + extent (auto-router-complexity spec A1). These three keys are
+    %% ADDITIVE: the /v1/decide contract tolerates unknown state keys, and
+    %% the local body below carries the same three, so both judges answer
+    %% from the same view.
+    FirstPrefix =
+        case maps:get(first_user, F, <<>>) of
+            <<>> -> <<"(no user message)">>;
+            U0 -> U0
+        end,
     #{
         <<"model">> => JM,
         <<"state">> => #{
             <<"system_prefix">> => maps:get(sys_prefix, F, <<>>),
             <<"user_prefix">> => UserPrefix,
+            <<"first_user_prefix">> => FirstPrefix,
+            <<"turns">> => maps:get(msg_count, F, 0),
+            <<"tool_calls">> => maps:get(tool_calls, F, 0),
             <<"out_budget">> => maps:get(out_budget, F, <<>>)
         },
         <<"questions">> => #{
@@ -1218,13 +1334,35 @@ judge_prompt() ->
 
 judge_input(F) ->
     Sys = sanitize_quoted(maps:get(sys_prefix, F, <<>>)),
-    User =
-        case maps:get(last_user, F, <<>>) of
-            <<>> -> <<"(no user message)">>;
-            U -> sanitize_quoted(U)
-        end,
+    %% Head and tail (auto-router-complexity spec A1). A multi-turn agent
+    %% session states its GOAL in the first user message and its NEXT STEP
+    %% in the last; a judge shown only the tail sees `continue' and answers
+    %% honestly about a fragment.
+    First = quoted_or_placeholder(maps:get(first_user, F, <<>>)),
+    User = quoted_or_placeholder(maps:get(last_user, F, <<>>)),
     Budget = maps:get(out_budget, F, <<>>),
-    <<"system: \"", Sys/binary, "\"\nuser: \"", User/binary, "\"\n", Budget/binary>>.
+    Shape = shape_line(F),
+    <<"system: \"", Sys/binary, "\"\nfirst_user: \"", First/binary, "\"\nuser: \"",
+        User/binary, "\"\n", Shape/binary, Budget/binary>>.
+
+quoted_or_placeholder(<<>>) ->
+    <<"(no user message)">>;
+quoted_or_placeholder(Bin) ->
+    sanitize_quoted(Bin).
+
+%% Conversation extent, as COUNTS only — never content. This is what tells
+%% the judge it is looking at turn 40 of a task rather than a standalone
+%% one-liner.
+shape_line(F) ->
+    Turns = maps:get(msg_count, F, 0),
+    Calls = maps:get(tool_calls, F, 0),
+    iolist_to_binary([
+        <<"turns: ">>,
+        integer_to_binary(Turns),
+        <<"\ntool_calls: ">>,
+        integer_to_binary(Calls),
+        <<"\n">>
+    ]).
 
 %% Neutralise quote/newline characters so embedded content cannot break
 %% out of the quoting that guards against prompt injection.
@@ -1481,15 +1619,39 @@ provider_enabled(_) ->
 %%% Decision cache (SPEC 5): dual keyspace, bounded FIFO sweep
 %%%===================================================================
 
+%% Decision-cache key (auto-router-complexity spec A3).
+%%
+%% The governing rule: this key is a SUPERSET of every field the judge
+%% input carries. When the judge body gains a field, the key gains a
+%% component in the same change, or the cache will hand one conversation's
+%% verdict to a different one.
+%%
+%% Two components changed from the pre-spec tuple:
+%%   - `first_user' is new because A1 put it in the judge body. Without it,
+%%     two sessions whose tails are both `continue' would share a verdict
+%%     computed on different tasks.
+%%   - `out_budget' REPLACES `max_out div 4096', fixing a defect that
+%%     predates A1: the judge body carries the budget LINE, which changes at
+%%     MaxOut = 2048 and 8192, while `div 4096' bucketed at a different
+%%     boundary — so max_out 1000 and 3000 already shared a bucket with
+%%     different judge inputs. Keying the derived line makes key and body
+%%     agree by construction.
+%%
+%% `turn_bucket' and `calls_bucket' are coarse on purpose: a cache hit
+%% across one adjacent turn is acceptable, a hit across a standalone
+%% one-liner and a 40-turn session is not.
 cache_key(_Cfg, F) ->
     erlang:phash2(
         {
             maps:get(sys_prefix, F, <<>>),
             maps:get(last_user, F, <<>>),
+            maps:get(first_user, F, <<>>),
             maps:get(tools_fp, F, 0),
             maps:get(has_mm, F, false),
             maps:get(prompt_est, F, 0) div 4096,
-            maps:get(max_out, F, 0) div 4096
+            maps:get(out_budget, F, <<>>),
+            maps:get(msg_count, F, 0) div 8,
+            maps:get(tool_calls, F, 0) div 4
         },
         268435456
     ).
@@ -2303,6 +2465,7 @@ validate(Raw) ->
         ),
         max_media = pos_int(maps:get(max_media_parts, Raw, Def#acfg.max_media), max_media_parts),
         markers = bin_list(maps:get(markers, Raw, Def#acfg.markers)),
+        complexity_terms = bin_list(maps:get(complexity_terms, Raw, Def#acfg.complexity_terms)),
         tier_failover_enabled = bool_or(
             maps:get(tier_failover_enabled, Raw, Def#acfg.tier_failover_enabled), false
         ),
@@ -2697,6 +2860,48 @@ log_cfg_error(Msg) ->
 log_cfg_warn(Msg) ->
     logger:warning(#{what => janus_auto_config, message => iolist_to_binary(Msg)}).
 
+%% Complexity lexicon (auto-router-complexity spec A2). Reuses marker_one/2
+%% so the two tables match identically (ASCII word-boundary, CJK substring).
+%%
+%% Scans the HEAD as well as the TAIL: in an agent session the complex task
+%% is named in the first user message while the tail is often `continue', and
+%% scanning only the tail would miss exactly the case this exists for.
+complexity_hit(F, Cfg) ->
+    case Cfg#acfg.complexity_terms of
+        [] ->
+            false;
+        Terms ->
+            First = string:lowercase(maps:get(first_user, F, <<>>)),
+            Last = string:lowercase(maps:get(last_user, F, <<>>)),
+            marker_hit(First, Terms) orelse marker_hit(Last, Terms)
+    end.
+
+%% The RECOMMENDED value for the `complexity_terms' setting. Not a default:
+%% upgrading must not silently widen the judge zone, so the shipped default
+%% is [] and an operator opts in by copying this list.
+-spec default_complexity_terms() -> [binary()].
+default_complexity_terms() ->
+    [
+        %% English (word-boundary matched)
+        <<"design">>,
+        <<"architecture">>,
+        <<"trade-off">>,
+        <<"tradeoff">>,
+        <<"why does">>,
+        <<"refactor">>,
+        <<"concurrency">>,
+        <<"distributed">>,
+        <<"debug">>,
+        %% CJK (substring matched)
+        <<"架构"/utf8>>,
+        <<"设计"/utf8>>,
+        <<"方案"/utf8>>,
+        <<"权衡"/utf8>>,
+        <<"并发"/utf8>>,
+        <<"分布式"/utf8>>,
+        <<"调试"/utf8>>
+    ].
+
 marker_hit(_TextLower, []) ->
     false;
 marker_hit(TextLower, [M | Rest]) ->
@@ -2814,6 +3019,10 @@ cfg() ->
         media_allow = 4096,
         max_media = 10,
         markers = [<<"ultrathink">>, <<"think harder">>],
+        %% EMPTY by default: upgrading must not silently widen the judge
+        %% zone and its spend. See ?DEFAULT_COMPLEXITY_TERMS for the
+        %% recommended list an operator can copy into the setting.
+        complexity_terms = [],
         tier_failover_enabled = false,
         tier_failover_max_names = 3
     }.
@@ -3041,17 +3250,45 @@ parse_words_test() ->
     ?assertEqual(error, parse_words(<<"cannot decide">>)).
 
 judge_input_quoting_test() ->
+    %% Shape changed by auto-router-complexity spec A1: the body now carries
+    %% the conversation HEAD and its extent, so a `continue' turn is judged
+    %% with the task it continues.
     F = #{
         sys_prefix => <<"sys">>,
+        first_user => <<"the real task">>,
         last_user => <<"do things">>,
+        msg_count => 7,
+        tool_calls => 2,
         out_budget => <<"Output budget: <=2k tokens">>
     },
     ?assertEqual(
-        <<"system: \"sys\"\nuser: \"do things\"\nOutput budget: <=2k tokens">>, judge_input(F)
+        <<
+            "system: \"sys\"\n"
+            "first_user: \"the real task\"\n"
+            "user: \"do things\"\n"
+            "turns: 7\n"
+            "tool_calls: 2\n"
+            "Output budget: <=2k tokens"
+        >>,
+        judge_input(F)
     ),
-    F2 = #{sys_prefix => <<>>, last_user => <<>>, out_budget => <<"Output budget: <=2k tokens">>},
+    %% A request with no user message at all renders both slots as the
+    %% placeholder, and the extent still reports what it knows (zero).
+    F2 = #{
+        sys_prefix => <<>>,
+        last_user => <<>>,
+        out_budget => <<"Output budget: <=2k tokens">>
+    },
     ?assertEqual(
-        <<"system: \"\"\nuser: \"(no user message)\"\nOutput budget: <=2k tokens">>, judge_input(F2)
+        <<
+            "system: \"\"\n"
+            "first_user: \"(no user message)\"\n"
+            "user: \"(no user message)\"\n"
+            "turns: 0\n"
+            "tool_calls: 0\n"
+            "Output budget: <=2k tokens"
+        >>,
+        judge_input(F2)
     ).
 
 maybe_route_pass_test() ->

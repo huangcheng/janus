@@ -107,6 +107,10 @@ def sort_document_arrays(doc: dict) -> dict:
         auto_router = router.get("auto_router")
         if isinstance(auto_router, dict):
             _sort_strings_in(auto_router, "markers")
+            # Same reason as markers: the lexicon is matched as a SET, so a
+            # reorder must not read as a config change in export/restore
+            # comparison.
+            _sort_strings_in(auto_router, "complexity_terms")
             # tiers are order-sensitive; do not sort them.
 
     return out
