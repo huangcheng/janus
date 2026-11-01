@@ -160,6 +160,10 @@ export type AutoCfg = {
   judge_timeout_ms: number
   cache_ttl_sec: number
   markers: string[]
+  /** Complexity lexicon (auto-router-complexity spec A2): routes a request
+   * that NAMES a hard task into the judge zone instead of straight to fast.
+   * Empty = today's routing. */
+  complexity_terms: string[]
   /** D11: after key failover exhausts, try next same-tier name (default off). */
   tier_failover_enabled: boolean
   /** Cap distinct names attempted per request; gateway clamps 1–8. */
@@ -1352,6 +1356,27 @@ function AutoRouterCard({
   reload: () => void
 }) {
   const [saving, setSaving] = useState(false)
+  // Raw text for the two comma-separated list fields. They must NOT be
+  // rendered from the parsed array: `design,` parses to ["design"], the
+  // controlled input re-renders as `design`, and the comma the operator just
+  // typed disappears so a second term can never be entered. Parse on blur.
+  const [markersDraft, setMarkersDraft] = useState(cfg.markers.join(", "))
+  const [termsDraft, setTermsDraft] = useState(cfg.complexity_terms.join(", "))
+
+  // Re-seed when the config is replaced (reload / server merge), but never
+  // while the operator is typing into them.
+  useEffect(() => {
+    setMarkersDraft(cfg.markers.join(", "))
+  }, [cfg.markers])
+  useEffect(() => {
+    setTermsDraft(cfg.complexity_terms.join(", "))
+  }, [cfg.complexity_terms])
+
+  const parseCsv = (raw: string) =>
+    raw
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
 
   const setBackend = (backend: "off" | "online") => {
     onChange({ ...cfg, judge_backend: backend })
@@ -1568,11 +1593,26 @@ function AutoRouterCard({
             <Input
               id="auto-markers"
               className="font-mono text-xs"
-              value={cfg.markers.join(", ")}
-              onChange={(e) =>
-                onChange({ ...cfg, markers: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })
-              }
+              value={markersDraft}
+              onChange={(e) => setMarkersDraft(e.target.value)}
+              onBlur={() => onChange({ ...cfg, markers: parseCsv(markersDraft) })}
             />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="auto-complexity-terms">Complexity terms → judge</FieldLabel>
+            <Input
+              id="auto-complexity-terms"
+              className="font-mono text-xs"
+              placeholder="empty = today's routing"
+              value={termsDraft}
+              onChange={(e) => setTermsDraft(e.target.value)}
+              onBlur={() => onChange({ ...cfg, complexity_terms: parseCsv(termsDraft) })}
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              A short request naming a hard task (&ldquo;design&rdquo;, &ldquo;架构&rdquo;) is sent to the
+              judge instead of straight to fast. It is a filter, not a flagship pin — the judge still
+              decides.
+            </p>
           </Field>
           <Field>
             <FieldLabel htmlFor="auto-model">Virtual model name</FieldLabel>
