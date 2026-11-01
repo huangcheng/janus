@@ -1382,10 +1382,21 @@ function AutoRouterCard({
     onChange({ ...cfg, judge_backend: backend })
   }
 
+  // The CSV fields are committed on blur, so a save without a preceding blur
+  // (keyboard-driven save, or a control that keeps focus) would PUT the
+  // pre-edit list. The persisted payload must not depend on blur ordering:
+  // flush both drafts here, before the request.
+  const commitDrafts = (): AutoCfg => ({
+    ...cfg,
+    markers: parseCsv(markersDraft),
+    complexity_terms: parseCsv(termsDraft),
+  })
+
   const save = async () => {
+    const payload = commitDrafts()
     setSaving(true)
     try {
-      await api("/settings/auto-router", { method: "PUT", body: cfg })
+      await api("/settings/auto-router", { method: "PUT", body: payload })
       toast.success("auto-router saved — gateways reload within seconds")
       reload()
     } catch (e: any) {
