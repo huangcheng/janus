@@ -114,6 +114,24 @@ turn_bucket_separates_shallow_from_deep_test() ->
     ?assertNotEqual(Shallow div 8, Deep div 8).
 
 %% --- A4: the decision names its own cause --------------------------
+
+%% Which origins mean a judge was actually INVOKED. The set is written
+%% out in the production code so it cannot drift; this pins it, because a
+%% local-backend fleet losing its shape is a silent regression.
+a4_judge_ran_origins_test() ->
+    Ran = [judge, local_judge, fallback_online],
+    lists:foreach(
+        fun(O) -> ?assert(janus_auto:judge_actually_ran(O)) end,
+        Ran
+    ),
+    %% These never produced a verdict to describe.
+    NotRan = [
+        no_judge, breaker, negcache, cache, inflight, judge_fail, judge_timeout
+    ],
+    lists:foreach(
+        fun(O) -> ?assertNot(janus_auto:judge_actually_ran(O)) end,
+        NotRan
+    ).
 %%
 %% A tier an operator cannot explain is a tier they cannot tune against.
 %% These pin that the router reports WHICH zone or rule settled a request,

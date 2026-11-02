@@ -22,6 +22,8 @@
 %% The judge input SHAPE (counts only) — exported so the test can drive
 %% the production function instead of re-implementing it.
 -export([judge_zone_shape/1]).
+%% Whether an origin means a judge was actually INVOKED (spec A4).
+-export([judge_actually_ran/1]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -390,9 +392,9 @@ decide(Cfg, F, Constraint) ->
             %% reporting a "judge input shape" for those would imply a
             %% call that never happened.
             Shape =
-                case Origin of
-                    judge -> judge_zone_shape(F);
-                    _ -> #{}
+                case judge_actually_ran(Origin) of
+                    true -> judge_zone_shape(F);
+                    false -> #{}
                 end,
             finish(
                 resolve_soft(Cfg, Tier, Constraint),
@@ -467,6 +469,19 @@ finish({ok, Name, Names, EffTier}, Origin, _RuleTier, Cfg, Decided, Shape) ->
     {{ok, Name, Meta}, Origin, EffTier, Name, Decided, Shape};
 finish(error, Origin, Tier, _Cfg, Decided, Shape) ->
     {error_tag(no_route), Origin, Tier, undefined, Decided, Shape}.
+
+%% Did a judge actually run for this origin? The set is written out so it
+%% cannot drift: `judge` is the online backend's verdict, `local_judge` the
+%% sidecar's, `fallback_online` an online verdict that fell back to the
+%% default tier. The remaining origins (no_judge, breaker, negcache,
+%% cache, inflight, judge_fail, judge_timeout) never produced a verdict to
+%% describe — judge_fail and judge_timeout DID invoke a judge, but it gave
+%% no answer, so there is no input shape worth reporting beyond what the
+%% request already carries.
+judge_actually_ran(judge) -> true;
+judge_actually_ran(local_judge) -> true;
+judge_actually_ran(fallback_online) -> true;
+judge_actually_ran(_) -> false.
 
 %% What the judge was shown, as shape only. Lengths and counts, never text —
 %% the same discipline the shape sentinel follows.
