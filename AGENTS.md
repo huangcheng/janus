@@ -67,10 +67,18 @@ database, not in git.
 
 ## Verification
 
-- Static gates: `rebar3 fmt --check` + `rebar3 compile` (CI runs
-  exactly these two).
-- Runtime behavior is verified LIVE against a real stack (real
-  Postgres, real upstreams, curl + browser), never asserted in
-  checked-in test suites.
+- Numeric gates, all run by CI on every `main` push:
+  - `rebar3 compile` and `rebar3 fmt --check`;
+  - `./scripts/verification/assert_eunit_nonempty.sh` — a non-vacuous
+    EUnit gate. It fails on a nonzero exit, any failing test, no
+    summary line, a zero-count suite, or a summed total of zero,
+    because `rebar3 eunit` exits 0 when nothing ran;
+  - dashboard: `scripts/lint_all.sh` (ruff + SPA typecheck + build).
+- Checked-in EUnit suites are supported and expected. This supersedes
+  the earlier "no checked-in tests" rule: characterization tests are
+  the cheapest way to pin a seam before changing it.
+- Live verification remains the primary END-TO-END proof — real
+  Postgres, real upstreams, curl and a real browser. Unit tests are
+  additive; they never replace a live check of a user-visible path.
 - Production is never mutated by verification: read-only curl and
   browsing only.

@@ -653,17 +653,21 @@ build_insert_shape_test() ->
     %% attempt defaults to 1, is_terminal to true, request_id to null;
     %% modality defaults to chat, units and outcome to null;
     %% failover_reason/trace_id ride through as binaries.
-    ?assertEqual(502, lists:nth(31, Params)),
-    ?assertEqual(null, lists:nth(32, Params)),
-    ?assertEqual(1, lists:nth(36, Params)),
-    ?assertEqual(true, lists:nth(38, Params)),
-    ?assertEqual(null, lists:nth(39, Params)),
-    ?assertEqual(<<"chat">>, lists:nth(40, Params)),
-    ?assertEqual(null, lists:nth(41, Params)),
+    %%
+    %% Indices are row-2 absolute positions: each row carries 24 params and
+    %% `ts` is param 1 (it is defaulted, not required, so it is easy to
+    %% forget when counting). Row 2 therefore starts at 25.
+    ?assertEqual(502, lists:nth(32, Params)),
+    ?assertEqual(null, lists:nth(33, Params)),
+    ?assertEqual(1, lists:nth(37, Params)),
+    ?assertEqual(true, lists:nth(39, Params)),
+    ?assertEqual(null, lists:nth(40, Params)),
+    ?assertEqual(<<"chat">>, lists:nth(41, Params)),
     ?assertEqual(null, lists:nth(42, Params)),
     ?assertEqual(null, lists:nth(43, Params)),
-    ?assertEqual(<<"auth">>, lists:nth(44, Params)),
-    ?assertEqual(<<"4bf92f3577b34da6a3ce929d0e0e4736">>, lists:nth(45, Params)),
+    ?assertEqual(null, lists:nth(44, Params)),
+    ?assertEqual(<<"auth">>, lists:nth(45, Params)),
+    ?assertEqual(<<"4bf92f3577b34da6a3ce929d0e0e4736">>, lists:nth(46, Params)),
     %% requested_model defaults to null; error_detail rides last and
     %% defaults to null.
     ?assertEqual(null, lists:nth(47, Params)),

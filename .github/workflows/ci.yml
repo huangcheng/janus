@@ -4,10 +4,14 @@ name: ci
 # manual dispatch — feature work happens on develop / short-lived
 # branches and is NOT built per-push (Actions budget discipline).
 #
-# Test suites were deleted repo-wide (2026-10-18, see AGENTS.md
-# "Verification"): no eunit, no e2e, no Playwright. CI is now a
-# compile + format gate only; runtime verification is browser + curl
-# live-checks against a real stack.
+# Verification policy (2026-11-02): the earlier "no checked-in tests" rule
+# is superseded. This repository DOES ship EUnit suites (19 standalone
+# modules plus inline `-ifdef(TEST)` tests, 179 tests at the time of the
+# change), and they now run here. The gate is deliberately not just
+# "rebar3 eunit exited 0": that command also succeeds when a project has no
+# tests, so `assert_eunit_nonempty.sh` makes zero-executed and unparseable
+# output hard failures. Live browser/curl verification remains the primary
+# end-to-end proof; checked-in tests are additive and never replace it.
 on:
   push:
     branches: [main]
@@ -37,14 +41,60 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/rebar3
-            _build
-          key: rebar-${{ runner.os }}-otp27-${{ hashFiles('rebar.lock') }}
-          restore-keys: rebar-${{ runner.os }}-otp27-
+          path: gateway/_build
+          # Keyed on the lockfile alone: a broad gateway prefix in
+          # restore-keys would resurrect stale build output after a
+          # dependency change, which is worse than a cold build.
+          key: gateway-${{ hashFiles('gateway/rebar.lock') }}
 
       - name: Compile
         run: rebar3 compile
 
       - name: Format check
         run: rebar3 fmt --check
+
+      - name: EUnit (non-vacuous)
+        # The wrapper fails on: nonzero eunit exit, any failure, no summary,
+        # a zero-count suite, or a summed total of zero.
+        run: ./scripts/verification/assert_eunit_nonempty.sh
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        # `.[dev]` is what brings in ruff, which lint_all.sh requires; without
+        # it the lint step fails with "ruff not installed" rather than linting.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Install SPA dependencies
+        # BEFORE the lint step: lint_all.sh runs the SPA typecheck and build
+        # when spa/node_modules exists, so installing after it would skip the
+        # type gate while still reporting success.
+        working-directory: dashboard/spa
+        run: npm ci
+
+      - name: Lint (Python + SPA)
+        run: bash scripts/lint_all.sh
+
+      - name: Typecheck (SPA)
+        working-directory: dashboard/spa
+        run: npm run typecheck
+
+      - name: Build (SPA)
+        working-directory: dashboard/spa
+        run: npm run build
