@@ -14,6 +14,11 @@ artifacts/
 reports/
 .cursor/
 .superpowers/
+# Agent tooling installed per-machine, not repo content.
+.agents/
+.claude/
+.zcode/
+skills-lock.json
 
 # Local audit/review scratch output — not repo content.
 .audit-notes/
