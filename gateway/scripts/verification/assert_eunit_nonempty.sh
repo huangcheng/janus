@@ -75,7 +75,10 @@ totals = [(int(t), int(f)) for t, f in failed_re.findall(text)]
 # truncates to the shorter list — dropping exactly the zero-passed
 # application this guard exists to catch.
 eunit_line_re = re.compile(r"\bFailed:\s*(\d+)\..*?\bPassed:\s*(\d+)\.")
-eunit_keyword_re = re.compile(r"\b(?:Failed|Passed):")
+# `Skipped:` is included: a mangled line that lost its Failed/Passed tokens
+# but kept `Skipped: 0.` would otherwise match no keyword at all, be skipped
+# silently, and let the application it belongs to vanish.
+eunit_keyword_re = re.compile(r"\b(?:Failed|Passed|Skipped):")
 for m in eunit_line_re.finditer(text):
     totals.append((int(m.group(2)), int(m.group(1))))  # (passed, failed)
 

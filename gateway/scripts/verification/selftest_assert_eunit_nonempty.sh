@@ -89,7 +89,12 @@ check "surplus token" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
 app2: Failed: 0.  Passed: 4.  Passed: 0.
 '
 
-# 11. A plain passing run is accepted.
+# 11. A line that lost both count tokens but kept `Skipped:` must not vanish.
+check "mangled, only Skipped remains" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
+app2: Skipped: 0.
+'
+
+# 12. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 
