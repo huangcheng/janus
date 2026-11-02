@@ -105,7 +105,18 @@ check "well-formed raw summary, failures" 1 'app1: Failed: 2.  Skipped: 0.  Pass
 check "well-formed raw summary, clean" 0 'app1: Failed: 0.  Skipped: 1.  Passed: 4.
 '
 
-# 13. A plain passing run is accepted.
+# 13. `Skipped:` is OPTIONAL, so a pair without it is valid (counting totals
+#     rather than kinds once rejected this).
+check "raw summary without Skipped" 0 'app1: Failed: 0.  Passed: 4.
+'
+
+# 14. A duplicated `Passed:` must be rejected even though the keyword TOTAL
+#     reaches three: `complete` keeps the first pair, so the second count
+#     would be dropped silently.
+check "duplicate Passed, total is three" 1 'app1: Failed: 0.  Passed: 4.  Passed: 0.
+'
+
+# 15. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 

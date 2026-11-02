@@ -95,14 +95,22 @@ for line in text.splitlines():
     keywords = eunit_keyword_re.findall(line)
     if keywords:
         complete = eunit_line_re.search(line)
-        # Three keywords (Failed/Skipped/Passed) on a well-formed line;
-        # `complete` already pins the Failed...Passed pair, so the count check
-        # only guards against surplus or absent tokens.
-        if len(keywords) != 3 or not complete:
+        # Count PER KIND, not in total. `Skipped:` is optional, so a plain
+        # `Failed: 0. Passed: 4.` is valid and must not be rejected; and a
+        # duplicated `Passed:` must not be accepted just because the total
+        # happens to reach three — `complete` keeps only the FIRST pair, so
+        # the surplus occurrence (and the count it carries) would vanish.
+        per_kind = {k: keywords.count(k) for k in set(keywords)}
+        ok_kinds = (
+            per_kind.get("Failed:", 0) == 1
+            and per_kind.get("Passed:", 0) == 1
+            and per_kind.get("Skipped:", 0) in (0, 1)
+        )
+        if not ok_kinds or not complete:
             print("FAIL: malformed EUnit summary line: " + line.strip(), file=sys.stderr)
             print(
-                "      Expected exactly one 'Failed: N. ... Passed: M.' pair; "
-                "refusing to guess.",
+                "      Expected exactly one 'Failed: N.' and one 'Passed: M.' "
+                "(and at most one 'Skipped: K.'); refusing to guess.",
                 file=sys.stderr,
             )
             sys.exit(1)
