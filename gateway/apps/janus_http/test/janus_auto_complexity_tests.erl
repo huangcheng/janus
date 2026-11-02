@@ -20,14 +20,19 @@
 
 %% A minimal raw settings map that validate/1 accepts: one member in each
 %% tier, so config parsing succeeds and the flag can be read back.
+%% ATOM keys and REAL catalog member names: validate/1 takes the shape
+%% normalize_map/1 produces, and tier_members/4 drops names the catalog
+%% does not know. With string keys or invented names the tiers come back
+%% empty, validate falls back, and a test written against it passes
+%% without ever exercising the field it claims to pin.
 routable_raw(Extra) ->
     maps:merge(
         #{
-            "model" => "janus-auto",
-            "tiers" => #{
-                "fast" => ["m-fast"],
-                "big" => ["m-big"],
-                "flagship" => ["m-flag"]
+            model => <<"janus-auto">>,
+            tiers => #{
+                fast => [<<"deepseek-v4.1-flash">>],
+                big => [<<"deepseek-v4-pro">>],
+                flagship => [<<"glm-5.3">>]
             }
         },
         Extra
