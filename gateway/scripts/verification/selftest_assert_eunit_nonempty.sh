@@ -74,7 +74,22 @@ check "partial eunit summary line" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
 app2: Passed: 0.
 '
 
-# 9. A plain passing run is accepted.
+# 9. Truncated token: the period or the digits cut off. Silently dropping
+#    this line would carry a zero-passed application through as green.
+check "truncated, no period" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
+app2: Passed: 0
+'
+check "truncated, no digits" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
+app2: Failed: 0.  Skipped: 0.  Passed:
+'
+
+# 10. A surplus token on an otherwise valid line: the last occurrence would
+#     be discarded, which can hide the zero-passed application.
+check "surplus token" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
+app2: Failed: 0.  Passed: 4.  Passed: 0.
+'
+
+# 11. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 

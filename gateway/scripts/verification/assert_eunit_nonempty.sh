@@ -75,20 +75,31 @@ totals = [(int(t), int(f)) for t, f in failed_re.findall(text)]
 # truncates to the shorter list — dropping exactly the zero-passed
 # application this guard exists to catch.
 eunit_line_re = re.compile(r"\bFailed:\s*(\d+)\..*?\bPassed:\s*(\d+)\.")
-eunit_partial_re = re.compile(r"\b(?:Failed|Passed):\s*\d+\.")
+eunit_keyword_re = re.compile(r"\b(?:Failed|Passed):")
 for m in eunit_line_re.finditer(text):
     totals.append((int(m.group(2)), int(m.group(1))))  # (passed, failed)
 
-# Fail closed, PER LINE: a line carrying a count without a complete
-# Failed:/Passed: pair means the output was truncated or shaped unexpectedly,
-# and guessing which count belongs to which application is how a failing suite
-# turns green. Checking per line (not "any partial anywhere") is what makes
-# this robust when good and bad lines are mixed.
+# Fail closed, PER LINE, with one rule that covers every malformed shape:
+# a line may carry these keywords only if it holds EXACTLY one complete
+# `Failed: N. ... Passed: M.` pair. That single test rejects truncated
+# tokens (`Passed: 0` with the period cut, or `Passed:` with the digits cut),
+# surplus tokens (`Failed: 0. Passed: 4. Passed: 0.`, where the last
+# occurrence would otherwise be dropped), and swapped/absent halves. The
+# earlier regex-pair approach missed the truncation-between-keyword-and-digit
+# case and the surplus case, and either would silently carry a zero-passed
+# application through.
 for line in text.splitlines():
-    if eunit_partial_re.search(line) and not eunit_line_re.search(line):
-        print("FAIL: incomplete EUnit summary line: " + line.strip(), file=sys.stderr)
-        print("      Refusing to guess which count belongs to which application.", file=sys.stderr)
-        sys.exit(1)
+    keywords = eunit_keyword_re.findall(line)
+    if keywords:
+        complete = eunit_line_re.search(line)
+        if len(keywords) != 2 or not complete:
+            print("FAIL: malformed EUnit summary line: " + line.strip(), file=sys.stderr)
+            print(
+                "      Expected exactly one 'Failed: N. ... Passed: M.' pair; "
+                "refusing to guess.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 if not passed and not totals:
     print("FAIL: no EUnit summary found in the log.", file=sys.stderr)
