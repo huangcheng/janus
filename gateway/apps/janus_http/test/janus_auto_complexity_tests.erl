@@ -38,6 +38,38 @@ routable_raw(Extra) ->
         Extra
     ).
 
+%% --- Prompt-only spec A: the operator-editable judge prompt ---------
+
+%% An empty setting must mean "use the built-in", not "send an empty
+%% instruction". Both paths must produce the SAME text, or an operator who
+%% clears the field gets different verdicts from one who never set it.
+prompt_empty_means_builtin_test() ->
+    Empty = janus_auto:validate(routable_raw(#{judge_prompt => <<>>})),
+    Default = janus_auto:validate(routable_raw(#{})),
+    ?assertEqual(janus_auto:judge_prompt_of(Default), janus_auto:judge_prompt_of(Empty)),
+    ?assertEqual(janus_auto:judge_prompt_of(Default), janus_auto:builtin_judge_prompt()),
+    %% And the built-in is not empty.
+    ?assertNotEqual(<<>>, janus_auto:builtin_judge_prompt()).
+
+%% A custom prompt must be what the judge is given.
+prompt_override_is_used_test() ->
+    P = <<"Reply fast, big or flagship. Custom.">>,
+    Cfg = janus_auto:validate(routable_raw(#{judge_prompt => P})),
+    ?assertEqual(P, janus_auto:judge_prompt_of(Cfg)).
+
+%% The cache key must change when the prompt changes: a verdict produced
+%% under one instruction must not be served after the instruction changes.
+%% Without this the operator edits the prompt, sees stale verdicts for a
+%% full cache_ttl_sec, edits again, and concludes the feature is broken.
+prompt_change_invalidates_cache_key_test() ->
+    A = janus_auto:validate(routable_raw(#{judge_prompt => <<"fast big flagship AA">>})),
+    B = janus_auto:validate(routable_raw(#{judge_prompt => <<"fast big flagship BB">>})),
+    Same = janus_auto:validate(routable_raw(#{judge_prompt => <<"fast big flagship AA">>})),
+    ?assertNotEqual(janus_auto:prompt_hash_of(A), janus_auto:prompt_hash_of(B)),
+    % Identical prompts hash identically, so an unrelated config edit that
+    % leaves the prompt alone does NOT flush the decision cache.
+    ?assertEqual(janus_auto:prompt_hash_of(A), janus_auto:prompt_hash_of(Same)).
+
 %% --- A2: lexicon scope ---------------------------------------------
 
 %% The recommended list is non-empty — that is what makes the documented

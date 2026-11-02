@@ -22,9 +22,12 @@
       "description": "Optional self-reference to this schema's canonical $id (editor autocomplete/validation), per the omp published-schema convention. Exporters SHOULD write it. EXCLUDED from payload_sha256 (like 'integrity') so editors may add/remove it freely."
     },
     "version": {
-      "const": 1,
       "type": "integer",
-      "description": "Format version. Checked by the lenient pre-read (numeric >1 incl. floats → unsupported_version; bools excluded explicitly — Python isinstance(True, int) is True); this const runs only after it. Integral floats (1.0) pass via JSON Schema numeric equality."
+      "description": "Format version. Checked by the lenient pre-read (numeric >2 incl. floats → unsupported_version; bools excluded explicitly — Python isinstance(True, int) is True); this enum runs only after it. Both 1 and 2 are accepted: version 2 added auto_router.judge_prompt and the auto-router enabled switch, and a version-1 backup restores with those defaulted.",
+      "enum": [
+        1,
+        2
+      ]
     },
     "kind": {
       "const": "janus-config-backup"
@@ -658,6 +661,10 @@
         "decision_log": {
           "type": "boolean",
           "description": "Emit the per-request auto-router decision log (spec A4): which zone or gate rule settled the tier, and for a judge verdict the input shape (lengths and counts only, never text). Off by default."
+        },
+        "judge_prompt": {
+          "type": "string",
+          "description": "The instruction the auto-router's judge is given (spec A). Empty means the gateway's built-in text. Must name every tier or the verdict cannot be parsed; the API refuses one that does not."
         }
       }
     },

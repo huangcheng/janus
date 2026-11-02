@@ -436,7 +436,7 @@ def _document_from_snapshot(snapshot: dict, validator) -> dict:
         raise ExportError("no active keyring; canary cannot be minted") from exc
     document = {
         "$schema": validator.schema["$id"],
-        "version": 1,
+        "version": 2,
         "kind": "janus-config-backup",
         "taken_at": snapshot["taken_at"],
         "source": {

@@ -164,6 +164,9 @@ export type AutoCfg = {
    * that NAMES a hard task into the judge zone instead of straight to fast.
    * Empty = today's routing. */
   complexity_terms: string[]
+  /** The judge's instruction (auto-router-prompt-only spec A). Empty = the
+   * gateway's built-in. Must name every tier or the API refuses it. */
+  judge_prompt?: string
   /** Emit the per-request decision log (spec A4). Off by default. */
   decision_log?: boolean
   /** D11: after key failover exhausts, try next same-tier name (default off). */
@@ -1625,6 +1628,24 @@ function AutoRouterCard({
               A short request naming a hard task (&ldquo;design&rdquo;, &ldquo;架构&rdquo;) is sent to the
               judge instead of straight to fast. It is a filter, not a flagship pin — the judge still
               decides.
+            </p>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="auto-judge-prompt">Judge prompt</FieldLabel>
+            <textarea
+              id="auto-judge-prompt"
+              className="min-h-[9rem] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder="Leave empty to use the gateway's built-in instruction"
+              value={cfg.judge_prompt ?? ""}
+              onChange={(e) => onChange({ ...cfg, judge_prompt: e.target.value })}
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              The instruction the judge is given. This is the only lever that changes how tiers are
+              chosen &mdash; the model reads it and answers <code>fast</code>, <code>big</code> or{" "}
+              <code>flagship</code>. It must name all three tiers.{" "}
+              <span className="text-muted-foreground/80">
+                {new TextEncoder().encode(cfg.judge_prompt ?? "").length} / 4096 bytes
+              </span>
             </p>
           </Field>
           <Field>

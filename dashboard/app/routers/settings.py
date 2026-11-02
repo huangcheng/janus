@@ -70,6 +70,12 @@ DEFAULTS = {
     # gateway's janus_auto:default_complexity_terms/0 carries the
     # recommended list an operator can apply.
     "complexity_terms": [],
+    # The instruction the judge is given (auto-router-prompt-only spec A).
+    # Empty means "use the gateway's built-in". This is the only
+    # operator-editable surface for routing behaviour, so it is validated
+    # hard: a prompt that never names a tier yields a verdict the parser
+    # must discard, and the request silently falls to the default tier.
+    "judge_prompt": "",
     # Emit the per-request auto-router decision log (spec A4). OFF by
     # default: one line per request is a lot of volume; the operator turns
     # it on when a tier surprised them.
@@ -98,6 +104,42 @@ LOCAL_JUDGE_INT_FIELDS = {
     "local_max_inflight": (1, 1_024),
     "ensure_generation": (0, 2**31 - 1),
 }
+
+
+# auto-router-prompt-only spec §3. The judge reply is parsed by matching a
+# tier word, so a prompt that never names a tier invites a verdict the
+# parser discards — which degrades to the default tier with NO error. These
+# checks turn that silent misroute into a 400 at write time.
+JUDGE_PROMPT_MAX_BYTES = 4096
+
+
+def _validate_judge_prompt(value: object) -> str:
+    """Return the prompt to store, refusing the shapes that cannot work."""
+    if not isinstance(value, str):
+        raise _err(400, "invalid", "judge_prompt must be a string")
+    if value == "":
+        # Empty is meaningful: the gateway uses its own built-in text.
+        return ""
+    encoded = value.encode("utf-8")
+    if len(encoded) > JUDGE_PROMPT_MAX_BYTES:
+        raise _err(
+            400,
+            "invalid",
+            f"judge_prompt must be at most {JUDGE_PROMPT_MAX_BYTES} bytes "
+            f"(got {len(encoded)})",
+        )
+    # Case-insensitive, matching parse_tier/1 which lowercases the verdict
+    # before comparing: a prompt saying "Fast / Big / Flagship" works
+    # perfectly, and refusing it would be a false negative.
+    lowered = value.lower()
+    missing = [t for t in TIERS if t not in lowered]
+    if missing:
+        raise _err(
+            400,
+            "invalid",
+            f"judge_prompt must name every tier; missing {', '.join(missing)}",
+        )
+    return value
 
 
 def _err(status: int, code: str, message: str) -> HTTPException:
@@ -457,6 +499,10 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
 
     if not isinstance(cfg.get("decision_log", DEFAULTS["decision_log"]), bool):
         raise _err(400, "invalid", "decision_log must be a boolean")
+
+    cfg["judge_prompt"] = _validate_judge_prompt(
+        cfg.get("judge_prompt", DEFAULTS["judge_prompt"])
+    )
     cfg["markers"] = [m.strip() for m in markers]
 
     # D11: same-tier next-name failover knobs (gateway clamp [1, 8]).

@@ -338,18 +338,24 @@ async def preflight(
     )
 
 
+_SUPPORTED_VERSIONS = (1, 2)
+
+
 def _version_gate(doc: dict) -> None:
     """C11: bools are excluded first (``isinstance(True, int)`` is true).
-    Numeric ``> 1`` (including ``1.5``) is ``unsupported_version``. ``1``
-    and integral ``1.0`` proceed. Anything else falls through to schema."""
+    Numeric above the newest supported version (including ``1.5`` rounding
+    cases) is ``unsupported_version``. Both 1 and 2 proceed: version 2 only
+    ADDED auto_router.judge_prompt, so a version-1 document restores with
+    the built-in prompt. Anything else falls through to the schema."""
     value = doc.get("version")
     if isinstance(value, bool):
         return
-    if isinstance(value, (int, float)) and value > 1:
+    if isinstance(value, (int, float)) and value > max(_SUPPORTED_VERSIONS):
         raise RestoreError(
             422,
             "unsupported_version",
-            f"document version {value} is not supported; this restore accepts version 1",
+            f"document version {value} is not supported; this restore accepts "
+            f"versions {', '.join(str(v) for v in _SUPPORTED_VERSIONS)}",
         )
 
 
