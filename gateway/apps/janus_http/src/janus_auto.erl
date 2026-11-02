@@ -1952,8 +1952,17 @@ pos_write(Key, Tier, JM, Cfg) ->
 %% reader of this backend will consult. Online keys on {Hash, Face,
 %% PromptHash}; local keys on the plain hash, because that is all its
 %% reader uses.
-write_key(Cfg, _JudgeModel, Hash) when Cfg#acfg.judge_backend =:= local ->
-    {ok, Hash};
+write_key(Cfg, JudgeModel, Hash) when Cfg#acfg.judge_backend =:= local ->
+    %% Only if JudgeModel IS the identity the reader will compare against.
+    %% judge_model/0 falls back to the sha-less `cache_name` when readiness
+    %% is unavailable, and the reader only ever compares the sha-derived
+    %% identity built in apply_health_body/2 — so an entry accepted in that
+    %% window would match the guard, take a plain-hash key, and still never
+    %% be read. Drop it; the next local miss asks the judge.
+    case local_readiness_identity(Cfg) of
+        {ok, JudgeModel} -> {ok, Hash};
+        _ -> error
+    end;
 write_key(Cfg, JudgeModel, Hash) ->
     case resolve_face_quiet(JudgeModel) of
         {ok, Face} -> {ok, {Hash, Face, Cfg#acfg.prompt_hash}};
