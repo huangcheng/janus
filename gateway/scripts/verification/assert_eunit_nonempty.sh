@@ -76,10 +76,12 @@ eunit_failed = [int(m) for m in eunit_failed_re.findall(text)]
 eunit_passed = [int(m) for m in eunit_passed_re.findall(text)]
 eunit_skipped = [int(m) for m in eunit_skipped_re.findall(text)]
 
-# A raw-EUnit failure line is a summary too, and its `Passed:` count is real
-# executed work. `Skipped:` tests are NOT counted as executed.
-if eunit_failed:
-    totals = totals + [(sum(eunit_passed), sum(eunit_failed))]
+# A raw-EUnit summary is per-application too, and its `Passed:` count is real
+# executed work (`Skipped:` is NOT). Keep ONE tuple per occurrence: collapsing
+# them into a single sum would hide an application that passed zero tests
+# behind another that passed several, which is the per-application discovery
+# regression the zero-count guard below is meant to catch.
+totals = totals + list(zip(eunit_passed, eunit_failed))
 
 if not passed and not totals:
     print("FAIL: no EUnit summary found in the log.", file=sys.stderr)

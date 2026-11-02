@@ -61,7 +61,14 @@ app2: 0 tests, 0 failures
 check "only skipped, nothing passed" 1 'Failed: 0.  Skipped: 3.  Passed: 0.
 '
 
-# 7. A plain passing run is accepted.
+# 7. A raw-EUnit application that passed NOTHING must not hide behind another
+#    that passed several. Collapsing the per-application counts into one sum
+#    would make this green.
+check "eunit zero-passed app among passing apps" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
+app2: Failed: 0.  Skipped: 0.  Passed: 0.
+'
+
+# 8. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 
