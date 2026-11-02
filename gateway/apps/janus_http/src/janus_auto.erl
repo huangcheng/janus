@@ -557,6 +557,21 @@ prompt_hash_for(Setting) -> prompt_hash(Setting).
 
 enabled(Cfg) -> Cfg#acfg.enabled.
 
+%% Did this install have a working router BEFORE the switch existed? True
+%% when any tier has a member, in the merged raw config (DB over app env).
+%% Mirrors migration 028's predicate exactly, for the layer the migration
+%% cannot see.
+already_routing(Raw, Def) ->
+    Tiers =
+        case maps:get(tiers, Raw, undefined) of
+            M when is_map(M) -> M;
+            _ -> Def#acfg.tiers
+        end,
+    lists:any(
+        fun(T) -> maps:get(T, Tiers, []) =/= [] end,
+        [fast, big, flagship]
+    ).
+
 %% Install a raw settings map as the DB overlay, so a test can drive
 %% maybe_route/3 end to end (the router reads the DB layer plus app env).
 set_enabled_raw(Raw) ->
@@ -2849,7 +2864,17 @@ validate(Raw) ->
                 off
         end,
     Def#acfg{
-        enabled = bool_or(maps:get(enabled, Raw, Def#acfg.enabled), false),
+        %% ABSENT is not the same as false here. An install configured
+        %% through sys.config has no settings row, and migration 028 only
+        %% rewrites the row — so a keyless upgrade would take a router that
+        %% was working out of service. When the key is absent we therefore
+        %% infer from "was this install already routing?" instead of
+        %% applying the code default. An EXPLICIT false is always honoured.
+        enabled =
+            case maps:find(enabled, Raw) of
+                {ok, _} -> bool_or(maps:get(enabled, Raw), false);
+                error -> already_routing(Raw, Def)
+            end,
         model = Model,
         judge_model = JM,
         judge_backend = Backend,

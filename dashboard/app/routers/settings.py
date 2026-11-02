@@ -444,7 +444,7 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     unknown_names = sorted(
         {n for names in norm_tiers.values() for n in names if n not in bound_names}
     )
-    if unknown_names:
+    if unknown_names and not disabled:
         raise _err(
             400,
             "not_bound",
@@ -474,7 +474,12 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     rows = await database.fetch("SELECT DISTINCT name FROM provider_models")
     surface = {r["name"] for r in rows} | bound_names
 
-    if backend == "online":
+    if disabled:
+        # A disabled family serves nothing, so a dangling member or a
+        # retired judge model is not a live routing hazard — it is exactly
+        # the state the operator is trying to park. Skip the surface checks.
+        cfg["tiers"] = norm_tiers
+    elif backend == "online":
         if cfg["judge_model"] is None:
             raise _err(400, "invalid", "judge_model is required when judge_backend is online")
         if cfg["judge_model"] not in surface:
@@ -514,6 +519,12 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
 
     if not isinstance(cfg.get("enabled", DEFAULTS["enabled"]), bool):
         raise _err(400, "invalid", "enabled must be a boolean")
+    # Resolved HERE, before every catalog check below, because this is the
+    # kill switch: an operator must be able to turn the family off while its
+    # configuration is broken. Cascade leaves a dangling judge_model when a
+    # model is retired, and `not_bound` / `unknown_models` would otherwise
+    # reject the one write that stops the router from serving.
+    disabled = cfg.get("enabled") is False
 
     cfg["judge_prompt"] = _validate_judge_prompt(
         cfg.get("judge_prompt", DEFAULTS["judge_prompt"])

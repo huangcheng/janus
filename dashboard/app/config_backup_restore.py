@@ -1204,8 +1204,28 @@ def _projected_auto_router(doc: dict, catalog: _Catalog) -> dict | None:
     router = doc["router"]
     file_cfg = router.get("auto_router")
     if isinstance(file_cfg, dict):
-        return file_cfg
-    return catalog.auto_router
+        return _with_enabled_inferred(file_cfg)
+    return _with_enabled_inferred(catalog.auto_router)
+
+
+def _with_enabled_inferred(cfg):
+    """A document written before the existence switch restores into code
+    whose default is OFF, which would silently take a previously working
+    router out of service — migration 028 covers the schema upgrade, not a
+    restore. Mirror 028's predicate here: a document that configures tier
+    members was routing, so it restores enabled. An explicit value in the
+    document always wins, so an operator's deliberate "off" is preserved."""
+    if not isinstance(cfg, dict) or "enabled" in cfg:
+        return cfg
+    tiers = cfg.get("tiers")
+    if not isinstance(tiers, dict):
+        return cfg
+    has_member = any(
+        isinstance(tiers.get(t), list) and tiers[t] for t in ("fast", "big", "flagship")
+    )
+    if not has_member:
+        return cfg
+    return {**cfg, "enabled": True}
 
 
 def _validate_projected_router(cfg: dict, bound: set[str], surface: set[str], virtual: str) -> None:
@@ -2696,7 +2716,11 @@ async def _write_settings(conn, doc: dict, catalog: _Catalog) -> bool:
     router = doc["router"]
     file_router = router.get("auto_router")
     if _singleton_changed(file_router, catalog.auto_router, markers=True):
-        await _upsert_setting(conn, "auto_router", file_router)
+        # Write the INFERRED form, not the raw document. This path bypasses
+        # put_auto_router, so a pre-switch backup would otherwise restore a
+        # row with no `enabled` and the gateway would resolve it to false —
+        # taking a previously working router out of service on restore.
+        await _upsert_setting(conn, "auto_router", _with_enabled_inferred(file_router))
         dirty = True
     file_reorder = router.get("auto_router_reorder")
     if _singleton_changed(file_reorder, catalog.auto_router_reorder, markers=False):

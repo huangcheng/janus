@@ -1454,7 +1454,16 @@ function AutoRouterCard({
             </p>
           </Alert>
         ) : null}
-        <div className={cfg.enabled === true ? "" : "pointer-events-none opacity-50"}>
+        {/* `pointer-events-none` only blocks the mouse: every control inside
+            stays tab-reachable and editable, and a keyboard user could edit a
+            section the banner says is preserved, then persist it. A native
+            disabled fieldset removes descendants from the tab order and the
+            a11y tree for real (React 18.3, so `inert` is not a boolean prop). */}
+        <fieldset
+          disabled={cfg.enabled !== true}
+          aria-disabled={cfg.enabled !== true}
+          className={cfg.enabled === true ? "" : "opacity-50"}
+        >
         {cfg.tiers.fast.length + cfg.tiers.big.length + cfg.tiers.flagship.length ===
           0 && (
           <Alert className="mb-4">
@@ -1740,7 +1749,7 @@ function AutoRouterCard({
             </div>
           </Field>
         </div>
-        </div>
+        </fieldset>
       </CardContent>
     </Card>
   )

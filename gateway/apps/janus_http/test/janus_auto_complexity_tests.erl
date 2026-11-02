@@ -183,14 +183,25 @@ enabled_true_routes_test() ->
     janus_auto:set_enabled_raw(#{}),
     ok.
 
-%% The default is OFF: an install that never sets the switch does not
-%% silently start routing. (The 028 migration enables existing installs.)
-enabled_defaults_off_test() ->
-    Cfg = janus_auto:validate(routable_raw(#{})),
-    ?assertEqual(false, janus_auto:enabled(Cfg)),
+%% A keyless config INFERS from whether the install was already routing.
+%% This exists because migration 028 can only rewrite a settings row: an
+%% install configured through sys.config would otherwise be taken out of
+%% service by an upgrade. Mirrors 028's predicate exactly.
+enabled_infers_for_keyless_installs_test() ->
+    %% Tiers configured, no `enabled` key -> already routing -> enabled.
+    ?assertEqual(true, janus_auto:enabled(janus_auto:validate(routable_raw(#{})))),
+    %% Nothing configured -> nothing to preserve -> off (the code default).
+    Empty = janus_auto:validate(#{
+        model => <<"janus-auto">>,
+        tiers => #{fast => [], big => [], flagship => []}
+    }),
+    ?assertEqual(false, janus_auto:enabled(Empty)),
+    %% An EXPLICIT false always wins, even with tiers configured: the
+    %% operator's choice is never overridden by the inference.
+    Disabled = janus_auto:validate(routable_raw(#{enabled => false})),
+    ?assertEqual(false, janus_auto:enabled(Disabled)),
+    %% The fallback record carries a real boolean, never undefined.
     ?assertEqual(false, janus_auto:enabled(janus_auto:default_cfg())),
-    %% The fallback record must carry a real boolean, never undefined: a
-    %% failed settings read must not mean "enabled" OR crash.
     ?assertEqual(true, is_boolean(janus_auto:enabled(janus_auto:default_cfg()))).
 
 %% --- A2: lexicon scope ---------------------------------------------
