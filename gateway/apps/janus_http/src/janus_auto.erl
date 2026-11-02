@@ -1948,6 +1948,18 @@ pos_write(Key, Tier, JM, Cfg) ->
     _ = fleet_publish_cache_put(raw_hash(Key), Tier, JM, Cfg#acfg.ttl),
     ok.
 
+%% The decision-cache key for an incoming verdict, in the SHAPE the local
+%% reader of this backend will consult. Online keys on {Hash, Face,
+%% PromptHash}; local keys on the plain hash, because that is all its
+%% reader uses.
+write_key(Cfg, _JudgeModel, Hash) when Cfg#acfg.judge_backend =:= local ->
+    {ok, Hash};
+write_key(Cfg, JudgeModel, Hash) ->
+    case resolve_face_quiet(JudgeModel) of
+        {ok, Face} -> {ok, {Hash, Face, Cfg#acfg.prompt_hash}};
+        error -> error
+    end.
+
 %% Face resolution that cannot take the caller down. Used only where a
 %% failure must not propagate (the fleet ingress path); a plain
 %% judge_model_route/1 exit or timeout becomes `error`.
@@ -2065,9 +2077,17 @@ fleet_cache_put(Hash, TierWire, JudgeModel, TtlSec) when
             %% fleet ingress process. An LB restart would then crash the
             %% fleet service instead of dropping one cache entry, and the
             %% -spec below does not advertise an exit.
-            case resolve_face_quiet(JudgeModel) of
-                {ok, Face} ->
-                    Key = {Hash, Face, Cfg#acfg.prompt_hash},
+            %%
+            %% The key SHAPE follows the backend, because the local judge
+            %% path reads and writes a plain hash
+            %% (judge_tier_local/3 -> pos_read(Hash, Identity)) with no face
+            %% and no prompt — its identity is the artifact, already
+            %% checked by the guard above. Writing a composite key while
+            %% local is active would create a row the local path never
+            %% consults: dead weight that still occupies an AUX slot and
+            %% can FIFO-evict live entries.
+            case write_key(Cfg, JudgeModel, Hash) of
+                {ok, Key} ->
                     pos_write_ttl(Key, Tier, JudgeModel, now_ms() + Ttl * 1000),
                     ok;
                 error ->
