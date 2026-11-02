@@ -8,6 +8,11 @@
 %% (silently inert override, or a node removed from the fleet) are both
 %% invisible from the outside.
 -module(janus_worker_pool_capacity_tests).
+%% The fixture below is named `node/0`, which shadows the auto-imported BIF of
+%% the same name/arity. OTP 27 treats that as a hard error, and nothing
+%% compiled this suite until CI started running EUnit; renaming would churn
+%% every assertion, so the auto-import is disabled instead.
+-compile({no_auto_import, [node/0]}).
 
 -include_lib("eunit/include/eunit.hrl").
 
