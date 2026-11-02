@@ -30,6 +30,7 @@
 %% The prompt surface (auto-router-prompt-only spec A) — exported so tests
 %% drive the real parse rather than re-reading the record layout.
 -export([judge_prompt_of/1, prompt_hash_of/1, builtin_judge_prompt/0]).
+-export([builtin_decisions_instruction/0]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -520,6 +521,8 @@ judge_prompt_of(Cfg) -> Cfg#acfg.judge_prompt.
 prompt_hash_of(Cfg) -> Cfg#acfg.prompt_hash.
 
 builtin_judge_prompt() -> judge_prompt().
+
+builtin_decisions_instruction() -> decisions_instruction().
 
 %% Did a judge actually run for this origin? The set is written out so it
 %% cannot drift: `judge` is the online backend's verdict, `local_judge` the
@@ -1303,17 +1306,21 @@ do_local_judge(Parent, Ref, Cfg, F, Hash, Identity) ->
             end
     end.
 
-%% Once per config generation: the local sidecar has no instruction channel.
+%% Once per distinct prompt: the local sidecar has no instruction channel.
 warn_local_judge_ignores_prompt(Cfg) ->
     case Cfg#acfg.judge_prompt of
         <<>> ->
             ok;
         _ ->
-            case persistent_term:get({?MODULE, local_prompt_warned}, false) of
-                true ->
+            %% Keyed on the prompt digest, so a NEW prompt warns again —
+            %% a latch would warn once per node lifetime and then stay
+            %% silent through every later edit.
+            Key = {?MODULE, local_prompt_warned},
+            case persistent_term:get(Key, undefined) of
+                H when H =:= Cfg#acfg.prompt_hash ->
                     ok;
-                false ->
-                    persistent_term:put({?MODULE, local_prompt_warned}, true),
+                _ ->
+                    persistent_term:put(Key, Cfg#acfg.prompt_hash),
                     logger:warning(#{
                         what => janus_auto_local_judge_ignores_prompt,
                         message =>
@@ -1848,6 +1855,14 @@ provider_enabled(_) ->
 %% prompt_hash is read from the record rather than recomputed here: the
 %% record is memoised per config generation by normalized/0, so the digest
 %% is paid once per generation instead of once per request.
+%%
+%% The prompt digest alone is NOT enough to identify the instruction: the
+%% same judge model can be reached over either the decisions contract or the
+%% chat contract (judge_model_route/1 falls back from one to the other), and
+%% an empty setting resolves to a DIFFERENT built-in on each. Cache entries
+%% are discriminated by judge model only (pos_read/2), so without the face a
+%% verdict produced under the decisions wording could be served under the
+%% chat wording. prompt_hash therefore carries the resolved face.
 cache_key(Cfg, F) ->
     erlang:phash2(
         {
@@ -2676,14 +2691,15 @@ validate(Raw) ->
         max_media = pos_int(maps:get(max_media_parts, Raw, Def#acfg.max_media), max_media_parts),
         markers = bin_list(maps:get(markers, Raw, Def#acfg.markers)),
         complexity_terms = bin_list(maps:get(complexity_terms, Raw, Def#acfg.complexity_terms)),
-        %% The RAW setting; <<>> means "use each path's built-in". Hashing
-        %% the setting (not the resolved text) keeps one identity per
-        %% operator choice: clearing the field returns to hash(<<>>), the
-        %% same key an install that never set it already has. A code change
-        %% to a built-in needs no key change, because the ETS cache does not
-        %% survive a restart.
+        %% The RAW setting; <<>> means "use each path's built-in". The hash
+        %% covers the setting AND both resolved instructions, because the
+        %% same model can be reached over either contract and an empty
+        %% setting means different text on each. Hashing the setting alone
+        %% would collide those two identities; hashing only the text would
+        %% make a code tweak to a built-in look like a different operator
+        %% choice.
         judge_prompt = JP,
-        prompt_hash = erlang:phash2(JP),
+        prompt_hash = erlang:phash2({JP, effective_prompt(JP, chat), effective_prompt(JP, decisions)}),
         %% bool_or/2 is this module's settings-boolean parser: it accepts
         %% true/false, 1/0 and <<"true">>/<<"false">>. A bare `=:= true`
         %% would silently read the normalized <<"true">> as false, so the
@@ -2724,7 +2740,7 @@ default_cfg() ->
         %% instruction and key the decision cache on `undefined`, degrading
         %% verdicts silently instead of failing.
         judge_prompt = <<>>,
-        prompt_hash = erlang:phash2(<<>>),
+        prompt_hash = erlang:phash2({<<>>, effective_prompt(<<>>, chat), effective_prompt(<<>>, decisions)}),
         decision_log = false,
         complexity_terms = [],
         tier_failover_enabled = false,
@@ -3257,7 +3273,7 @@ cfg() ->
         %% recommended list an operator can copy into the setting.
         complexity_terms = [],
         judge_prompt = <<>>,
-        prompt_hash = erlang:phash2(<<>>),
+        prompt_hash = erlang:phash2({<<>>, effective_prompt(<<>>, chat), effective_prompt(<<>>, decisions)}),
         decision_log = false,
         tier_failover_enabled = false,
         tier_failover_max_names = 3

@@ -74,6 +74,25 @@ prompt_change_invalidates_cache_key_test() ->
     % leaves the prompt alone does NOT flush the decision cache.
     ?assertEqual(janus_auto:prompt_hash_of(A), janus_auto:prompt_hash_of(Same)).
 
+%% The prompt digest must cover BOTH resolved instructions, not just the
+%% setting: the same judge model can be reached over the decisions contract
+%% or the chat contract (judge_model_route/1 falls back from one to the
+%% other), each sends different text for an empty setting, and cache entries
+%% are discriminated by judge model alone. Hashing the setting only would
+%% let a verdict produced under one wording be served under the other.
+prompt_hash_separates_the_two_faces_test() ->
+    Cfg = janus_auto:validate(routable_raw(#{})),
+    Chat = janus_auto:builtin_judge_prompt(),
+    Decisions = janus_auto:builtin_decisions_instruction(),
+    ?assertNotEqual(Chat, Decisions),
+    %% The stored digest is over {setting, chat text, decisions text}:
+    %% changing EITHER built-in changes the identity.
+    H = janus_auto:prompt_hash_of(Cfg),
+    ?assertEqual(
+        erlang:phash2({<<>>, Chat, Decisions}),
+        H
+    ).
+
 %% --- A2: lexicon scope ---------------------------------------------
 
 %% The recommended list is non-empty — that is what makes the documented
