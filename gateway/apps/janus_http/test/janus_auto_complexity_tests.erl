@@ -142,11 +142,28 @@ a4_marker_rule_is_named_test() ->
 
 %% The shape carries COUNTS, never text. This is the privacy invariant the
 %% spec inherits from the shape sentinel.
+%%
+%% Driven through the PRODUCTION function (judge_zone_shape/1), not a local
+%% literal: a literal would assert its own keys and could never fail, so
+%% a text field added to the real shape later would slip past.
 a4_shape_is_counts_only_test() ->
-    %% Structural assertion: the shape map's keys are the four counts the
-    %% spec names. A future field carrying text would show up here.
-    Shape = #{first_user_len => 10, last_user_len => 8, turns => 3, tool_calls => 1},
+    F = #{
+        first_user => <<"the task">>,
+        last_user => <<"continue">>,
+        msg_count => 9,
+        tool_calls => 4
+    },
+    Shape = janus_auto:judge_zone_shape(F),
     ?assertEqual(
         [first_user_len, last_user_len, tool_calls, turns],
         lists:sort(maps:keys(Shape))
+    ),
+    %% Every value is a non-negative integer: lengths and counts, never a
+    %% binary that could carry content.
+    lists:foreach(
+        fun({_K, V}) ->
+            ?assert(is_integer(V)),
+            ?assert(V >= 0)
+        end,
+        maps:to_list(Shape)
     ).

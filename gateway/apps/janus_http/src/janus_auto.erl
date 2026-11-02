@@ -19,6 +19,9 @@
 %% The recommended (NOT default) lexicon, so the dashboard can offer it and
 %% the docs can stay in step with it.
 -export([default_complexity_terms/0]).
+%% The judge input SHAPE (counts only) — exported so the test can drive
+%% the production function instead of re-implementing it.
+-export([judge_zone_shape/1]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -380,17 +383,26 @@ decide(Cfg, F, Constraint) ->
             {{error, request_too_large}, too_large, undefined, undefined, too_large, #{}};
         judge_zone ->
             {Tier, Origin} = judge_tier(Cfg, F),
-            %% A4: record WHAT the judge saw, as shape only — the lengths of
-            %% the two text fields and the two counts, never the text.
+            %% A4: record WHAT the judge saw — but ONLY when a judge
+            %% actually ran. judge_tier/2 returns without calling one for
+            %% several reasons (backend off, no judge model, empty
+            %% labels, breaker open, not-ready gate, negcache hit), and
+            %% reporting a "judge input shape" for those would imply a
+            %% call that never happened.
+            Shape =
+                case Origin of
+                    judge -> judge_zone_shape(F);
+                    _ -> #{}
+                end,
             finish(
                 resolve_soft(Cfg, Tier, Constraint),
                 Origin,
                 Tier,
                 Cfg,
-                judge_zone,
-                judge_zone_shape(F)
+                Origin,
+                Shape
             );
-        {Tier, soft_route, RuleName} ->
+        {{Tier, soft_route}, RuleName} ->
             %% Rule 5 (fast): directed hard, AVAILABILITY SOFT. A fast
             %% tier with no usable member falls back to the default tier
             %% on ANY resolve failure -- not only for streams. Keeping this
@@ -408,7 +420,7 @@ decide(Cfg, F, Constraint) ->
                         RuleName
                     )
             end;
-        {Tier, _Kind, RuleName} ->
+        {{Tier, _Kind}, RuleName} ->
             %% A hard gate rule settled the tier; RuleName names which one.
             case resolve_hard(Cfg, Tier, Constraint) of
                 {ok, _, _, _} = Ok ->
@@ -796,32 +808,28 @@ rules_gate_1(F, Cfg) ->
             not maps:get(tools, F) andalso
             Est < Fast andalso
             maps:get(msg_count, F) =< 3,
+    %% Each entry pairs its condition with the rule NAME that fires it, so
+    %% the two cannot drift apart (spec A4). They used to be two
+    %% independent lists joined by zip, where adding a condition without
+    %% adding its name silently mislabelled every later rule.
     Conds = [
         %% Images no longer hard-pin to flagship: with curated vision
         %% capability flags, the vision constraint filters members inside
         %% whichever tier the size/complexity rules pick (2026-10-21).
-        {maps:get(marker, F), {flagship, hard}},
-        {Est > Big, {flagship, hard}},
-        {(PromptTools * 6) div 5 > Big, {big, hard}},
-        {IsFast, {fast, soft_route}}
+        {maps:get(marker, F), {flagship, hard}, marker},
+        {Est > Big, {flagship, hard}, too_big},
+        {(PromptTools * 6) div 5 > Big, {big, hard}, prompt_big},
+        {IsFast, {fast, soft_route}, fast}
     ],
     %% Each condition carries its RULE NUMBER so the decision log can name
     %% the reason instead of a generic `rules' (auto-router-complexity spec
     %% A4). A verdict an operator cannot explain is a verdict they cannot
     %% tune against.
-    Numbered = [
-        erlang:append_element(Verdict, RuleNo)
-     || {{Cond, Verdict}, RuleNo} <- lists:zip(Conds, rule_numbers()),
-        Cond
-    ],
-    case Numbered of
+    case [{Verdict, Rule} || {Cond, Verdict, Rule} <- Conds, Cond] of
         [] -> judge_zone;
         [First | _] -> First
     end.
 
-%% Rule numbers for the conditions in rules_gate_1/2, in evaluation order.
-%% Kept as a list so the zip stays in step when a condition is added.
-rule_numbers() -> [marker, too_big, prompt_big, fast].
 
 %%%===================================================================
 %%% Judge zone (SPEC 3 step 4 / SPEC 6)
@@ -3258,7 +3266,8 @@ decision_tuple_arity_test() ->
             case GateResult of
                 judge_zone -> ok;
                 {error, request_too_large} -> ok;
-                _ -> ?assertEqual(3, tuple_size(GateResult))
+                %% A gate verdict is {Verdict, RuleName}.
+                _ -> ?assertEqual(2, tuple_size(GateResult))
             end
         end,
         Cases
@@ -3283,7 +3292,7 @@ rules_priority_test() ->
     %% Gate verdicts are {Tier, Kind, RuleName} (spec A4): the third element
     %% names which rule fired, so a decision log can explain the tier.
     ?assertEqual(
-        {flagship, hard, marker},
+        {{flagship, hard}, marker},
         rules_gate(
             features(
                 #{
@@ -3298,23 +3307,23 @@ rules_priority_test() ->
     ),
     %% marker before capacity
     ?assertEqual(
-        {flagship, hard, marker},
+        {{flagship, hard}, marker},
         rules_gate(features(#{<<"messages">> => [u(<<"ultrathink ", Big/binary>>)]}, C), C)
     ),
     %% est_total over big -> flagship (total before the prompt-part rule)
     ?assertEqual(
-        {flagship, hard, too_big},
+        {{flagship, hard}, too_big},
         rules_gate(features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 128000}, C), C)
     ),
     %% prompt-part margin over big (est_total still fits big) -> big
     Mid = binary:copy(<<"x">>, 224000),
     ?assertEqual(
-        {big, hard, prompt_big},
+        {{big, hard}, prompt_big},
         rules_gate(features(#{<<"messages">> => [u(Mid)], <<"max_tokens">> => 100}, C), C)
     ),
     %% short, no tools, <=3 msgs -> fast
     ?assertEqual(
-        {fast, soft_route, fast},
+        {{fast, soft_route}, fast},
         rules_gate(features(#{<<"messages">> => [u(<<"hi">>)]}, C), C)
     ),
     %% tools present -> judge zone
