@@ -2019,22 +2019,22 @@ fleet_cache_put(Hash, TierWire, JudgeModel, TtlSec) when
         {true, JudgeModel} ->
             Tier = binary_to_tier(TierWire),
             Ttl = min(TtlSec, 300),
-            %% Store under BOTH local face keys with THIS node's prompt
-            %% identity: we cannot know which contract produced the peer's
-            %% verdict, and a local lookup will use whichever face its own
-            %% route resolves to. Writing both means the entry is hit
-            %% regardless, which is the honest reading of a shared cache
-            %% whose peers are assumed to run the same config.
+            %% The wire carries no face, so store under the ONE face this
+            %% node would use for this judge model — the same resolution
+            %% cache_face/3 applies to a local read. Writing BOTH faces
+            %% would re-create the cross-contract reuse the face exists to
+            %% prevent: a decisions-produced verdict served to a chat
+            %% request, under this node's prompt, with nothing recording
+            %% that it came from a different instruction.
+            %%
+            %% The prompt identity is this node's, not the producer's. That
+            %% is unavoidable (the wire cannot carry it) and is the standing
+            %% assumption that fleet config is uniform; if it is not, the
+            %% entry is simply wrong for one side, which is why the face is
+            %% narrowed rather than guessed.
             Cfg = normalized(),
-            Exp = now_ms() + Ttl * 1000,
-            lists:foreach(
-                fun(Face) ->
-                    pos_write_ttl(
-                        {Hash, Face, Cfg#acfg.prompt_hash}, Tier, JudgeModel, Exp
-                    )
-                end,
-                [chat, decisions]
-            ),
+            Key = cache_face(Cfg, JudgeModel, Hash),
+            pos_write_ttl(Key, Tier, JudgeModel, now_ms() + Ttl * 1000),
             ok;
         {true, _Other} ->
             {error, judge_mismatch}
