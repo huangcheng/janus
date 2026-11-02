@@ -120,7 +120,14 @@ def _validate_judge_prompt(value: object) -> str:
     if value == "":
         # Empty is meaningful: the gateway uses its own built-in text.
         return ""
-    encoded = value.encode("utf-8")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        # JSON permits a lone surrogate escape (\ud800), and FastAPI decodes
+        # it into a str that cannot be UTF-8 encoded. That is a malformed
+        # body, not a server fault: refuse it like any other bad value
+        # instead of raising a 500.
+        raise _err(400, "invalid", "judge_prompt must be valid UTF-8") from None
     if len(encoded) > JUDGE_PROMPT_MAX_BYTES:
         raise _err(
             400,

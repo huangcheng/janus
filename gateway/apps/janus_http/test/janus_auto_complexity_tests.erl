@@ -46,9 +46,13 @@ routable_raw(Extra) ->
 prompt_empty_means_builtin_test() ->
     Empty = janus_auto:validate(routable_raw(#{judge_prompt => <<>>})),
     Default = janus_auto:validate(routable_raw(#{})),
+    %% The stored value is the operator's CHOICE, and <<>> means "built-in".
+    %% Clearing the field and never setting it must be the same choice, so
+    %% they share both the stored value and its hash (the cache identity).
     ?assertEqual(janus_auto:judge_prompt_of(Default), janus_auto:judge_prompt_of(Empty)),
-    ?assertEqual(janus_auto:judge_prompt_of(Default), janus_auto:builtin_judge_prompt()),
-    %% And the built-in is not empty.
+    ?assertEqual(<<>>, janus_auto:judge_prompt_of(Empty)),
+    ?assertEqual(janus_auto:prompt_hash_of(Default), janus_auto:prompt_hash_of(Empty)),
+    %% And the built-in it resolves to is real text, per path.
     ?assertNotEqual(<<>>, janus_auto:builtin_judge_prompt()).
 
 %% A custom prompt must be what the judge is given.
