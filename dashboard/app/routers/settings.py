@@ -24,7 +24,16 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from .. import audit, auto_reorder, auto_router_rules, database, egress, limits, nodes
+from .. import (
+    audit,
+    auto_reorder,
+    auto_router_rules,
+    config_backup_schema,
+    database,
+    egress,
+    limits,
+    nodes,
+)
 from ..auth import require_auth
 from ..config import config
 
@@ -81,6 +90,37 @@ DEFAULTS = {
     "tier_failover_enabled": False,
     "tier_failover_max_names": 3,
 }
+
+def _build_known_auto_keys() -> frozenset[str]:
+    """Every `auto_router` key the backup schema permits.
+
+    The PUT body is whatever GET returned, and GET merges the stored row with
+    no whitelist. A row may carry keys this router does not own — retired
+    settings, or server-owned knobs a restore wrote verbatim. Deriving the
+    tolerated set from the published schema keeps the two from drifting; a
+    key absent from the schema is still refused as unknown.
+    """
+    try:
+        schema = config_backup_schema.load_schema().schema
+        props = schema["$defs"]["auto_router"]["properties"]
+        return frozenset(props) | frozenset(DEFAULTS)
+    except Exception:  # pragma: no cover - schema is a build artifact
+        logger.warning("auto_router: could not read the backup schema; "
+                       "falling back to DEFAULTS for tolerated PUT keys")
+        return frozenset(DEFAULTS)
+
+
+_KNOWN_AUTO_KEYS_CACHE: frozenset[str] | None = None
+
+
+def _known_auto_keys() -> frozenset[str]:
+    # Built once on first use: the schema is a build artifact read from disk,
+    # and a failure there must degrade to DEFAULTS rather than break the PUT.
+    global _KNOWN_AUTO_KEYS_CACHE
+    if _KNOWN_AUTO_KEYS_CACHE is None:
+        _KNOWN_AUTO_KEYS_CACHE = _build_known_auto_keys()
+    return _KNOWN_AUTO_KEYS_CACHE
+
 
 # Distinct names attempted after Part C key exhaustion; matches gateway clamp.
 _TIER_FAILOVER_MAX_NAMES_RANGE = (1, 8)
@@ -389,14 +429,16 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     if not isinstance(body, dict):
         raise _err(400, "invalid", "body must be a JSON object")
 
-    # Legacy keys retired by spec C (the rule gate). A stored row written by
-    # an older release still carries them, `_merge_auto_config` has no
-    # whitelist so they come back inside GET's `config`, and the SPA spreads
-    # that object straight into the PUT body. Accept and DROP them, or the
-    # Router page can never be saved again on any install that saved it
-    # before — including the save that would clean the row up.
-    _LEGACY_AUTO_KEYS = {"markers", "complexity_terms", "fast_ctx_tokens"}
-    body = {k: v for k, v in body.items() if k not in _LEGACY_AUTO_KEYS}
+    # GET returns `{**DEFAULTS, **stored}` with no whitelist, and the SPA
+    # spreads that object straight back into the PUT body. A stored row can
+    # therefore contain keys this router does not own — the spec-C legacy
+    # keys on any install that saved before the gate was removed, and any
+    # server-owned key a restore wrote verbatim (judge_max_inflight,
+    # media_token_allowance, max_media_parts). Rejecting those makes the
+    # Router page unsaveable on exactly the installs that need it, so the
+    # tolerated set is derived from the BACKUP SCHEMA rather than kept as a
+    # hand-written list that drifts. Unknown-in-schema is still rejected.
+    body = {k: v for k, v in body.items() if k in _known_auto_keys()}
     unknown = set(body) - set(DEFAULTS)
     if unknown:
         raise _err(400, "unknown_fields", f"unknown fields: {sorted(unknown)}")
