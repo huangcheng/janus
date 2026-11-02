@@ -83,10 +83,11 @@ check "truncated, no digits" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
 app2: Failed: 0.  Skipped: 0.  Passed:
 '
 
-# 10. A surplus token on an otherwise valid line: the last occurrence would
-#     be discarded, which can hide the zero-passed application.
+# 10. A surplus token on an otherwise valid line: the extra occurrence would
+#     be discarded, which can hide a zero-passed application. Written with the
+#     full trio plus one duplicate, so it is unambiguous.
 check "surplus token" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
-app2: Failed: 0.  Passed: 4.  Passed: 0.
+app2: Failed: 0.  Skipped: 0.  Passed: 4.  Passed: 0.
 '
 
 # 11. A line that lost both count tokens but kept `Skipped:` must not vanish.
@@ -94,7 +95,17 @@ check "mangled, only Skipped remains" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 
 app2: Skipped: 0.
 '
 
-# 12. A plain passing run is accepted.
+# 12. WELL-FORMED raw EUnit summaries must still be accepted. This is the
+#     regression the keyword-count guard introduced once: adding `Skipped:`
+#     made a legitimate line carry three keywords while the guard still
+#     required two, so every real summary was reported malformed. Both a
+#     failing and a clean raw summary are pinned here.
+check "well-formed raw summary, failures" 1 'app1: Failed: 2.  Skipped: 0.  Passed: 4.
+'
+check "well-formed raw summary, clean" 0 'app1: Failed: 0.  Skipped: 1.  Passed: 4.
+'
+
+# 13. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 

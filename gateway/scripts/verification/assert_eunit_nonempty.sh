@@ -95,7 +95,10 @@ for line in text.splitlines():
     keywords = eunit_keyword_re.findall(line)
     if keywords:
         complete = eunit_line_re.search(line)
-        if len(keywords) != 2 or not complete:
+        # Three keywords (Failed/Skipped/Passed) on a well-formed line;
+        # `complete` already pins the Failed...Passed pair, so the count check
+        # only guards against surplus or absent tokens.
+        if len(keywords) != 3 or not complete:
             print("FAIL: malformed EUnit summary line: " + line.strip(), file=sys.stderr)
             print(
                 "      Expected exactly one 'Failed: N. ... Passed: M.' pair; "
