@@ -68,7 +68,10 @@ _VALIDATOR = None
 
 # PUT /api/settings/auto-router integer floors (C7 reuses that contract).
 _ROUTER_INT_MIN = {
-    "fast_ctx_tokens": 1,
+    # `fast_ctx_tokens` was removed by spec C with the rule gate. It is still
+    # ACCEPTED in a document (the schema keeps it as an optional legacy
+    # field) but no longer validated: requiring it would fail every restore
+    # of a backup exported by this or any later release.
     "big_ctx_tokens": 1,
     "max_ctx_tokens": 1,
     "judge_timeout_ms": 100,

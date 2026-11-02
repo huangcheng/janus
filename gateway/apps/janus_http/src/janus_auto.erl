@@ -507,22 +507,18 @@ exceeds_max_ctx(Cfg, Est) ->
 %% (`{Est > Big, {flagship, hard}, too_big}`): a request over big_ctx_tokens
 %% went to flagship, and flooring it to `big` would put a 61k-token request
 %% into the tier whose window it already crossed.
-capacity_floor(Cfg, Est, Tier0) ->
+capacity_floor(Cfg, Est, _Tier0) ->
+    %% `none` means ONLY "the request fits where it was sent". It must not
+    %% also mean "already at flagship": an oversized request the judge
+    %% classified flagship still needs the HARD resolution, or a flagship
+    %% verdict with every flagship member down silently degrades to
+    %% default_tier — the exact downgrade this floor exists to prevent —
+    %% and the decision log would blame the judge for a tier the floor
+    %% changed.
     case Est > Cfg#acfg.big_ctx of
         false -> none;
-        true -> floor_target(Tier0)
+        true -> flagship
     end.
-
-floor_target(Tier0) ->
-    case tier_rank(Tier0) >= tier_rank(flagship) of
-        true -> none;
-        false -> flagship
-    end.
-
-tier_rank(fast) -> 0;
-tier_rank(big) -> 1;
-tier_rank(flagship) -> 2;
-tier_rank(_) -> 0.
 
 %% EffectiveNames = the list that produced Name (D2): if soft fell to
 %% default_tier, that default-tier list IS the effective list.
@@ -3477,8 +3473,11 @@ capacity_floor_test() ->
     %% whose window it already crossed.
     ?assertEqual(flagship, capacity_floor(C, C#acfg.big_ctx + 1, fast)),
     ?assertEqual(flagship, capacity_floor(C, C#acfg.big_ctx + 1, big)),
-    %% Already flagship: nothing to raise.
-    ?assertEqual(none, capacity_floor(C, C#acfg.big_ctx + 1, flagship)).
+    %% ALREADY flagship: still floored. "Floor to flagship" is not a no-op
+    %% here — it changes the RESOLUTION MODE from soft to hard. Returning
+    %% `none` let a flagship verdict fall back to default_tier when every
+    %% flagship member was down, which is the downgrade the floor forbids.
+    ?assertEqual(flagship, capacity_floor(C, C#acfg.big_ctx + 1, flagship)).
 
 %% Above max_ctx_tokens nothing can serve the request, so it is refused
 %% rather than judged.

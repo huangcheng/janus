@@ -389,6 +389,14 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     if not isinstance(body, dict):
         raise _err(400, "invalid", "body must be a JSON object")
 
+    # Legacy keys retired by spec C (the rule gate). A stored row written by
+    # an older release still carries them, `_merge_auto_config` has no
+    # whitelist so they come back inside GET's `config`, and the SPA spreads
+    # that object straight into the PUT body. Accept and DROP them, or the
+    # Router page can never be saved again on any install that saved it
+    # before — including the save that would clean the row up.
+    _LEGACY_AUTO_KEYS = {"markers", "complexity_terms", "fast_ctx_tokens"}
+    body = {k: v for k, v in body.items() if k not in _LEGACY_AUTO_KEYS}
     unknown = set(body) - set(DEFAULTS)
     if unknown:
         raise _err(400, "unknown_fields", f"unknown fields: {sorted(unknown)}")

@@ -510,6 +510,13 @@
           "type": "integer",
           "minimum": 1
         },
+        "complexity_terms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "DEPRECATED (spec C): the complexity lexicon was removed with the rule gate. Accepted on restore and ignored."
+        },
         "decision_log": {
           "type": "boolean",
           "description": "Emit the per-request auto-router decision log (spec A4): which zone or gate rule settled the tier, and for a judge verdict the input shape (lengths and counts only, never text). Off by default."
@@ -524,6 +531,10 @@
         "enabled": {
           "type": "boolean",
           "description": "Existence switch for the auto-router family (spec B). When false the virtual model is not listed and a direct call answers 404. Optional with default false; the 028 migration enables it for installs that were already routing."
+        },
+        "fast_ctx_tokens": {
+          "type": "integer",
+          "description": "DEPRECATED (spec C): the fast threshold was removed with the rule gate. Accepted on restore and ignored."
         },
         "judge_backend": {
           "enum": [
@@ -563,6 +574,13 @@
             }
           ],
           "description": "Local judge sidecar settings (artifact pinning, loopback endpoint, inflight cap). Null = section never configured; v1 restore skips null sections."
+        },
+        "markers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "DEPRECATED (spec C): markers were removed with the rule gate. Accepted on restore and ignored; a stored row may still carry them."
         },
         "max_ctx_tokens": {
           "type": [
