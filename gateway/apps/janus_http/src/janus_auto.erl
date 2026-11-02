@@ -1948,6 +1948,17 @@ pos_write(Key, Tier, JM, Cfg) ->
     _ = fleet_publish_cache_put(raw_hash(Key), Tier, JM, Cfg#acfg.ttl),
     ok.
 
+%% Face resolution that cannot take the caller down. Used only where a
+%% failure must not propagate (the fleet ingress path); a plain
+%% judge_model_route/1 exit or timeout becomes `error`.
+resolve_face_quiet(JM) ->
+    try judge_model_route(JM) of
+        {ok, _Route, Face} -> {ok, Face};
+        error -> error
+    catch
+        _:_ -> error
+    end.
+
 %% A cache key for the contract that was ACTUALLY used. do_judge/7
 %% re-resolves the route (it must: listings change between the caller's
 %% probe and the call), so the write has to key on the face the call used,
@@ -2005,6 +2016,15 @@ judge_model() ->
 %% LOCAL decision cache with the same duration on this node's clock.
 %% Judge must match the local config (double-checked here — ingress
 %% already gated on it); TTL clamped to the cache_put class (300 s).
+%%
+%% NOTE: nothing in this repository calls this yet. It is the receive half
+%% of the fleet decision-cache sharing design (spec B2), whose `cache_put`
+%% class was implemented on both ends but never wired into
+%% `janus_fleet`'s dispatch. It is kept rather than deleted because the
+%% egress half (fleet_publish_cache_put/4) IS live and publishes messages
+%% no peer consumes; deleting one half alone would make that mismatch
+%% permanent and silent. Covered by fleet_cache_put_*_test/0 below so the
+%% face-keying stays correct when it is finally connected.
 -spec fleet_cache_put(term(), binary() | atom(), binary(), pos_integer()) ->
     ok | {error, judge_mismatch} | {error, badarg}.
 fleet_cache_put(Hash, TierWire, JudgeModel, TtlSec) when
@@ -2033,9 +2053,28 @@ fleet_cache_put(Hash, TierWire, JudgeModel, TtlSec) when
             %% entry is simply wrong for one side, which is why the face is
             %% narrowed rather than guessed.
             Cfg = normalized(),
-            Key = cache_face(Cfg, JudgeModel, Hash),
-            pos_write_ttl(Key, Tier, JudgeModel, now_ms() + Ttl * 1000),
-            ok;
+            %% Resolve EXPLICITLY and skip on failure. cache_face/3's
+            %% read-side fallback (unresolvable route -> `chat`) is safe for
+            %% a read because nothing is written, but here something would
+            %% be: a decisions-produced verdict filed under chat and served
+            %% to a chat request later. And this path must never take the
+            %% read-side shortcut of assuming a face.
+            %%
+            %% It must also not BLOCK: judge_model_route/1 calls into
+            %% janus_lb (gen_server:call, 5 s), and this runs inside the
+            %% fleet ingress process. An LB restart would then crash the
+            %% fleet service instead of dropping one cache entry, and the
+            %% -spec below does not advertise an exit.
+            case resolve_face_quiet(JudgeModel) of
+                {ok, Face} ->
+                    Key = {Hash, Face, Cfg#acfg.prompt_hash},
+                    pos_write_ttl(Key, Tier, JudgeModel, now_ms() + Ttl * 1000),
+                    ok;
+                error ->
+                    %% No usable route right now: dropping the entry loses
+                    %% nothing, the next local miss asks the judge.
+                    ok
+            end;
         {true, _Other} ->
             {error, judge_mismatch}
     end;

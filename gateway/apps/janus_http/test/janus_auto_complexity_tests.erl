@@ -113,6 +113,37 @@ prompt_cache_key_shape_test() ->
     ?assertNotEqual(ChatKey, janus_auto:cache_face_for_test(Cfg2, H, chat)),
     ?assertNotEqual(DecKey, janus_auto:cache_face_for_test(Cfg2, H, decisions)).
 
+%% The fleet receive path must file a verdict under ONE face — the one this
+%% node would use for that judge model — and must not crash when no route is
+%% usable. Writing both faces re-creates the cross-contract reuse the face
+%% exists to prevent; blocking on janus_lb would take the fleet ingress down.
+fleet_cache_put_files_one_face_test() ->
+    %% The receive half is not wired up yet, so this pins the CONTRACT that
+    %% matters now: whatever the config, an arriving verdict must never raise
+    %% and must never be filed under a guessed face. In this VM the judge
+    %% model does not match the local config, so the mismatch guard answers
+    %% first — that is the documented behaviour, not a shortcut.
+    ?assertEqual(
+        {error, judge_mismatch},
+        janus_auto:fleet_cache_put(424242, <<"big">>, <<"nobody">>, 30)
+    ),
+    %% And nothing landed under either face.
+    lists:foreach(
+        fun(Face) ->
+            ?assertEqual(miss, janus_auto:pos_read({424242, Face, 0}, <<"nobody">>))
+        end,
+        [chat, decisions]
+    ),
+    %% An unparseable tier name is refused, never cached: caching an
+    %% arbitrary binary would pin the hash to default_tier through
+    %% resolve_soft/3, silently.
+    %% Refused before the judge check, because an unresolvable tier name can
+    %% never be stored — `badarg` is the earlier and more specific refusal.
+    ?assertEqual(
+        {error, badarg},
+        janus_auto:fleet_cache_put(424243, <<"nonsense">>, <<"nobody">>, 30)
+    ).
+
 %% --- A2: lexicon scope ---------------------------------------------
 
 %% The recommended list is non-empty — that is what makes the documented
