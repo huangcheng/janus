@@ -31,6 +31,7 @@
 %% drive the real parse rather than re-reading the record layout.
 -export([judge_prompt_of/1, prompt_hash_of/1, builtin_judge_prompt/0]).
 -export([builtin_decisions_instruction/0]).
+-export([prompt_hash_for/1]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -524,6 +525,8 @@ builtin_judge_prompt() -> judge_prompt().
 
 builtin_decisions_instruction() -> decisions_instruction().
 
+prompt_hash_for(Setting) -> prompt_hash(Setting).
+
 %% Did a judge actually run for this origin? The set is written out so it
 %% cannot drift: `judge` is the online backend's verdict, `local_judge` the
 %% sidecar's, `fallback_online` an online verdict that fell back to the
@@ -951,21 +954,41 @@ judge_tier_online(Cfg, F, Hash) ->
                     bump(breaker_skip),
                     {Cfg#acfg.default_tier, breaker};
                 false ->
-                    case pos_read(Hash, JM) of
+                    %% The cache must be keyed on the CONTRACT the verdict
+                    %% was produced under, not just the judge model: an
+                    %% empty setting resolves to different text for the
+                    %% decisions and chat contracts, and
+                    %% judge_model_route/1 flips the same model between them
+                    %% as listings come and go. Keying on {Hash, Face}
+                    %% keeps the two identities apart.
+                    {_Face, Key} = cache_face(Cfg, JM, Hash),
+                    case pos_read(Key, JM) of
                         {ok, Tier} ->
                             bump(poscache_hit),
                             {Tier, cache};
                         miss ->
-                            case neg_hit(Hash, JM) of
+                            case neg_hit(Key, JM) of
                                 true ->
                                     bump(negcache_hit),
                                     {Cfg#acfg.default_tier, negcache};
                                 false ->
-                                    judge_call(Cfg, JM, F, Hash, true)
+                                    judge_call(Cfg, JM, F, Key, true)
                             end
                     end
             end
     end.
+
+%% Which contract will actually be used, decided ONCE so the cache read,
+%% the cache write and the request itself cannot disagree. An unresolvable
+%% route falls back to `chat` as the nominal face; the call will fail and
+%% the verdict path never writes in that case.
+cache_face(Cfg, JM, Hash) ->
+    Face =
+        case judge_model_route(JM) of
+            {ok, _Route, F} -> F;
+            error -> chat
+        end,
+    {Face, {Hash, Face, Cfg#acfg.prompt_hash}}.
 
 judge_tier_local(Cfg, F, Hash) ->
     case local_not_ready_gate_active() of
@@ -1533,6 +1556,14 @@ decisions_instruction() ->
 %% An empty setting means "use this path's built-in": an operator who clears
 %% the field must get the same behaviour as one who never set it, and a
 %% custom prompt applies to both paths.
+%% One definition, used by validate/1 and default_cfg/0 alike, so the
+%% identity cannot drift between the parsed record and the fallback one.
+%% Covers the setting AND both resolved instructions: the same model can be
+%% reached over either contract, each sends different text for an empty
+%% setting, and the cache is otherwise discriminated by judge model only.
+prompt_hash(Setting) when is_binary(Setting) ->
+    erlang:phash2({Setting, effective_prompt(Setting, chat), effective_prompt(Setting, decisions)}).
+
 effective_prompt(<<>>, chat) -> judge_prompt();
 effective_prompt(<<>>, decisions) -> decisions_instruction();
 effective_prompt(P, _Path) when is_binary(P) -> P.
@@ -2699,7 +2730,7 @@ validate(Raw) ->
         %% make a code tweak to a built-in look like a different operator
         %% choice.
         judge_prompt = JP,
-        prompt_hash = erlang:phash2({JP, effective_prompt(JP, chat), effective_prompt(JP, decisions)}),
+        prompt_hash = prompt_hash(JP),
         %% bool_or/2 is this module's settings-boolean parser: it accepts
         %% true/false, 1/0 and <<"true">>/<<"false">>. A bare `=:= true`
         %% would silently read the normalized <<"true">> as false, so the
@@ -2740,7 +2771,7 @@ default_cfg() ->
         %% instruction and key the decision cache on `undefined`, degrading
         %% verdicts silently instead of failing.
         judge_prompt = <<>>,
-        prompt_hash = erlang:phash2({<<>>, effective_prompt(<<>>, chat), effective_prompt(<<>>, decisions)}),
+        prompt_hash = prompt_hash(<<>>),
         decision_log = false,
         complexity_terms = [],
         tier_failover_enabled = false,
@@ -3273,7 +3304,7 @@ cfg() ->
         %% recommended list an operator can copy into the setting.
         complexity_terms = [],
         judge_prompt = <<>>,
-        prompt_hash = erlang:phash2({<<>>, effective_prompt(<<>>, chat), effective_prompt(<<>>, decisions)}),
+        prompt_hash = prompt_hash(<<>>),
         decision_log = false,
         tier_failover_enabled = false,
         tier_failover_max_names = 3

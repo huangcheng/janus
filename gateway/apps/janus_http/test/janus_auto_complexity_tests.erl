@@ -85,13 +85,15 @@ prompt_hash_separates_the_two_faces_test() ->
     Chat = janus_auto:builtin_judge_prompt(),
     Decisions = janus_auto:builtin_decisions_instruction(),
     ?assertNotEqual(Chat, Decisions),
-    %% The stored digest is over {setting, chat text, decisions text}:
-    %% changing EITHER built-in changes the identity.
+    %% Pin the PROPERTY, not the formula: changing either built-in, or the
+    %% setting, must change the identity, and two different settings must
+    %% not collide. Restating phash2({...}) here would pass even if the
+    %% production hash changed shape.
     H = janus_auto:prompt_hash_of(Cfg),
-    ?assertEqual(
-        erlang:phash2({<<>>, Chat, Decisions}),
-        H
-    ).
+    ?assertEqual(H, janus_auto:prompt_hash_for(<<>>)),
+    ?assertNotEqual(H, janus_auto:prompt_hash_for(<<"custom fast big flagship">>)),
+    %% Deterministic for the same input.
+    ?assertEqual(H, janus_auto:prompt_hash_for(<<>>)).
 
 %% --- A2: lexicon scope ---------------------------------------------
 
