@@ -68,7 +68,13 @@ check "eunit zero-passed app among passing apps" 1 'app1: Failed: 0.  Skipped: 0
 app2: Failed: 0.  Skipped: 0.  Passed: 0.
 '
 
-# 8. A plain passing run is accepted.
+# 8. A summary line carrying only one of the two fields is not a pair; the
+#    gate must not guess (fail closed rather than mis-attribute a count).
+check "partial eunit summary line" 1 'app1: Failed: 0.  Skipped: 0.  Passed: 4.
+app2: Passed: 0.
+'
+
+# 9. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 

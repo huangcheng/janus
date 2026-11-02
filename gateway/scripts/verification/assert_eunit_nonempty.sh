@@ -66,22 +66,29 @@ text = open(path, encoding="utf-8", errors="replace").read()
 # zero failures and exit OK — the exact false green this wrapper prevents.
 passed_re = re.compile(r"All (\d+) tests passed\.")
 failed_re = re.compile(r"(\d+) tests, (\d+) failures")
-eunit_failed_re = re.compile(r"Failed:\s*(\d+)\.")
-eunit_passed_re = re.compile(r"Passed:\s*(\d+)\.")
-eunit_skipped_re = re.compile(r"Skipped:\s*(\d+)\.")
-
 passed = [int(m) for m in passed_re.findall(text)]
 totals = [(int(t), int(f)) for t, f in failed_re.findall(text)]
-eunit_failed = [int(m) for m in eunit_failed_re.findall(text)]
-eunit_passed = [int(m) for m in eunit_passed_re.findall(text)]
-eunit_skipped = [int(m) for m in eunit_skipped_re.findall(text)]
 
-# A raw-EUnit summary is per-application too, and its `Passed:` count is real
-# executed work (`Skipped:` is NOT). Keep ONE tuple per occurrence: collapsing
-# them into a single sum would hide an application that passed zero tests
-# behind another that passed several, which is the per-application discovery
-# regression the zero-count guard below is meant to catch.
-totals = totals + list(zip(eunit_passed, eunit_failed))
+# Raw-EUnit summaries are paired PER LINE, not by two whole-file passes: a
+# positional zip of independent findall results would mis-attribute counts
+# when one line carries only one of the two fields, and `zip` silently
+# truncates to the shorter list — dropping exactly the zero-passed
+# application this guard exists to catch.
+eunit_line_re = re.compile(r"\bFailed:\s*(\d+)\..*?\bPassed:\s*(\d+)\.")
+eunit_partial_re = re.compile(r"\b(?:Failed|Passed):\s*\d+\.")
+for m in eunit_line_re.finditer(text):
+    totals.append((int(m.group(2)), int(m.group(1))))  # (passed, failed)
+
+# Fail closed, PER LINE: a line carrying a count without a complete
+# Failed:/Passed: pair means the output was truncated or shaped unexpectedly,
+# and guessing which count belongs to which application is how a failing suite
+# turns green. Checking per line (not "any partial anywhere") is what makes
+# this robust when good and bad lines are mixed.
+for line in text.splitlines():
+    if eunit_partial_re.search(line) and not eunit_line_re.search(line):
+        print("FAIL: incomplete EUnit summary line: " + line.strip(), file=sys.stderr)
+        print("      Refusing to guess which count belongs to which application.", file=sys.stderr)
+        sys.exit(1)
 
 if not passed and not totals:
     print("FAIL: no EUnit summary found in the log.", file=sys.stderr)
