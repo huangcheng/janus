@@ -63,18 +63,10 @@ DEFAULTS = {
     "local_judge": dict(LOCAL_JUDGE_DEFAULTS),
     "tiers": {"fast": [], "big": [], "flagship": []},
     "default_tier": "fast",
-    "fast_ctx_tokens": 8000,
     "big_ctx_tokens": 60000,
     "max_ctx_tokens": None,
     "judge_timeout_ms": 1500,
     "cache_ttl_sec": 300,
-    "markers": ["ultrathink", "think harder"],
-    # Complexity lexicon (auto-router-complexity spec A2): a short request
-    # that NAMES a hard task is routed INTO the judge zone instead of
-    # straight to fast. EMPTY by default so an upgrade changes nothing; the
-    # gateway's janus_auto:default_complexity_terms/0 carries the
-    # recommended list an operator can apply.
-    "complexity_terms": [],
     # The instruction the judge is given (auto-router-prompt-only spec A).
     # Empty means "use the gateway's built-in". This is the only
     # operator-editable surface for routing behaviour, so it is validated
@@ -95,7 +87,6 @@ _TIER_FAILOVER_MAX_NAMES_RANGE = (1, 8)
 
 TIERS = ("fast", "big", "flagship")
 INT_FIELDS = {
-    "fast_ctx_tokens": 1,
     "big_ctx_tokens": 1,
     "max_ctx_tokens": 1,
     "judge_timeout_ms": 100,
@@ -545,21 +536,12 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
             raise _err(400, "invalid", f"{field} must be an integer >= {minimum} or null")
         cfg[field] = v
 
-    markers = cfg.get("markers", DEFAULTS["markers"])
-    if not isinstance(markers, list) or not all(isinstance(m, str) and m.strip() for m in markers):
-        raise _err(400, "invalid", "markers must be a list of strings")
-
-    terms = cfg.get("complexity_terms", DEFAULTS["complexity_terms"])
-    if not isinstance(terms, list) or not all(isinstance(t, str) and t.strip() for t in terms):
-        raise _err(400, "invalid", "complexity_terms must be a list of strings")
-
     if not isinstance(cfg.get("decision_log", DEFAULTS["decision_log"]), bool):
         raise _err(400, "invalid", "decision_log must be a boolean")
 
     cfg["judge_prompt"] = _validate_judge_prompt(
         cfg.get("judge_prompt", DEFAULTS["judge_prompt"])
     )
-    cfg["markers"] = [m.strip() for m in markers]
 
     # D11: same-tier next-name failover knobs (gateway clamp [1, 8]).
     tfe = cfg.get("tier_failover_enabled", DEFAULTS["tier_failover_enabled"])

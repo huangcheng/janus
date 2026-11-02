@@ -204,43 +204,14 @@ enabled_infers_for_keyless_installs_test() ->
     ?assertEqual(false, janus_auto:enabled(janus_auto:default_cfg())),
     ?assertEqual(true, is_boolean(janus_auto:enabled(janus_auto:default_cfg()))).
 
-%% --- A2: lexicon scope ---------------------------------------------
-
-%% The recommended list is non-empty — that is what makes the documented
-%% operator lever usable. (The SHIPPED default is [], asserted in the
-%% settings suite where the dashboard DEFAULTS live; this module can only
-%% see the recommended list, since #acfg is private.)
-recommended_list_is_non_empty_test() ->
-    ?assertNotEqual([], janus_auto:default_complexity_terms()).
-
-%% The knob is default-OFF: the recommended list must be a distinct thing an
-%% operator applies, never something the shipped default already contains.
+%% --- A2 was REMOVED (auto-router-prompt-only spec C) ---------------
 %%
-%% Cross-repo assertion avoided on purpose — reading the dashboard's Python
-%% source from an Erlang test is brittle and would fail for a reason unrelated
-%% to the behaviour. The dashboard default is pinned by the dashboard's own
-%% validation (a PUT omitting the field leaves [] in place); what matters
-%% HERE is that the gateway's two things are distinct: the recommended list
-%% is non-empty, and a config that does not carry terms has none.
-recommended_is_not_the_default_test() ->
-    %% default_cfg/0 ships [], so an operator sees no behaviour change on
-    %% upgrade; default_complexity_terms/0 is the list they may opt into.
-    %% default_cfg/0 ships [], so an operator sees no behaviour change on
-    %% upgrade; default_complexity_terms/0 is the list they may opt into.
-    Recommended = janus_auto:default_complexity_terms(),
-    ?assertNotEqual([], Recommended),
-    %% Distinctness, expressed as the property that matters: the recommended
-    %% entries are real needles the matcher would find, not placeholder text.
-    ?assert(lists:member(<<"design">>, Recommended)).
-
-%% Both scripts appear in the recommended list, since the measured cases
-%% were Chinese and English.
-recommended_covers_both_scripts_test() ->
-    Terms = janus_auto:default_complexity_terms(),
-    HasAscii = lists:any(fun(T) -> T =:= <<"design">> end, Terms),
-    HasCJK = lists:any(fun(T) -> T =:= <<"设计"/utf8>> end, Terms),
-    ?assert(HasAscii),
-    ?assert(HasCJK).
+%% The complexity lexicon is gone: keyword matching cannot answer "is this
+%% task hard?" in any language, it shipped default-empty so it did nothing,
+%% and it only existed because the rule gate settled requests before the
+%% judge was consulted. The gate is gone too, so there is nothing left for
+%% it to patch. `default_complexity_terms/0` and `complexity_hit/2` are
+%% deleted with their tests rather than kept as a documented-but-dead lever.
 
 %% --- A1: features carry the head and the extent --------------------
 

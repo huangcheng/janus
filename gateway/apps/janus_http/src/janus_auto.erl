@@ -16,9 +16,6 @@
 
 -export([start_link/0]).
 -export([maybe_route/2, maybe_route/3, direct_walk/1, stats/0, snapshot/0, apply_db_settings/1]).
-%% The recommended (NOT default) lexicon, so the dashboard can offer it and
-%% the docs can stay in step with it.
--export([default_complexity_terms/0]).
 %% The judge input SHAPE (counts only) — exported so the test can drive
 %% the production function instead of re-implementing it.
 -export([judge_zone_shape/1]).
@@ -90,21 +87,12 @@
     tiers :: #{atom() => [binary()]},
     default_tier :: atom(),
     big_ctx :: pos_integer(),
-    fast_ctx :: pos_integer(),
     max_ctx :: pos_integer() | undefined,
     judge_ms :: pos_integer(),
     judge_max_inflight :: pos_integer(),
     ttl :: pos_integer(),
     media_allow :: pos_integer(),
     max_media :: pos_integer(),
-    markers :: [binary()],
-    %% Complexity lexicon (auto-router-complexity spec A2): a short request
-    %% that NAMES a hard task is routed INTO the judge zone instead of
-    %% straight to fast. NOT a flagship pin — a lexicon matches words, and
-    %% "设计一个 hello world" is trivial. Default EMPTY per the repository's
-    %% default-off discipline; the documented recommended list is applied by
-    %% the operator.
-    complexity_terms :: [binary()],
     %% The instruction the judge is given (auto-router-prompt-only spec A).
     %% Empty means "use the built-in". This is the ONLY operator-editable
     %% surface for routing behaviour: the tier is the model's judgment, so
@@ -308,11 +296,6 @@ snapshot() ->
                 E -> E
             end,
         default_tier => atom_to_binary(Cfg#acfg.default_tier, utf8),
-        %% The active lexicon, so an operator can confirm whether the lever
-        %% is actually on, and the recommended list so the dashboard can
-        %% offer it without duplicating the table in two languages.
-        complexity_terms => Cfg#acfg.complexity_terms,
-        complexity_terms_recommended => default_complexity_terms(),
         %% Whether the decision log is actually on, so the operator can
         %% confirm the lever from /stats instead of guessing.
         decision_log => Cfg#acfg.decision_log,
@@ -443,76 +426,106 @@ route_auto(Cfg, ReqMap, Constraint) ->
     end.
 
 %% Returns {Result, Reason, Tier, Target} for uniform debug logging.
+%% The tier decision (auto-router-prompt-only spec C).
+%%
+%% The rule gate is GONE: no token threshold, no marker word, no fast
+%% short-circuit. Every request reaches the judge, and the judge's reading of
+%% the task is the decision. What survives is a CAPACITY bound, which is a
+%% statement about the model rather than about the work:
+%%
+%%   1. est_total > max_ctx_tokens -> refuse (no tier could serve it)
+%%   2. judge                      -> the verdict
+%%   3. est_total > big_ctx_tokens -> floor the verdict at flagship
+%%
+%% Step 3 exists because deleting `too_big` would otherwise delete the only
+%% guarantee that an oversized request reaches a tier that can serve it: a
+%% request judged `fast` — or judged at all while judge_backend is off, so
+%% every request takes default_tier — would be routed into a fast model and
+%% answered by the provider with a context-overflow 4xx. A judge cannot know
+%% a model's context window, so this one bound stays deterministic.
+%%
+%% est_total is prompt + media + tools + max_out (features/1). Narrowing it
+%% to prompt + tools would stop refusing output- and media-heavy requests.
+%%
+%% Returns the UNIFORM 6-TUPLE {Result, Origin, Tier, Target, Decided, Shape};
+%% see finish/6 — a shorter tuple once broke routing silently.
 decide(Cfg, F, Constraint) ->
-    case rules_gate(F, Cfg) of
-        {error, request_too_large} ->
+    Est = maps:get(est_total, F),
+    case exceeds_max_ctx(Cfg, Est) of
+        true ->
             bump(too_large),
             {{error, request_too_large}, too_large, undefined, undefined, too_large, #{}};
-        judge_zone ->
-            {Tier, Origin} = judge_tier(Cfg, F),
-            %% A4: record WHAT the judge saw — but ONLY when a judge
-            %% actually ran. judge_tier/2 returns without calling one for
-            %% several reasons (backend off, no judge model, empty
-            %% labels, breaker open, not-ready gate, negcache hit), and
-            %% reporting a "judge input shape" for those would imply a
-            %% call that never happened.
+        false ->
+            {Tier0, Origin} = judge_tier(Cfg, F),
             Shape =
                 case judge_actually_ran(Origin) of
                     true -> judge_zone_shape(F);
                     false -> #{}
                 end,
-            finish(
-                resolve_soft(Cfg, Tier, Constraint),
-                Origin,
-                Tier,
-                Cfg,
-                Origin,
-                Shape
-            );
-        {{Tier, soft_route}, RuleName} ->
-            %% Rule 5 (fast): directed hard, AVAILABILITY SOFT. A fast
-            %% tier with no usable member falls back to the default tier
-            %% on ANY resolve failure -- not only for streams. Keeping this
-            %% clause separate from the hard one preserves that: merging
-            %% them turned an unavailable fast tier into no_route.
-            case resolve_hard(Cfg, Tier, Constraint) of
-                {ok, _, _, _} = Ok ->
-                    finish(Ok, rules, Tier, Cfg, RuleName);
-                error ->
+            case capacity_floor(Cfg, Est, Tier0) of
+                none ->
                     finish(
-                        resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint),
-                        fallback,
-                        Tier,
-                        Cfg,
-                        RuleName
-                    )
-            end;
-        {{Tier, _Kind}, RuleName} ->
-            %% A hard gate rule settled the tier; RuleName names which one.
-            case resolve_hard(Cfg, Tier, Constraint) of
-                {ok, _, _, _} = Ok ->
-                    finish(Ok, rules, Tier, Cfg, RuleName);
-                error when is_map_key(stream, Constraint) ->
-                    %% Hard tier has no member this stream can use
-                    %% (native-only or stream_translate_blocked). Serving
-                    %% the default tier beats failing with no_route.
-                    finish(
-                        resolve_soft(Cfg, Cfg#acfg.default_tier, Constraint),
-                        fallback,
-                        Tier,
-                        Cfg,
-                        RuleName
+                        resolve_soft(Cfg, Tier0, Constraint), Origin, Tier0, Cfg, Origin, Shape
                     );
-                error ->
-                    finish(error, rules, Tier, Cfg, RuleName)
+                Floored ->
+                    %% The floor is a CONSTRAINT, so it resolves HARD: if the
+                    %% tier it demands has no usable member the answer is
+                    %% no_route, not a silent downgrade to a tier that
+                    %% provably cannot hold the request. Deliberately
+                    %% stricter than the gate's old hard arms, which fell
+                    %% back to default_tier under a stream constraint — a
+                    %% protocol mismatch is not the request's fault, a
+                    %% capacity overflow is.
+                    case resolve_hard(Cfg, Floored, Constraint) of
+                        {ok, _, _, _} = Ok ->
+                            finish(
+                                Ok,
+                                {floor, Origin, Tier0, Floored},
+                                Floored,
+                                Cfg,
+                                capacity_floor,
+                                Shape
+                            );
+                        error ->
+                            finish(error, capacity_floor, Floored, Cfg, capacity_floor, Shape)
+                    end
             end
     end.
 
+%% Above max_ctx_tokens no tier can serve the request, so there is nothing to
+%% judge: the answer is a refusal, not a tier.
+exceeds_max_ctx(Cfg, Est) ->
+    case Cfg#acfg.max_ctx of
+        MC when is_integer(MC) -> Est > MC;
+        _ -> false
+    end.
+
+%% The capacity floor. `none` when the request fits where it was sent, else
+%% the tier it must be raised to.
+%%
+%% Flagship, not big, because that is what the rule it replaces demanded
+%% (`{Est > Big, {flagship, hard}, too_big}`): a request over big_ctx_tokens
+%% went to flagship, and flooring it to `big` would put a 61k-token request
+%% into the tier whose window it already crossed.
+capacity_floor(Cfg, Est, Tier0) ->
+    case Est > Cfg#acfg.big_ctx of
+        false -> none;
+        true -> floor_target(Tier0)
+    end.
+
+floor_target(Tier0) ->
+    case tier_rank(Tier0) >= tier_rank(flagship) of
+        true -> none;
+        false -> flagship
+    end.
+
+tier_rank(fast) -> 0;
+tier_rank(big) -> 1;
+tier_rank(flagship) -> 2;
+tier_rank(_) -> 0.
+
 %% EffectiveNames = the list that produced Name (D2): if soft fell to
 %% default_tier, that default-tier list IS the effective list.
-finish(Resolved, Origin, RuleTier, Cfg, Decided) ->
-    finish(Resolved, Origin, RuleTier, Cfg, Decided, #{}).
-
 finish({ok, Name, Names, EffTier}, Origin, _RuleTier, Cfg, Decided, Shape) ->
     bump({routed, EffTier}),
     %% `decided` names the zone or rule that settled the tier, and `shape`
@@ -646,19 +659,7 @@ features(ReqMap, Cfg) ->
             ToolsEst = (ToolsBytes + 3) div 4,
             MaxOut = max_out(ReqMap),
             EstTotal = PromptEst + MediaAllow + ToolsEst + MaxOut,
-            {LastUser, HasUser} = last_user_text(Msgs),
-            %% Release A of the prompt-only spec: observe, do not act.
-            %% `markers` cuts against the design (a keyword table standing in
-            %% for a semantic judgment) and is defective besides — it scans
-            %% only last_user, so `ultrathink ... / continue / continue`
-            %% stops matching after turn one. Before removing it we count
-            %% whether anything uses it at all. The gate's behaviour is
-            %% unchanged here.
-            MarkerHit = HasUser andalso marker_hit(string:lowercase(LastUser), Cfg#acfg.markers),
-            case MarkerHit of
-                true -> bump(marker_hit_total);
-                false -> ok
-            end,
+            {LastUser, _HasUser} = last_user_text(Msgs),
             {FirstUser, _HasAny} = first_user_text(Msgs),
             #{
                 prompt_est => PromptEst,
@@ -669,7 +670,6 @@ features(ReqMap, Cfg) ->
                 est_total => EstTotal,
                 has_mm => Media > 0,
                 msg_count => length(Msgs),
-                marker => MarkerHit,
                 sys_prefix => bin_part(sys_text(Msgs), 256),
                 last_user => bin_part(LastUser, 1200),
                 %% Conversation head (auto-router-complexity spec A1): in an
@@ -928,59 +928,6 @@ out_budget_line(MaxOut) when MaxOut =< 2048 -> <<"Output budget: <=2k tokens">>;
 out_budget_line(MaxOut) when MaxOut =< 8192 -> <<"Output budget: <=8k tokens">>;
 out_budget_line(_) -> <<"Output budget: >8k tokens">>.
 
-%%%===================================================================
-%%% Rule gate (SPEC 4.2, priority 0..6)
-%%%===================================================================
-
-rules_gate(F, Cfg) ->
-    Est0 = maps:get(est_total, F),
-    case Cfg#acfg.max_ctx of
-        MC when is_integer(MC), Est0 > MC ->
-            {error, request_too_large};
-        _ ->
-            rules_gate_1(F, Cfg)
-    end.
-
-rules_gate_1(F, Cfg) ->
-    Est = maps:get(est_total, F),
-    PromptTools = maps:get(prompt_est, F) + maps:get(tools_est, F),
-    Big = Cfg#acfg.big_ctx,
-    Fast = Cfg#acfg.fast_ctx,
-    %% Complexity lexicon (auto-router-complexity spec A2): scanned over
-    %% BOTH the head and the tail, because the `continue' case states its
-    %% complexity at the head. Evaluated BEFORE IsFast so a hit prevents the
-    %% fast route rather than competing with it — that ordering is the whole
-    %% point: this is the signal a pure token threshold cannot carry.
-    Complex = complexity_hit(F, Cfg),
-    IsFast =
-        not Complex andalso
-            not maps:get(tools, F) andalso
-            Est < Fast andalso
-            maps:get(msg_count, F) =< 3,
-    %% Each entry pairs its condition with the rule NAME that fires it, so
-    %% the two cannot drift apart (spec A4). They used to be two
-    %% independent lists joined by zip, where adding a condition without
-    %% adding its name silently mislabelled every later rule.
-    Conds = [
-        %% Images no longer hard-pin to flagship: with curated vision
-        %% capability flags, the vision constraint filters members inside
-        %% whichever tier the size/complexity rules pick (2026-10-21).
-        {maps:get(marker, F), {flagship, hard}, marker},
-        {Est > Big, {flagship, hard}, too_big},
-        {(PromptTools * 6) div 5 > Big, {big, hard}, prompt_big},
-        {IsFast, {fast, soft_route}, fast}
-    ],
-    %% Each condition carries its RULE NUMBER so the decision log can name
-    %% the reason instead of a generic `rules' (auto-router-complexity spec
-    %% A4). A verdict an operator cannot explain is a verdict they cannot
-    %% tune against.
-    case [{Verdict, Rule} || {Cond, Verdict, Rule} <- Conds, Cond] of
-        [] -> judge_zone;
-        [First | _] -> First
-    end.
-
-
-%%%===================================================================
 %%% Judge zone (SPEC 3 step 4 / SPEC 6)
 %%%===================================================================
 
@@ -2892,7 +2839,6 @@ validate(Raw) ->
         tiers = Tiers,
         default_tier = DefaultTier,
         big_ctx = BigCtx,
-        fast_ctx = pos_int(maps:get(fast_ctx_tokens, Raw, Def#acfg.fast_ctx), fast_ctx_tokens),
         max_ctx = MaxCtx,
         judge_ms = pos_int(maps:get(judge_timeout_ms, Raw, Def#acfg.judge_ms), judge_timeout_ms),
         judge_max_inflight = pos_int(
@@ -2903,8 +2849,6 @@ validate(Raw) ->
             maps:get(media_token_allowance, Raw, Def#acfg.media_allow), media_token_allowance
         ),
         max_media = pos_int(maps:get(max_media_parts, Raw, Def#acfg.max_media), max_media_parts),
-        markers = bin_list(maps:get(markers, Raw, Def#acfg.markers)),
-        complexity_terms = bin_list(maps:get(complexity_terms, Raw, Def#acfg.complexity_terms)),
         %% The RAW setting; <<>> means "use each path's built-in". The hash
         %% covers the setting AND both resolved instructions, because the
         %% same model can be reached over either contract and an empty
@@ -2939,16 +2883,12 @@ default_cfg() ->
         tiers = #{fast => [], big => [], flagship => []},
         default_tier = fast,
         big_ctx = 60000,
-        fast_ctx = 8000,
         max_ctx = undefined,
         judge_ms = 1500,
         judge_max_inflight = 8,
         ttl = 300,
         media_allow = 4096,
         max_media = 10,
-        markers = [
-            <<"ultrathink">>, <<"think harder">>, <<"think deeply">>, <<"analyze carefully">>
-        ],
         %% This record is what snapshot/0 returns when the settings read
         %% FAILS, and the base validate/1 starts from. Every field must hold
         %% a real value: an undefined prompt would send `null` as the judge
@@ -2957,7 +2897,6 @@ default_cfg() ->
         judge_prompt = <<>>,
         prompt_hash = prompt_hash(<<>>),
         decision_log = false,
-        complexity_terms = [],
         tier_failover_enabled = false,
         tier_failover_max_names = 3
     }.
@@ -3262,7 +3201,6 @@ pos_int(_N, Key) ->
     default_int(Key).
 
 default_int(big_ctx_tokens) -> 60000;
-default_int(fast_ctx_tokens) -> 8000;
 default_int(judge_timeout_ms) -> 1500;
 default_int(judge_max_inflight) -> 8;
 default_int(cache_ttl_sec) -> 300;
@@ -3324,128 +3262,6 @@ log_cfg_error(Msg) ->
 log_cfg_warn(Msg) ->
     logger:warning(#{what => janus_auto_config, message => iolist_to_binary(Msg)}).
 
-%% Complexity lexicon (auto-router-complexity spec A2). Reuses marker_one/2
-%% so the two tables match identically (ASCII word-boundary, CJK substring).
-%%
-%% Scans the HEAD as well as the TAIL: in an agent session the complex task
-%% is named in the first user message while the tail is often `continue', and
-%% scanning only the tail would miss exactly the case this exists for.
-complexity_hit(F, Cfg) ->
-    case Cfg#acfg.complexity_terms of
-        [] ->
-            false;
-        Terms ->
-            First = string:lowercase(maps:get(first_user, F, <<>>)),
-            Last = string:lowercase(maps:get(last_user, F, <<>>)),
-            marker_hit(First, Terms) orelse marker_hit(Last, Terms)
-    end.
-
-%% The RECOMMENDED value for the `complexity_terms' setting. Not a default:
-%% upgrading must not silently widen the judge zone, so the shipped default
-%% is [] and an operator opts in by copying this list.
--spec default_complexity_terms() -> [binary()].
-default_complexity_terms() ->
-    [
-        %% English (word-boundary matched)
-        <<"design">>,
-        <<"architecture">>,
-        <<"trade-off">>,
-        <<"tradeoff">>,
-        <<"why does">>,
-        <<"refactor">>,
-        <<"concurrency">>,
-        <<"distributed">>,
-        <<"debug">>,
-        %% CJK (substring matched)
-        <<"架构"/utf8>>,
-        <<"设计"/utf8>>,
-        <<"方案"/utf8>>,
-        <<"权衡"/utf8>>,
-        <<"并发"/utf8>>,
-        <<"分布式"/utf8>>,
-        <<"调试"/utf8>>
-    ].
-
-marker_hit(_TextLower, []) ->
-    false;
-marker_hit(TextLower, [M | Rest]) ->
-    case marker_one(TextLower, string:lowercase(M)) of
-        true -> true;
-        false -> marker_hit(TextLower, Rest)
-    end.
-
-marker_one(TextLower, M) ->
-    case is_ascii_only(M) of
-        true -> word_match(TextLower, M);
-        false -> binary:match(TextLower, M) =/= nomatch
-    end.
-
-is_ascii_only(B) ->
-    lists:all(fun(C) -> C < 128 end, binary_to_list(B)).
-
-word_match(Hay, Needle) ->
-    word_match(Hay, Needle, 0).
-
-word_match(_Hay, <<>>, _From) ->
-    false;
-word_match(Hay, Needle, From) ->
-    case binary:match(Hay, Needle, [{scope, {From, byte_size(Hay) - From}}]) of
-        nomatch ->
-            false;
-        {S, L} ->
-            Before = S =:= 0 orelse not is_word_char(binary:at(Hay, S - 1)),
-            After = S + L >= byte_size(Hay) orelse not is_word_char(binary:at(Hay, S + L)),
-            case Before andalso After andalso not negated(Hay, S) of
-                true -> true;
-                false -> word_match(Hay, Needle, S + L)
-            end
-    end.
-
-%% Is the word immediately before position S a negator?
-negated(Hay, S) ->
-    %% prev_word/2 already starts at S-1.
-    case prev_word(Hay, S) of
-        undefined ->
-            false;
-        W ->
-            lists:member(
-                string:lowercase(W),
-                [<<"not">>, <<"don't">>, <<"dont">>, <<"never">>, <<"no">>, <<"stop">>]
-            )
-    end.
-
-prev_word(Hay, S) ->
-    prev_word_skip_ws(Hay, S - 1).
-
-prev_word_skip_ws(_Hay, I) when I < 0 -> undefined;
-prev_word_skip_ws(Hay, I) when is_integer(I), I >= 0, I < byte_size(Hay) ->
-    C = binary:at(Hay, I),
-    case C =:= $\s orelse C =:= $	 of
-        true ->
-            prev_word_skip_ws(Hay, I - 1);
-        false ->
-            case is_word_char(C) orelse C =:= $' of
-                false -> undefined;
-                true -> prev_word(Hay, I, I)
-            end
-    end.
-
-prev_word(Hay, I, Start) when I >= 0 ->
-    C = binary:at(Hay, I),
-    case is_word_char(C) orelse C =:= $' of
-        true -> prev_word(Hay, I - 1, Start);
-        false -> binary:part(Hay, I + 1, Start - I)
-    end;
-prev_word(_Hay, _I, Start) when Start =:= 0 ->
-    %% reached the beginning
-    undefined;
-prev_word(Hay, _I, Start) ->
-    binary:part(Hay, 0, Start + 1).
-
-is_word_char(C) ->
-    (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) orelse
-        (C >= $0 andalso C =< $9) orelse C =:= $_.
-
 now_ms() ->
     erlang:system_time(millisecond).
 
@@ -3476,18 +3292,15 @@ cfg() ->
         tiers = #{fast => [<<"m-fast">>], big => [<<"m-big">>], flagship => [<<"m-flag">>]},
         default_tier = fast,
         big_ctx = 60000,
-        fast_ctx = 8000,
         max_ctx = undefined,
         judge_ms = 100,
         judge_max_inflight = 8,
         ttl = 300,
         media_allow = 4096,
         max_media = 10,
-        markers = [<<"ultrathink">>, <<"think harder">>],
         %% EMPTY by default: upgrading must not silently widen the judge
         %% zone and its spend. See ?DEFAULT_COMPLEXITY_TERMS for the
         %% recommended list an operator can copy into the setting.
-        complexity_terms = [],
         judge_prompt = <<>>,
         prompt_hash = prompt_hash(<<>>),
         decision_log = false,
@@ -3581,7 +3394,6 @@ features_basic_test() ->
     ?assertEqual(false, maps:get(tools, F)),
     ?assertEqual(2, maps:get(msg_count, F)),
     ?assertEqual(false, maps:get(has_mm, F)),
-    ?assertEqual(false, maps:get(marker, F)),
     ?assertEqual(4096, maps:get(max_out, F)),
     ?assertEqual(<<"you are helpful">>, maps:get(sys_prefix, F)),
     ?assertEqual(<<"count to ten">>, maps:get(last_user, F)).
@@ -3630,122 +3442,71 @@ max_tokens_fields_test() ->
     ?assertEqual(50, max_out(#{<<"max_tokens">> => 1000, <<"max_completion_tokens">> => 50})),
     ?assertEqual(4096, max_out(#{})).
 
-marker_word_boundary_test() ->
-    ?assert(word_match(<<"please ultrathink this">>, <<"ultrathink">>)),
-    ?assertNot(word_match(<<"don't think harder, just answer">>, <<"think harder">>)),
-    ?assertNot(word_match(<<"never think harder">>, <<"think harder">>)),
-    ?assert(word_match(<<"thinkharder ultrathink">>, <<"ultrathink">>)),
-    ?assertNot(word_match(<<"thinkharder">>, <<"think harder">>)),
-    %% marker_hit contract: haystack already lowercased (features does it)
-    ?assert(marker_hit(<<"think harder please">>, [<<"think harder">>])),
-    ?assertNot(marker_hit(<<"don't think harder">>, [<<"think harder">>])).
-
 %% The decision tuple's SHAPE is load-bearing (spec A4): element(5) and
-%% element(6) are read unconditionally by the debug log, and a shorter
-%% tuple made element/2 raise badarg — which maybe_route/3's catch-all
+%% element(6) are read unconditionally by the decision log, and a shorter
+%% tuple once made element/2 raise badarg — which maybe_route/3's catch-all
 %% swallowed into a silent degradation to `pass`, i.e. the router stopped
-%% routing entirely. Every clause must therefore return the SAME arity.
+%% routing entirely. Every clause of decide/3 must return the SAME arity.
 decision_tuple_arity_test() ->
     C = cfg(),
     Big = binary:copy(<<"x">>, 300000),
+    Oversize = (cfg())#acfg{max_ctx = 70000},
     Cases = [
-        %% too large
-        rules_gate(features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 500000},
-            (cfg())#acfg{max_ctx = 70000}), (cfg())#acfg{max_ctx = 70000}),
-        %% a hard rule
-        rules_gate(features(#{<<"messages">> => [u(<<"ultrathink hi">>)]}, C), C),
-        %% the fast rule
-        rules_gate(features(#{<<"messages">> => [u(<<"hi">>)]}, C), C)
+        %% too large: refused before any judge call
+        decide(
+            Oversize,
+            features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 500000}, Oversize),
+            #{}
+        ),
+        %% ordinary request (judge zone; backend off in this fixture)
+        decide(C, features(#{<<"messages">> => [u(<<"hi">>)]}, C), #{}),
+        %% over big_ctx: the capacity floor applies
+        decide(C, features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 128000}, C), #{})
     ],
-    lists:foreach(
-        fun(GateResult) ->
-            %% A gate result is {Tier, Kind, RuleName}; the judge zone is
-            %% the bare atom.
-            case GateResult of
-                judge_zone -> ok;
-                {error, request_too_large} -> ok;
-                %% A gate verdict is {Verdict, RuleName}.
-                _ -> ?assertEqual(2, tuple_size(GateResult))
-            end
-        end,
-        Cases
-    ),
-    %% The decision itself: {Result, Reason, Tier, Target, Decided, Shape}.
-    _ = decide(C, features(#{<<"messages">> => [u(<<"hi">>)]}, C), #{}),
-    ok.
+    lists:foreach(fun(D) -> ?assertEqual(6, tuple_size(D)) end, Cases).
 
-rules_priority_test() ->
+%% The capacity floor (spec C step 3). Deleting the gate must not delete the
+%% only guarantee that an oversized request reaches a tier that can serve it.
+capacity_floor_test() ->
     C = cfg(),
-    Big = binary:copy(<<"x">>, 300000),
-    %% multimodal no longer hard-pins to flagship: media allowance pushes
-    %% est over fast_ctx, so plain image requests reach the judge zone and
-    %% the vision constraint filters members at selection time; the marker
-    %% rule still wins for marked image requests
-    ?assertEqual(
-        judge_zone,
-        rules_gate(
-            features(#{<<"messages">> => [u(<<"hi">>, [#{<<"type">> => <<"image_url">>}])]}, C), C
-        )
-    ),
-    %% Gate verdicts are {Tier, Kind, RuleName} (spec A4): the third element
-    %% names which rule fired, so a decision log can explain the tier.
-    ?assertEqual(
-        {{flagship, hard}, marker},
-        rules_gate(
-            features(
-                #{
-                    <<"messages">> => [
-                        u(<<"ultrathink hi">>, [#{<<"type">> => <<"image_url">>}])
-                    ]
-                },
-                C
-            ),
-            C
-        )
-    ),
-    %% marker before capacity
-    ?assertEqual(
-        {{flagship, hard}, marker},
-        rules_gate(features(#{<<"messages">> => [u(<<"ultrathink ", Big/binary>>)]}, C), C)
-    ),
-    %% est_total over big -> flagship (total before the prompt-part rule)
-    ?assertEqual(
-        {{flagship, hard}, too_big},
-        rules_gate(features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 128000}, C), C)
-    ),
-    %% prompt-part margin over big (est_total still fits big) -> big
-    Mid = binary:copy(<<"x">>, 224000),
-    ?assertEqual(
-        {{big, hard}, prompt_big},
-        rules_gate(features(#{<<"messages">> => [u(Mid)], <<"max_tokens">> => 100}, C), C)
-    ),
-    %% short, no tools, <=3 msgs -> fast
-    ?assertEqual(
-        {{fast, soft_route}, fast},
-        rules_gate(features(#{<<"messages">> => [u(<<"hi">>)]}, C), C)
-    ),
-    %% tools present -> judge zone
-    ?assertEqual(
-        judge_zone,
-        rules_gate(
-            features(
-                #{
-                    <<"messages">> => [u(<<"hi">>)],
-                    <<"tools">> => [#{<<"type">> => <<"function">>}]
-                },
-                C
-            ),
-            C
-        )
-    ).
+    %% Below big_ctx: nothing to floor.
+    ?assertEqual(none, capacity_floor(C, 1000, fast)),
+    ?assertEqual(none, capacity_floor(C, 1000, flagship)),
+    %% Above big_ctx: raised to flagship, which is what the replaced rule
+    %% demanded. Flooring to `big` would put a 61k request into the tier
+    %% whose window it already crossed.
+    ?assertEqual(flagship, capacity_floor(C, C#acfg.big_ctx + 1, fast)),
+    ?assertEqual(flagship, capacity_floor(C, C#acfg.big_ctx + 1, big)),
+    %% Already flagship: nothing to raise.
+    ?assertEqual(none, capacity_floor(C, C#acfg.big_ctx + 1, flagship)).
 
-rules_max_ctx_test() ->
+%% Above max_ctx_tokens nothing can serve the request, so it is refused
+%% rather than judged.
+exceeds_max_ctx_test() ->
     C = (cfg())#acfg{max_ctx = 70000},
-    Big = binary:copy(<<"x">>, 300000),
-    ?assertEqual(
-        {error, request_too_large},
-        rules_gate(features(#{<<"messages">> => [u(Big)], <<"max_tokens">> => 200000}, C), C)
-    ).
+    ?assertNot(exceeds_max_ctx(C, 1000)),
+    ?assertNot(exceeds_max_ctx(C, 70000)),
+    ?assert(exceeds_max_ctx(C, 70001)),
+    %% No cap configured: never refuse on size.
+    ?assertNot(exceeds_max_ctx((cfg())#acfg{max_ctx = undefined}, 999999)).
+
+%% The gate is gone: a short, tool-free request no longer short-circuits to
+%% fast. Judge-backend off in this fixture means the decision comes from the
+%% default tier, but it must come from decide/3's judge path, NOT from a
+%% token threshold — that is the whole point of spec C.
+gate_removed_short_request_is_judged_test() ->
+    C = cfg(),
+    F = features(#{<<"messages">> => [u(<<"hi">>)]}, C),
+    %% A deliberately tiny request — the exact shape the old gate sent
+    %% straight to fast without ever asking the judge. (est_total includes
+    %% the default 4096-token output budget, so "tiny" is measured against
+    %% big_ctx, not against a small absolute number.)
+    ?assert(maps:get(est_total, F) < C#acfg.big_ctx),
+    ?assertEqual(0, maps:get(tool_calls, F)),
+    Decision = decide(C, F, #{}),
+    %% backend=off -> the judge did not run, and the origin says so.
+    ?assertEqual(no_judge, element(2, Decision)),
+    ?assertEqual(6, tuple_size(Decision)).
 
 parse_words_test() ->
     ?assertEqual({ok, <<"big">>}, parse_words(<<"some reasoning\n\nbig">>)),
@@ -3882,9 +3643,6 @@ utf8_bin_part_test() ->
     B = <<"ab", 228, 184, 173>>,
     ?assertEqual(<<"ab">>, bin_part(B, 4)),
     ?assertEqual(B, bin_part(B, 5)).
-
-empty_marker_guard_test() ->
-    ?assertEqual(false, word_match(<<"anything">>, <<>>, 0)).
 
 judge_punct_parse_test() ->
     ?assertEqual({ok, <<"big">>}, parse_words(<<"answer: big.">>)).

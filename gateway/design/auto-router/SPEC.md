@@ -128,28 +128,30 @@ content 为 binary 或 part 列表、`tools` 字段缺失或为合法数组（`n
 `maybe_route` 直接返回 `pass`（debug 日志）——该请求随后按普通未知模型处理，
 返回既有 `model_not_found` 404，**不会透传给上游**。
 
-### 4.2 规则门（优先级自上而下）
+### 4.2 决策（auto-router-prompt-only spec C 修订）
+
+规则门已**移除**。档位由 judge 对任务本身的判断决定；保留的只有一条
+**容量约束**，它说的是模型能装下多少，不是任务有多难。
 
 | # | 条件 | 去向 | 性质 |
 |---|---|---|---|
-| 0 | `est_total > max_ctx_tokens`（仅当配置了该上限） | `{error, request_too_large}` → 400 | hard，**先于一切路由规则**——硬上限必须对多模态/marker/超长请求同样生效 |
-| 1 | `has_multimodal` | `flagship` | hard |
-| 2 | `marker_hit` | `flagship` | hard（显式用户意图优先于容量规则；flagship 窗口由部署者保证 ≥ big） |
-| 3 | `est_total > big_ctx_tokens` | `flagship` | hard——含 max_out 与媒体预算的**总量**超 big 档总窗时上旗舰；必须先于规则 4（总量溢出比 prompt 段溢出更严重，先判总） |
-| 4 | `(prompt_est + tools_est) × 1.2 > big_ctx_tokens` | `big` | hard——仅 prompt+tools 段超阈、总量未超 big 时落 big |
-| 5 | `not has_tools` 且 **`est_total`** `< fast_ctx_tokens` 且 `msg_count ≤ 3` | `fast` | **定向 hard / 可用性 soft**：正常时直接落 fast；fast 档不可用时按 soft 语义降级 default_tier（成本偏好不是可用性硬约束）。总窗口比较基于 prompt+output 共享窗口的通用假设（主流模型如此）；输出上限独立的部署者可上调 fast_ctx_tokens |
-| 6 | 其余 | 判分区 | soft |
+| 0 | `est_total > max_ctx_tokens`（仅当配置了该上限） | `{error, request_too_large}` → 400 | 有效性校验，**先于一切**——没有任何档位能服务该请求，因此不调用 judge，直接拒绝 |
+| 1 | 其余全部 | 判分区 | judge 给出 `fast` / `big` / `flagship` |
+| 2 | judge 判定后，`est_total > big_ctx_tokens` 且档位低于 `flagship` | 抬升至 `flagship`**并硬解析** | 容量下限 |
 
-**容量防线总述**：未配置 `max_ctx_tokens` 时，容量保护由规则 3（est_total 总量）+ 规则 4（prompt+tools 段）+ 部署者保证的 `flagship ≥ big` 共同构成
-完整防线——任何请求至多到达 flagship 档，不会缺档拦截。
+**规则 2 为什么存在**：删除规则 3（`est_total > big_ctx` → flagship）会同时删掉"超长请求必达能服务它的档位"这一唯一保证。judge 看不到模型的上下文窗口，所以这一条必须保持确定性，不能交给 judge。它只**抬升**档位，从不降低；它通过 `resolve_hard/3` 解析——所要求的档位没有可用成员时返回 `no_route`，不降级。这比旧规则更严格：旧的 hard 分支在 stream 约束下会回退到 default_tier，而协议不匹配不是请求的错，容量溢出是。
 
-**已知设计取舍**：规则 5 命中的短请求不进判分区（judge 永远看不到它们）——
-这是刻意的成本取舍：短小请求默认走 fast，需要深度思考时由用户显式加标记
-（规则 2）。部署者若不认可此取舍，可把 `fast_ctx_tokens` 调小（如 1000），
-让更多请求进入判分区。
+**`est_total`** = `prompt_est + media_allow + tools_est + max_out`。不可窄化为 `prompt_est + tools_est`，否则输出密集与媒体密集的请求将不再被拒绝。
 
-余量 ×1.2 **只乘 prompt+tools**，不乘 `max_out`（修 N6 双重放大）；
-`big_ctx_tokens` / `fast_ctx_tokens` 语义为**总窗口**（prompt+tools+output）。
+**已移除**：规则 1（多模态 PIN flagship，早于此版本已改为能力过滤）、规则 2（`marker_hit` → flagship）、规则 3/4（容量硬规则，由规则 2 的下限取代）、规则 5（短请求短路 fast）、`fast_ctx_tokens`、`markers`、`complexity_terms`。
+
+**知识变更（必须记录）**：旧规则门可以给出 *hard* 判定——`resolve_hard` 失败即 `no_route`，§8 规定 hard 判定的档位不可用时不得降级。门移除后，judge 的判定**一律 soft 解析**：`resolve_soft` 在该档无成员时静默回退 `default_tier`。即"判定 flagship、flagship 全挂"现在会得到一个成功的 fast 模型，而不是 `no_route`。这是刻意的取舍——judge 的判定是估计而非约束，降级优于失败——但它是对 §8 的修订，不是隐含行为。
+
+**成本与延迟**：judge 现在在**每个** `janus-auto` 请求的路径上，而不再只是"门未判定的余量"。缓存未命中时最多增加 `judge_timeout_ms`（默认 1500 ms）的 TTFB；judge 不可用时**全部**请求降级到 `default_tier`。当前流量（21 次/天）下可接受，但 `janus-auto` 若成为真实流量路径，成本模型必须重估。
+
+### 4.3 判分区的输入
+
+judge 看到的内容（spec A1/A3）：`sys_prefix`、`first_user`、`last_user`（文本截断）、`turns`、`tool_calls`、`out_budget`（计数）。指令来自 `judge_prompt` 设置（空 = 内置），是运维可调的唯一路由行为面，见 `auto-router-prompt-only.md` §3。
 
 ## 5. 决策缓存
 
@@ -318,8 +320,9 @@ Caller(HTTP handler)               Judge worker (spawn_monitor)
 |---|---|
 | 未配置 auto_router | `pass`（一次 app-env 查询开销） |
 | maybe_route 意外异常 | catch → `pass` + warn（§2.3） |
-| 规则 hard 档不可用（规则 1/2/3/4） | `{error, no_route}`，不降级 |
-| 规则 5 fast 档不可用 | 按 soft 语义降级 default_tier → 仍败则 no_route |
+| `enabled = false` | `{error, no_route}` → 404；模型不出现在 `/v1/models`，body 不解析 |
+| 容量下限（§4.2 规则 2）所要求的档位无可用成员 | `{error, no_route}`，**不降级**——该档位已证明装不下该请求 |
+| judge 判定档位不可用 | 按 soft 语义降级 default_tier → 仍败则 no_route（§4.2 知识变更） |
 | messages 畸形（非 map 列表等） | `pass` → 既有 model_not_found 404，无上游透传 |
 | est_total > max_ctx_tokens（已配置且 ≥ big_ctx_tokens） | `{error, request_too_large}` → 400（OpenAI 兼容错误体） |
 | 未指派 judge / 熔断 / 信号量满 / 负缓存 | default_tier（soft） |

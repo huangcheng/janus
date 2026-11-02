@@ -496,12 +496,10 @@
         "judge_model",
         "tiers",
         "default_tier",
-        "fast_ctx_tokens",
         "big_ctx_tokens",
         "max_ctx_tokens",
         "judge_timeout_ms",
-        "cache_ttl_sec",
-        "markers"
+        "cache_ttl_sec"
       ],
       "properties": {
         "big_ctx_tokens": {
@@ -511,15 +509,6 @@
         "cache_ttl_sec": {
           "type": "integer",
           "minimum": 1
-        },
-        "complexity_terms": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
-          "uniqueItems": true,
-          "description": "Complexity lexicon for the auto router (auto-router-complexity spec A2): a short request naming a hard task is routed into the JUDGE zone instead of straight to fast. Not a flagship pin — a lexicon matches words. Empty (the default) keeps the pre-spec routing. Semantically a SET: exported sorted ascending so a reorder is not a change."
         },
         "decision_log": {
           "type": "boolean",
@@ -535,10 +524,6 @@
         "enabled": {
           "type": "boolean",
           "description": "Existence switch for the auto-router family (spec B). When false the virtual model is not listed and a direct call answers 404. Optional with default false; the 028 migration enables it for installs that were already routing."
-        },
-        "fast_ctx_tokens": {
-          "type": "integer",
-          "minimum": 1
         },
         "judge_backend": {
           "enum": [
@@ -578,15 +563,6 @@
             }
           ],
           "description": "Local judge sidecar settings (artifact pinning, loopback endpoint, inflight cap). Null = section never configured; v1 restore skips null sections."
-        },
-        "markers": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
-          "uniqueItems": true,
-          "description": "Trigger phrases — semantically a SET: exported sorted ascending, compared set-equal (C3/C14); re-hash may sort them."
         },
         "max_ctx_tokens": {
           "type": [
