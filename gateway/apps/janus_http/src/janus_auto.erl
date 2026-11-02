@@ -24,6 +24,9 @@
 -export([judge_zone_shape/1]).
 %% Whether an origin means a judge was actually INVOKED (spec A4).
 -export([judge_actually_ran/1]).
+%% The settings-entry point and its fallback record — exported so tests can
+%% drive the REAL parse instead of re-implementing it.
+-export([validate/1, default_cfg/0, decision_log/1]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -87,6 +90,12 @@
     %% default-off discipline; the documented recommended list is applied by
     %% the operator.
     complexity_terms :: [binary()],
+    %% Emit the per-request decision log (A4). OFF by default.
+    %% Record-level default as well as the one in default_cfg/0: this
+    %% field is read on the fallback path (snapshot/0 uses default_cfg/0
+    %% when the settings read fails), and an undefined boolean there
+    %% would raise rather than mean "off".
+    decision_log = false :: boolean(),
     %% Same-tier next-name failover (design 2026-10-15 D11): default off.
     tier_failover_enabled :: boolean(),
     tier_failover_max_names :: pos_integer()
@@ -261,6 +270,9 @@ snapshot() ->
         %% offer it without duplicating the table in two languages.
         complexity_terms => Cfg#acfg.complexity_terms,
         complexity_terms_recommended => default_complexity_terms(),
+        %% Whether the decision log is actually on, so the operator can
+        %% confirm the lever from /stats instead of guessing.
+        decision_log => Cfg#acfg.decision_log,
         tiers => #{
             fast => Fast,
             big => Big,
@@ -363,17 +375,27 @@ route_auto(Cfg, ReqMap, Constraint) ->
             pass;
         F ->
             Decision = decide(Cfg, F, Constraint),
-            _ = logger:debug(#{
-                what => janus_auto_decision,
-                reason => element(2, Decision),
-                tier => element(3, Decision),
-                target => element(4, Decision),
-                est_total => maps:get(est_total, F),
-                %% A4: which zone/rule settled it, and (judge zone only) the
-                %% shape the judge was shown.
-                decided => element(5, Decision),
-                shape => element(6, Decision)
-            }),
+            %% A4: the decision log. INFO level, not debug — the logger
+            %% has one global level, so a debug decision line is invisible
+            %% exactly when an operator needs it. Gated by a setting so a
+            %% busy fleet does not fill the ring with one line per
+            %% request; the field set is the same either way.
+            case decision_log_enabled(Cfg) of
+                true ->
+                    _ = logger:info(#{
+                        what => janus_auto_decision,
+                        reason => element(2, Decision),
+                        tier => element(3, Decision),
+                        target => element(4, Decision),
+                        est_total => maps:get(est_total, F),
+                        %% Which zone/rule settled it, and (judge zone
+                        %% only) the shape the judge was shown.
+                        decided => element(5, Decision),
+                        shape => element(6, Decision)
+                    });
+                false ->
+                    ok
+            end,
             element(1, Decision)
     end.
 
@@ -469,6 +491,16 @@ finish({ok, Name, Names, EffTier}, Origin, _RuleTier, Cfg, Decided, Shape) ->
     {{ok, Name, Meta}, Origin, EffTier, Name, Decided, Shape};
 finish(error, Origin, Tier, _Cfg, Decided, Shape) ->
     {error_tag(no_route), Origin, Tier, undefined, Decided, Shape}.
+
+%% Whether the decision log is emitted. Default OFF: one line per request
+%% is a lot of volume for a fleet, and the operator turns it on precisely
+%% when a tier surprised them.
+decision_log_enabled(Cfg) ->
+    Cfg#acfg.decision_log.
+
+%% Accessor for the decision-log flag (see decision_log_enabled/1).
+decision_log(Cfg) ->
+    Cfg#acfg.decision_log.
 
 %% Did a judge actually run for this origin? The set is written out so it
 %% cannot drift: `judge` is the online backend's verdict, `local_judge` the
@@ -2551,6 +2583,12 @@ validate(Raw) ->
         max_media = pos_int(maps:get(max_media_parts, Raw, Def#acfg.max_media), max_media_parts),
         markers = bin_list(maps:get(markers, Raw, Def#acfg.markers)),
         complexity_terms = bin_list(maps:get(complexity_terms, Raw, Def#acfg.complexity_terms)),
+        %% bool_or/2 is this module's settings-boolean parser: it accepts
+        %% true/false, 1/0 and <<"true">>/<<"false">>. A bare `=:= true`
+        %% would silently read the normalized <<"true">> as false, so the
+        %% lever could never be switched on and nothing would say so.
+        %% Default false keeps the default-off discipline.
+        decision_log = bool_or(maps:get(decision_log, Raw, false), false),
         tier_failover_enabled = bool_or(
             maps:get(tier_failover_enabled, Raw, Def#acfg.tier_failover_enabled), false
         ),
@@ -3108,6 +3146,7 @@ cfg() ->
         %% zone and its spend. See ?DEFAULT_COMPLEXITY_TERMS for the
         %% recommended list an operator can copy into the setting.
         complexity_terms = [],
+        decision_log = false,
         tier_failover_enabled = false,
         tier_failover_max_names = 3
     }.

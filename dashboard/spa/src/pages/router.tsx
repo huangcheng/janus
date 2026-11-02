@@ -164,6 +164,8 @@ export type AutoCfg = {
    * that NAMES a hard task into the judge zone instead of straight to fast.
    * Empty = today's routing. */
   complexity_terms: string[]
+  /** Emit the per-request decision log (spec A4). Off by default. */
+  decision_log?: boolean
   /** D11: after key failover exhausts, try next same-tier name (default off). */
   tier_failover_enabled: boolean
   /** Cap distinct names attempted per request; gateway clamps 1–8. */
@@ -1624,6 +1626,21 @@ function AutoRouterCard({
               judge instead of straight to fast. It is a filter, not a flagship pin — the judge still
               decides.
             </p>
+          </Field>
+          <Field>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <FieldLabel htmlFor="auto-decision-log">Decision log</FieldLabel>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Log which zone or rule settled each tier, and what a judge was shown (shape only).
+                </p>
+              </div>
+              <Checkbox
+                id="auto-decision-log"
+                checked={cfg.decision_log === true}
+                onCheckedChange={(v) => onChange({ ...cfg, decision_log: v === true })}
+              />
+            </div>
           </Field>
           <Field>
             <FieldLabel htmlFor="auto-model">Virtual model name</FieldLabel>

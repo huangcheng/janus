@@ -18,6 +18,21 @@
 
 %% --- helpers -------------------------------------------------------
 
+%% A minimal raw settings map that validate/1 accepts: one member in each
+%% tier, so config parsing succeeds and the flag can be read back.
+routable_raw(Extra) ->
+    maps:merge(
+        #{
+            "model" => "janus-auto",
+            "tiers" => #{
+                "fast" => ["m-fast"],
+                "big" => ["m-big"],
+                "flagship" => ["m-flag"]
+            }
+        },
+        Extra
+    ).
+
 %% --- A2: lexicon scope ---------------------------------------------
 
 %% The recommended list is non-empty — that is what makes the documented
@@ -114,6 +129,32 @@ turn_bucket_separates_shallow_from_deep_test() ->
     ?assertNotEqual(Shallow div 8, Deep div 8).
 
 %% --- A4: the decision names its own cause --------------------------
+
+%% The decision-log lever must actually turn ON. normalize_map/1 turns a
+%% string "true" into <<"true">>, so a bare `=:= true` parse would read
+%% the normalized form as false and the lever would never fire — with
+%% nothing logged about it.
+a4_decision_log_parses_every_spelling_test() ->
+    %% The only way this knob turns on. Read through the record's own
+    %% accessor so the test does not depend on the record's field order.
+    On = [true, 1, <<"true">>],
+    lists:foreach(
+        fun(V) ->
+            Cfg = janus_auto:validate(routable_raw(#{decision_log => V})),
+            ?assertEqual({V, true}, {V, janus_auto:decision_log(Cfg)})
+        end,
+        On
+    ),
+    Off = [false, 0, <<"false">>, undefined, <<"yes">>, 42],
+    lists:foreach(
+        fun(V) ->
+            Cfg = janus_auto:validate(routable_raw(#{decision_log => V})),
+            ?assertEqual({V, false}, {V, janus_auto:decision_log(Cfg)})
+        end,
+        Off
+    ),
+    %% Absent entirely: default off.
+    ?assertEqual(false, janus_auto:decision_log(janus_auto:validate(routable_raw(#{})))).
 
 %% Which origins mean a judge was actually INVOKED. The set is written
 %% out in the production code so it cannot drift; this pins it, because a

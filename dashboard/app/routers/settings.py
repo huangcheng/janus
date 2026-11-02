@@ -70,6 +70,10 @@ DEFAULTS = {
     # gateway's janus_auto:default_complexity_terms/0 carries the
     # recommended list an operator can apply.
     "complexity_terms": [],
+    # Emit the per-request auto-router decision log (spec A4). OFF by
+    # default: one line per request is a lot of volume; the operator turns
+    # it on when a tier surprised them.
+    "decision_log": False,
     # D11 / janus-auto same-tier next-name failover (gateway defaults off).
     "tier_failover_enabled": False,
     "tier_failover_max_names": 3,
@@ -450,6 +454,9 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     terms = cfg.get("complexity_terms", DEFAULTS["complexity_terms"])
     if not isinstance(terms, list) or not all(isinstance(t, str) and t.strip() for t in terms):
         raise _err(400, "invalid", "complexity_terms must be a list of strings")
+
+    if not isinstance(cfg.get("decision_log", DEFAULTS["decision_log"]), bool):
+        raise _err(400, "invalid", "decision_log must be a boolean")
     cfg["markers"] = [m.strip() for m in markers]
 
     # D11: same-tier next-name failover knobs (gateway clamp [1, 8]).

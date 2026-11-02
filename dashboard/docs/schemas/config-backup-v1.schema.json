@@ -654,6 +654,10 @@
           },
           "uniqueItems": true,
           "description": "Complexity lexicon for the auto router (auto-router-complexity spec A2): a short request naming a hard task is routed into the JUDGE zone instead of straight to fast. Not a flagship pin — a lexicon matches words. Empty (the default) keeps the pre-spec routing. Semantically a SET: exported sorted ascending so a reorder is not a change."
+        },
+        "decision_log": {
+          "type": "boolean",
+          "description": "Emit the per-request auto-router decision log (spec A4): which zone or gate rule settled the tier, and for a judge verdict the input shape (lengths and counts only, never text). Off by default."
         }
       }
     },
