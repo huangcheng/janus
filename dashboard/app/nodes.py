@@ -1051,4 +1051,3 @@ async def stop_monitor() -> None:
             pass
         _worker_probe_task = None
         logger.info("worker reach probe stopped")
-

@@ -40,10 +40,12 @@ target-version = "py311"
 # alert paths: they must never take the loop down.
 ignore = [
   "BLE001",
-  # ISC004: long SQL literals are split across lines with implicit
+  # ISC002: long SQL literals are split across lines with implicit
   # concatenation throughout; parenthesizing 12 query strings adds
-  # diff noise with zero behavior change.
-  "ISC004",
+  # diff noise with zero behavior change. (The comment previously said
+  # ISC004, which is not a real rule; ruff refused to start on it, so the
+  # Python lint had never actually run.)
+  "ISC002",
 ]
 
 [tool.ruff.lint.flake8-bugbear]

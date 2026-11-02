@@ -26,12 +26,15 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from app.config_backup_canon import (
+# Imported AFTER the sys.path insert above: this is a standalone script run
+# from the dashboard root, so `app` is not importable until the parent is on
+# the path. That is the intended pattern here, not a stray late import.
+from app.config_backup_canon import (  # noqa: E402
     derive_key_ids,
     payload_sha256,
     sort_document_arrays,
 )
-from app.config_backup_schema import load_schema
+from app.config_backup_schema import load_schema  # noqa: E402
 
 
 class RehashError(Exception):
