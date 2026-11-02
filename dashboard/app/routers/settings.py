@@ -110,7 +110,22 @@ def _build_known_auto_keys() -> frozenset[str]:
         return frozenset(DEFAULTS)
 
 
+# Settings deleted by spec C (the rule gate). The gateway ignores them; the
+# dashboard drops them on write so they do not survive in the row forever.
+_RETIRED_AUTO_KEYS = frozenset({"markers", "complexity_terms", "fast_ctx_tokens"})
+
 _KNOWN_AUTO_KEYS_CACHE: frozenset[str] | None = None
+
+
+def _server_owned_auto_keys() -> frozenset[str]:
+    """`auto_router` keys the SCHEMA knows but this router does not write.
+
+    A restore writes a document's `auto_router` verbatim, so a row can carry
+    them. They are preserved from the row and never accepted from a request
+    body: the dashboard does not own them, so a client must not be able to
+    set them through this endpoint.
+    """
+    return _known_auto_keys() - frozenset(DEFAULTS) - _RETIRED_AUTO_KEYS
 
 
 def _known_auto_keys() -> frozenset[str]:
@@ -431,21 +446,33 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
 
     # GET returns `{**DEFAULTS, **stored}` with no whitelist, and the SPA
     # spreads that object straight back into the PUT body. A stored row can
-    # therefore contain keys this router does not own — the spec-C legacy
-    # keys on any install that saved before the gate was removed, and
-    # server-owned knobs a restore wrote verbatim (judge_max_inflight,
-    # media_token_allowance, max_media_parts). Those are TOLERATED and pass
-    # through untouched: rejecting them makes the Router page unsaveable on
-    # exactly the installs that need it. Anything outside DEFAULTS *and*
-    # outside the schema is a real typo and is still refused.
+    # therefore carry keys this router does not own. Three kinds, three
+    # different things to do with them:
     #
-    # The tolerated set comes from the published backup schema rather than a
-    # hand-written list, so it cannot drift from what a stored row may
-    # legally contain.
+    #   * RETIRED (spec C): read, ignored, and DROPPED. Keeping them would
+    #     re-persist dead configuration on every save, so this is also the
+    #     cleanup path — one PUT removes them from the row for good.
+    #   * SERVER-OWNED (schema-only knobs a restore wrote verbatim):
+    #     preserved from the STORED row, never taken from the body. The
+    #     dashboard does not own them and must not let a client inject them.
+    #   * ANYTHING ELSE: a real typo. Refused.
+    #
+    # The tolerated set is derived from the published backup schema, so it
+    # cannot drift from what a stored row may legally contain.
     known = _known_auto_keys()
     unknown = set(body) - known
     if unknown:
         raise _err(400, "unknown_fields", f"unknown fields: {sorted(unknown)}")
+    # Retired keys are dropped (this is also the cleanup path). Server-owned
+    # keys are dropped from the BODY as well: they are preserved from the
+    # stored row below, so a client cannot inject or overwrite a knob the
+    # dashboard does not own.
+    server_owned_keys = _server_owned_auto_keys()
+    body = {
+        k: v
+        for k, v in body.items()
+        if k not in _RETIRED_AUTO_KEYS and k not in server_owned_keys
+    }
 
     # H1: a PARTIAL body must never silently revert live config. Merge
     # onto the STORED row (known keys only), not onto DEFAULTS — an
@@ -453,8 +480,16 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     # generation bump then propagates the real config, not a truncated
     # one. A body carrying every key is still a full replace.
     stored = await _stored()
-    base = {k: v for k, v in stored.items() if k in DEFAULTS} if isinstance(stored, dict) else {}
-    cfg = {**DEFAULTS, **base, **body}
+    stored = stored if isinstance(stored, dict) else {}
+    # DEFAULTS keys come from the body; RETIRED keys never survive;
+    # everything else the schema allows is preserved from the row.
+    base = {k: v for k, v in stored.items() if k in DEFAULTS}
+    server_owned = {
+        k: v
+        for k, v in stored.items()
+        if k not in DEFAULTS and k not in _RETIRED_AUTO_KEYS and k in known
+    }
+    cfg = {**DEFAULTS, **base, **server_owned, **body}
     if isinstance(body.get("local_judge"), dict):
         stored_lj = base.get("local_judge")
         stored_lj = stored_lj if isinstance(stored_lj, dict) else {}
