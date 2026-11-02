@@ -31,7 +31,7 @@
 %% drive the real parse rather than re-reading the record layout.
 -export([judge_prompt_of/1, prompt_hash_of/1, builtin_judge_prompt/0]).
 -export([builtin_decisions_instruction/0]).
--export([prompt_hash_for/1]).
+-export([prompt_hash_for/1, cache_face_for_test/3]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -527,6 +527,9 @@ builtin_decisions_instruction() -> decisions_instruction().
 
 prompt_hash_for(Setting) -> prompt_hash(Setting).
 
+%% Explicit face (the production caller derives it from the route).
+cache_face_for_test(Cfg, Hash, Face) -> face_key(Hash, Face, Cfg).
+
 %% Did a judge actually run for this origin? The set is written out so it
 %% cannot drift: `judge` is the online backend's verdict, `local_judge` the
 %% sidecar's, `fallback_online` an online verdict that fell back to the
@@ -961,7 +964,7 @@ judge_tier_online(Cfg, F, Hash) ->
                     %% judge_model_route/1 flips the same model between them
                     %% as listings come and go. Keying on {Hash, Face}
                     %% keeps the two identities apart.
-                    {_Face, Key} = cache_face(Cfg, JM, Hash),
+                    Key = cache_face(Cfg, JM, Hash),
                     case pos_read(Key, JM) of
                         {ok, Tier} ->
                             bump(poscache_hit),
@@ -978,17 +981,18 @@ judge_tier_online(Cfg, F, Hash) ->
             end
     end.
 
-%% Which contract will actually be used, decided ONCE so the cache read,
-%% the cache write and the request itself cannot disagree. An unresolvable
-%% route falls back to `chat` as the nominal face; the call will fail and
-%% the verdict path never writes in that case.
+%% The READ key. Do not memoise the face into the write path: do_judge/7
+%% re-resolves the route because listings can change between this probe and
+%% the call, and the write must key on the contract actually used
+%% (face_key/3). Here, an unresolvable route falls back to `chat` as the
+%% nominal face; the call then fails and nothing is written.
 cache_face(Cfg, JM, Hash) ->
     Face =
         case judge_model_route(JM) of
             {ok, _Route, F} -> F;
             error -> chat
         end,
-    {Face, {Hash, Face, Cfg#acfg.prompt_hash}}.
+    {Hash, Face, Cfg#acfg.prompt_hash}.
 
 judge_tier_local(Cfg, F, Hash) ->
     case local_not_ready_gate_active() of
@@ -1216,8 +1220,10 @@ do_judge(Parent, Ref, Cfg, F, Hash, JM, CacheWrites) ->
                             case parse_decisions_tier(RespBody, Labels) of
                                 {ok, Tier} ->
                                     case CacheWrites of
-                                        true -> pos_write(Hash, Tier, JM, Cfg);
-                                        false -> ok
+                                        true ->
+                                            pos_write(face_key(Hash, decisions, Cfg), Tier, JM, Cfg);
+                                        false ->
+                                            ok
                                     end,
                                     breaker_ok(JM),
                                     Parent ! {Ref, Tier};
@@ -1249,7 +1255,7 @@ do_judge(Parent, Ref, Cfg, F, Hash, JM, CacheWrites) ->
                         {ok, TierBin} ->
                             Tier = binary_to_tier(TierBin),
                             case CacheWrites of
-                                true -> pos_write(Hash, Tier, JM, Cfg);
+                                true -> pos_write(face_key(Hash, chat, Cfg), Tier, JM, Cfg);
                                 false -> ok
                             end,
                             breaker_ok(JM),
@@ -1927,14 +1933,35 @@ pos_read(Hash, JM) ->
         _:_ -> miss
     end.
 
-pos_write(Hash, Tier, JM, Cfg) ->
+pos_write(Key, Tier, JM, Cfg) ->
     Exp = now_ms() + Cfg#acfg.ttl * 1000,
-    pos_write_ttl(Hash, Tier, JM, Exp),
+    pos_write_ttl(Key, Tier, JM, Exp),
     %% Miss-only fleet publish (spec B2): pos_write runs ONLY after a
     %% cache miss that was then fetched from the judge — a hit never
     %% publishes, so there is no invalidation storm.
-    _ = fleet_publish_cache_put(Hash, Tier, JM, Cfg#acfg.ttl),
+    %%
+    %% The wire carries the RAW hash, not the local composite key:
+    %% janus_fleet:hash_to_wire/1 accepts a non_neg_integer, and the face and
+    %% prompt identity are LOCAL facts each node derives for itself. Sending
+    %% them would either fail the guard (silently, under publish's catch) or
+    %% force a peer to trust this node's prompt.
+    _ = fleet_publish_cache_put(raw_hash(Key), Tier, JM, Cfg#acfg.ttl),
     ok.
+
+%% A cache key for the contract that was ACTUALLY used. do_judge/7
+%% re-resolves the route (it must: listings change between the caller's
+%% probe and the call), so the write has to key on the face the call used,
+%% not the one the caller predicted. The caller's read and this write agree
+%% whenever the route did not move, which is the common case; when it did
+%% move the read simply misses, which is correct rather than stale.
+face_key(Key, Face, Cfg) ->
+    {raw_hash(Key), Face, Cfg#acfg.prompt_hash}.
+
+%% The request hash inside a cache key. Keys are {Hash, Face, PromptHash};
+%% anything else is passed through, so the local-judge path (which keys on a
+%% plain hash) keeps working unchanged.
+raw_hash({Hash, _Face, _PromptHash}) when is_integer(Hash) -> Hash;
+raw_hash(Key) -> Key.
 
 %% Shared writer for the local miss path and the fleet receive path
 %% (the latter must NOT re-publish).
@@ -1992,7 +2019,22 @@ fleet_cache_put(Hash, TierWire, JudgeModel, TtlSec) when
         {true, JudgeModel} ->
             Tier = binary_to_tier(TierWire),
             Ttl = min(TtlSec, 300),
-            pos_write_ttl(Hash, Tier, JudgeModel, now_ms() + Ttl * 1000),
+            %% Store under BOTH local face keys with THIS node's prompt
+            %% identity: we cannot know which contract produced the peer's
+            %% verdict, and a local lookup will use whichever face its own
+            %% route resolves to. Writing both means the entry is hit
+            %% regardless, which is the honest reading of a shared cache
+            %% whose peers are assumed to run the same config.
+            Cfg = normalized(),
+            Exp = now_ms() + Ttl * 1000,
+            lists:foreach(
+                fun(Face) ->
+                    pos_write_ttl(
+                        {Hash, Face, Cfg#acfg.prompt_hash}, Tier, JudgeModel, Exp
+                    )
+                end,
+                [chat, decisions]
+            ),
             ok;
         {true, _Other} ->
             {error, judge_mismatch}

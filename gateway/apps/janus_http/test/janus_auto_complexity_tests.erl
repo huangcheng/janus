@@ -95,6 +95,24 @@ prompt_hash_separates_the_two_faces_test() ->
     %% Deterministic for the same input.
     ?assertEqual(H, janus_auto:prompt_hash_for(<<>>)).
 
+%% The two judge faces must not share a cache entry. Reading with one
+%% face's key and writing with the other's silently disables the cache (or
+%% serves a stale verdict), and neither shows up as an error. This pins the
+%% key SHAPE so the read and both write sites cannot drift apart again.
+prompt_cache_key_shape_test() ->
+    Cfg = janus_auto:validate(routable_raw(#{})),
+    H = 12345,
+    ChatKey = janus_auto:cache_face_for_test(Cfg, H, chat),
+    DecKey = janus_auto:cache_face_for_test(Cfg, H, decisions),
+    ?assertEqual({H, chat, janus_auto:prompt_hash_of(Cfg)}, ChatKey),
+    ?assertEqual({H, decisions, janus_auto:prompt_hash_of(Cfg)}, DecKey),
+    ?assertNotEqual(ChatKey, DecKey),
+    %% A different prompt must move BOTH keys, or an edited prompt keeps
+    %% serving verdicts produced under the old instruction.
+    Cfg2 = janus_auto:validate(routable_raw(#{judge_prompt => <<"fast big flagship X">>})),
+    ?assertNotEqual(ChatKey, janus_auto:cache_face_for_test(Cfg2, H, chat)),
+    ?assertNotEqual(DecKey, janus_auto:cache_face_for_test(Cfg2, H, decisions)).
+
 %% --- A2: lexicon scope ---------------------------------------------
 
 %% The recommended list is non-empty — that is what makes the documented
