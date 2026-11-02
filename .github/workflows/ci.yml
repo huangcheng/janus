@@ -102,11 +102,14 @@ jobs:
           node-version: "22"
 
       - name: Install Python dependencies
-        # `.[dev]` is what brings in ruff, which lint_all.sh requires; without
-        # it the lint step fails with "ruff not installed" rather than linting.
+        # `.[dev]` brings in ruff, which lint_all.sh requires. The version is
+        # pinned in pyproject.toml: ruff's formatter changes between minors, so
+        # an unpinned install makes `ruff format --check` fail in CI on a tree
+        # that passes locally (this happened: 0.7.4 vs 0.17.3).
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          python -m ruff --version
 
       - name: Install SPA dependencies
         # BEFORE the lint step: lint_all.sh runs the SPA typecheck and build

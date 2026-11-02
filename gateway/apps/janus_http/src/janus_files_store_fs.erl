@@ -5,6 +5,13 @@
 %% small; write is temp+rename so a reader never sees a partial blob.
 %% Mount the root on persistent storage; rsync is the backup story.
 -module(janus_files_store_fs).
+%% The store's public API is put/2 and get/1, which shadow auto-imported
+%% BIFs of the same name/arity. Without this the module does not compile on
+%% OTP 27 ("ambiguous call of overridden pre R14 auto-imported BIF put/2");
+%% it compiled locally only because the local toolchain is newer. Calling
+%% erlang:put/erlang:get here would work but would rename the API for every
+%% caller, so the auto-import is disabled instead.
+-compile({no_auto_import, [put/2, get/1]}).
 -export([put/2, get/1, delete/1]).
 
 -ifdef(TEST).

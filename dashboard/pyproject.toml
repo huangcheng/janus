@@ -20,7 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.7",
+    # Pinned, not ">=": ruff's formatter changes between minor releases, so an
+    # unpinned install makes `ruff format --check` pass locally and fail in CI
+    # (or the reverse) on the same tree. Bump deliberately, with the reformat.
+    "ruff==0.7.4",
 ]
 
 # Fresh installs (CI runners) hit setuptools' flat-layout auto-discovery:
