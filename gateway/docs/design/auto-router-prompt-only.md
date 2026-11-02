@@ -98,10 +98,16 @@ Consequences, stated for the changelog:
 - Any user relying on it must instead rely on the judge, or on the
   operator adjusting the prompt.
 
-**Migration observation.** Before removal is shipped, the release records a
-`marker_hit_would_fire` counter (increment only, no behaviour change) so
-the operator can see whether anyone used it at all. If the counter is zero
-across a release, removal is silent.
+**Removal order.** The marker counter cannot be added by the same release
+that deletes the code path it counts. Removal is therefore two releases:
+
+1. **Observe.** `markers` keeps its current behaviour; a new
+   `marker_hit_total` counter records how often it fires. No routing change.
+2. **Remove.** If the counter is still zero, remove `markers` in the next
+   release. If it is not zero, stop and revisit — someone depends on it.
+
+This document governs release 2. Release 1 is a one-line counter and is
+included here only to define the sequence.
 
 ### 3. Operator-editable judge prompt
 
@@ -117,9 +123,16 @@ Validation, because a bad prompt makes the router silently wrong:
 
 | Check | Refusal |
 |---|---|
-| length ≤ 4096 bytes | `prompt too long` |
+| length ≤ 4096 **bytes** | `prompt too long` |
 | contains each configured tier label (`fast`, `big`, `flagship`) | `prompt must name every tier` |
 | empty string | accepted; means built-in |
+
+The limit counts UTF-8 **bytes**, not characters, because the value is sent
+verbatim to the judge and the byte length is what the request carries. A
+Chinese prompt costs ~3 bytes per character, so the effective character
+budget is smaller; the dashboard shows a live byte counter beside the field
+so the limit is visible before the write is refused. The bound is inclusive:
+4096 bytes is accepted, 4097 refused.
 
 The label check exists because a prompt that never names a tier invites a
 verdict the parser must discard (`parse_tier` returns an unrecognised word),
@@ -128,7 +141,15 @@ turns a silent misroute into a 400 at the dashboard.
 
 ### 4. Prompt changes invalidate the decision cache
 
-`cache_key/2` gains `erlang:phash2(Prompt)` as its first element.
+`cache_key/2` takes `_Cfg` today — deliberately unused. It gains the prompt
+hash as its first element, which means the argument becomes load-bearing and
+the parameter is renamed `Cfg`. Both call sites (`judge_tier/2` and the
+local-judge path) already have `Cfg` in scope.
+
+The hash is NOT recomputed per request: `#acfg{}` is already memoised per
+config generation by `normalized/0`, so the prompt is hashed once when the
+record is built and the digest travels in it as a `prompt_hash` field. A
+4 KB string hashed on every request would be avoidable work on the hot path.
 
 Without this, an operator edits the prompt, requests keep hitting verdicts
 cached under the old prompt for up to `cache_ttl_sec` (300 s default), and
@@ -156,9 +177,23 @@ upstream model name, producing a provider-side error. "Disabled" must mean
 "does not exist", matching the fail-closed rule in `AGENTS.md`. A model
 that is hidden but callable is worse than either state.
 
-When false the dashboard hides every other auto-router field; only
-`enabled` is shown. This is a UI affordance, not a second gate: the backend
-honours `enabled` regardless of what the UI renders.
+`enabled` is an **existence** switch, never a mutating one. Flipping it to
+false preserves every other value — tier lists, judge model, prompt — in the
+database untouched, so re-enabling restores the previous configuration
+exactly. The dashboard hides those fields; it does not clear them.
+
+The 404 is produced at one named seam so every face behaves identically:
+
+- `maybe_route/3` gains a `{error, disabled}` return, chosen before any
+  routing work when `Cfg#acfg.enabled =:= false` and the requested name is
+  the configured auto model.
+- `janus_http_proxy:proxy_model/7` translates `{error, disabled}` into the
+  same 404 `model_not_found` envelope it already emits for an unknown model,
+  so chat, responses, Anthropic and modality faces cannot diverge.
+
+Returning `{error, disabled}` rather than `pass` is the point: `pass` would
+send the literal name `janus-auto` upstream, and the client would get a
+provider error instead of a 404.
 
 ### 6. Judging the task, and its size
 
