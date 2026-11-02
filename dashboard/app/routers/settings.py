@@ -432,14 +432,18 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     # GET returns `{**DEFAULTS, **stored}` with no whitelist, and the SPA
     # spreads that object straight back into the PUT body. A stored row can
     # therefore contain keys this router does not own — the spec-C legacy
-    # keys on any install that saved before the gate was removed, and any
-    # server-owned key a restore wrote verbatim (judge_max_inflight,
-    # media_token_allowance, max_media_parts). Rejecting those makes the
-    # Router page unsaveable on exactly the installs that need it, so the
-    # tolerated set is derived from the BACKUP SCHEMA rather than kept as a
-    # hand-written list that drifts. Unknown-in-schema is still rejected.
-    body = {k: v for k, v in body.items() if k in _known_auto_keys()}
-    unknown = set(body) - set(DEFAULTS)
+    # keys on any install that saved before the gate was removed, and
+    # server-owned knobs a restore wrote verbatim (judge_max_inflight,
+    # media_token_allowance, max_media_parts). Those are TOLERATED and pass
+    # through untouched: rejecting them makes the Router page unsaveable on
+    # exactly the installs that need it. Anything outside DEFAULTS *and*
+    # outside the schema is a real typo and is still refused.
+    #
+    # The tolerated set comes from the published backup schema rather than a
+    # hand-written list, so it cannot drift from what a stored row may
+    # legally contain.
+    known = _known_auto_keys()
+    unknown = set(body) - known
     if unknown:
         raise _err(400, "unknown_fields", f"unknown fields: {sorted(unknown)}")
 
