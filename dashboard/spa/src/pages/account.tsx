@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react"
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import QRCode from "qrcode"
 import { toast } from "sonner"
 import {
@@ -335,12 +335,36 @@ export function Account() {
   )
 }
 
+function passwordStatusDescription(status: Status | null): string {
+  if (status === null) return "Checking password status…"
+  if (status.has_password) return "Your password is active. Use a unique password with at least 8 characters."
+  return "No password is set. Sign-in currently requires a passkey."
+}
+
 function PasswordCard({ status, onDone }: { status: Status | null; onDone: () => void }) {
+  const [editing, setEditing] = useState(false)
   const [current, setCurrent] = useState("")
   const [next, setNext] = useState("")
   const [confirm, setConfirm] = useState("")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const changePasswordRef = useRef<HTMLButtonElement>(null)
+  const restoreFocus = useRef(false)
+
+  useEffect(() => {
+    if (editing || !restoreFocus.current) return
+    restoreFocus.current = false
+    changePasswordRef.current?.focus()
+  }, [editing])
+
+  function close() {
+    restoreFocus.current = true
+    setEditing(false)
+    setCurrent("")
+    setNext("")
+    setConfirm("")
+    setErr(null)
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -353,9 +377,7 @@ function PasswordCard({ status, onDone }: { status: Status | null; onDone: () =>
     try {
       await api("/auth/password", { method: "POST", body: { current, next } })
       toast.success("Password updated")
-      setCurrent("")
-      setNext("")
-      setConfirm("")
+      close()
       onDone()
     } catch (e: any) {
       toast.error(e.message)
@@ -368,64 +390,79 @@ function PasswordCard({ status, onDone }: { status: Status | null; onDone: () =>
     <Card className="w-full self-start overflow-hidden">
       <CardHeader>
         <CardTitle>Sign-in password</CardTitle>
-        <CardDescription>
-          {status?.has_password
-            ? "Use a unique password with at least 8 characters."
-            : "No password is set. Sign-in currently requires a passkey."}
-        </CardDescription>
+        <CardDescription>{passwordStatusDescription(status)}</CardDescription>
       </CardHeader>
       <CardContent>
-        {err && <ErrorFlash message={err} />}
-        {/* Single column at a capped measure: a settings form reads best as
-            a quiet stack — equal field widths, one rhythm, one action at
-            the foot. Two-column halves with a divider left the sparse card
-            looking misaligned. */}
-        <form onSubmit={submit} className="max-w-sm">
-          <div className="flex flex-col gap-4">
-            <Field>
-              <FieldLabel htmlFor="pw-current">Current password</FieldLabel>
-              <Input
-                id="pw-current"
-                type="password"
-                autoComplete="current-password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                required
-              />
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="pw-next">New password</FieldLabel>
-              <Input
-                id="pw-next"
-                type="password"
-                autoComplete="new-password"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-                required
-                minLength={8}
-              />
-              <FieldDescription>At least 8 characters.</FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="pw-confirm">Confirm new password</FieldLabel>
-              <Input
-                id="pw-confirm"
-                type="password"
-                autoComplete="new-password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                required
-                minLength={8}
-              />
-            </Field>
-          </div>
-          <FieldFooter className="mt-6">
-            <Button type="submit" disabled={busy}>
-              {busy && <LoaderCircle className="animate-spin" />}
-              Update password
+        {editing ? (
+          <form onSubmit={submit} className="max-w-sm">
+            {err && <ErrorFlash message={err} />}
+            <div className="flex flex-col gap-4">
+              <Field>
+                <FieldLabel htmlFor="pw-current">Current password</FieldLabel>
+                <Input
+                  id="pw-current"
+                  type="password"
+                  autoComplete="current-password"
+                  value={current}
+                  onChange={(e) => setCurrent(e.target.value)}
+                  required
+                  autoFocus
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="pw-next">New password</FieldLabel>
+                <Input
+                  id="pw-next"
+                  type="password"
+                  autoComplete="new-password"
+                  value={next}
+                  onChange={(e) => setNext(e.target.value)}
+                  required
+                  minLength={8}
+                />
+                <FieldDescription>At least 8 characters.</FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="pw-confirm">Confirm new password</FieldLabel>
+                <Input
+                  id="pw-confirm"
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirm}
+                  onChange={(e) => setConfirm(e.target.value)}
+                  required
+                  minLength={8}
+                />
+              </Field>
+            </div>
+            <FieldFooter className="mt-6">
+              <Button type="button" variant="ghost" onClick={close} disabled={busy}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy}>
+                {busy && <LoaderCircle className="animate-spin" />}
+                Update password
+              </Button>
+            </FieldFooter>
+          </form>
+        ) : (
+          <div className="flex flex-col items-start gap-4">
+            <Button
+              ref={changePasswordRef}
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!status?.has_password}
+              onClick={() => {
+                setErr(null)
+                setEditing(true)
+              }}
+            >
+              <KeyRound />
+              Change password
             </Button>
-          </FieldFooter>
-        </form>
+          </div>
+        )}
       </CardContent>
     </Card>
   )
