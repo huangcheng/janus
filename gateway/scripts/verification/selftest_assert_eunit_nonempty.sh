@@ -116,7 +116,14 @@ check "raw summary without Skipped" 0 'app1: Failed: 0.  Passed: 4.
 check "duplicate Passed, total is three" 1 'app1: Failed: 0.  Passed: 4.  Passed: 0.
 '
 
-# 15. A plain passing run is accepted.
+# 15. The other two per-kind branches: a duplicated `Failed:`, and a
+#     duplicated `Skipped:`. Each must be rejected on its own.
+check "duplicate Failed" 1 'app1: Failed: 0.  Failed: 1.  Passed: 4.
+'
+check "duplicate Skipped" 1 'app1: Failed: 0.  Skipped: 0.  Skipped: 1.  Passed: 4.
+'
+
+# 16. A plain passing run is accepted.
 check "single app success" 0 'All 179 tests passed.
 '
 
