@@ -91,6 +91,7 @@ DEFAULTS = {
     "tier_failover_max_names": 3,
 }
 
+
 def _build_known_auto_keys() -> frozenset[str]:
     """Every `auto_router` key the backup schema permits.
 
@@ -105,8 +106,10 @@ def _build_known_auto_keys() -> frozenset[str]:
         props = schema["$defs"]["auto_router"]["properties"]
         return frozenset(props) | frozenset(DEFAULTS)
     except Exception:  # pragma: no cover - schema is a build artifact
-        logger.warning("auto_router: could not read the backup schema; "
-                       "falling back to DEFAULTS for tolerated PUT keys")
+        logger.warning(
+            "auto_router: could not read the backup schema; "
+            "falling back to DEFAULTS for tolerated PUT keys"
+        )
         return frozenset(DEFAULTS)
 
 
@@ -183,8 +186,7 @@ def _validate_judge_prompt(value: object) -> str:
         raise _err(
             400,
             "invalid",
-            f"judge_prompt must be at most {JUDGE_PROMPT_MAX_BYTES} bytes "
-            f"(got {len(encoded)})",
+            f"judge_prompt must be at most {JUDGE_PROMPT_MAX_BYTES} bytes " f"(got {len(encoded)})",
         )
     # Case-insensitive, matching parse_tier/1 which lowercases the verdict
     # before comparing: a prompt saying "Fast / Big / Flagship" works
@@ -469,9 +471,7 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     # dashboard does not own.
     server_owned_keys = _server_owned_auto_keys()
     body = {
-        k: v
-        for k, v in body.items()
-        if k not in _RETIRED_AUTO_KEYS and k not in server_owned_keys
+        k: v for k, v in body.items() if k not in _RETIRED_AUTO_KEYS and k not in server_owned_keys
     }
 
     # H1: a PARTIAL body must never silently revert live config. Merge
@@ -628,9 +628,7 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
     if not isinstance(cfg.get("decision_log", DEFAULTS["decision_log"]), bool):
         raise _err(400, "invalid", "decision_log must be a boolean")
 
-    cfg["judge_prompt"] = _validate_judge_prompt(
-        cfg.get("judge_prompt", DEFAULTS["judge_prompt"])
-    )
+    cfg["judge_prompt"] = _validate_judge_prompt(cfg.get("judge_prompt", DEFAULTS["judge_prompt"]))
 
     # D11: same-tier next-name failover knobs (gateway clamp [1, 8]).
     tfe = cfg.get("tier_failover_enabled", DEFAULTS["tier_failover_enabled"])
@@ -1521,9 +1519,7 @@ def _worker_capacity_map(raw) -> dict:
 
 @router.get("/worker-capacity")
 async def get_worker_capacity(user: dict = Depends(require_auth)):
-    row = await database.fetchrow(
-        "SELECT value FROM settings WHERE key = $1", _WORKER_CAPACITY_KEY
-    )
+    row = await database.fetchrow("SELECT value FROM settings WHERE key = $1", _WORKER_CAPACITY_KEY)
     cfg = _worker_capacity_map(row["value"]) if row else {}
     return {
         "source": "db" if row is not None else "default",
