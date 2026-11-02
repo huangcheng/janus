@@ -53,10 +53,37 @@ jobs:
       - name: Format check
         run: rebar3 fmt --check
 
+      - name: EUnit gate self-test
+        # The gate's whole value is its PARSER. Test it before trusting it:
+        # the cases are the real summary shapes rebar3 and EUnit emit.
+        run: ./scripts/verification/selftest_assert_eunit_nonempty.sh
+
       - name: EUnit (non-vacuous)
         # The wrapper fails on: nonzero eunit exit, any failure, no summary,
-        # a zero-count suite, or a summed total of zero.
+        # a zero-count suite, or a summed total of zero. It resolves the app
+        # root from its own path, so the working directory does not matter.
         run: ./scripts/verification/assert_eunit_nonempty.sh
+
+  judge-sidecar:
+    # `gateway/sidecars/janus_judge` ships 12 pytest cases that nothing ran,
+    # the same rot risk as the EUnit suites had. It is a separate Python
+    # component with its own requirements, so it gets its own job.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway/sidecars/janus_judge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Pytest
+        run: python -m pytest -q
 
   dashboard:
     runs-on: ubuntu-latest

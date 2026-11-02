@@ -23,6 +23,12 @@
 # without a build).
 set -uo pipefail
 
+# Resolve the application root from THIS script's location. `rebar3 eunit`
+# looks for rebar.config in the cwd, so invoking the script from the repo
+# root or from its own directory would fail with a misleading
+# "'rebar3 eunit' exited 1" instead of running the tests.
+APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 EUNIT_CMD=(rebar3 eunit)
 LOG=""
 
@@ -32,7 +38,7 @@ if [[ "${1:-}" == "--from" ]]; then
 else
   LOG="$(mktemp -t janus-eunit-XXXXXX)"
   trap 'rm -f "$LOG"' EXIT
-  "${EUNIT_CMD[@]}" >"$LOG" 2>&1
+  (cd "$APP_ROOT" && "${EUNIT_CMD[@]}") >"$LOG" 2>&1
   rc=$?
   if [[ $rc -ne 0 ]]; then
     echo "FAIL: '${EUNIT_CMD[*]}' exited $rc" >&2
@@ -48,15 +54,32 @@ import sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8", errors="replace").read()
 
-# `rebar3 eunit` (one app) emits:  All 179 tests passed.
-# (one app, failures)             179 tests, 1 failures
-# Multi-app runs emit one summary per application, so counts must be SUMMED,
-# not maxed — otherwise a second app's suite is invisible.
+# SUMMARY FORMATS, all observed in real runs:
+#   success (rebar3):  All 179 tests passed.
+#   failure (rebar3):  179 tests, 2 failures
+#   failure (eunit):   Failed: 1.  Skipped: 0.  Passed: 4.
+# Multi-application runs emit one summary per application, so counts must be
+# SUMMED, not maxed — otherwise a second app's suite is invisible.
+#
+# The third form matters for `--from`, where there is no exit code to consult:
+# parsing only `N tests, M failures` would read a raw-EUnit failure log as
+# zero failures and exit OK — the exact false green this wrapper prevents.
 passed_re = re.compile(r"All (\d+) tests passed\.")
 failed_re = re.compile(r"(\d+) tests, (\d+) failures")
+eunit_failed_re = re.compile(r"Failed:\s*(\d+)\.")
+eunit_passed_re = re.compile(r"Passed:\s*(\d+)\.")
+eunit_skipped_re = re.compile(r"Skipped:\s*(\d+)\.")
 
 passed = [int(m) for m in passed_re.findall(text)]
 totals = [(int(t), int(f)) for t, f in failed_re.findall(text)]
+eunit_failed = [int(m) for m in eunit_failed_re.findall(text)]
+eunit_passed = [int(m) for m in eunit_passed_re.findall(text)]
+eunit_skipped = [int(m) for m in eunit_skipped_re.findall(text)]
+
+# A raw-EUnit failure line is a summary too, and its `Passed:` count is real
+# executed work. `Skipped:` tests are NOT counted as executed.
+if eunit_failed:
+    totals = totals + [(sum(eunit_passed), sum(eunit_failed))]
 
 if not passed and not totals:
     print("FAIL: no EUnit summary found in the log.", file=sys.stderr)
@@ -69,12 +92,16 @@ if failures:
     sys.exit(1)
 
 executed = sum(passed) + sum(t for t, _ in totals)
+# eunit_passed was folded into totals above; do not count it twice.
 if executed == 0:
     print("FAIL: EUnit executed zero tests.", file=sys.stderr)
     sys.exit(1)
 
-# A suite that reports 0 is a discovery bug, not a pass.
-zero_suites = [p for p in passed if p == 0]
+# A suite that reports 0 is a discovery bug, not a pass. Check BOTH summary
+# shapes: a `0 tests, 0 failures` application is otherwise masked whenever
+# another application contributed a positive count, which is exactly the
+# per-application discovery regression this gate exists to catch.
+zero_suites = [p for p in passed if p == 0] + [t for t, _ in totals if t == 0]
 if zero_suites:
     print("FAIL: a suite reported 0 tests; check discovery.", file=sys.stderr)
     sys.exit(1)
