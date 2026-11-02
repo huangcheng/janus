@@ -561,14 +561,24 @@ enabled(Cfg) -> Cfg#acfg.enabled.
 %% when any tier has a member, in the merged raw config (DB over app env).
 %% Mirrors migration 028's predicate exactly, for the layer the migration
 %% cannot see.
-already_routing(Raw, Def) ->
+already_routing(Raw, _Def) ->
+    %% Must mirror migration 028 (`json_array_length(...) > 0`) and the
+    %% restore-path mirror (`isinstance(list)`) EXACTLY. A non-list tier
+    %% value — JSON null from a hand-edited row, or a bare binary — would
+    %% trivially satisfy `=/= []` while validate_tiers/3 turns it into [],
+    %% so nothing could route and the three layers would disagree.
     Tiers =
         case maps:get(tiers, Raw, undefined) of
             M when is_map(M) -> M;
-            _ -> Def#acfg.tiers
+            _ -> #{}
         end,
     lists:any(
-        fun(T) -> maps:get(T, Tiers, []) =/= [] end,
+        fun(T) ->
+            case maps:get(T, Tiers, []) of
+                L when is_list(L) -> L =/= [];
+                _ -> false
+            end
+        end,
         [fast, big, flagship]
     ).
 

@@ -1778,10 +1778,12 @@ def _orphan_warning(digest, desired, surface, file_by, current, warnings) -> Non
 
 def _tally_settings(doc, catalog, sections) -> None:
     router = doc["router"]
+    # Must use the same inferred forms as the write path, or the dry run
+    # reports an update the write does not make (and vice versa).
     _tally_singleton(
         sections["auto_router"],
-        router.get("auto_router"),
-        catalog.auto_router,
+        _with_enabled_inferred(router.get("auto_router")),
+        _with_enabled_inferred(catalog.auto_router),
         markers=True,
     )
     _tally_singleton(
@@ -2715,7 +2717,17 @@ async def _write_settings(conn, doc: dict, catalog: _Catalog) -> bool:
     dirty = False
     router = doc["router"]
     file_router = router.get("auto_router")
-    if _singleton_changed(file_router, catalog.auto_router, markers=True):
+    # Compare the INFERRED forms on BOTH sides. Comparing raw documents gets
+    # it wrong twice: a pre-switch document over a row that now has
+    # `enabled: true` would look changed and bump the generation for a no-op,
+    # and when both sides predate the switch they compare EQUAL, the write is
+    # skipped, and the row keeps no `enabled` at all — leaving the gateway to
+    # resolve it to false, which is the exact case this is meant to fix.
+    if _singleton_changed(
+        _with_enabled_inferred(file_router),
+        _with_enabled_inferred(catalog.auto_router),
+        markers=True,
+    ):
         # Write the INFERRED form, not the raw document. This path bypasses
         # put_auto_router, so a pre-switch backup would otherwise restore a
         # row with no `enabled` and the gateway would resolve it to false —

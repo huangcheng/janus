@@ -214,6 +214,19 @@ def _merge_auto_config(stored: dict | None) -> dict:
         cfg["judge_backend"] = "online" if cfg.get("judge_model") else "off"
     elif cfg.get("judge_backend") not in JUDGE_BACKENDS:
         cfg["judge_backend"] = "off"
+    # Mirror the gateway's inference for an ABSENT key, or the card would
+    # render a working router as OFF and the next Save (which PUTs the whole
+    # form) would write the explicit false this release works to prevent.
+    # An install configured through sys.config has no settings row at all,
+    # so `stored` is None here and the gateway infers "enabled" from tiers it
+    # cannot see — the dashboard cannot know either, so it must NOT invent a
+    # false. Same predicate as migration 028 and _with_enabled_inferred.
+    if (stored or {}).get("enabled") is None:
+        tiers = cfg.get("tiers")
+        if isinstance(tiers, dict) and any(
+            isinstance(tiers.get(t), list) and tiers[t] for t in TIERS
+        ):
+            cfg["enabled"] = True
     return cfg
 
 
@@ -432,6 +445,16 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
             raise _err(400, "invalid", f"tiers.{t} must be a list of model names")
         norm_tiers[t] = [n.strip() for n in names]
 
+    # Resolved BEFORE any catalog check, because this is the kill switch: an
+    # operator must be able to turn the family off while its configuration is
+    # broken. Cascade leaves a dangling judge_model when a model is retired,
+    # and `not_bound` / `unknown_models` would otherwise reject the one write
+    # that stops the router from serving. It must also precede its first use
+    # in this function, or Python scoping makes it an UnboundLocalError.
+    if not isinstance(cfg.get("enabled", DEFAULTS["enabled"]), bool):
+        raise _err(400, "invalid", "enabled must be a boolean")
+    disabled = cfg.get("enabled") is False
+
     # Tier members come from the ROUTER BINDINGS (the curated pool):
     # the adjudicator's availability probe only sees bound models, so a
     # tier listing an unbound name would silently never route.
@@ -516,15 +539,6 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
 
     if not isinstance(cfg.get("decision_log", DEFAULTS["decision_log"]), bool):
         raise _err(400, "invalid", "decision_log must be a boolean")
-
-    if not isinstance(cfg.get("enabled", DEFAULTS["enabled"]), bool):
-        raise _err(400, "invalid", "enabled must be a boolean")
-    # Resolved HERE, before every catalog check below, because this is the
-    # kill switch: an operator must be able to turn the family off while its
-    # configuration is broken. Cascade leaves a dangling judge_model when a
-    # model is retired, and `not_bound` / `unknown_models` would otherwise
-    # reject the one write that stops the router from serving.
-    disabled = cfg.get("enabled") is False
 
     cfg["judge_prompt"] = _validate_judge_prompt(
         cfg.get("judge_prompt", DEFAULTS["judge_prompt"])
