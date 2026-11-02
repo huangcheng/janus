@@ -199,8 +199,14 @@ def _parse_stored_json(raw, key: str):
         return None
 
 
-def _merge_auto_config(stored: dict | None) -> dict:
-    """Stored row merged with defaults; compat absent judge_backend (§3)."""
+def _merge_auto_config(stored: dict | None, live: dict | None = None) -> dict:
+    """Stored row merged with defaults; compat absent judge_backend (§3).
+
+    `live` is the gateway's own resolved view (master /stats `auto` block).
+    It is authoritative for `enabled` when the stored row does not carry the
+    key, because the gateway infers from the MERGED config — sys.config plus
+    DB — which this process cannot see.
+    """
     # Defence in depth for callers that hand in a non-dict by accident: the
     # merge must never raise for a stored value (see `_stored`).
     stored = stored if isinstance(stored, dict) else None
@@ -222,11 +228,20 @@ def _merge_auto_config(stored: dict | None) -> dict:
     # cannot see — the dashboard cannot know either, so it must NOT invent a
     # false. Same predicate as migration 028 and _with_enabled_inferred.
     if (stored or {}).get("enabled") is None:
-        tiers = cfg.get("tiers")
-        if isinstance(tiers, dict) and any(
-            isinstance(tiers.get(t), list) and tiers[t] for t in TIERS
-        ):
-            cfg["enabled"] = True
+        # Prefer what the gateway actually resolved: it sees sys.config tiers
+        # that this process cannot, and rendering OFF for a router that IS
+        # serving would let the next Save write the explicit false we are
+        # trying to prevent. Fall back to the row's own tiers only when the
+        # snapshot is unavailable.
+        live_enabled = live.get("enabled") if isinstance(live, dict) else None
+        if isinstance(live_enabled, bool):
+            cfg["enabled"] = live_enabled
+        else:
+            tiers = cfg.get("tiers")
+            if isinstance(tiers, dict) and any(
+                isinstance(tiers.get(t), list) and tiers[t] for t in TIERS
+            ):
+                cfg["enabled"] = True
     return cfg
 
 
@@ -358,11 +373,12 @@ async def get_auto_router(user: dict = Depends(require_auth)):
     # can edit them — it is the single source of the response shape (L1:
     # the duplicate `config` merge here was dead code and has been
     # removed rather than allowed to drift).
+    live = await _auto_live_snapshot()
     return {
         "source": "db" if stored is not None else "default",
-        "config": _merge_auto_config(stored),
+        "config": _merge_auto_config(stored, live),
         "defaults": DEFAULTS,
-        "live_snapshot": await _auto_live_snapshot(),
+        "live_snapshot": live,
     }
 
 
