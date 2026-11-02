@@ -504,9 +504,54 @@
         "markers"
       ],
       "properties": {
-        "model": {
-          "type": "string",
-          "minLength": 1
+        "big_ctx_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cache_ttl_sec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "complexity_terms": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Complexity lexicon for the auto router (auto-router-complexity spec A2): a short request naming a hard task is routed into the JUDGE zone instead of straight to fast. Not a flagship pin — a lexicon matches words. Empty (the default) keeps the pre-spec routing. Semantically a SET: exported sorted ascending so a reorder is not a change."
+        },
+        "decision_log": {
+          "type": "boolean",
+          "description": "Emit the per-request auto-router decision log (spec A4): which zone or gate rule settled the tier, and for a judge verdict the input shape (lengths and counts only, never text). Off by default."
+        },
+        "default_tier": {
+          "enum": [
+            "fast",
+            "big",
+            "flagship"
+          ]
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Existence switch for the auto-router family (spec B). When false the virtual model is not listed and a direct call answers 404. Optional with default false; the 028 migration enables it for installs that were already routing."
+        },
+        "fast_ctx_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "judge_backend": {
+          "enum": [
+            "off",
+            "online",
+            "local"
+          ],
+          "description": "Judge pipeline selector. local = kev sidecar at local_judge.endpoint; restore reuses the gateway's PUT validation (loopback-only endpoint enforced there)."
+        },
+        "judge_max_inflight": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Online-judge concurrency cap."
         },
         "judge_model": {
           "type": [
@@ -514,6 +559,65 @@
             "null"
           ],
           "description": "null = judge DISABLED (preflight skips the surface check entirely). Non-null must be in the post-write agent-visible surface (not restricted to bound models); restore reuses the PUT /api/settings/auto-router surface check, which already handles the openai_decisions exclusion."
+        },
+        "judge_prompt": {
+          "type": "string",
+          "description": "The instruction the auto-router's judge is given (spec A). Empty means the gateway's built-in text. Must name every tier or the verdict cannot be parsed; the API refuses one that does not."
+        },
+        "judge_timeout_ms": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "local_judge": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/local_judge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Local judge sidecar settings (artifact pinning, loopback endpoint, inflight cap). Null = section never configured; v1 restore skips null sections."
+        },
+        "markers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Trigger phrases — semantically a SET: exported sorted ascending, compared set-equal (C3/C14); re-hash may sort them."
+        },
+        "max_ctx_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_media_parts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Media parts above this count skip the judge (fast tier)."
+        },
+        "media_token_allowance": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Extra token budget allowance per media part before a request leaves the fast tier."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier_failover_enabled": {
+          "type": "boolean",
+          "description": "Optional (D11). After key failover exhausts, try the next model in the same janus-auto tier (pre-commit only). Default false when omitted; gateway default off."
+        },
+        "tier_failover_max_names": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Optional (D11). Cap distinct same-tier names attempted per client request. Default 3 when omitted; gateway clamps to [1, 8]."
         },
         "tiers": {
           "type": "object",
@@ -565,106 +669,6 @@
             }
           },
           "description": "Members must be mutually exclusive across tiers and bound on Router — restore re-validates both (same rule as PUT /api/settings/auto-router)."
-        },
-        "default_tier": {
-          "enum": [
-            "fast",
-            "big",
-            "flagship"
-          ]
-        },
-        "fast_ctx_tokens": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "big_ctx_tokens": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_ctx_tokens": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 1
-        },
-        "judge_timeout_ms": {
-          "type": "integer",
-          "minimum": 100
-        },
-        "cache_ttl_sec": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "markers": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
-          "uniqueItems": true,
-          "description": "Trigger phrases — semantically a SET: exported sorted ascending, compared set-equal (C3/C14); re-hash may sort them."
-        },
-        "tier_failover_enabled": {
-          "type": "boolean",
-          "description": "Optional (D11). After key failover exhausts, try the next model in the same janus-auto tier (pre-commit only). Default false when omitted; gateway default off."
-        },
-        "tier_failover_max_names": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 8,
-          "description": "Optional (D11). Cap distinct same-tier names attempted per client request. Default 3 when omitted; gateway clamps to [1, 8]."
-        },
-        "judge_backend": {
-          "enum": [
-            "off",
-            "online",
-            "local"
-          ],
-          "description": "Judge pipeline selector. local = kev sidecar at local_judge.endpoint; restore reuses the gateway's PUT validation (loopback-only endpoint enforced there)."
-        },
-        "local_judge": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/local_judge"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Local judge sidecar settings (artifact pinning, loopback endpoint, inflight cap). Null = section never configured; v1 restore skips null sections."
-        },
-        "judge_max_inflight": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Online-judge concurrency cap."
-        },
-        "media_token_allowance": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Extra token budget allowance per media part before a request leaves the fast tier."
-        },
-        "max_media_parts": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Media parts above this count skip the judge (fast tier)."
-        },
-        "complexity_terms": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
-          "uniqueItems": true,
-          "description": "Complexity lexicon for the auto router (auto-router-complexity spec A2): a short request naming a hard task is routed into the JUDGE zone instead of straight to fast. Not a flagship pin — a lexicon matches words. Empty (the default) keeps the pre-spec routing. Semantically a SET: exported sorted ascending so a reorder is not a change."
-        },
-        "decision_log": {
-          "type": "boolean",
-          "description": "Emit the per-request auto-router decision log (spec A4): which zone or gate rule settled the tier, and for a judge verdict the input shape (lengths and counts only, never text). Off by default."
-        },
-        "judge_prompt": {
-          "type": "string",
-          "description": "The instruction the auto-router's judge is given (spec A). Empty means the gateway's built-in text. Must name every tier or the verdict cannot be parsed; the API refuses one that does not."
         }
       }
     },

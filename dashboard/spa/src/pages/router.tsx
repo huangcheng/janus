@@ -148,6 +148,9 @@ export type LocalJudgeCfg = {
 }
 
 export type AutoCfg = {
+  /** Existence switch (spec B). False = the virtual model is absent: not in
+   * /v1/models, and a direct call answers 404. */
+  enabled?: boolean
   model: string
   judge_backend: "off" | "online" | "local"
   judge_model: string | null
@@ -1423,13 +1426,35 @@ function AutoRouterCard({
           thresholds. Hot-reloaded by every gateway node on save.
           {source === "default" && " (currently defaults — not yet saved)"}
         </CardDescription>
-        <CardAction>
+        <CardAction className="flex items-center gap-3">
+          <label
+            htmlFor="auto-enabled"
+            className="flex items-center gap-2 text-xs text-muted-foreground"
+          >
+            <Checkbox
+              id="auto-enabled"
+              checked={cfg.enabled === true}
+              onCheckedChange={(v) => onChange({ ...cfg, enabled: v === true })}
+            />
+            Enabled
+          </label>
           <Button size="sm" disabled={saving} onClick={save}>
             {saving ? "Saving…" : "Save auto-router"}
           </Button>
         </CardAction>
       </CardHeader>
       <CardContent>
+        {cfg.enabled !== true ? (
+          <Alert className="mb-4">
+            <p>
+              The auto router is <strong>disabled</strong>. <code>{cfg.model}</code> is
+              absent from <code>/v1/models</code> and a direct call answers{" "}
+              <code>404 no_route</code>. Its configuration below is preserved and is
+              restored exactly when you re-enable it.
+            </p>
+          </Alert>
+        ) : null}
+        <div className={cfg.enabled === true ? "" : "pointer-events-none opacity-50"}>
         {cfg.tiers.fast.length + cfg.tiers.big.length + cfg.tiers.flagship.length ===
           0 && (
           <Alert className="mb-4">
@@ -1714,6 +1739,7 @@ function AutoRouterCard({
               </div>
             </div>
           </Field>
+        </div>
         </div>
       </CardContent>
     </Card>

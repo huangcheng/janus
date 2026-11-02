@@ -52,6 +52,11 @@ _ARTIFACT_URL_SUFFIXES = (
 )
 
 DEFAULTS = {
+    # Existence switch for the whole auto-router family (spec B). The
+    # gateway's code default is false; the 028 migration sets it true for
+    # installs that were already routing, so an upgrade does not take a
+    # working router out of service.
+    "enabled": False,
     "model": "janus-auto",
     "judge_backend": "off",
     "judge_model": None,
@@ -506,6 +511,9 @@ async def put_auto_router(request: Request, user: dict = Depends(require_auth)):
 
     if not isinstance(cfg.get("decision_log", DEFAULTS["decision_log"]), bool):
         raise _err(400, "invalid", "decision_log must be a boolean")
+
+    if not isinstance(cfg.get("enabled", DEFAULTS["enabled"]), bool):
+        raise _err(400, "invalid", "enabled must be a boolean")
 
     cfg["judge_prompt"] = _validate_judge_prompt(
         cfg.get("judge_prompt", DEFAULTS["judge_prompt"])

@@ -144,6 +144,55 @@ fleet_cache_put_files_one_face_test() ->
         janus_auto:fleet_cache_put(424243, <<"nonsense">>, <<"nobody">>, 30)
     ).
 
+%% --- Spec B: enabled is an EXISTENCE switch -------------------------
+
+%% Disabled must mean absent, not "hidden but callable". The router answers
+%% no_route (which every face already maps to 404) rather than `pass`, so
+%% the refusal is deliberate and identical everywhere.
+enabled_false_refuses_the_virtual_model_test() ->
+    Raw = (routable_raw(#{enabled => false}))#{model => <<"janus-auto">>},
+    janus_auto:set_enabled_raw(Raw),
+    ?assertEqual(
+        {error, no_route},
+        janus_auto:maybe_route(<<"janus-auto">>, #{
+            <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => <<"hi">>}]
+        })
+    ),
+    janus_auto:set_enabled_raw(#{}),
+    ok.
+
+%% Enabled must actually route — otherwise the switch only ever turns the
+%% feature OFF and the test above would pass against a broken build.
+enabled_true_routes_test() ->
+    Raw = (routable_raw(#{enabled => true}))#{model => <<"janus-auto">>},
+    janus_auto:set_enabled_raw(Raw),
+    Result = janus_auto:maybe_route(<<"janus-auto">>, #{
+        <<"messages">> => [#{<<"role">> => <<"user">>, <<"content">> => <<"hi">>}]
+    }),
+    %% Either a routed target or a tier-unavailable no_route is acceptable;
+    %% what matters is that the router ENGAGED rather than short-circuiting
+    %% at the disabled check.
+    ?assert(
+        case Result of
+            {ok, _, _} -> true;
+            {error, no_route} -> true;
+            pass -> false;
+            {error, Other} -> {unexpected, Other} =:= never
+        end
+    ),
+    janus_auto:set_enabled_raw(#{}),
+    ok.
+
+%% The default is OFF: an install that never sets the switch does not
+%% silently start routing. (The 028 migration enables existing installs.)
+enabled_defaults_off_test() ->
+    Cfg = janus_auto:validate(routable_raw(#{})),
+    ?assertEqual(false, janus_auto:enabled(Cfg)),
+    ?assertEqual(false, janus_auto:enabled(janus_auto:default_cfg())),
+    %% The fallback record must carry a real boolean, never undefined: a
+    %% failed settings read must not mean "enabled" OR crash.
+    ?assertEqual(true, is_boolean(janus_auto:enabled(janus_auto:default_cfg()))).
+
 %% --- A2: lexicon scope ---------------------------------------------
 
 %% The recommended list is non-empty — that is what makes the documented

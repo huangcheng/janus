@@ -32,6 +32,8 @@
 -export([judge_prompt_of/1, prompt_hash_of/1, builtin_judge_prompt/0]).
 -export([builtin_decisions_instruction/0]).
 -export([prompt_hash_for/1, cache_face_for_test/3]).
+%% The existence switch (spec B) — exported so tests drive the real parse.
+-export([enabled/1, set_enabled_raw/1]).
 %% Fleet decision-cache sharing (native-distribution spec B2):
 %% judge_model/0 is the ingress-side JudgeModel-match reference;
 %% fleet_cache_put/4 is the receive-side write API (never cross-owner
@@ -73,6 +75,14 @@
 }).
 
 -record(acfg, {
+    %% Existence switch for the whole family (spec B). FALSE means the
+    %% virtual model does not exist: not advertised, and a direct call
+    %% answers 404. It is deliberately NOT a "hide but still work" flag —
+    %% a model that is advertised as absent must behave as absent.
+    %%
+    %% Flipping it preserves every other value, so re-enabling restores the
+    %% configuration exactly.
+    enabled = false :: boolean(),
     model :: binary(),
     judge_model :: binary() | undefined,
     judge_backend :: off | online | local,
@@ -149,8 +159,21 @@ maybe_route(Name, ReqMap, Constraint) when
     try
         Cfg = normalized(),
         case Name =:= Cfg#acfg.model of
-            false -> pass;
-            true -> route_auto(Cfg, ReqMap, Constraint)
+            false ->
+                pass;
+            true ->
+                case Cfg#acfg.enabled of
+                    false ->
+                        %% Disabled = absent. NOT `pass`: pass would send the
+                        %% literal name downstream and let a listing miss
+                        %% decide, which is the same 404 reached by accident.
+                        %% Returning no_route makes the refusal deliberate and
+                        %% gives it one code path for every face.
+                        bump(disabled_refused),
+                        {error, no_route};
+                    true ->
+                        route_auto(Cfg, ReqMap, Constraint)
+                end
         end
     catch
         Class:Reason ->
@@ -240,8 +263,13 @@ snapshot() ->
     %% serve" view. /v1/models advertises on routable (M1): a tier list
     %% whose members were all deleted/disabled must not advertise a model
     %% every call would 404 on.
-    Routable = lists:any(fun model_available/1, Fast ++ Big ++ Flagship),
+    %% `enabled` joins `routable`: a disabled family is not advertised even
+    %% if its tier lists are full, because the call would 404. /v1/models
+    %% keys on routable (M1), so this is the single place the two agree.
+    HasMember = lists:any(fun model_available/1, Fast ++ Big ++ Flagship),
+    Routable = Cfg#acfg.enabled andalso HasMember,
     #{
+        enabled => Cfg#acfg.enabled,
         configured => Fast =/= [] orelse Big =/= [] orelse Flagship =/= [],
         routable => Routable,
         model => Cfg#acfg.model,
@@ -526,6 +554,15 @@ builtin_judge_prompt() -> judge_prompt().
 builtin_decisions_instruction() -> decisions_instruction().
 
 prompt_hash_for(Setting) -> prompt_hash(Setting).
+
+enabled(Cfg) -> Cfg#acfg.enabled.
+
+%% Install a raw settings map as the DB overlay, so a test can drive
+%% maybe_route/3 end to end (the router reads the DB layer plus app env).
+set_enabled_raw(Raw) ->
+    persistent_term:put(?DB_PT_KEY, Raw),
+    persistent_term:erase(?PT_KEY),
+    ok.
 
 %% Explicit face (the production caller derives it from the route).
 cache_face_for_test(Cfg, Hash, Face) -> face_key(Hash, Face, Cfg).
@@ -2812,6 +2849,7 @@ validate(Raw) ->
                 off
         end,
     Def#acfg{
+        enabled = bool_or(maps:get(enabled, Raw, Def#acfg.enabled), false),
         model = Model,
         judge_model = JM,
         judge_backend = Backend,
@@ -2858,6 +2896,7 @@ validate(Raw) ->
 default_cfg() ->
     LocalJ = default_local_judge(),
     #acfg{
+        enabled = false,
         model = <<"janus-auto">>,
         judge_model = undefined,
         judge_backend = off,
@@ -3394,6 +3433,7 @@ db_settings_override_test() ->
 
 cfg() ->
     #acfg{
+        enabled = false,
         model = <<"janus-auto">>,
         judge_model = undefined,
         judge_backend = off,
@@ -3725,8 +3765,28 @@ maybe_route_pass_test() ->
     ?assertEqual(pass, maybe_route(<<"other-model">>, #{<<"messages">> => [u()]})).
 
 maybe_route_crash_degrades_test() ->
-    %% Junk input on the virtual name must degrade to pass, never raise.
-    ?assertEqual(pass, maybe_route(<<"janus-auto">>, #{<<"messages">> => bad})).
+    %% Junk input on the virtual name must never raise. What it degrades TO
+    %% depends on the existence switch, and the order matters: when the
+    %% family is disabled the model does not exist, so the answer is
+    %% no_route (404) and the body is never parsed — there is nothing to
+    %% degrade, and answering `pass` would send a model that is advertised
+    %% as absent. Enabled, junk still degrades to pass as before.
+    ?assertEqual(
+        {error, no_route},
+        maybe_route(<<"janus-auto">>, #{<<"messages">> => bad})
+    ),
+    reset_cfg_cache(),
+    persistent_term:put(
+        ?DB_PT_KEY,
+        #{
+            <<"enabled">> => true,
+            <<"model">> => <<"janus-auto">>,
+            <<"tiers">> => #{<<"fast">> => [<<"m-a">>]}
+        }
+    ),
+    ?assertEqual(pass, maybe_route(<<"janus-auto">>, #{<<"messages">> => bad})),
+    persistent_term:erase(?DB_PT_KEY),
+    reset_cfg_cache().
 
 cache_pos_jm_mismatch_test() ->
     reclaim_tables(),
