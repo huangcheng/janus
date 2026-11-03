@@ -24,28 +24,32 @@ UPSTREAM_PORT="${UPSTREAM_PORT:-18090}"
 JANUS_PORT="${JANUS_PORT:-18091}"
 API_KEY="${TEST_API_KEY:-sk-fake-matrix-a}"
 
-mkdir -p "$ARTIFACT_DIR"
-# ARTIFACT_DIR is an advertised override and the runner DELETES inside it.
-# A name blacklist is the wrong instrument: `pwd -P` resolves /tmp to
-# /private/tmp on macOS, symlinks and trailing slashes slip past a string
-# compare, and the next realistic typo is some other shared directory.
+# ARTIFACT_DIR is an advertised override and this script DELETES inside it.
 #
-# So the rule is about CONTENT, not name: the directory must be absent, empty,
-# or already marked as ours by a previous run. A shared directory with other
-# people's files in it is refused no matter what it is called.
+# Name blacklists and `-L` symlink tests all failed review for good reason:
+# `-L` is an lstat of the path AS WRITTEN, so a trailing slash dereferences it,
+# a symlink in any MIDDLE component is invisible to it, and on macOS `pwd -P`
+# turns /tmp into /private/tmp so a name compare misses. Chasing each of those
+# is a losing game.
+#
+# So the rule is about CONTENT, evaluated on a fully resolved path: first
+# canonicalise (which resolves every component, including a final symlink),
+# then require the directory to be absent, empty, or already marked as ours.
+# A planted link to a populated foreign directory resolves to that directory
+# and is refused; a planted link to an empty one loses nothing.
 ARTIFACT_MARKER=".janus-matrix-a"
-# Refuse a symlink outright. `-d` follows it, but `find` does NOT follow a
-# symlinked starting point, so a link to a shared directory would list as
-# empty, pass the guard, and the deletes below would run inside the TARGET.
-# /tmp is world-writable, so such a link can be planted by another user.
-if [[ -L "$ARTIFACT_DIR" ]]; then
-  echo "refusing to use $ARTIFACT_DIR: it is a symlink" >&2; exit 2
-fi
-if [[ -d "$ARTIFACT_DIR" && ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
-  # A failed listing must ABORT, not read as "empty": silently treating an
-  # unreadable directory as safe is how the destructive globs below run.
-  # bash strips NULs from command substitution, so the result is non-empty
-  # iff at least one entry exists, regardless of embedded newlines.
+# Strip trailing slashes BEFORE anything else: a trailing slash makes `-L`
+# and `-f` dereference, and later uses must see one identical value.
+while [[ "$ARTIFACT_DIR" == */ && "$ARTIFACT_DIR" != "/" ]]; do
+  ARTIFACT_DIR="${ARTIFACT_DIR%/}"
+done
+mkdir -p "$ARTIFACT_DIR" 2>/dev/null || {
+  echo "cannot create $ARTIFACT_DIR" >&2; exit 2; }
+ARTIFACT_DIR="$(cd "$ARTIFACT_DIR" && pwd -P)" || {
+  echo "cannot resolve $ARTIFACT_DIR" >&2; exit 2; }
+
+if [[ ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
+  # A failed listing must ABORT, not read as "empty".
   if ! listing=$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -print0 2>&1); then
     echo "refusing to use $ARTIFACT_DIR: cannot list it ($listing)" >&2
     exit 2
@@ -55,10 +59,9 @@ if [[ -d "$ARTIFACT_DIR" && ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
     exit 2
   fi
 fi
-# Probe the shapes this script actually writes BEFORE claiming the directory
-# with its marker: a failure after the marker would leave a directory that
-# looks like ours but cannot hold artifacts, and the next run would skip the
-# emptiness check and delete inside it anyway.
+# Probe the shapes actually written, BEFORE claiming the directory: a failure
+# after the marker would leave a directory that looks like ours but cannot
+# hold artifacts, and the next run would skip the emptiness check.
 for probe in .write-probe.log .write-probe.txt .write-probe.json; do
   if ! : >"$ARTIFACT_DIR/$probe" 2>/dev/null; then
     echo "cannot create $probe in $ARTIFACT_DIR" >&2; exit 2
