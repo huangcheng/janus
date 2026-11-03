@@ -34,16 +34,20 @@ mkdir -p "$ARTIFACT_DIR"
 # or already marked as ours by a previous run. A shared directory with other
 # people's files in it is refused no matter what it is called.
 ARTIFACT_MARKER=".janus-matrix-a"
-if [[ -d "$ARTIFACT_DIR" ]]; then
-  if [[ ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
-    stray=$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)
-    if [[ -n "$stray" ]]; then
-      echo "refusing to use $ARTIFACT_DIR: it is not empty and was not created by this script" >&2
-      exit 2
-    fi
+if [[ -d "$ARTIFACT_DIR" && ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
+  # Null-delimited so a filename with a newline cannot hide the rest, and the
+  # read's own status is kept separate from "find failed".
+  stray=""
+  while IFS= read -r -d '' entry; do stray="$entry"; break; done \
+    < <(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  if [[ -n "$stray" ]]; then
+    echo "refusing to use $ARTIFACT_DIR: it is not empty and was not created by this script" >&2
+    exit 2
   fi
 fi
-: >"$ARTIFACT_DIR/$ARTIFACT_MARKER"
+if ! : >"$ARTIFACT_DIR/$ARTIFACT_MARKER" 2>/dev/null; then
+  echo "cannot write the artifact marker in $ARTIFACT_DIR" >&2; exit 2
+fi
 rm -f "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.json 2>/dev/null
 # A FRESH database per run, inside the artifact dir. The default SQLite path
 # is the relative "data/janus.db", and /app is the mounted gateway checkout,
@@ -111,9 +115,19 @@ then
   say "  SEED GENERATION FAILED — cannot continue without seed.json"
   exit 1
 fi
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["providers"]' \
-  "$ARTIFACT_DIR/seed.json" 2>/dev/null \
-  || { say "  seed.json is missing, unparseable, or has no providers"; exit 1; }
+python3 - "$ARTIFACT_DIR/seed.json" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+    providers = doc["providers"]
+    if not isinstance(providers, list) or not providers:
+        raise SystemExit("providers is empty or not a list")
+except SystemExit:
+    raise
+except Exception as exc:
+    raise SystemExit(str(exc))
+PY
+[[ $? -eq 0 ]] || { say "  seed.json is missing, unparseable, or has no providers"; exit 1; }
 
 # ------------------------------------------------------------------ janus
 say "== Janus on :$JANUS_PORT (docker, sqlite)"
