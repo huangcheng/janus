@@ -20,6 +20,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 NETWORK="${NETWORK:-janus-matrix-d-net}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-18096}"
 MASTER_PORT="${MASTER_PORT:-18097}"
+# Admin port must stay free too: 8090 is where /stats lives.
+MASTER_ADMIN_PORT="${MASTER_ADMIN_PORT:-18099}"
 WORKER_PORT="${WORKER_PORT:-18098}"
 API_KEY="${TEST_API_KEY:-sk-matrix-test}"
 MASTER_NODE_NAME="${MASTER_NODE_NAME:-janus@matrix-master}"
@@ -129,7 +131,7 @@ boot_node() {
     -e JANUS_FLEET_PEERS="$peers" \
     -e JANUS_FLEET_ENABLED=false \
     -e JANUS_FLEET_DIST_PORT=25672 \
-    -e JANUS_FLEET_GEN_TLS=1 \
+    -e JANUS_FLEET_TLS_DIR="/artifacts/fleet-tls-node-${node_name#*@}" \
     -e JANUS_HTTP_PORT=8080 \
     -e JANUS_SQLITE_PATH="/artifacts/$db" \
     -e JANUS_SEED_PATH="/artifacts/$seed" \
@@ -152,6 +154,11 @@ boot_node() {
       VMARGS=/rel/releases/1/vm.args
       # erl -args_file takes the rendered -name/-setcookie, and ERL_FLAGS
       # carries the TLS distribution flags the renderer exported.
+      # Distribution must match the address family the docker bridge hands
+      # out. The container-name lookup returns IPv6 first while the rendered
+      # listener binds 0.0.0.0, so a plain ping returns pang and the worker
+      # never registers — pin both sides to IPv4.
+      ERL_FLAGS="$ERL_FLAGS -kernel inet_dist_use_interface {127,0,0,1}"
       echo "ERL_FLAGS=${ERL_FLAGS:-none}" >&2
       exec erl -noshell -args_file "$VMARGS" -pa /build/default/lib/*/ebin \
         -eval "application:ensure_all_started(janus), io:format(\"janus_up~n\"), receive after infinity -> ok end."
@@ -180,6 +187,57 @@ boot_node() {
   say "  $name did not become healthy"; docker logs "$name" 2>&1 | tail -25; return 1
 }
 
+# ---------------------------------------------------------------- TLS
+# One CA for the cluster, one leaf per node. `JANUS_FLEET_GEN_TLS=1` inside
+# each container would mint a DIFFERENT CA per container, so the two nodes
+# never trust each other and the dist handshake fails with nothing in the
+# logs — which is exactly what kept the worker out of the pool.
+say "== minting a shared CA and one leaf per node"
+if ! command -v openssl >/dev/null 2>&1; then
+  say "  openssl not found on the host; the D group needs it to mint the shared CA"
+  exit 2
+fi
+TLS_OUT="$ARTIFACT_DIR/fleet-tls"
+"$PYTHON" - "$TLS_OUT" "$MASTER_NODE_NAME" "$WORKER_NODE_NAME" <<'PY'
+import os, subprocess, sys
+out, master, worker = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(out, exist_ok=True)
+hosts = [n.split("@", 1)[1] for n in (master, worker)] + ["localhost"]
+san = ",".join(f"DNS:{h}" for h in hosts) + ",IP:127.0.0.1"
+def run(*a):
+    subprocess.run(a, check=True, cwd=out,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", "ca-key.pem", "-out", "ca.pem", "-days", "3650",
+    "-subj", "/CN=janus-fleet-ca")
+for name in (master, worker):
+    host = name.split("@", 1)[1]
+    run("openssl", "req", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", f"node-key-{host}.pem", "-out", f"node-{host}.csr",
+        "-subj", f"/CN={host}")
+    ext = os.path.join(out, f"san-{host}.ext")
+    with open(ext, "w") as fh:
+        fh.write(f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n")
+    run("openssl", "x509", "-req", "-in", f"node-{host}.csr",
+        "-CA", "ca.pem", "-CAkey", "ca-key.pem", "-CAcreateserial",
+        "-out", f"node-{host}.pem", "-days", "3650", "-extfile", ext)
+    os.remove(os.path.join(out, f"node-{host}.csr"))
+    os.remove(ext)
+PY
+say "  CA + $(ls "$TLS_OUT" | grep -c '^node-.*\.pem$') leaf(s) minted"
+
+# Lay each node out the way the renderer expects: ca.pem / node.pem /
+# node-key.pem in one directory.
+stage_tls() {  # stage_tls HOSTPART
+  local d="$ARTIFACT_DIR/fleet-tls-node-$1"
+  mkdir -p "$d"
+  cp "$TLS_OUT/ca.pem" "$d/ca.pem"
+  cp "$TLS_OUT/node-$1.pem" "$d/node.pem"
+  cp "$TLS_OUT/node-key-$1.pem" "$d/node-key.pem"
+}
+stage_tls "${MASTER_NODE_NAME#*@}"
+stage_tls "${WORKER_NODE_NAME#*@}"
+
 say "== master on :$MASTER_PORT"
 boot_node "${MASTER_CONTAINER:-matrix-master}" master "$MASTER_PORT" \
   master.db seed.json || exit 1
@@ -191,6 +249,10 @@ boot_node "${WORKER_CONTAINER:-matrix-worker}" worker "$WORKER_PORT" \
 say "  worker up"
 
 BASE="http://127.0.0.1:$MASTER_PORT"
+# The stats plane is an ADMIN route (janus_http_sup:admin_routes/0), so it is
+# read from the admin port — hitting the agent port returns nothing, which
+# made an empty pool indistinguishable from an unreachable stats plane.
+STATS_BASE="http://127.0.0.1:$MASTER_ADMIN_PORT"
 MASTER_C="${MASTER_CONTAINER:-matrix-master}"
 WORKER_C="${WORKER_CONTAINER:-matrix-worker}"
 
@@ -211,7 +273,7 @@ logs_of() { docker logs "$1" 2>&1; }
 wait_for_workers() {
   local want="$1" tries="${2:-60}" json n
   for _ in $(seq 1 "$tries"); do
-    json=$(curl -sS -m3 "$BASE/stats/sched" \
+    json=$(curl -sS -m3 "$STATS_BASE/stats/sched" \
       -H "authorization: Bearer ${STATS_TOKEN:-$API_KEY}" 2>/dev/null || true)
     n=$(printf '%s' "$json" | grep -o '"node"' | wc -l | tr -d ' ')
     [[ "${n:-0}" -ge "$want" ]] && { printf '%s' "$json" >"$ARTIFACT_DIR/sched.json"; return 0; }
