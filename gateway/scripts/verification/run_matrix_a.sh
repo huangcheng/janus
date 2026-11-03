@@ -25,6 +25,12 @@ JANUS_PORT="${JANUS_PORT:-18091}"
 API_KEY="${TEST_API_KEY:-sk-fake-matrix-a}"
 
 mkdir -p "$ARTIFACT_DIR"
+# ARTIFACT_DIR is an advertised override and the next line deletes inside it.
+# Refuse a shared or system path: a typo would wipe unrelated files.
+case "$ARTIFACT_DIR" in
+  / | /tmp | /var | /usr | /etc | "$HOME" | "$HOME/")
+    echo "refusing to use $ARTIFACT_DIR as the artifact dir" >&2; exit 2 ;;
+esac
 rm -f "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.json 2>/dev/null
 # A FRESH database per run, inside the artifact dir. The default SQLite path
 # is the relative "data/janus.db", and /app is the mounted gateway checkout,
@@ -53,6 +59,9 @@ docker rm -f janus-matrix-a >/dev/null 2>&1
 
 # --------------------------------------------------------------- upstream
 say "== mock upstream on :$UPSTREAM_PORT"
+# The mock must bind 0.0.0.0: the GATEWAY is a container and reaches it over
+# the docker bridge. The gateway itself is published on loopback only, so the
+# stack is not reachable off-host even though it holds a hardcoded test key.
 JANUS_MOCK_PORT="$UPSTREAM_PORT" JANUS_MOCK_HOST=0.0.0.0 \
   "$DASH/.venv/bin/python" "$DASH/scripts/mock_upstream.py" \
   >"$ARTIFACT_DIR/upstream.log" 2>&1 &
@@ -66,7 +75,7 @@ curl -sf -m2 -o /dev/null "http://127.0.0.1:$UPSTREAM_PORT/v1/models" 2>/dev/nul
 
 # ------------------------------------------------------------------- seed
 # One provider per mock key so each row can select a fault class by model.
-python3 - "$ARTIFACT_DIR/seed.json" "$API_KEY" "$UPSTREAM_PORT" <<'PY'
+if ! python3 - "$ARTIFACT_DIR/seed.json" "$API_KEY" "$UPSTREAM_PORT" <<'PY'
 import json, sys
 path, key, port = sys.argv[1], sys.argv[2], sys.argv[3]
 providers, models = [], []
@@ -85,6 +94,11 @@ for name, mkey in [
     })
 json.dump({"agent_api_key": key, "providers": providers}, open(path, "w"), indent=2)
 PY
+then
+  say "  SEED GENERATION FAILED — cannot continue without seed.json"
+  exit 1
+fi
+[[ -s "$ARTIFACT_DIR/seed.json" ]] || { say "  seed.json is empty"; exit 1; }
 
 # ------------------------------------------------------------------ janus
 say "== Janus on :$JANUS_PORT (docker, sqlite)"
@@ -107,8 +121,8 @@ if ! docker run --rm -v "$GW:/app" -v janus-matrix-a-build:/build -w /app \
   exit 1
 fi
 say "  build ok"
-docker run -d --rm --name janus-matrix-a \
-  -p "$JANUS_PORT:8080" \
+docker run -d --name janus-matrix-a \
+  -p "127.0.0.1:$JANUS_PORT:8080" \
   --add-host=host.docker.internal:host-gateway \
   -e JANUS_HTTP_PORT=8080 \
   -e JANUS_SQLITE_PATH=/artifacts/janus.db \
@@ -117,7 +131,7 @@ docker run -d --rm --name janus-matrix-a \
   -e JANUS_API_KEY_PEPPER=janus-matrix-a-pepper \
   -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
   -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v janus-matrix-a-build:/build \
-  -w /app erlang:27-alpine sh -c "$BOOT" >/dev/null 2>&1
+  -w /app erlang:27-alpine sh -c "$BOOT" >"$ARTIFACT_DIR/boot.log" 2>&1
 
 BASE="http://127.0.0.1:$JANUS_PORT"
 for _ in $(seq 1 240); do
