@@ -297,14 +297,32 @@ Not fixed here, because the fix belongs to whoever owns the fleet lifecycle
 and needs a decision on what "enabled" should start on a master. Recorded so
 it stops being invisible.
 
-### Blocker for the remaining D rows
+### Blocker for the remaining D rows — now identified
 
-D1 and everything downstream need a worker to actually register. Dist is
-configured and the worker does not dial; the container-name lookup on this
-Docker network returns an IPv6 address and `-kernel inet6` did not change
-the outcome. That is the next thing to investigate, and it is
-infrastructure work — no product code should change to make a verification
-topology work.
+D1 and everything downstream need a worker to actually register. After
+fixing four separate infrastructure defects (shared CA instead of a
+per-container CA, SANs as full long node names rather than host parts,
+`/stats` read from the admin port, and a stats token so the probe is not a
+401), the probe is finally trustworthy: `/stats/sched` returns real JSON
+with `"workers":[]`.
+
+That makes the remaining blocker precise rather than vague. Neither node
+logs a single distribution event. The two knobs interact as follows:
+
+| `JANUS_FLEET_ENABLED` | Effect |
+|---|---|
+| `false` (shipped default) | no fleet client/server; nothing dials; pool stays empty |
+| `true` on master | `application:ensure_all_started(janus)` hangs forever |
+
+So the master/worker pool cannot be stood up in a verification stack at
+all until the `true` path is fixed. That is the same product defect recorded
+above, and it is now on the critical path for 12 matrix rows instead of
+being an interesting aside.
+
+Whoever fixes it should decide what `enabled=true` is supposed to start on a
+master, and the D group becomes completable immediately afterwards — the
+rest of the scaffold (network, CA, node names, admin auth) is done and
+verified.
 
 ### Not yet executed
 

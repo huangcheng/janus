@@ -101,6 +101,10 @@ boot_node() {
   esac
   matrix_claim_name "$name"
   matrix_track_container "$name"
+  # JANUS_STATS_TOKEN: loopback-only admin auth does not apply to a request
+  # forwarded through a published port (it arrives from the bridge gateway),
+  # so /stats needs a token or every probe is a 401.
+  #
   # JANUS_FLEET_PEERS is the dist allowlist the master enforces, and the
   # worker's target. JANUS_FLEET_ENABLED stays FALSE, which is what the
   # shipped deployment uses: workers dial the master and send their own
@@ -137,6 +141,7 @@ boot_node() {
     -e JANUS_SEED_PATH="/artifacts/$seed" \
     -e JANUS_AUTO_SEED="$auto_seed" \
     -e JANUS_API_KEY_PEPPER="${MATRIX_PEPPER:-janus-matrix-pepper}" \
+    -e JANUS_STATS_TOKEN="$API_KEY" \
     -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
     -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v "$BUILD_VOLUME":/build \
     -w /app "$ERLANG_IMAGE" sh -c '
@@ -154,11 +159,6 @@ boot_node() {
       VMARGS=/rel/releases/1/vm.args
       # erl -args_file takes the rendered -name/-setcookie, and ERL_FLAGS
       # carries the TLS distribution flags the renderer exported.
-      # Distribution must match the address family the docker bridge hands
-      # out. The container-name lookup returns IPv6 first while the rendered
-      # listener binds 0.0.0.0, so a plain ping returns pang and the worker
-      # never registers — pin both sides to IPv4.
-      ERL_FLAGS="$ERL_FLAGS -kernel inet_dist_use_interface {127,0,0,1}"
       echo "ERL_FLAGS=${ERL_FLAGS:-none}" >&2
       exec erl -noshell -args_file "$VMARGS" -pa /build/default/lib/*/ebin \
         -eval "application:ensure_all_started(janus), io:format(\"janus_up~n\"), receive after infinity -> ok end."
@@ -202,8 +202,12 @@ TLS_OUT="$ARTIFACT_DIR/fleet-tls"
 import os, subprocess, sys
 out, master, worker = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(out, exist_ok=True)
-hosts = [n.split("@", 1)[1] for n in (master, worker)] + ["localhost"]
-san = ",".join(f"DNS:{h}" for h in hosts) + ",IP:127.0.0.1"
+# The pinned verify fun compares SAN dNSNames against the entries of
+# JANUS_FLEET_PEERS, which are FULL long names — so the SAN must be the long
+# name too, not just the host part. With host-only SANs the handshake fails
+# with san_not_in_peer_set and a shared CA buys nothing.
+hosts = [master, worker]
+san = ",".join(f"DNS:{h}" for h in hosts)
 def run(*a):
     subprocess.run(a, check=True, cwd=out,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -214,7 +218,7 @@ for name in (master, worker):
     host = name.split("@", 1)[1]
     run("openssl", "req", "-newkey", "rsa:2048", "-nodes",
         "-keyout", f"node-key-{host}.pem", "-out", f"node-{host}.csr",
-        "-subj", f"/CN={host}")
+        "-subj", f"/CN={name}")
     ext = os.path.join(out, f"san-{host}.ext")
     with open(ext, "w") as fh:
         fh.write(f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n")
