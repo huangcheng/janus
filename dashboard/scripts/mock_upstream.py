@@ -234,6 +234,43 @@ async def models():
     return {"object": "list", "data": [{"id": "mock-model", "object": "model", "owned_by": "mock"}]}
 
 
+@app.post("/v1/embeddings")
+async def embeddings(request: Request):
+    """Native OpenAI-Embeddings endpoint for the modality rows.
+
+    Same key contract as chat, so a fault class is selected by picking the
+    provider key: mock-key-e gives 5xx, mock-key-a gives 401, and so on.
+    That matters because the gateway documents NO failover on this surface —
+    a row has to be able to prove the failure reaches the client rather than
+    being retried onto another route.
+
+    `mock-embed-nousage` omits the usage object on purpose: the gateway must
+    record "unknown", never invent a token count.
+    """
+    auth = request.headers.get("authorization", "")
+    key = auth.removeprefix("Bearer ").strip()
+    body = await request.json()
+    model = body.get("model", "mock-embed")
+
+    fault = KEY_BEHAVIORS.get(key)
+    if fault is not None:
+        status, payload = fault
+        return JSONResponse(payload, status_code=status)
+
+    # Echo the shape the caller sent so the row can assert the gateway did
+    # not rewrite the input.
+    inp = body.get("input")
+    n = len(inp) if isinstance(inp, list) else 1
+    data = [
+        {"object": "embedding", "index": i, "embedding": [0.1, 0.2, 0.3]}
+        for i in range(n)
+    ]
+    out = {"object": "list", "data": data, "model": model}
+    if "nousage" not in model:
+        out["usage"] = {"prompt_tokens": 3, "total_tokens": 3}
+    return out
+
+
 @app.post("/v1/responses")
 async def responses(request: Request):
     """Minimal native OpenAI-Responses endpoint: any key -> a tiny SSE

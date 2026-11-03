@@ -50,6 +50,7 @@ apply_seed(Map) ->
                         AgentKey = validate_agent_key(Map),
                         lists:foreach(fun apply_provider/1, Validated),
                         maybe_seed_agent_key(AgentKey),
+                        apply_settings(map_get(Map, settings, #{})),
                         bump_generation()
                     catch
                         Class:Reason:Stack ->
@@ -129,6 +130,46 @@ validate_agent_key(Map) ->
         undefined -> undefined;
         Raw0 -> required_secret(Raw0, agent_api_key)
     end.
+
+%% Seed-time settings. Optional: a file without a `settings` object behaves
+%% exactly as before.
+%%
+%% Settings are read from the database at BOOT and are not part of the config
+%% poller (that poller republishes the CATALOG), so a verification stack
+%% cannot enable a knob by writing the row afterwards — the gateway would
+%% keep serving the boot-time value. Seeding it means one generation publish
+%% carries both, and a runner needs no restart dance.
+-spec apply_settings(map()) -> ok.
+apply_settings(Map) when is_map(Map), map_size(Map) > 0 ->
+    maps:foreach(fun(Key, Value) -> upsert_setting(Key, Value) end, Map),
+    ok;
+apply_settings(_Other) ->
+    ok.
+
+upsert_setting(Key, Value) ->
+    Bin = iolist_to_binary(thoas:encode(normalise_setting(Value))),
+    case
+        q(
+            <<"INSERT INTO settings (key, value) VALUES (?, ?) "
+              "ON CONFLICT(key) DO UPDATE SET value = excluded.value">>,
+            [to_bin(Key), Bin]
+        )
+    of
+        {ok, _} ->
+            logger:info(#{what => janus_seed_setting, key => to_bin(Key)}),
+            ok;
+        {error, Reason} ->
+            error({seed_setting, to_bin(Key), Reason})
+    end.
+
+%% The seed file is JSON, so a value already arrives as a decoded term; this
+%% only makes the intent explicit for strings vs structured objects.
+normalise_setting(V) when is_map(V); is_list(V); is_boolean(V); is_number(V) -> V;
+normalise_setting(V) when is_binary(V) -> V.
+
+to_bin(B) when is_binary(B) -> B;
+to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
+to_bin(L) when is_list(L) -> iolist_to_binary(L).
 
 apply_provider(#{name := Name, base_url := Base, protocol := Proto, keys := Keys, models := Models}) ->
     ProviderId = upsert_provider(Name, Base, Proto),

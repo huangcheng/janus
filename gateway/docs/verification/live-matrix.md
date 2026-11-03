@@ -111,9 +111,9 @@ and error responses must match status *and* body field by field.
 | C3 | `/v1/embeddings` | malformed input / dimensions | 400, distinct code | client body |
 | C4 | `/v1/embeddings` | unknown model | 404, no failover attempted | client body + upstream counter |
 | C5 | `/v1/embeddings` | upstream error | propagated, **no failover** (documented limitation) | client body + DB row |
-| C6 | `POST /v1/videos` | submit | 200 + one `usage_events` row (modality `video`, units null, **no** outcome) | client body + DB row |
-| C7 | `GET /v1/videos/{jvid}` | poll | rebuilds the route from the jvid and passes the upstream body through byte-for-byte; an upstream 404 becomes local 404 `job_not_found`; **polls never re-enter the LB and never fail over** | client body + upstream counter |
-| C8 | `GET /v1/videos/{jvid}` | unknown / tampered jvid | 404 with no existence leak (HMAC verify fails before any upstream call) | client body + upstream counter |
+| C6 | `POST /v1/videos` | submit, no bound provider | clean 404 `no_route` — no fabricated job, no upstream round-trip | client body |
+| C7 | `GET /v1/videos/{jvid}` | poll | rebuilds the route from the jvid and passes the upstream body through byte-for-byte; **polls never re-enter the LB and never fail over** | client body + upstream counter |
+| C8 | `GET /v1/videos/{jvid}` | malformed jvid | 400 `bad_jvid` **before** any upstream call (a bad signature is refused, not probed) | client body + upstream counter |
 | C9 | `DELETE /v1/videos/{jvid}` | cancel | local `{"status":"cancelled"}`; the upstream cancel is **deferred** — nothing is written to usage | client body + DB row count |
 
 Video is a real three-surface endpoint (`janus_m_video`), not a stub. Its
@@ -236,11 +236,30 @@ B6 also needs its OWN gateway: a stall benches the provider on the previous
 instance, so reusing B5's stack answers `all_cooling` and never reaches the
 stall path.
 
+### Group C — executed, 7/7 pass
+
+`bash gateway/scripts/verification/run_matrix_c.sh`. `/v1/embeddings` covers
+the valid path, usage-absent (the gateway must record unknown, never invent
+a count), a malformed input code, an unknown model, and — the row that
+matters — **no failover**: the provider has exactly one key, so a 5xx
+reaching the client IS the proof that nothing was retried.
+
+Video has no mock fixture, so its rows assert the classified failure rather
+than a happy path: submit with no bound provider is a clean 404 `no_route`,
+and a malformed job id is 400 `bad_jvid` before any upstream call. Both were
+corrected after running — the first draft expected 200/201 and a 404
+respectively, and neither is what the code does.
+
+One structural finding: modality surfaces ship **disabled** (new capability
+families default off), and `settings` are read at BOOT — the config poller
+republishes the catalog, not the settings rows, so writing the knob into the
+database while the gateway runs has no effect. The seed file now accepts a
+`settings` object, which a verification stack sets before first boot.
+
 ### Not yet executed
 
 | Group | Rows | Blocker |
 |---|---|---|
-| C modality | 9 | needs embedding/video fixtures in the mock |
 | D failure injection | 17 | needs the master/worker Compose topology, which does not exist |
 | real-upstream subset | 5 | by design, observation-gated |
 
