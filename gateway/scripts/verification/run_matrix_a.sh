@@ -7,7 +7,28 @@
 #
 #   bash gateway/scripts/verification/run_matrix_a.sh
 #
-# Artifacts: $ARTIFACT_DIR (default /tmp/janus-matrix-a/)
+# Requirements (checked, with a clear error if missing — nothing is assumed
+# about the host):
+#   docker            with a working daemon
+#   python3           >= 3.8, for the mock upstream and seed generation
+#   fastapi + uvicorn importable by $PYTHON, for the mock upstream
+#   curl
+#
+# Overridable (all have neutral defaults):
+#   PYTHON            interpreter that can import fastapi+uvicorn
+#                     (default: python3)
+#   ERLANG_IMAGE      image used to build and run the gateway
+#                     (default: "$ERLANG_IMAGE")
+#   CONTAINER_NAME    docker container name (default: janus-matrix-a)
+#   BUILD_VOLUME      docker volume for rebar output
+#                     (default: janus-matrix-a-build)
+#   ARTIFACT_DIR      parent for the run directory; a NEW timestamped
+#                     subdirectory is created inside it. Default: mktemp -d
+#   UPSTREAM_HOST     how the GATEWAY CONTAINER addresses the mock running on
+#                     the host. Default host.docker.internal, which needs
+#                     Docker Desktop or Docker >= 20.10 (--add-host
+#                     host-gateway). Override with the host's address on the
+#                     docker bridge if that flag is unavailable.
 #   seed.json, upstream.log, jarvis*.log, per-row .http/.body captures,
 #   summary.txt — one line per row with PASS/FAIL and the evidence.
 #
@@ -20,9 +41,39 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GW="$ROOT/gateway"
 DASH="$ROOT/dashboard"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
+PYTHON="${PYTHON:-python3}"
+ERLANG_IMAGE="${ERLANG_IMAGE:-erlang:27-alpine}"
+CONTAINER_NAME="${CONTAINER_NAME:-janus-matrix-a}"
+BUILD_VOLUME="${BUILD_VOLUME:-janus-matrix-a-build}"
+UPSTREAM_HOST="${UPSTREAM_HOST:-host.docker.internal}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-18090}"
 JANUS_PORT="${JANUS_PORT:-18091}"
 API_KEY="${TEST_API_KEY:-sk-fake-matrix-a}"
+
+# Preflight: fail with a specific message rather than somewhere downstream.
+# Nothing about the host is assumed — each requirement is named and checked.
+missing=""
+command -v docker >/dev/null 2>&1 || missing="$missing docker"
+command -v curl   >/dev/null 2>&1 || missing="$missing curl"
+command -v "$PYTHON" >/dev/null 2>&1 || missing="$missing $PYTHON"
+if [[ -n "$missing" ]]; then
+  echo "missing required command(s):$missing" >&2
+  echo "see the Requirements block at the top of this script" >&2
+  exit 2
+fi
+if ! docker info >/dev/null 2>&1; then
+  echo "docker is installed but the daemon is not reachable" >&2
+  exit 2
+fi
+if ! "$PYTHON" -c 'import fastapi, uvicorn' >/dev/null 2>&1; then
+  echo "$PYTHON cannot import fastapi+uvicorn, which the mock upstream needs." >&2
+  echo "install them, or point PYTHON at an interpreter that has them:" >&2
+  echo "  pip install 'fastapi>=0.115' 'uvicorn[standard]>=0.32'" >&2
+  exit 2
+fi
+if ! docker image inspect "$ERLANG_IMAGE" >/dev/null 2>&1; then
+  echo "note: $ERLANG_IMAGE is not present locally; docker will pull it"
+fi
 
 # Artifact retention must not require deleting anything.
 #
@@ -88,11 +139,11 @@ skip(){ SKIP=$((SKIP+1)); ROWS+=("$(printf '%-4s %-6s %s' SKIP "$1" "$2")"); say
 
 cleanup() {
     [[ -n "${UP_PID:-}" ]] && kill "$UP_PID" 2>/dev/null
-    docker rm -f janus-matrix-a >/dev/null 2>&1
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
     wait 2>/dev/null
 }
 trap cleanup EXIT
-docker rm -f janus-matrix-a >/dev/null 2>&1
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
 
 # --------------------------------------------------------------- upstream
 say "== mock upstream on :$UPSTREAM_PORT"
@@ -100,7 +151,7 @@ say "== mock upstream on :$UPSTREAM_PORT"
 # the docker bridge. The gateway itself is published on loopback only, so the
 # stack is not reachable off-host even though it holds a hardcoded test key.
 JANUS_MOCK_PORT="$UPSTREAM_PORT" JANUS_MOCK_HOST=0.0.0.0 \
-  "$DASH/.venv/bin/python" "$DASH/scripts/mock_upstream.py" \
+  "$PYTHON" "$DASH/scripts/mock_upstream.py" \
   >"$ARTIFACT_DIR/upstream.log" 2>&1 &
 UP_PID=$!
 for _ in $(seq 1 100); do
@@ -112,9 +163,9 @@ curl -sf -m2 -o /dev/null "http://127.0.0.1:$UPSTREAM_PORT/v1/models" 2>/dev/nul
 
 # ------------------------------------------------------------------- seed
 # One provider per mock key so each row can select a fault class by model.
-if ! python3 - "$ARTIFACT_DIR/seed.json" "$API_KEY" "$UPSTREAM_PORT" <<'PY'
+if ! python3 - "$ARTIFACT_DIR/seed.json" "$API_KEY" "$UPSTREAM_PORT" "$UPSTREAM_HOST" <<'PY'
 import json, sys
-path, key, port = sys.argv[1], sys.argv[2], sys.argv[3]
+path, key, port, host = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 providers, models = [], []
 for name, mkey in [
     ("healthy", "mock-key-b"), ("auth", "mock-key-a"), ("deny", "mock-key-c"),
@@ -124,7 +175,7 @@ for name, mkey in [
     models.append(model)
     providers.append({
         "name": name,
-        "base_url": f"http://host.docker.internal:{port}/v1",
+        "base_url": f"http://{host}:{port}/v1",
         "protocol": "openai_chat",
         "keys": [mkey],
         "models": [model],
@@ -159,28 +210,32 @@ say "== Janus on :$JANUS_PORT (docker, sqlite)"
 # in the shared volume by an earlier run — a green-looking boot on a broken
 # build, which is precisely the failure mode this matrix exists to catch.
 # So the build is a hard prerequisite with its own exit code.
-BUILD='apk add --no-cache build-base git >/dev/null 2>&1; chmod +x rebar3; export REBAR_BASE_DIR=/build; mkdir -p /build; ./rebar3 compile'
+# `&&` not `;`: if apk cannot install build-base (offline, rootless, a
+# non-alpine image) the compile must not proceed to fail later with
+# "cc: not found", which reads as a source problem rather than a missing
+# toolchain. build-base compiles the esqlite NIF; git fetches hex deps.
+BUILD='apk add --no-cache build-base git || exit 3; chmod +x rebar3 && export REBAR_BASE_DIR=/build && mkdir -p /build && ./rebar3 compile'
 BOOT='export REBAR_BASE_DIR=/build; exec erl -noshell -pa /build/default/lib/*/ebin -eval "application:ensure_all_started(janus), io:format(\"janus_up~n\"), receive after infinity -> ok end."'
 
 say "== compiling into the shared build volume"
-if ! docker run --rm -v "$GW:/app" -v janus-matrix-a-build:/build -w /app \
-     erlang:27-alpine sh -c "$BUILD" >"$ARTIFACT_DIR/compile.log" 2>&1; then
+if ! docker run --rm -v "$GW:/app" -v "$BUILD_VOLUME":/build -w /app \
+     "$ERLANG_IMAGE" sh -c "$BUILD" >"$ARTIFACT_DIR/compile.log" 2>&1; then
   say "  BUILD FAILED (see $ARTIFACT_DIR/compile.log)"
   tail -20 "$ARTIFACT_DIR/compile.log"
   exit 1
 fi
 say "  build ok"
-if ! docker run -d --name janus-matrix-a \
+if ! docker run -d --name "$CONTAINER_NAME" \
   -p "127.0.0.1:$JANUS_PORT:8080" \
-  --add-host=host.docker.internal:host-gateway \
+  --add-host="$UPSTREAM_HOST:host-gateway" \
   -e JANUS_HTTP_PORT=8080 \
   -e JANUS_SQLITE_PATH=/artifacts/janus.db \
   -e JANUS_SEED_PATH=/artifacts/seed.json \
   -e JANUS_AUTO_SEED=1 \
   -e JANUS_API_KEY_PEPPER=janus-matrix-a-pepper \
   -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
-  -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v janus-matrix-a-build:/build \
-  -w /app erlang:27-alpine sh -c "$BOOT" >"$ARTIFACT_DIR/docker-run.log" 2>&1
+  -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v "$BUILD_VOLUME":/build \
+  -w /app "$ERLANG_IMAGE" sh -c "$BOOT" >"$ARTIFACT_DIR/docker-run.log" 2>&1
 then
   say "  docker run failed (see $ARTIFACT_DIR/docker-run.log)"
   tail -10 "$ARTIFACT_DIR/docker-run.log"
@@ -193,7 +248,7 @@ for _ in $(seq 1 240); do
   sleep 1
 done
 curl -sf -m2 -o /dev/null "$BASE/healthz" 2>/dev/null \
-  || { say "  Janus did not boot"; docker logs janus-matrix-a 2>&1 | tail -25; exit 1; }
+  || { say "  Janus did not boot"; docker logs "$CONTAINER_NAME" 2>&1 | tail -25; exit 1; }
 say "  janus up"
 
 # ------------------------------------------------------------------ helper
