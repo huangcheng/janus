@@ -143,8 +143,13 @@ validate_agent_key(Map) ->
 apply_settings(Map) when is_map(Map), map_size(Map) > 0 ->
     maps:foreach(fun(Key, Value) -> upsert_setting(Key, Value) end, Map),
     ok;
-apply_settings(_Other) ->
-    ok.
+apply_settings(Other) ->
+    %% LOUD, not silent. A `settings` block of the wrong shape would otherwise
+    %% report a clean seed while writing nothing, and the operator's only
+    %% symptom would be the gateway still serving its boot-time value — the
+    %% exact confusion this channel exists to remove. An absent block is the
+    %% `#{}` default and takes the clause above.
+    error({seed_settings, not_an_object, Other}).
 
 upsert_setting(Key, Value) ->
     Bin = iolist_to_binary(thoas:encode(normalise_setting(Value))),
@@ -162,10 +167,13 @@ upsert_setting(Key, Value) ->
             error({seed_setting, to_bin(Key), Reason})
     end.
 
-%% The seed file is JSON, so a value already arrives as a decoded term; this
-%% only makes the intent explicit for strings vs structured objects.
-normalise_setting(V) when is_map(V); is_list(V); is_boolean(V); is_number(V) -> V;
-normalise_setting(V) when is_binary(V) -> V.
+%% The seed file is JSON, so a value arrives as an already-decoded term and
+%% this is the identity. It exists to be an explicit pass-through and MUST
+%% accept every JSON term: `thoas` decodes `null` to the atom `null`, so a
+%% guarded clause set turns `"settings": {"k": null}` into a function_clause
+%% that aborts the whole seed and is then sanitised down to the useless atom
+%% `function_clause`.
+normalise_setting(V) -> V.
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);

@@ -249,16 +249,34 @@ async def embeddings(request: Request):
     """
     auth = request.headers.get("authorization", "")
     key = auth.removeprefix("Bearer ").strip()
-    body = await request.json()
-    model = body.get("model", "mock-embed")
 
+    # Consult the fault table BEFORE parsing: a 5xx key must fail the same way
+    # whether or not the body is valid JSON, and an unguarded `await
+    # request.json()` would raise on a malformed body and turn a scripted 503
+    # into an unhandled 500.
     fault = KEY_BEHAVIORS.get(key)
     if fault is not None:
         status, payload = fault
         return JSONResponse(payload, status_code=status)
 
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"error": {"message": "invalid JSON body"}}, status_code=400
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": {"message": "body must be a JSON object"}}, status_code=400
+        )
+    model = body.get("model", "mock-embed")
+
     # Echo the shape the caller sent so the row can assert the gateway did
     # not rewrite the input.
+    # `input` may be a string, or a list of strings, TOKENS, or token arrays.
+    # The gateway's own contract allows all of them, so the mock must not
+    # assume a list is a batch of sentences: echo one embedding per element
+    # either way, which is what a real provider does for the array forms.
     inp = body.get("input")
     n = len(inp) if isinstance(inp, list) else 1
     data = [
