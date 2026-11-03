@@ -126,8 +126,8 @@ matrix_track_pid() {
 
 matrix_cleanup() {
   local p c
-  for p in "${UP_PIDS[@]:-}"; do [[ -n "$p" ]] && kill "$p" 2>/dev/null; done
-  for c in "${CREATED_CONTAINERS[@]:-}"; do
+  for p in ${UP_PIDS[@]+"${UP_PIDS[@]}"}; do [[ -n "$p" ]] && kill "$p" 2>/dev/null; done
+  for c in ${CREATED_CONTAINERS[@]+"${CREATED_CONTAINERS[@]}"}; do
     [[ -n "$c" ]] && docker rm -f "$c" >/dev/null 2>&1
   done
   wait 2>/dev/null
@@ -141,8 +141,21 @@ matrix_build_gateway() {
   # `&&` chain, not `;`: if apk cannot install the toolchain the compile must
   # not proceed to fail later with "cc: not found", which reads as a source
   # problem. build-base compiles the esqlite NIF; git fetches hex deps.
-  build_cmd='apk add --no-cache build-base git || exit 3; chmod +x rebar3 &&
-    export REBAR_BASE_DIR=/build && mkdir -p /build && ./rebar3 compile'
+  # Try the compile FIRST. A warm build volume makes it a no-op that needs
+  # no toolchain and no network; the toolchain lives in the image layer, not
+  # in the volume, so checking for cc/git up front forced an `apk add` on
+  # every run and made the runner depend on the Alpine CDN being reachable.
+  # Only when the compile actually fails do we install and retry, so an
+  # offline host still works against an already-built volume.
+  build_cmd='
+    chmod +x rebar3
+    export REBAR_BASE_DIR=/build
+    mkdir -p /build
+    if ./rebar3 compile; then exit 0; fi
+    echo "compile failed; installing build-base+git and retrying"
+    apk add --no-cache build-base git || exit 3
+    ./rebar3 compile
+  '
   say "== compiling into the shared build volume"
   if ! docker run --rm -v "$GW:/app" -v "$BUILD_VOLUME":/build -w /app \
        "$ERLANG_IMAGE" sh -c "$build_cmd" >"$ARTIFACT_DIR/compile.log" 2>&1; then
@@ -169,7 +182,7 @@ matrix_boot_gateway() {
     -e JANUS_AUTO_SEED=1 \
     -e JANUS_API_KEY_PEPPER="${MATRIX_PEPPER:-janus-matrix-pepper}" \
     -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
-    "${MATRIX_EXTRA_ENV[@]}" \
+    ${MATRIX_EXTRA_ENV[@]+"${MATRIX_EXTRA_ENV[@]}"} \
     -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v "$BUILD_VOLUME":/build \
     -w /app "$ERLANG_IMAGE" sh -c \
     'export REBAR_BASE_DIR=/build; exec erl -noshell -pa /build/default/lib/*/ebin \
