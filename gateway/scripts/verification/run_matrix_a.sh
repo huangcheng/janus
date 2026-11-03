@@ -19,66 +19,45 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GW="$ROOT/gateway"
 DASH="$ROOT/dashboard"
-ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/janus-matrix-a}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-18090}"
 JANUS_PORT="${JANUS_PORT:-18091}"
 API_KEY="${TEST_API_KEY:-sk-fake-matrix-a}"
 
-# ARTIFACT_DIR is an advertised override and this script DELETES inside it.
+# Artifact retention must not require deleting anything.
 #
-# Name blacklists and `-L` symlink tests all failed review for good reason:
-# `-L` is an lstat of the path AS WRITTEN, so a trailing slash dereferences it,
-# a symlink in any MIDDLE component is invisible to it, and on macOS `pwd -P`
-# turns /tmp into /private/tmp so a name compare misses. Chasing each of those
-# is a losing game.
+# Every attack this guard went through — trailing slashes defeating `-L`,
+# symlinks in middle components, a forged marker file, a populated foreign
+# directory — was possible only because the script tried to REUSE a
+# directory it was handed and clean it out first. The `rm -f "$ARTIFACT_DIR"/*`
+# line was the whole attack surface.
 #
-# So the rule is about CONTENT, evaluated on a fully resolved path: first
-# canonicalise (which resolves every component, including a final symlink),
-# then require the directory to be absent, empty, or already marked as ours.
-# A planted link to a populated foreign directory resolves to that directory
-# and is refused; a planted link to an empty one loses nothing.
-ARTIFACT_MARKER=".janus-matrix-a"
-# Strip trailing slashes BEFORE anything else: a trailing slash makes `-L`
-# and `-f` dereference, and later uses must see one identical value.
-while [[ "$ARTIFACT_DIR" == */ && "$ARTIFACT_DIR" != "/" ]]; do
-  ARTIFACT_DIR="${ARTIFACT_DIR%/}"
-done
-mkdir -p "$ARTIFACT_DIR" 2>/dev/null || {
-  echo "cannot create $ARTIFACT_DIR" >&2; exit 2; }
-ARTIFACT_DIR="$(cd "$ARTIFACT_DIR" && pwd -P)" || {
-  echo "cannot resolve $ARTIFACT_DIR" >&2; exit 2; }
-
-if [[ ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
-  # A failed listing must ABORT, not read as "empty".
-  if ! listing=$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -print0 2>&1); then
-    echo "refusing to use $ARTIFACT_DIR: cannot list it ($listing)" >&2
-    exit 2
-  fi
-  if [[ -n "$listing" ]]; then
-    echo "refusing to use $ARTIFACT_DIR: it is not empty and was not created by this script" >&2
-    exit 2
-  fi
+# So it is gone. The default is a fresh `mktemp -d`; an explicit
+# ARTIFACT_DIR creates a NEW timestamped subdirectory under it and never
+# touches existing content. Nothing is ever deleted, so nothing needs
+# guarding, and a stale run cannot contaminate a new one.
+if [[ -n "${ARTIFACT_DIR:-}" ]]; then
+  # Resolve through any symlinks ONCE so later uses see a single value, then
+  # create a NEW timestamped subdirectory. An existing directory is never
+  # touched, so retention costs nobody's data.
+  while [[ "$ARTIFACT_DIR" == */ && "$ARTIFACT_DIR" != "/" ]]; do
+    ARTIFACT_DIR="${ARTIFACT_DIR%/}"
+  done
+  mkdir -p "$ARTIFACT_DIR" 2>/dev/null || {
+    echo "cannot create ARTIFACT_DIR=$ARTIFACT_DIR" >&2; exit 2; }
+  ARTIFACT_DIR="$(cd "$ARTIFACT_DIR" && pwd -P)/run-$(date +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$ARTIFACT_DIR" || { echo "cannot create $ARTIFACT_DIR" >&2; exit 2; }
+else
+  ARTIFACT_DIR="$(mktemp -d -t janus-matrix-a-XXXXXX)" || {
+    echo "cannot create a temp artifact dir" >&2; exit 2; }
 fi
-# Probe the shapes actually written, BEFORE claiming the directory: a failure
-# after the marker would leave a directory that looks like ours but cannot
-# hold artifacts, and the next run would skip the emptiness check.
-for probe in .write-probe.log .write-probe.txt .write-probe.json; do
-  if ! : >"$ARTIFACT_DIR/$probe" 2>/dev/null; then
-    echo "cannot create $probe in $ARTIFACT_DIR" >&2; exit 2
-  fi
-  rm -f "$ARTIFACT_DIR/$probe"
-done
-if ! : >"$ARTIFACT_DIR/$ARTIFACT_MARKER" 2>/dev/null; then
-  echo "cannot write the artifact marker in $ARTIFACT_DIR" >&2; exit 2
-fi
-rm -f "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.json 2>/dev/null
 # A FRESH database per run, inside the artifact dir. The default SQLite path
 # is the relative "data/janus.db", and /app is the mounted gateway checkout,
 # so without this the run reads and writes the DEVELOPER'S LOCAL database:
 # seeding then fails with UNIQUE constraint on api_keys because the key from
 # a previous run is still there. Isolation also keeps a stale catalog from
-# silently satisfying a row.
-rm -f "$ARTIFACT_DIR/janus.db"*
+# silently satisfying a row. No `rm` is needed: the artifact dir is always
+# new, so there is no previous database to clear.
 
 PASS=0; FAIL=0; SKIP=0
 ROWS=()
