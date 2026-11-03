@@ -94,9 +94,14 @@ init([]) ->
     State1 = boot_load(State0),
     %% If boot never published (DB+snapshot miss), still resolve fleet
     %% once from env so JANUS_FLEET_ENABLED keeps working offline.
+    %%
+    %% DEFERRED for the same reason publish_catalog/2 defers it: this runs
+    %% inside init/1 while the parent supervisor is still waiting for us, so
+    %% a direct start_child would deadlock. `publish_catalog` already queued
+    %% the message on the ready path; this covers the not-ready one.
     case State1#state.ready of
         true -> ok;
-        false -> _ = maybe_start_fleet_once()
+        false -> _ = erlang:send_after(0, self(), maybe_start_fleet)
     end,
     State = schedule_poll(State1),
     logger:info(#{
