@@ -206,8 +206,9 @@ os.makedirs(out, exist_ok=True)
 # JANUS_FLEET_PEERS, which are FULL long names — so the SAN must be the long
 # name too, not just the host part. With host-only SANs the handshake fails
 # with san_not_in_peer_set and a shared CA buys nothing.
-hosts = [master, worker]
-san = ",".join(f"DNS:{h}" for h in hosts)
+# Each leaf asserts ONLY its own long name. A shared SAN list would make
+# every cert claim to be both nodes, which is exactly the property a
+# certificate is supposed to establish.
 def run(*a):
     subprocess.run(a, check=True, cwd=out,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -221,7 +222,10 @@ for name in (master, worker):
         "-subj", f"/CN={name}")
     ext = os.path.join(out, f"san-{host}.ext")
     with open(ext, "w") as fh:
-        fh.write(f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n")
+        fh.write(
+            f"subjectAltName=DNS:{name}\n"
+            "extendedKeyUsage=serverAuth,clientAuth\n"
+        )
     run("openssl", "x509", "-req", "-in", f"node-{host}.csr",
         "-CA", "ca.pem", "-CAkey", "ca-key.pem", "-CAcreateserial",
         "-out", f"node-{host}.pem", "-days", "3650", "-extfile", ext)
