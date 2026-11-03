@@ -6,11 +6,13 @@ erl_crash.dump
 rebar3.crashdump
 .DS_Store
 *.swp
-# Local scratch docs only: the design record IS shipped (README links it).
-# Exclude the CONTENTS, never the directory itself — a `docs/` entry stops
-# git from descending, so a later negation for docs/design can never apply.
+# Local scratch docs only: the design record and the live verification
+# matrix ARE shipped (README and the hardening spec link them). Exclude the
+# CONTENTS, never the directory itself — a `docs/` entry stops git from
+# descending, so a later negation can never apply.
 docs/*
 !docs/design/
+!docs/verification/
 
 # Local API runtime: SQLite, copied seed, secrets (keep scripts/local.env.example)
 data/
