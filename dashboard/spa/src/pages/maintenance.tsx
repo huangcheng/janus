@@ -1227,7 +1227,7 @@ export function Maintenance() {
                 id="maxmind-account"
                 inputMode="numeric"
                 autoComplete="off"
-                placeholder="e.g. 1427293"
+                placeholder="numeric account ID from the MaxMind portal"
                 value={maxmindAccountId}
                 onChange={(e) => setMaxmindAccountId(e.target.value)}
               />
