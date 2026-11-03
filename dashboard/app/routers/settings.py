@@ -781,44 +781,95 @@ async def post_reorder_tick(user: dict = Depends(require_auth)):
 _MODALITIES = ("image", "tts", "asr", "video", "computer", "embedding")
 _TRANSLATE_KEYS = ("tools", "responses")
 
+# Tool-accumulator ceilings for the streaming translate path, in bytes (per
+# call and per stream) and a call count. The gateway reads each from the same
+# `translate` settings key, falling back to its own compiled default when the
+# entry is absent — so an unconfigured gateway keeps the conservative values.
+#
+# They are operator-tunable because a long agent task legitimately streams
+# many calls with large arguments; the shipped constants were sized for a
+# short exchange and truncated real work with no way to raise them short of a
+# release. Upper bounds are refused rather than clamped: an absurd value is a
+# typo, and silently accepting it would remove the protection entirely.
+_TRANSLATE_CAP_LIMITS = {
+    "tool_args_per_call_cap": (1024, 64 * 1024 * 1024),
+    "tool_calls_per_stream_cap": (1, 4096),
+    "tool_args_total_cap": (1024, 256 * 1024 * 1024),
+}
+_TRANSLATE_BOOL_KEYS = ("tools", "responses")
+
 
 async def _generic_settings(key: str, defaults: dict) -> dict:
     row = await database.fetchrow("SELECT value FROM settings WHERE key = $1", key)
     stored = _parse_stored_json(row["value"], key) if row else None
     cfg = dict(defaults)
     if isinstance(stored, dict):
-        for k in defaults:
-            if isinstance(stored.get(k), bool):
-                cfg[k] = stored[k]
+        for k, default in defaults.items():
+            got = stored.get(k)
+            # Booleans were the only shape here; the cap knobs are integers,
+            # so accept the type the default implies or the value is dropped
+            # on read and the operator's setting silently does nothing.
+            if isinstance(default, bool) and isinstance(got, bool):
+                cfg[k] = got
+            elif isinstance(default, int) and not isinstance(got, bool) and isinstance(got, int):
+                cfg[k] = got
     return {"source": "db" if stored is not None else "default", "config": cfg}
 
 
 @router.get("/translate")
 async def get_translate(user: dict = Depends(require_auth)):
-    return await _generic_settings("translate", {k: False for k in _TRANSLATE_KEYS})
+    return await _generic_settings("translate", _translate_defaults())
+
+
+def _translate_defaults() -> dict:
+    """Defaults mirror the gateway's compiled values, so GET is honest."""
+    return {
+        "tools": False,
+        "responses": False,
+        "tool_args_per_call_cap": 256 * 1024,
+        "tool_calls_per_stream_cap": 64,
+        "tool_args_total_cap": 1024 * 1024,
+    }
 
 
 @router.put("/translate")
 async def put_translate(request: Request, user: dict = Depends(require_auth)):
     body = await request.json()
     if not isinstance(body, dict):
-        raise _err(400, "invalid", "body must be an object of boolean knobs")
-    unknown = set(body) - set(_TRANSLATE_KEYS)
+        raise _err(400, "invalid", "body must be an object of knobs")
+    allowed = set(_TRANSLATE_BOOL_KEYS) | set(_TRANSLATE_CAP_LIMITS)
+    unknown = set(body) - allowed
     if unknown:
         raise _err(400, "invalid", f"unknown knobs: {sorted(unknown)}")
     for k, v in body.items():
-        if not isinstance(v, bool):
-            raise _err(400, "invalid", f"{k} must be a boolean")
+        if k in _TRANSLATE_BOOL_KEYS:
+            if not isinstance(v, bool):
+                raise _err(400, "invalid", f"{k} must be a boolean")
+        else:
+            lo, hi = _TRANSLATE_CAP_LIMITS[k]
+            # bool is an int subclass in Python; True must not pass as 1.
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise _err(400, "invalid", f"{k} must be an integer number of units")
+            if not (lo <= v <= hi):
+                raise _err(400, "invalid", f"{k} must be between {lo} and {hi}")
     async with database.transaction() as tx:
         # M3: the merge baseline is read on the SAME connection inside the
         # transaction, under a row lock (concurrent PUTs cannot lose one).
         row = await tx.fetchrow("SELECT value FROM settings WHERE key = 'translate' FOR UPDATE")
-        current = {k: False for k in _TRANSLATE_KEYS}
+        current = _translate_defaults()
         stored = _parse_stored_json(row["value"], "translate") if row else None
         if isinstance(stored, dict):
-            for k in _TRANSLATE_KEYS:
-                if isinstance(stored.get(k), bool):
-                    current[k] = stored[k]
+            for k, default in current.items():
+                got = stored.get(k)
+                if isinstance(default, bool) and isinstance(got, bool):
+                    current[k] = got
+                elif (
+                    isinstance(default, int)
+                    and not isinstance(default, bool)
+                    and not isinstance(got, bool)
+                    and isinstance(got, int)
+                ):
+                    current[k] = got
         cfg = {**current, **body}
         await tx.execute(
             "INSERT INTO settings (key, value) VALUES ('translate', $1) "

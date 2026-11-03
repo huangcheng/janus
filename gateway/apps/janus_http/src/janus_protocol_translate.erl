@@ -70,6 +70,37 @@
     responses_tool_to_chat/1,
     responses_tools_to_chat/1
 ]).
+%% Tool-accumulator caps. Resolved from the `translate` settings key on every
+%% call (persistent_term read, no I/O) so an operator can raise them without a
+%% release: a long agent task legitimately streams many calls with large
+%% arguments, and the shipped constants were sized for a short exchange.
+%%
+%% Absent / malformed entry => the shipped default. The defaults stay the
+%% conservative values, so an unconfigured gateway behaves exactly as before.
+-spec tool_cap(per_call | calls | total) -> pos_integer().
+tool_cap(Kind) ->
+    Default =
+        case Kind of
+            per_call -> ?TOOL_ARGS_PER_CALL_CAP;
+            calls -> ?TOOL_CALLS_PER_STREAM_CAP;
+            total -> ?TOOL_ARGS_TOTAL_CAP
+        end,
+    Key =
+        case Kind of
+            per_call -> <<"tool_args_per_call_cap">>;
+            calls -> <<"tool_calls_per_stream_cap">>;
+            total -> <<"tool_args_total_cap">>
+        end,
+    case persistent_term:get({janus, translate_cfg}, undefined) of
+        Cfg when is_map(Cfg) ->
+            case maps:get(Key, Cfg, undefined) of
+                N when is_integer(N), N > 0 -> N;
+                _ -> Default
+            end;
+        _ ->
+            Default
+    end.
+
 
 -define(DEFAULT_MAX_TOKENS, 4096).
 
@@ -2694,7 +2725,7 @@ anthro_tool_start(D, St) ->
                     %% Duplicate block index: upstream bug, fail closed.
                     {error, translate_unsupported, St};
                 _ ->
-                    case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+                    case map_size(St#sse_st.tools) >= tool_cap(calls) of
                         true ->
                             {error, tool_args_cap, St};
                         false ->
@@ -2744,8 +2775,8 @@ anthro_tool_fragment_bytes(Idx, P, St) ->
             PerCall = TA0#tool_acc.args_bytes + byte_size(P),
             Total = St#sse_st.total_args + byte_size(P),
             case
-                PerCall > ?TOOL_ARGS_PER_CALL_CAP orelse
-                    Total > ?TOOL_ARGS_TOTAL_CAP
+                PerCall > tool_cap(per_call) orelse
+                    Total > tool_cap(total)
             of
                 true ->
                     {error, tool_args_cap, St};
@@ -3080,7 +3111,7 @@ chat_tool_open(Idx, E, St) ->
             %% splice a call in half; fail closed.
             {error, translate_unsupported, St};
         _ ->
-            case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+            case map_size(St#sse_st.tools) >= tool_cap(calls) of
                 true ->
                     {error, tool_args_cap, St};
                 false ->
@@ -3127,8 +3158,8 @@ chat_tool_fragment(Idx, Fragment, St) ->
             PerCall = TA#tool_acc.args_bytes + byte_size(F),
             Total = St#sse_st.total_args + byte_size(F),
             case
-                PerCall > ?TOOL_ARGS_PER_CALL_CAP orelse
-                    Total > ?TOOL_ARGS_TOTAL_CAP
+                PerCall > tool_cap(per_call) orelse
+                    Total > tool_cap(total)
             of
                 true ->
                     {error, tool_args_cap, St};
@@ -3551,7 +3582,7 @@ resp_tool_open_chat(Idx, E, St) ->
             %% splice a call in half; fail closed.
             {error, translate_unsupported, St};
         _ ->
-            case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+            case map_size(St#sse_st.tools) >= tool_cap(calls) of
                 true ->
                     {error, tool_args_cap, St};
                 false ->
@@ -3711,7 +3742,7 @@ anthro_resp_tool_start(D, St) ->
                     %% Duplicate block index: upstream bug, fail closed.
                     {error, translate_unsupported, St};
                 _ ->
-                    case map_size(St#sse_st.tools) >= ?TOOL_CALLS_PER_STREAM_CAP of
+                    case map_size(St#sse_st.tools) >= tool_cap(calls) of
                         true ->
                             {error, tool_args_cap, St};
                         false ->
@@ -3938,8 +3969,8 @@ resp_tool_fragment(Idx, Fragment, St) ->
                     PerCall = TA0#tool_acc.args_bytes + byte_size(F),
                     Total = St#sse_st.total_args + byte_size(F),
                     case
-                        PerCall > ?TOOL_ARGS_PER_CALL_CAP orelse
-                            Total > ?TOOL_ARGS_TOTAL_CAP
+                        PerCall > tool_cap(per_call) orelse
+                            Total > tool_cap(total)
                     of
                         true ->
                             {error, tool_args_cap, St};

@@ -2,12 +2,19 @@
 %% eunit suite include this so the record can never drift.
 -define(SSE_LEFTOVER_CAP, 1024 * 1024).
 
-%% Phase-1 tool-call caps (C5): 256KiB args per call id, 64 calls per
-%% stream, 1MiB total args per stream. Exceeding any cap fails the fold
-%% with {error, tool_args_cap, St}; for this phase the caller terminates
-%% the stream on that tuple (the 1.9 ship unit wires the full C2 error
-%% frames). The existing 1MiB ?SSE_LEFTOVER_CAP bounds ONE event, not
-%% cross-event accumulation — these bound the accumulators.
+%% Phase-1 tool-call caps (C5). These are DEFAULTS, not the effective
+%% values: janus_protocol_translate:tool_cap/1 resolves each one from the
+%% `translate` settings key on every use, falling back here when the key or
+%% entry is absent. Exceeding any cap fails the fold with
+%% {error, tool_args_cap, St} and the caller terminates the stream.
+%%
+%% They were compile-time constants sized for a short exchange; a long agent
+%% task legitimately streams many calls with large arguments, so an operator
+%% can now raise them without a release. The defaults are unchanged, so an
+%% unconfigured gateway behaves exactly as before.
+%%
+%% The existing 1MiB ?SSE_LEFTOVER_CAP bounds ONE event, not cross-event
+%% accumulation — these bound the accumulators.
 -define(TOOL_ARGS_PER_CALL_CAP, 256 * 1024).
 -define(TOOL_CALLS_PER_STREAM_CAP, 64).
 -define(TOOL_ARGS_TOTAL_CAP, 1024 * 1024).
