@@ -1253,6 +1253,14 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
         {error, upstream, Msg} ->
             TrackStatus = 502,
             note_usage_outcome(error),
+            %% Carry the reason into the usage row. Mid-stream failures never
+            %% went through stash_upstream_error_detail/1 (that path is the
+            %% NON-stream one), so every terminal 502 on the translate path
+            %% was written with error_detail = NULL — 301 rows over 20 days —
+            %% and a cap being hit was indistinguishable from any other
+            %% upstream stream failure. Quantifying a limit requires the row
+            %% to say which limit.
+            _ = put(janus_error_detail, Msg),
             case wire_enc_abort_reason(Msg) of
                 true ->
                     %% Internal-hop inflate failure on the TRANSLATE
