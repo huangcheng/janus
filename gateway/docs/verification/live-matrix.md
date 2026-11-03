@@ -75,7 +75,7 @@ the exclusions registry, not in the matrix.
 | A10 | responses | chat | text (translated), `translate.responses` on | 200 | client body |
 | A11 | responses | chat | text, `translate.responses` **off** | 400 `protocol_requires_native` | client body code |
 | A12 | chat | decisions-only listing | any | 400 `protocol_requires_native` | client body code |
-| A13 | chat | chat | unsupported field | 400, precise distinct code (never a generic 500) | client body code |
+| A13 | chat | janus-auto | malformed `messages` (not a list) | local 404, **no upstream round-trip** (SPEC §8: malformed input degrades to `pass`, and no provider lists the virtual name) | client body code + upstream counter |
 | A14 | chat | chat | usage present | `usage_events` row carries upstream numbers | DB row |
 | A15 | chat | chat | usage absent | row carries the documented estimate marker | DB row |
 | A16 | chat | any | provider 4xx | terminal row + provider's own message preserved | DB `error_detail` |
@@ -184,14 +184,43 @@ Rows that cannot be executed are registered in
 `artifacts/verification/<commit>/exclusions.md` with the reason. A row
 silently dropped from this file is a regression in the matrix itself.
 
-## Current state
+## Execution status
 
-Nothing in this matrix has been executed as a batch yet. The scenarios
-that have been run are ad hoc and their evidence was not retained, which
-is precisely what this document is meant to end.
+### Group A — executed, 9/9 pass
 
-Known gaps in the stack, recorded rather than worked around:
+`bash gateway/scripts/verification/run_matrix_a.sh` runs the automated
+subset against a disposable docker stack (SQLite, generated seed, the mock
+upstream). Artifacts and a per-row PASS/FAIL summary land in
+`/tmp/janus-matrix-a/`.
 
-- the multi-node / upgrade / backup topology does not exist yet;
-- no automated runner executes these rows; each is a manual curl session
-  against the disposable stack.
+Row A13 was **rewritten after running it**. It originally asserted that a
+malformed `messages` value returns 400 for a DIRECT model name. That check
+does not exist and should not: a direct name is a pass-through, and the
+gateway translates rather than validating bodies its upstream will reject.
+What the contract actually says (SPEC §8) is that malformed input on the
+*virtual* name degrades to `pass`, and since no provider lists that name
+the caller gets a local 404 with no upstream round-trip — which the row now
+asserts, verified against the mock's request counter.
+
+Two stack defects were found by running rather than by reading:
+
+- the container had no C compiler, so the NIF-backed dependency failed to
+  build — and because the shared build volume still held beams from an
+  earlier run, the boot printed its ready line anyway. Build and boot are
+  now separate steps with the build as a hard prerequisite.
+- the default SQLite path is the relative `data/janus.db`, and `/app` is the
+  mounted checkout, so a run read and wrote the DEVELOPER'S local database;
+  seeding then failed with a UNIQUE violation because a previous run's key
+  was still there. Each run now uses a fresh DB inside its artifact dir.
+
+### Not yet executed
+
+| Group | Rows | Blocker |
+|---|---|---|
+| B streaming | 12 | needs a runner; the machinery in `verify_stream_live.sh` is the template |
+| C modality | 9 | needs embedding/video fixtures in the mock |
+| D failure injection | 17 | needs the master/worker Compose topology, which does not exist |
+| real-upstream subset | 5 | by design, observation-gated |
+
+The multi-node / upgrade / backup topology does not exist yet. Nothing in
+groups B–D has been run as a batch.
