@@ -29,6 +29,8 @@
 #                     Docker Desktop or Docker >= 20.10 (--add-host
 #                     host-gateway). Override with the host's address on the
 #                     docker bridge if that flag is unavailable.
+#   NO_HOST_GATEWAY   set to 1 to drop --add-host entirely, for runtimes
+#                     that reject the host-gateway magic value.
 #   seed.json, upstream.log, jarvis*.log, per-row .http/.body captures,
 #   summary.txt — one line per row with PASS/FAIL and the evidence.
 #
@@ -46,6 +48,16 @@ ERLANG_IMAGE="${ERLANG_IMAGE:-erlang:27-alpine}"
 CONTAINER_NAME="${CONTAINER_NAME:-janus-matrix-a}"
 BUILD_VOLUME="${BUILD_VOLUME:-janus-matrix-a-build}"
 UPSTREAM_HOST="${UPSTREAM_HOST:-host.docker.internal}"
+# `--add-host X:host-gateway` is Docker 20.10+. On an older engine or a
+# non-Docker runtime the flag is rejected outright, so it is opt-in: with
+# ADD_HOST_ARGS empty and UPSTREAM_HOST defaulting to host.docker.internal,
+# Docker Desktop still resolves the name on its own.
+# An ARRAY, not a string: "${VAR:+--flag="$VAR"}" word-splits on expansion and
+# mangled the docker command line into a spurious "docker run failed".
+ADD_HOST_ARGS=("--add-host=$UPSTREAM_HOST:host-gateway")
+if [[ "${NO_HOST_GATEWAY:-0}" == "1" ]]; then
+  ADD_HOST_ARGS=()
+fi
 UPSTREAM_PORT="${UPSTREAM_PORT:-18090}"
 JANUS_PORT="${JANUS_PORT:-18091}"
 API_KEY="${TEST_API_KEY:-sk-fake-matrix-a}"
@@ -139,11 +151,21 @@ skip(){ SKIP=$((SKIP+1)); ROWS+=("$(printf '%-4s %-6s %s' SKIP "$1" "$2")"); say
 
 cleanup() {
     [[ -n "${UP_PID:-}" ]] && kill "$UP_PID" 2>/dev/null
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+    # Remove only a container THIS run created. CONTAINER_NAME is
+    # caller-supplied, so an unconditional `docker rm -f` could destroy
+    # someone else's container that happens to share the name.
+    if [[ "${CONTAINER_OURS:-0}" == 1 ]]; then
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+    fi
     wait 2>/dev/null
 }
+# A name collision is a refusal, not a deletion: the previous behaviour
+# force-removed whatever held the name before starting.
+if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+  echo "a container named $CONTAINER_NAME already exists; set CONTAINER_NAME to something else" >&2
+  exit 2
+fi
 trap cleanup EXIT
-docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
 
 # --------------------------------------------------------------- upstream
 say "== mock upstream on :$UPSTREAM_PORT"
@@ -186,7 +208,7 @@ then
   say "  SEED GENERATION FAILED — cannot continue without seed.json"
   exit 1
 fi
-python3 - "$ARTIFACT_DIR/seed.json" <<'PY'
+"$PYTHON" - "$ARTIFACT_DIR/seed.json" <<'PY'
 import json, sys
 try:
     doc = json.load(open(sys.argv[1]))
@@ -225,9 +247,10 @@ if ! docker run --rm -v "$GW:/app" -v "$BUILD_VOLUME":/build -w /app \
   exit 1
 fi
 say "  build ok"
-if ! docker run -d --name "$CONTAINER_NAME" \
+CONTAINER_OURS=1
+docker run -d --name "$CONTAINER_NAME" \
   -p "127.0.0.1:$JANUS_PORT:8080" \
-  --add-host="$UPSTREAM_HOST:host-gateway" \
+  "${ADD_HOST_ARGS[@]}" \
   -e JANUS_HTTP_PORT=8080 \
   -e JANUS_SQLITE_PATH=/artifacts/janus.db \
   -e JANUS_SEED_PATH=/artifacts/seed.json \
@@ -236,8 +259,9 @@ if ! docker run -d --name "$CONTAINER_NAME" \
   -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
   -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v "$BUILD_VOLUME":/build \
   -w /app "$ERLANG_IMAGE" sh -c "$BOOT" >"$ARTIFACT_DIR/docker-run.log" 2>&1
-then
-  say "  docker run failed (see $ARTIFACT_DIR/docker-run.log)"
+run_rc=$?
+if [[ "$run_rc" -ne 0 ]]; then
+  say "  docker run failed (rc=$run_rc, see $ARTIFACT_DIR/docker-run.log)"
   tail -10 "$ARTIFACT_DIR/docker-run.log"
   exit 1
 fi
