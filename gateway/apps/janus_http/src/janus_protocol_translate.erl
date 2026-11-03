@@ -77,6 +77,8 @@
 %%
 %% Absent / malformed entry => the shipped default. The defaults stay the
 %% conservative values, so an unconfigured gateway behaves exactly as before.
+-export([tool_cap/1]).
+
 -spec tool_cap(per_call | calls | total) -> pos_integer().
 tool_cap(Kind) ->
     Default =
