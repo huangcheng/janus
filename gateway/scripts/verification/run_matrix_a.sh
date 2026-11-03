@@ -45,8 +45,21 @@ if [[ -n "${ARTIFACT_DIR:-}" ]]; then
   done
   mkdir -p "$ARTIFACT_DIR" 2>/dev/null || {
     echo "cannot create ARTIFACT_DIR=$ARTIFACT_DIR" >&2; exit 2; }
-  ARTIFACT_DIR="$(cd "$ARTIFACT_DIR" && pwd -P)/run-$(date +%Y%m%d-%H%M%S)-$$"
-  mkdir -p "$ARTIFACT_DIR" || { echo "cannot create $ARTIFACT_DIR" >&2; exit 2; }
+  # `set -u` has no `-e`, so a failed `cd` would leave the substitution empty
+  # and silently produce "/run-<ts>" — writing artifacts at the filesystem
+  # root. Resolve, then check, then append.
+  base="$(cd "$ARTIFACT_DIR" && pwd -P)" || {
+    echo "cannot resolve ARTIFACT_DIR=$ARTIFACT_DIR" >&2; exit 2; }
+  [[ -n "$base" ]] || { echo "ARTIFACT_DIR resolved to empty" >&2; exit 2; }
+  ARTIFACT_DIR="$base/run-$(date +%Y%m%d-%H%M%S)-$$"
+  # `mkdir -p` succeeds on an EXISTING directory, so it cannot detect the
+  # timestamp+pid collision it is meant to exclude here.
+  if ! mkdir "$ARTIFACT_DIR" 2>/dev/null; then
+    echo "refusing to reuse an existing run dir: $ARTIFACT_DIR" >&2; exit 2
+  fi
+  # mktemp -d gives 0700; match it so a shared parent does not expose the
+  # artifacts (they contain a seed with an agent key).
+  chmod 700 "$ARTIFACT_DIR" 2>/dev/null || true
 else
   ARTIFACT_DIR="$(mktemp -d -t janus-matrix-a-XXXXXX)" || {
     echo "cannot create a temp artifact dir" >&2; exit 2; }
