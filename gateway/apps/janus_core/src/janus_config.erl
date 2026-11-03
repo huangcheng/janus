@@ -121,6 +121,12 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% Fleet children start once, after the first settings distribute has been
+%% applied and init/1 has returned (see publish_catalog/2 for why this can
+%% never be a direct call).
+handle_info(maybe_start_fleet, State) ->
+    _ = maybe_start_fleet_once(),
+    {noreply, State};
 handle_info(poll_config, State) ->
     {_Reply, State1} = do_reload(State, poll),
     {noreply, schedule_poll(State1#state{poll_ref = undefined})};
@@ -314,7 +320,16 @@ publish_catalog(Gen, Rows) when is_integer(Gen), is_map(Rows) ->
     _ = distribute_settings(Rows),
     %% F9: fleet children start once after the first settings distribute
     %% (not from a cold PT miss / env-only supervisor init).
-    _ = maybe_start_fleet_once(),
+    %%
+    %% DEFERRED, never called inline. publish_catalog/2 runs inside init/1
+    %% (boot_load), and this process is a CHILD of janus_core_sup: calling
+    %% `supervisor:start_child(janus_core_sup, ...)` from here asks that
+    %% supervisor to start a child while it is still waiting for THIS
+    %% child's init to return. That is a deadlock — the master hung forever
+    %% with `JANUS_FLEET_ENABLED=true`, the VM up and listening on the dist
+    %% port, the application tree never completing, and no error logged.
+    %% A self-message runs after init returns, when the supervisor is free.
+    _ = erlang:send_after(0, self(), maybe_start_fleet),
     ok.
 
 %% Hand dashboard-managed settings (settings table) to their consumers.

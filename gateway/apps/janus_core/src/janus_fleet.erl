@@ -1103,7 +1103,11 @@ ensure_tab(Name, Type) ->
 
 start_pg_scope() ->
     case catch pg:start(?PG_SCOPE) of
+        %% OTP 27 returns {ok, Pid}; matching only bare `ok` made every
+        %% fleet boot log janus_fleet_pg_start_failed even though the scope
+        %% had started, which hid real failures behind a permanent one.
         ok -> ok;
+        {ok, _Pid} -> ok;
         {error, {already_started, _}} -> ok;
         {'EXIT', _} = Crash ->
             logger:error(#{what => janus_fleet_pg_start_failed, reason => Crash}),
