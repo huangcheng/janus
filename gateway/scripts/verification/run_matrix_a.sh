@@ -51,15 +51,20 @@ if [[ -n "${ARTIFACT_DIR:-}" ]]; then
   base="$(cd "$ARTIFACT_DIR" && pwd -P)" || {
     echo "cannot resolve ARTIFACT_DIR=$ARTIFACT_DIR" >&2; exit 2; }
   [[ -n "$base" ]] || { echo "ARTIFACT_DIR resolved to empty" >&2; exit 2; }
-  ARTIFACT_DIR="$base/run-$(date +%Y%m%d-%H%M%S)-$$"
-  # `mkdir -p` succeeds on an EXISTING directory, so it cannot detect the
-  # timestamp+pid collision it is meant to exclude here.
-  if ! mkdir "$ARTIFACT_DIR" 2>/dev/null; then
-    echo "refusing to reuse an existing run dir: $ARTIFACT_DIR" >&2; exit 2
+  # Create it under a 0700 umask so the permissions are right AT creation:
+  # tightening afterwards leaves a window, and a swallowed `chmod` failure
+  # would silently keep the wider mode. `mkdir -p` succeeds on an existing
+  # directory and so cannot detect the timestamp+pid collision this is meant
+  # to exclude; plain `mkdir` under the restrictive umask does both jobs.
+  run_dir="$base/run-$(date +%Y%m%d-%H%M%S)-$$"
+  old_umask="$(umask)"
+  umask 077
+  if ! mkdir "$run_dir" 2>/dev/null; then
+    umask "$old_umask"
+    echo "refusing to reuse an existing run dir: $run_dir" >&2; exit 2
   fi
-  # mktemp -d gives 0700; match it so a shared parent does not expose the
-  # artifacts (they contain a seed with an agent key).
-  chmod 700 "$ARTIFACT_DIR" 2>/dev/null || true
+  umask "$old_umask"
+  ARTIFACT_DIR="$run_dir"
 else
   ARTIFACT_DIR="$(mktemp -d -t janus-matrix-a-XXXXXX)" || {
     echo "cannot create a temp artifact dir" >&2; exit 2; }
