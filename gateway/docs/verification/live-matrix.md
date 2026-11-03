@@ -213,11 +213,33 @@ Two stack defects were found by running rather than by reading:
   seeding then failed with a UNIQUE violation because a previous run's key
   was still there. Each run now uses a fresh DB inside its artifact dir.
 
+### Group B — executed, 7/7 pass
+
+`bash gateway/scripts/verification/run_matrix_b.sh`. Assertions are on the
+bytes the client received, because that is the only way to see a keepalive
+during a stall or a frame split across reads.
+
+Two rows were corrected by running them:
+
+- **B11** assumed `n>1` blocks any stream. It blocks only the
+  CROSS-PROTOCOL translate path: a chat client hitting a chat provider rides
+  the native stream and is served normally (verified — 200 with a full SSE
+  stream). The row now drives a protocol pair and matches the real code,
+  `translate_unsupported`.
+- **B6** looked for `stall|idle|timeout` in the terminal frame. The gateway
+  actually closes with an SSE **comment**:
+  `: janus stream failed - upstream stopped sending data mid-stream`.
+  Matching the real text, and asserting it is a comment (not payload), is
+  both more precise and less likely to rot.
+
+B6 also needs its OWN gateway: a stall benches the provider on the previous
+instance, so reusing B5's stack answers `all_cooling` and never reaches the
+stall path.
+
 ### Not yet executed
 
 | Group | Rows | Blocker |
 |---|---|---|
-| B streaming | 12 | needs a runner; the machinery in `verify_stream_live.sh` is the template |
 | C modality | 9 | needs embedding/video fixtures in the mock |
 | D failure injection | 17 | needs the master/worker Compose topology, which does not exist |
 | real-upstream subset | 5 | by design, observation-gated |

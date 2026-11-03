@@ -27,6 +27,10 @@ ERLANG_IMAGE="${ERLANG_IMAGE:-erlang:27-alpine}"
 BUILD_VOLUME="${BUILD_VOLUME:-janus-matrix-build}"
 UPSTREAM_HOST="${UPSTREAM_HOST:-host.docker.internal}"
 
+# Extra -e args for matrix_boot_gateway. An array, so a value containing
+# spaces cannot be word-split into a mangled docker command line.
+MATRIX_EXTRA_ENV=()
+
 PASS=0; FAIL=0; SKIP=0
 ROWS=()
 CREATED_CONTAINERS=()
@@ -165,7 +169,7 @@ matrix_boot_gateway() {
     -e JANUS_AUTO_SEED=1 \
     -e JANUS_API_KEY_PEPPER="${MATRIX_PEPPER:-janus-matrix-pepper}" \
     -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
-    ${MATRIX_EXTRA_ENV:+$MATRIX_EXTRA_ENV} \
+    "${MATRIX_EXTRA_ENV[@]}" \
     -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v "$BUILD_VOLUME":/build \
     -w /app "$ERLANG_IMAGE" sh -c \
     'export REBAR_BASE_DIR=/build; exec erl -noshell -pa /build/default/lib/*/ebin \
