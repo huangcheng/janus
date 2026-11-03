@@ -175,7 +175,7 @@ matrix_boot_gateway() {
   matrix_track_container "$name"
   docker run -d --name "$name" \
     -p "127.0.0.1:$port:8080" \
-    "${ADD_HOST_ARGS[@]}" \
+    ${ADD_HOST_ARGS[@]+"${ADD_HOST_ARGS[@]}"} \
     -e JANUS_HTTP_PORT=8080 \
     -e JANUS_SQLITE_PATH="$dbpath" \
     -e JANUS_SEED_PATH="$seed" \

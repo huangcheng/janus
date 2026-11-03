@@ -156,7 +156,7 @@ post A12 "$(req no-such-model 'hi')"
 say ""
 note ""
 note "== rows"
-for r in "${ROWS[@]}"; do note "$r"; done
+for r in ${ROWS[@]+"${ROWS[@]}"}; do note "$r"; done
 note ""
 note "summary: $PASS passed, $FAIL failed, $SKIP skipped"
 say ""

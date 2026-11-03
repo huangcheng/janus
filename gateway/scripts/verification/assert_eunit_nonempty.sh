@@ -38,7 +38,7 @@ if [[ "${1:-}" == "--from" ]]; then
 else
   LOG="$(mktemp -t janus-eunit-XXXXXX)"
   trap 'rm -f "$LOG"' EXIT
-  (cd "$APP_ROOT" && "${EUNIT_CMD[@]}") >"$LOG" 2>&1
+  (cd "$APP_ROOT" && ${EUNIT_CMD[@]+"${EUNIT_CMD[@]}"}) >"$LOG" 2>&1
   rc=$?
   if [[ $rc -ne 0 ]]; then
     echo "FAIL: '${EUNIT_CMD[*]}' exited $rc" >&2
