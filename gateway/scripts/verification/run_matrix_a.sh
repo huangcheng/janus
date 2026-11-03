@@ -35,12 +35,15 @@ mkdir -p "$ARTIFACT_DIR"
 # people's files in it is refused no matter what it is called.
 ARTIFACT_MARKER=".janus-matrix-a"
 if [[ -d "$ARTIFACT_DIR" && ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
-  # Null-delimited so a filename with a newline cannot hide the rest, and the
-  # read's own status is kept separate from "find failed".
-  stray=""
-  while IFS= read -r -d '' entry; do stray="$entry"; break; done \
-    < <(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-  if [[ -n "$stray" ]]; then
+  # A failed listing must ABORT, not read as "empty": silently treating an
+  # unreadable directory as safe is how the destructive globs below run.
+  # bash strips NULs from command substitution, so the result is non-empty
+  # iff at least one entry exists, regardless of embedded newlines.
+  if ! listing=$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -print0 2>&1); then
+    echo "refusing to use $ARTIFACT_DIR: cannot list it ($listing)" >&2
+    exit 2
+  fi
+  if [[ -n "$listing" ]]; then
     echo "refusing to use $ARTIFACT_DIR: it is not empty and was not created by this script" >&2
     exit 2
   fi
@@ -48,6 +51,13 @@ fi
 if ! : >"$ARTIFACT_DIR/$ARTIFACT_MARKER" 2>/dev/null; then
   echo "cannot write the artifact marker in $ARTIFACT_DIR" >&2; exit 2
 fi
+# The marker proves only that ONE file was writable. Probe the actual shape
+# this script writes before deleting anything, so a directory that accepts
+# a dotfile but not these names fails here rather than mid-run.
+if ! : >"$ARTIFACT_DIR/.write-probe.log" 2>/dev/null; then
+  echo "cannot create .log files in $ARTIFACT_DIR" >&2; exit 2
+fi
+rm -f "$ARTIFACT_DIR/.write-probe.log"
 rm -f "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.json 2>/dev/null
 # A FRESH database per run, inside the artifact dir. The default SQLite path
 # is the relative "data/janus.db", and /app is the mounted gateway checkout,
