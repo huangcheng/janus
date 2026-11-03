@@ -256,11 +256,61 @@ republishes the catalog, not the settings rows, so writing the knob into the
 database while the gateway runs has no effect. The seed file now accepts a
 `settings` object, which a verification stack sets before first boot.
 
+### Group D — partially executed (2 pass, 1 fail, 4 skip)
+
+`bash gateway/scripts/verification/run_matrix_d.sh`. The runner builds a
+real two-node stack (private bridge, rendered `vm.args`, TLS distribution
+flags) and exercises what does not need a registered worker.
+
+| Row | Result |
+|---|---|
+| D5 slow upstream | **PASS** — bounded client outcome |
+| D17 master restart | **PASS** — healthy again, serves afterwards |
+| D1 worker registers | **FAIL** — the worker never appears in `/stats/sched` |
+| D2/D3 empty-pool fallback | SKIP (depend on D1) |
+| D14/D16 Postgres rows | SKIP (this stack is SQLite) |
+
+### Product finding: `JANUS_FLEET_ENABLED=true` hangs a master
+
+Found while building the D topology. On the **master** role,
+`JANUS_FLEET_ENABLED=true` makes `application:ensure_all_started(janus)`
+block indefinitely: the VM starts and listens on the distribution port, but
+the application tree never completes, so the node never serves and nothing
+logs an error.
+
+Four-way control on the same image and env:
+
+| Configuration | Result |
+|---|---|
+| no fleet flags | starts |
+| `JANUS_FLEET_PEERS` only | starts |
+| `JANUS_FLEET_ENABLED=true` only | **hangs** |
+| enabled + peers | **hangs** |
+
+The worker role is unaffected. The shipped deployment sets
+`JANUS_FLEET_ENABLED=false`, which is why this has not been noticed in
+production — the master/worker pool works through worker-initiated hello,
+not through the signal fleet. This is a defect, not a missing feature: the
+knob is documented as available and it bricks the master when set.
+
+Not fixed here, because the fix belongs to whoever owns the fleet lifecycle
+and needs a decision on what "enabled" should start on a master. Recorded so
+it stops being invisible.
+
+### Blocker for the remaining D rows
+
+D1 and everything downstream need a worker to actually register. Dist is
+configured and the worker does not dial; the container-name lookup on this
+Docker network returns an IPv6 address and `-kernel inet6` did not change
+the outcome. That is the next thing to investigate, and it is
+infrastructure work — no product code should change to make a verification
+topology work.
+
 ### Not yet executed
 
 | Group | Rows | Blocker |
 |---|---|---|
-| D failure injection | 17 | needs the master/worker Compose topology, which does not exist |
+| D rows needing a registered worker | 12 | worker does not dial the master (see above) |
 | real-upstream subset | 5 | by design, observation-gated |
 
 The multi-node / upgrade / backup topology does not exist yet. Nothing in
