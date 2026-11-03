@@ -140,15 +140,18 @@ validate_agent_key(Map) ->
 %% keep serving the boot-time value. Seeding it means one generation publish
 %% carries both, and a runner needs no restart dance.
 -spec apply_settings(map()) -> ok.
-apply_settings(Map) when is_map(Map), map_size(Map) > 0 ->
+%% ABSENT is not an error: a seed file with no `settings` block must behave
+%% exactly as before this channel existed. `map_get/3` returns the `#{}`
+%% default, which lands here.
+apply_settings(Empty) when is_map(Empty), map_size(Empty) =:= 0 ->
+    ok;
+apply_settings(Map) when is_map(Map) ->
     maps:foreach(fun(Key, Value) -> upsert_setting(Key, Value) end, Map),
     ok;
 apply_settings(Other) ->
-    %% LOUD, not silent. A `settings` block of the wrong shape would otherwise
-    %% report a clean seed while writing nothing, and the operator's only
-    %% symptom would be the gateway still serving its boot-time value — the
-    %% exact confusion this channel exists to remove. An absent block is the
-    %% `#{}` default and takes the clause above.
+    %% LOUD for a PRESENT but wrong shape. Silently reporting a clean seed
+    %% while writing nothing leaves the gateway serving its boot-time value,
+    %% which is the exact confusion this channel exists to remove.
     error({seed_settings, not_an_object, Other}).
 
 upsert_setting(Key, Value) ->
