@@ -25,12 +25,25 @@ JANUS_PORT="${JANUS_PORT:-18091}"
 API_KEY="${TEST_API_KEY:-sk-fake-matrix-a}"
 
 mkdir -p "$ARTIFACT_DIR"
-# ARTIFACT_DIR is an advertised override and the next line deletes inside it.
-# Refuse a shared or system path: a typo would wipe unrelated files.
-case "$ARTIFACT_DIR" in
-  / | /tmp | /var | /usr | /etc | "$HOME" | "$HOME/")
-    echo "refusing to use $ARTIFACT_DIR as the artifact dir" >&2; exit 2 ;;
-esac
+# ARTIFACT_DIR is an advertised override and the runner DELETES inside it.
+# A name blacklist is the wrong instrument: `pwd -P` resolves /tmp to
+# /private/tmp on macOS, symlinks and trailing slashes slip past a string
+# compare, and the next realistic typo is some other shared directory.
+#
+# So the rule is about CONTENT, not name: the directory must be absent, empty,
+# or already marked as ours by a previous run. A shared directory with other
+# people's files in it is refused no matter what it is called.
+ARTIFACT_MARKER=".janus-matrix-a"
+if [[ -d "$ARTIFACT_DIR" ]]; then
+  if [[ ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
+    stray=$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)
+    if [[ -n "$stray" ]]; then
+      echo "refusing to use $ARTIFACT_DIR: it is not empty and was not created by this script" >&2
+      exit 2
+    fi
+  fi
+fi
+: >"$ARTIFACT_DIR/$ARTIFACT_MARKER"
 rm -f "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.json 2>/dev/null
 # A FRESH database per run, inside the artifact dir. The default SQLite path
 # is the relative "data/janus.db", and /app is the mounted gateway checkout,
@@ -98,7 +111,9 @@ then
   say "  SEED GENERATION FAILED — cannot continue without seed.json"
   exit 1
 fi
-[[ -s "$ARTIFACT_DIR/seed.json" ]] || { say "  seed.json is empty"; exit 1; }
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["providers"]' \
+  "$ARTIFACT_DIR/seed.json" 2>/dev/null \
+  || { say "  seed.json is missing, unparseable, or has no providers"; exit 1; }
 
 # ------------------------------------------------------------------ janus
 say "== Janus on :$JANUS_PORT (docker, sqlite)"
@@ -121,7 +136,7 @@ if ! docker run --rm -v "$GW:/app" -v janus-matrix-a-build:/build -w /app \
   exit 1
 fi
 say "  build ok"
-docker run -d --name janus-matrix-a \
+if ! docker run -d --name janus-matrix-a \
   -p "127.0.0.1:$JANUS_PORT:8080" \
   --add-host=host.docker.internal:host-gateway \
   -e JANUS_HTTP_PORT=8080 \
@@ -131,7 +146,12 @@ docker run -d --name janus-matrix-a \
   -e JANUS_API_KEY_PEPPER=janus-matrix-a-pepper \
   -e JANUS_SECRETS_KEY="v1:$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
   -v "$GW:/app" -v "$ARTIFACT_DIR:/artifacts" -v janus-matrix-a-build:/build \
-  -w /app erlang:27-alpine sh -c "$BOOT" >"$ARTIFACT_DIR/boot.log" 2>&1
+  -w /app erlang:27-alpine sh -c "$BOOT" >"$ARTIFACT_DIR/docker-run.log" 2>&1
+then
+  say "  docker run failed (see $ARTIFACT_DIR/docker-run.log)"
+  tail -10 "$ARTIFACT_DIR/docker-run.log"
+  exit 1
+fi
 
 BASE="http://127.0.0.1:$JANUS_PORT"
 for _ in $(seq 1 240); do
