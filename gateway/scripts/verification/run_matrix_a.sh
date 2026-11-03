@@ -34,6 +34,13 @@ mkdir -p "$ARTIFACT_DIR"
 # or already marked as ours by a previous run. A shared directory with other
 # people's files in it is refused no matter what it is called.
 ARTIFACT_MARKER=".janus-matrix-a"
+# Refuse a symlink outright. `-d` follows it, but `find` does NOT follow a
+# symlinked starting point, so a link to a shared directory would list as
+# empty, pass the guard, and the deletes below would run inside the TARGET.
+# /tmp is world-writable, so such a link can be planted by another user.
+if [[ -L "$ARTIFACT_DIR" ]]; then
+  echo "refusing to use $ARTIFACT_DIR: it is a symlink" >&2; exit 2
+fi
 if [[ -d "$ARTIFACT_DIR" && ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
   # A failed listing must ABORT, not read as "empty": silently treating an
   # unreadable directory as safe is how the destructive globs below run.
@@ -48,16 +55,19 @@ if [[ -d "$ARTIFACT_DIR" && ! -f "$ARTIFACT_DIR/$ARTIFACT_MARKER" ]]; then
     exit 2
   fi
 fi
+# Probe the shapes this script actually writes BEFORE claiming the directory
+# with its marker: a failure after the marker would leave a directory that
+# looks like ours but cannot hold artifacts, and the next run would skip the
+# emptiness check and delete inside it anyway.
+for probe in .write-probe.log .write-probe.txt .write-probe.json; do
+  if ! : >"$ARTIFACT_DIR/$probe" 2>/dev/null; then
+    echo "cannot create $probe in $ARTIFACT_DIR" >&2; exit 2
+  fi
+  rm -f "$ARTIFACT_DIR/$probe"
+done
 if ! : >"$ARTIFACT_DIR/$ARTIFACT_MARKER" 2>/dev/null; then
   echo "cannot write the artifact marker in $ARTIFACT_DIR" >&2; exit 2
 fi
-# The marker proves only that ONE file was writable. Probe the actual shape
-# this script writes before deleting anything, so a directory that accepts
-# a dotfile but not these names fails here rather than mid-run.
-if ! : >"$ARTIFACT_DIR/.write-probe.log" 2>/dev/null; then
-  echo "cannot create .log files in $ARTIFACT_DIR" >&2; exit 2
-fi
-rm -f "$ARTIFACT_DIR/.write-probe.log"
 rm -f "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.txt "$ARTIFACT_DIR"/*.json 2>/dev/null
 # A FRESH database per run, inside the artifact dir. The default SQLite path
 # is the relative "data/janus.db", and /app is the mounted gateway checkout,
