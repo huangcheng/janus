@@ -1260,7 +1260,14 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
             %% and a cap being hit was indistinguishable from any other
             %% upstream stream failure. Quantifying a limit requires the row
             %% to say which limit.
-            _ = put(janus_error_detail, Msg),
+            %% Binary only, matching every other writer of this key: the
+            %% reader guards `is_binary`, so a non-binary would be silently
+            %% dropped rather than recorded, which defeats the point.
+            _ =
+                case is_binary(Msg) of
+                    true -> put(janus_error_detail, Msg);
+                    false -> ok
+                end,
             case wire_enc_abort_reason(Msg) of
                 true ->
                     %% Internal-hop inflate failure on the TRANSLATE
