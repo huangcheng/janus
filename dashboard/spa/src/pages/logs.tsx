@@ -67,6 +67,8 @@ type StreamKind = "otp" | "ops"
 
 const ALL_NODES = "All nodes"
 const ALL_TYPES = "All types"
+// The mobile Time header uses this same 136px track to align the separate grids.
+const MOBILE_ROW_CLASS = "max-sm:grid max-sm:w-full max-sm:grid-cols-[136px_minmax(0,1fr)]"
 
 export function Logs() {
   const [stream, setStream] = useState<StreamKind>("otp")
@@ -187,19 +189,18 @@ export function Logs() {
   }
   let streamDescription: string
   if (stream === "ops") {
-    streamDescription = "ops events from Postgres (cool_edge / task_run + markers)"
+    streamDescription = "Postgres · cool_edge, task_run, and node markers"
   } else if (live) {
-    streamDescription = "OTP live ring buffer (2000, in-memory)"
+    streamDescription = "in-memory ring buffer · latest 2,000 lines"
   } else {
-    streamDescription =
-      "OTP persisted in Postgres · lines land within one poll cycle (~10s)"
+    streamDescription = "Postgres · visible within one poll cycle (~10s)"
   }
   let footer: ReactNode
   if (stream === "ops") {
     footer = (
       <>
         <Database className="size-3" />
-        Ops events · refreshing every 2 seconds · drained by the dashboard puller
+        Dashboard puller · auto-refresh every 2 seconds
       </>
     )
   } else if (live) {
@@ -209,14 +210,14 @@ export function Logs() {
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
           <span className="relative inline-flex size-1.5 rounded-full bg-success" />
         </span>
-        Live ring buffer · refreshing every 2 seconds
+        Live ring buffer · auto-refresh every 2 seconds
       </>
     )
   } else {
     footer = (
       <>
         <Database className="size-3" />
-        Persisted view · refreshing every 2 seconds · new lines land within ~10s
+        Postgres-backed · auto-refresh every 2 seconds
       </>
     )
   }
@@ -231,83 +232,95 @@ export function Logs() {
         <CardHeader className="border-b">
           <CardTitle>Event stream</CardTitle>
           <CardDescription>
-            {lineCount} lines fetched · {streamDescription}
+            {lineCount.toLocaleString()} {stream === "ops" ? "events" : "log lines"} fetched · {streamDescription}
           </CardDescription>
-          <CardAction className="flex flex-wrap items-center gap-2">
-            <Select
-              value={stream}
-              onValueChange={(v) => setStream(v as StreamKind)}
+          <CardAction className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <div
+              role="group"
+              aria-label="Stream controls"
+              className="flex flex-wrap items-center gap-2"
             >
-              <SelectTrigger size="sm" aria-label="Stream source" style={{ width: 144 }}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="otp">OTP logs</SelectItem>
-                <SelectItem value="ops">Ops events</SelectItem>
-              </SelectContent>
-            </Select>
-            {stream === "otp" ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setLive(!live)}
-                aria-pressed={live}
-                title={
-                  live
-                    ? "Switch to the persisted view"
-                    : "Switch to the live ring buffer"
-                }
+              <Select
+                value={stream}
+                onValueChange={(v) => setStream(v as StreamKind)}
               >
-                {live ? (
-                  <span className="relative flex size-2">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
-                    <span className="relative inline-flex size-2 rounded-full bg-success" />
-                  </span>
-                ) : (
-                  <Database />
-                )}
-                {live ? "Live" : "Persisted"}
+                <SelectTrigger size="sm" aria-label="Stream source" className="w-36 max-sm:w-[132px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="otp">OTP logs</SelectItem>
+                  <SelectItem value="ops">Ops events</SelectItem>
+                </SelectContent>
+              </Select>
+              {stream === "otp" ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setLive(!live)}
+                  aria-pressed={live}
+                  title={
+                    live
+                      ? "Switch to the persisted view"
+                      : "Switch to the live ring buffer"
+                  }
+                >
+                  {live ? (
+                    <span className="relative flex size-2">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
+                      <span className="relative inline-flex size-2 rounded-full bg-success" />
+                    </span>
+                  ) : (
+                    <Database />
+                  )}
+                  {live ? "Live" : "Persisted"}
+                </Button>
+              ) : (
+                <Select
+                  value={opsType ?? ALL_TYPES}
+                  onValueChange={(v) => setOpsType(!v || v === ALL_TYPES ? null : v)}
+                >
+                  <SelectTrigger size="sm" aria-label="Ops event type" className="w-36 max-sm:w-[132px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ALL_TYPES}>All types</SelectItem>
+                    <SelectItem value="cool_edge">cool_edge</SelectItem>
+                    <SelectItem value="task_run">task_run</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+              <Button variant="outline" size="sm" onClick={load} aria-label="Refresh logs">
+                <RefreshCw />
               </Button>
-            ) : (
-              <Select
-                value={opsType ?? ALL_TYPES}
-                onValueChange={(v) => setOpsType(!v || v === ALL_TYPES ? null : v)}
-              >
-                <SelectTrigger size="sm" aria-label="Ops event type" style={{ width: 144 }}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL_TYPES}>All types</SelectItem>
-                  <SelectItem value="cool_edge">cool_edge</SelectItem>
-                  <SelectItem value="task_run">task_run</SelectItem>
-                </SelectContent>
-              </Select>
-            )}
-            <ComboboxSingle
-              value={nodeFilter ?? ALL_NODES}
-              options={[ALL_NODES, ...nodeOptions]}
-              onChange={(v) => setNodeFilter(!v || v === ALL_NODES ? null : v)}
-              placeholder={ALL_NODES}
-              className="w-44"
-            />
-            {stream === "otp" ? (
-              <Select
-                value={level}
-                onValueChange={setLevel}
-              >
-                <SelectTrigger size="sm" aria-label="Minimum log level" style={{ width: 112 }}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="info">All levels</SelectItem>
-                  <SelectItem value="warn">Warn and above</SelectItem>
-                  <SelectItem value="error">Errors only</SelectItem>
-                </SelectContent>
-              </Select>
-            ) : null}
-            <Button variant="outline" size="sm" onClick={load} aria-label="Refresh logs">
-              <RefreshCw />
-            </Button>
+            </div>
+            <div
+              role="group"
+              aria-label="Event filters"
+              className="flex flex-wrap items-center gap-2"
+            >
+              <ComboboxSingle
+                value={nodeFilter ?? ALL_NODES}
+                options={[ALL_NODES, ...nodeOptions]}
+                onChange={(v) => setNodeFilter(!v || v === ALL_NODES ? null : v)}
+                label={nodeFilter ? `Node filter: ${nodeFilter}` : "Node filter"}
+                className="w-44"
+              />
+              {stream === "otp" ? (
+                <Select
+                  value={level}
+                  onValueChange={setLevel}
+                >
+                  <SelectTrigger size="sm" aria-label="Minimum log level" className="w-28">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="info">All levels</SelectItem>
+                    <SelectItem value="warn">Warn and above</SelectItem>
+                    <SelectItem value="error">Errors only</SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : null}
+            </div>
           </CardAction>
         </CardHeader>
         <CardContent className="min-h-0 px-0">
@@ -321,22 +334,30 @@ export function Logs() {
               }
             />
           ) : (
-            <Table flush aria-label="Log event stream" className="table-fixed">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-[136px] sm:w-[144px]">Time</TableHead>
-                  {!nodeFilter && <TableHead className="hidden md:table-cell">Node</TableHead>}
-                  <TableHead className="w-28 px-2 sm:w-[120px] sm:px-3">
+            <Table flush role="table" aria-label="Log event stream" className="table-fixed max-sm:block">
+              <TableHeader role="rowgroup" className="max-sm:block">
+                <TableRow role="row" className={MOBILE_ROW_CLASS}>
+                  <TableHead role="columnheader" className="w-[136px] sm:w-[144px]">Time</TableHead>
+                  {!nodeFilter && (
+                    <TableHead role="columnheader" className="hidden md:w-[120px] md:table-cell lg:w-[160px] xl:w-[200px]">
+                      Node
+                    </TableHead>
+                  )}
+                  <TableHead role="columnheader" className="w-28 px-2 sm:w-[120px] sm:px-3">
                     {stream === "ops" ? "Type" : "Level"}
                   </TableHead>
-                  <TableHead>Details</TableHead>
+                  <TableHead role="columnheader" className="max-sm:sr-only">Details</TableHead>
                 </TableRow>
               </TableHeader>
-              <TableBody>
+              <TableBody role="rowgroup" className="max-sm:block">
                 {stream === "otp"
                   ? otpPagination.slice.map((e) => (
-                      <TableRow key={`${e.node ?? ""}:${e.idx}:${e.ts}`}>
-                        <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
+                      <TableRow
+                        role="row"
+                        key={`${e.node ?? ""}:${e.idx}:${e.ts}`}
+                        className={MOBILE_ROW_CLASS}
+                      >
+                        <TableCell role="cell" className="font-mono text-xs whitespace-nowrap tabular-nums">
                           <EventTime ts={e.ts} />
                           {!nodeFilter && e.node && (
                             <span className="mt-1 line-clamp-2 whitespace-normal text-muted-foreground md:hidden" title={e.node}>
@@ -346,25 +367,29 @@ export function Logs() {
                           )}
                         </TableCell>
                         {!nodeFilter && (
-                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">
+                          <TableCell role="cell" className="hidden font-mono text-xs text-muted-foreground md:table-cell">
                             <span className="block max-w-[200px] truncate" title={e.node}>
                               {e.node ?? "—"}
                             </span>
                           </TableCell>
                         )}
-                        <TableCell className="px-2 sm:px-3">
+                        <TableCell role="cell" className="px-2 sm:px-3">
                           <Badge variant={levelBadgeVariant(e.level)} className="font-mono">
                             {e.level}
                           </Badge>
                         </TableCell>
-                        <TableCell className="w-full whitespace-normal">
+                        <TableCell role="cell" className="w-full whitespace-normal max-sm:col-span-2 max-sm:pt-0">
                           <LogDetails fields={e.fields} />
                         </TableCell>
                       </TableRow>
                     ))
                   : opsPagination.slice.map((line) => (
-                      <TableRow key={line.key}>
-                        <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
+                      <TableRow
+                        role="row"
+                        key={line.key}
+                        className={MOBILE_ROW_CLASS}
+                      >
+                        <TableCell role="cell" className="font-mono text-xs whitespace-nowrap tabular-nums">
                           <EventTime ts={line.ts} />
                           {!nodeFilter && line.nodeLabel && (
                             <span className="mt-1 line-clamp-2 whitespace-normal text-muted-foreground md:hidden" title={line.nodeLabel}>
@@ -374,13 +399,13 @@ export function Logs() {
                           )}
                         </TableCell>
                         {!nodeFilter && (
-                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">
+                          <TableCell role="cell" className="hidden font-mono text-xs text-muted-foreground md:table-cell">
                             <span className="block max-w-[200px] truncate" title={line.nodeLabel}>
                               {line.nodeLabel ?? "—"}
                             </span>
                           </TableCell>
                         )}
-                        <TableCell className="px-2 sm:px-3">
+                        <TableCell role="cell" className="px-2 sm:px-3">
                           <Badge
                             variant={line.kind === "marker" ? "warning" : "outline"}
                             className="font-mono"
@@ -388,8 +413,12 @@ export function Logs() {
                             {line.kind === "marker" ? "marker" : line.type}
                           </Badge>
                         </TableCell>
-                        <TableCell className="w-full whitespace-normal">
-                          <ExpandableText text={line.text} className="w-full" />
+                        <TableCell role="cell" className="w-full whitespace-normal max-sm:col-span-2 max-sm:pt-0">
+                          <ExpandableText
+                            text={line.text}
+                            summary={<span className="font-mono">{line.text}</span>}
+                            className="w-full"
+                          />
                         </TableCell>
                       </TableRow>
                     ))}
@@ -465,24 +494,52 @@ function LogDetails({ fields }: { fields: Record<string, unknown> }) {
   const text = formatFields(fields)
   if (!text) return "—"
   return (
-    <ExpandableText text={text} className="w-full">
+    <ExpandableText
+      text={text}
+      summary={
+        <span className="font-mono">
+          <LogSummary fields={fields} />
+        </span>
+      }
+      className="w-full"
+    >
       <LogFields fields={fields} />
     </ExpandableText>
   )
 }
 
-function LogFields({ fields }: { fields: Record<string, unknown> }) {
+function LogSummary({ fields }: { fields: Record<string, unknown> }) {
   return (
     <>
       {fieldEntries(fields).map(([key, value]) => (
         <span key={key}>
-          <span className="text-muted-foreground">{key}=</span>
-          <span className={value === null || typeof value !== "object" ? "text-primary" : undefined}>
+          {key}=
+          <span className={key === "what" ? "text-foreground" : undefined}>
             {formatValue(value)}
           </span>{" "}
         </span>
       ))}
     </>
+  )
+}
+
+function LogFields({ fields }: { fields: Record<string, unknown> }) {
+  return (
+    <dl className="min-w-full font-mono text-xs leading-5">
+      {fieldEntries(fields).map(([key, value]) => (
+        <div
+          key={key}
+          className="grid border-b border-border/50 last:border-0 sm:grid-cols-[minmax(120px,0.24fr)_minmax(0,1fr)]"
+        >
+          <dt className="px-3 pt-2.5 text-muted-foreground sm:pb-2.5">{key}</dt>
+          <dd className="min-w-0 whitespace-pre-wrap break-words px-3 pb-2.5 [overflow-wrap:anywhere] sm:pt-2.5">
+            <span className={value === null || typeof value !== "object" ? "text-primary" : undefined}>
+              {formatValue(value)}
+            </span>
+          </dd>
+        </div>
+      ))}
+    </dl>
   )
 }
 

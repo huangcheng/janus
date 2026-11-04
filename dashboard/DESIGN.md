@@ -32,8 +32,8 @@ Quiet precision: a restrained light or dark admin theme driven by cool-neutral O
 - Data-plane endpoints live in the compact API endpoints popover in the sidebar footer, not a permanently expanded endpoint list.
 - Page descriptions wrap when useful. Dense tables stay fluid; forms and settings use intentional reading widths.
 - Use predictable form groups and tier grids with consistent spacing. Responsive behavior is structural: grids collapse and dialog content remains within the viewport.
-- Logs use the same document-flow `Table flush` and shared client pagination as Audit. OTP and Ops events keep separate sources, filters, expandable details, and two-second refresh.
-- Log and Audit tables use fixed columns. Secondary node, actor, and target metadata moves beneath timestamps on phones, preserving the information without horizontal scrolling.
+- Logs use the same document-flow `Table flush` and shared client pagination as Audit. OTP and Ops events keep separate sources, filters, expandable details, and two-second refresh. OTP rows expand into structured key/value fields.
+- Log and Audit tables use fixed columns. Secondary node, actor, and target metadata moves beneath timestamps on phones, preserving the information without horizontal scrolling. Log details use the full phone row beneath time and severity.
 
 ## Motion
 
