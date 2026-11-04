@@ -294,6 +294,35 @@ this repository). Worker-role
 followers are verified via master `/stats/sched` registration, not agent
 `:8080`.
 
+## MCP server
+
+The dashboard embeds an MCP server (Streamable HTTP) exposing the fleet,
+catalog and observability surface to AI agents — every tool call lands on
+an existing audited REST endpoint; the MCP layer only adds discovery and
+gating (`app/mcp/`). Default OFF; while off, `/mcp/` 404s fail-closed.
+
+```bash
+# One-time enable (break-glass pair on the query string)
+curl -X PUT "https://<dashboard>/api/settings/mcp?role=operator&reason=enabling-agents" \
+  -H "authorization: Bearer $JANUS_JWT" \
+  -H 'content-type: application/json' -d '{"enabled": true, "confirmed": true}'
+
+# Client config: URL https://<dashboard>/mcp/ (trailing slash), header
+# Authorization: Bearer <operator JWT>. Stateful write tools are annotated
+# destructiveHint; break-glass tools take role/reason/confirmed arguments.
+```
+
+The `fleet_command` tool rides the allowlisted `POST /api/nodes/fleet-command`
+endpoint (fleet_status, pool_ping, runtime_snapshot, worker_geo_refresh,
+lb_cool_clear, config_reload_nudge, catalog_cache_flush), audited on both
+the dashboard and the gateway side. Agent workflow guidance lives in
+`docs/skills/janus-fleet-ops/SKILL.md` (repo copy; `.agents/skills/` mirrors
+are per-machine installs).
+
+Bare-metal deploys: the `mcp` dependency (plus transitives) must be in the
+rebuilt wheelhouse — `install_bare_dashboard.sh` hard-refuses wheels not
+listed in `wheels-manifest.txt`. Docker deploys need only the image rebuild.
+
 ## Development
 
 ```bash
