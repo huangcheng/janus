@@ -1481,12 +1481,15 @@ decisions_terminal({error, response_too_large}, Route, Req, State) ->
     reply_err(openai_decisions, Req, State, 502, Code, Msg);
 decisions_terminal({error, Reason}, Route, Req, State) ->
     Status = error_http_status(Reason),
-    %% Detail before the row: track_proxied is the writer.
-    _ =
-        case decisions_local_error(Reason) of
-            {_Code, Msg} when is_binary(Msg) -> put(janus_error_detail, Msg);
-            _ -> ok
+    %% Derive the message from the STATUS, exactly as decisions_error_reply/4
+    %% will, and stash it BEFORE the row. Deriving it from `Reason` instead
+    %% would put a different sentence in the row than the caller receives.
+    {_Code, DetailMsg} =
+        case Status of
+            504 -> decisions_local_error(upstream_timeout);
+            _ -> decisions_local_error(other)
         end,
+    _ = put(janus_error_detail, DetailMsg),
     _ = track_proxied(Status, Route, #{}),
     case is_transient(Reason) of
         true ->
