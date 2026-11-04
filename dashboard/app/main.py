@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import (
     alerts,
@@ -20,6 +20,7 @@ from . import (
     decisions_probe,
     entitlements,
     maintenance,
+    mcp as mcp_server,
     nodes,
 )
 from .auth import require_auth
@@ -138,16 +139,21 @@ async def lifespan(app: FastAPI):
             "bucket, so five failed logins lock out everyone for %ss",
             config.lockout_sec,
         )
-    yield
-    await maintenance.stop_sweeper()
-    await alerts.stop_sender()
-    await cascade.stop_background()
-    await auto_reorder.stop_background()
-    await entitlements.stop_background()
-    await sync.stop_sync_scheduler()
-    await nodes.stop_monitor()
-    await database.close_pool()
-    logger.info("dashboard stopped")
+    # The /mcp mount is a Starlette sub-app — a mounted sub-app's own
+    # lifespan never runs, so the host app must run the SDK's session
+    # manager (stateless HTTP still routes sessions through it).
+    async with mcp_server.mcp.session_manager.run():
+        yield
+        await maintenance.stop_sweeper()
+        await alerts.stop_sender()
+        await cascade.stop_background()
+        await auto_reorder.stop_background()
+        await entitlements.stop_background()
+        await sync.stop_sync_scheduler()
+        await nodes.stop_monitor()
+        await database.close_pool()
+        await mcp_server.api.close()
+        logger.info("dashboard stopped")
 
 
 app = FastAPI(
@@ -257,6 +263,40 @@ app.include_router(config_backup.router, prefix="/api/config", tags=["config"])
 app.include_router(entitlements_router.router, prefix="/api/entitlements", tags=["entitlements"])
 app.include_router(alerts_router.router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(maintenance.router, prefix="/api/maintenance", tags=["maintenance"])
+
+# --- MCP server (Streamable HTTP; knob-gated, default off — see app/mcp) ---
+# Registered here, before the SPA catch-all below, so /mcp/* never falls
+# through to index.html.
+mcp_server.bind(app)
+app.mount("/mcp", mcp_server.gated_app(), name="mcp")
+
+
+# Every HTTP method, not just the MCP trio: a method outside the list would
+# fall to Starlette's 405 BEFORE the gate runs, disclosing that the surface
+# exists while the knob is off — breaking the fail-closed 404 contract.
+@app.api_route(
+    "/mcp",
+    methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "CONNECT"],
+    include_in_schema=False,
+)
+async def mcp_bare(request: Request):
+    """Bare /mcp does not match the mount above (a Starlette Mount matches
+    path/{path:path}, not the bare path), so without this route it would
+    reach the SPA catch-all. Run the same knob+auth gate, then redirect —
+    307 preserves method and body — to the real endpoint /mcp/."""
+    denied = await mcp_server.gate()
+    if denied is None:
+        denied = mcp_server.auth_failure(request.headers.get("authorization"))
+    if denied is not None:
+        return denied
+    # root_path-aware and query-preserving: a prefix-proxied deployment
+    # must not redirect to the bare origin, and any query string on the
+    # incoming request rides along.
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    target = f"{root_path}/mcp/"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    return RedirectResponse(target, status_code=307)
 
 
 @app.get("/api/health")

@@ -32,6 +32,7 @@ from .. import (
     database,
     egress,
     limits,
+    mcp as mcp_server,
     nodes,
 )
 from ..auth import require_auth
@@ -1456,6 +1457,52 @@ async def put_egress_policy(request: Request, user: dict = Depends(require_auth)
         "enabled": body["enabled"],
         "retro_audit_reported": reported,
     }
+
+
+# ---------------------------------------------------------------------------
+# The MCP server knob (settings key `dash.mcp`, JSON {"enabled": bool}).
+# DASHBOARD-ONLY like dash.egress_policy — gateways never consume it, so no
+# generation bump. Default OFF; while OFF the /mcp mount 404s fail-closed
+# (see app/mcp). Flipping it is a break-glass write (operator role +
+# confirm + reason), exactly like the egress-policy knob.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mcp")
+async def get_mcp_knob(user: dict = Depends(require_auth)):
+    return {
+        "source": "db" if await _mcp_row() is not None else "default",
+        "enabled": await mcp_server.mcp_enabled(),
+    }
+
+
+async def _mcp_row():
+    return await database.fetchrow(
+        "SELECT value FROM settings WHERE key = $1", mcp_server.MCP_KNOB_KEY
+    )
+
+
+@router.put("/mcp")
+async def put_mcp_knob(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        raise _err(400, "invalid", "body must carry {enabled: boolean}")
+    gate = egress.require_breakglass(request, "dash.mcp")
+    egress.require_confirmed(body, "dash.mcp")
+    before = await mcp_server.mcp_enabled()
+    payload = json.dumps({"enabled": body["enabled"]})
+    await database.execute(
+        "INSERT INTO settings (key, value) VALUES ($1, $2) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+        mcp_server.MCP_KNOB_KEY,
+        payload,
+    )
+    audit.log(
+        "settings.mcp",
+        mcp_server.MCP_KNOB_KEY,
+        f"role={gate['role']} reason={gate['reason']} {before} -> {body['enabled']}",
+    )
+    return {"enabled": body["enabled"]}
 
 
 # ---------------------------------------------------------------------------
