@@ -113,28 +113,34 @@ function ResolutionCard({ rows }: { rows: UsageSummary["by_resolution"] }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="px-0">
-        <Table flush>
+        <Table flush className="table-fixed">
           <TableHeader>
             <TableRow>
               <TableHead>Requested</TableHead>
-              <TableHead className="w-8" />
+              <TableHead className="w-6" />
               <TableHead>Resolved model</TableHead>
-              <TableHead className="text-right">Requests</TableHead>
-              <TableHead className="text-right">Tokens</TableHead>
-              <TableHead className="text-right">Last</TableHead>
+              <TableHead className="w-20 text-right">Requests</TableHead>
+              <TableHead className="hidden text-right lg:table-cell lg:w-24">Tokens</TableHead>
+              <TableHead className="hidden text-right xl:table-cell xl:w-32">Last</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((r) => (
               <TableRow key={`${r.requested}:${r.resolved}`}>
-                <TableCell className="font-mono text-xs">{r.requested}</TableCell>
+                <TableCell className="max-w-0 truncate font-mono text-xs" title={r.requested}>{r.requested}</TableCell>
                 <TableCell className="text-muted-foreground">→</TableCell>
-                <TableCell className="font-mono text-xs">{r.resolved}</TableCell>
+                <TableCell className="max-w-0 truncate font-mono text-xs" title={r.resolved}>
+                  <span className="block truncate">{r.resolved}</span>
+                  <span className="mt-1 block text-[11px] text-muted-foreground xl:hidden">
+                    <span className="lg:hidden">{fmtNum(r.prompt_tokens + r.completion_tokens)} tokens · </span>
+                    <EventTime ts={new Date(r.last_ts * 1000).toISOString()} />
+                  </span>
+                </TableCell>
                 <TableCell className="text-right tabular-nums">{fmtNum(r.requests)}</TableCell>
-                <TableCell className="text-right tabular-nums">
+                <TableCell className="hidden text-right tabular-nums lg:table-cell">
                   {fmtNum(r.prompt_tokens + r.completion_tokens)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-muted-foreground">
+                <TableCell className="hidden text-right tabular-nums text-muted-foreground xl:table-cell">
                   <EventTime ts={new Date(r.last_ts * 1000).toISOString()} />
                 </TableCell>
               </TableRow>
@@ -160,19 +166,19 @@ function BreakdownCard({ title, rows }: { title: string; rows: UsageSummary["by_
             No traffic in this window
           </div>
         ) : (
-          <Table>
+          <Table className="table-fixed">
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead className="text-right">Requests</TableHead>
-                <TableHead className="text-right">Tokens</TableHead>
-                <TableHead className="w-[30%]">Share</TableHead>
+                <TableHead className="w-20 text-right">Requests</TableHead>
+                <TableHead className="w-20 text-right">Tokens</TableHead>
+                <TableHead className="w-16">Share</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map((r, i) => (
                 <TableRow key={(r.id ?? "del") + ":" + i}>
-                  <TableCell className="max-w-[220px] truncate font-mono text-xs" title={r.name ?? undefined}>
+                  <TableCell className="max-w-0 truncate font-mono text-xs" title={r.name ?? undefined}>
                     {r.name ?? "(deleted)"}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{fmtNum(r.requests)}</TableCell>
@@ -298,13 +304,13 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
             description="No tokens to price. Set prices on the Providers page to see spend."
           />
         ) : (
-          <Table flush>
+          <Table flush className="table-fixed">
             <TableHeader>
               <TableRow>
                 <TableHead>{SPEND_GROUP_LABEL[gb]}</TableHead>
-                <TableHead className="text-right">Tokens in</TableHead>
-                <TableHead className="text-right">Tokens out</TableHead>
-                <TableHead className="text-right">Cost</TableHead>
+                <TableHead className="w-[76px] text-right sm:w-24">Tokens in</TableHead>
+                <TableHead className="w-[76px] text-right sm:w-24">Tokens out</TableHead>
+                <TableHead className="w-[92px] text-right sm:w-32">Cost</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -312,7 +318,7 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
                 const unp = r.unpriced_prompt_tokens + r.unpriced_completion_tokens
                 return (
                   <TableRow key={`${String(r.id)}:${i}`}>
-                    <TableCell className="max-w-[220px] truncate font-mono text-xs">
+                    <TableCell className="max-w-0 truncate font-mono text-xs" title={r.name}>
                       {r.name}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
@@ -321,7 +327,7 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
                     <TableCell className="text-right tabular-nums">
                       {fmtNum(r.completion_tokens)}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className="whitespace-normal text-right tabular-nums">
                       {r.cost == null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
@@ -332,7 +338,7 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
                       )}
                       {unp > 0 && (
                         <span
-                          className="ml-1 text-[11px] text-muted-foreground"
+                          className="block text-[11px] text-muted-foreground sm:ml-1 sm:inline"
                           title="tokens on models without a price row — excluded from cost, never estimated"
                         >
                           (+{fmtNum(unp)} unpriced)
@@ -344,7 +350,7 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
               })}
               {unpricedTotal > 0 && (
                 <TableRow className="bg-muted/40 text-muted-foreground">
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="whitespace-normal font-mono text-xs">
                     unpriced models ({data.unpriced.models})
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
@@ -363,6 +369,66 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function UsageEventListItem({
+  event: e,
+  onTimeline,
+}: {
+  event: UsageEvent
+  onTimeline: (requestRef: string) => void
+}) {
+  return (
+    <li className="space-y-3 px-5 py-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-mono text-xs text-muted-foreground tabular-nums">{fmtTs(e.ts)}</span>
+        <span className={`font-mono text-xs font-semibold ${statusClass(e.status)}`}>
+          {e.status}
+        </span>
+        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          {e.stream === 1 ? <Zap className="size-3.5" aria-hidden /> : null}
+          {e.stream === 1 ? "stream" : "non-stream"}
+        </span>
+        {e.request_ref && (
+          <span className="ml-auto">
+            <IconAction label="Timeline" onClick={() => onTimeline(e.request_ref!)}>
+              <History />
+            </IconAction>
+          </span>
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-mono text-sm" title={e.model ?? undefined}>
+          {e.model ?? "(deleted)"}
+        </div>
+        <div className="mt-1 truncate font-mono text-xs text-muted-foreground" title={e.provider ?? undefined}>
+          {e.provider ?? "(deleted)"}
+        </div>
+      </div>
+      <dl className="grid grid-cols-3 gap-3 text-xs">
+        <div>
+          <dt className="text-muted-foreground">Tokens in</dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{e.prompt_tokens ?? "—"}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Tokens out</dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{e.completion_tokens ?? "—"}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Latency</dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{e.latency_ms != null ? `${e.latency_ms} ms` : "—"}</dd>
+        </div>
+      </dl>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">Key</dt>
+        <dd className="min-w-0 truncate font-mono" title={e.key_prefix ?? undefined}>{e.key_prefix ?? "(deleted)"}</dd>
+        <dt className="text-muted-foreground">Request ID</dt>
+        <dd className="min-w-0 [&>button]:max-w-full">
+          {e.request_id ? <CopyMono text={e.request_id} /> : "—"}
+        </dd>
+      </dl>
+    </li>
   )
 }
 
@@ -678,71 +744,90 @@ export function Usage() {
                   description="Adjust the filters or widen the time range."
                 />
               ) : (
-                <Table flush>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Time</TableHead>
-                      <TableHead>Key</TableHead>
-                      <TableHead>Model</TableHead>
-                      <TableHead>Provider</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Stream</TableHead>
-                      <TableHead className="text-right">In</TableHead>
-                      <TableHead className="text-right">Out</TableHead>
-                      <TableHead className="text-right">Latency</TableHead>
-                      <TableHead>Request ID</TableHead>
-                      <TableHead className="w-10">
-                        <span className="sr-only">Timeline</span>
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
+                <>
+                  <ul className="divide-y divide-border/60 lg:hidden" aria-label="Usage events">
                     {events.map((e, i) => (
-                      <TableRow key={e.request_id ?? `${e.ts}-${i}`}>
-                        <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
-                          {fmtTs(e.ts)}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">{e.key_prefix ?? "(deleted)"}</TableCell>
-                        <TableCell className="font-mono text-xs">{e.model ?? "(deleted)"}</TableCell>
-                        <TableCell className="font-mono text-xs">{e.provider ?? "(deleted)"}</TableCell>
-                        <TableCell className={`font-mono text-xs font-semibold ${statusClass(e.status)}`}>
-                          {e.status}
-                        </TableCell>
-                        <TableCell>
-                          {e.stream === 1 ? (
-                            <>
-                              <Zap className="size-3.5 text-muted-foreground" aria-hidden />
-                              <span className="sr-only">streamed</span>
-                            </>
-                          ) : (
-                            <span className="text-muted-foreground" aria-hidden>
-                              ·
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {e.prompt_tokens ?? "—"}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {e.completion_tokens ?? "—"}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {e.latency_ms != null ? `${e.latency_ms} ms` : "—"}
-                        </TableCell>
-                        <TableCell>
-                          {e.request_id ? <CopyMono text={e.request_id} /> : "—"}
-                        </TableCell>
-                        <TableCell>
-                          {e.request_ref && (
-                            <IconAction label="Timeline" onClick={() => setTimelineRef(e.request_ref)}>
-                              <History />
-                            </IconAction>
-                          )}
-                        </TableCell>
-                      </TableRow>
+                      <UsageEventListItem
+                        key={e.request_id ?? `${e.ts}-${i}`}
+                        event={e}
+                        onTimeline={setTimelineRef}
+                      />
                     ))}
-                  </TableBody>
-                </Table>
+                  </ul>
+                  <div className="hidden lg:block">
+                    <Table flush className="table-fixed">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-32">Time</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-28">Key</TableHead>
+                          <TableHead className="w-48">Model</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-40">Provider</TableHead>
+                          <TableHead className="w-16">Status</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-14">Stream</TableHead>
+                          <TableHead className="w-20 text-right">In</TableHead>
+                          <TableHead className="w-20 text-right">Out</TableHead>
+                          <TableHead className="w-24 text-right">Latency</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-40">Request ID</TableHead>
+                          <TableHead className="w-10">
+                            <span className="sr-only">Timeline</span>
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {events.map((e, i) => (
+                          <TableRow key={e.request_id ?? `${e.ts}-${i}`}>
+                            <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
+                              {fmtTs(e.ts)}
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 truncate font-mono text-xs 2xl:table-cell" title={e.key_prefix ?? undefined}>
+                              {e.key_prefix ?? "(deleted)"}
+                            </TableCell>
+                            <TableCell className="max-w-0 truncate font-mono text-xs" title={e.model ?? undefined}>
+                              {e.model ?? "(deleted)"}
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 truncate font-mono text-xs 2xl:table-cell" title={e.provider ?? undefined}>
+                              {e.provider ?? "(deleted)"}
+                            </TableCell>
+                            <TableCell className={`font-mono text-xs font-semibold ${statusClass(e.status)}`}>
+                              {e.status}
+                            </TableCell>
+                            <TableCell className="hidden 2xl:table-cell">
+                              {e.stream === 1 ? (
+                                <>
+                                  <Zap className="size-3.5 text-muted-foreground" aria-hidden />
+                                  <span className="sr-only">streamed</span>
+                                </>
+                              ) : (
+                                <span className="text-muted-foreground" aria-hidden>
+                                  ·
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {e.prompt_tokens ?? "—"}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {e.completion_tokens ?? "—"}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {e.latency_ms != null ? `${e.latency_ms} ms` : "—"}
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 2xl:table-cell [&>button]:max-w-full">
+                              {e.request_id ? <CopyMono text={e.request_id} /> : "—"}
+                            </TableCell>
+                            <TableCell>
+                              {e.request_ref && (
+                                <IconAction label="Timeline" onClick={() => setTimelineRef(e.request_ref)}>
+                                  <History />
+                                </IconAction>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
               )}
               <div className="px-5">
                 <Pagination

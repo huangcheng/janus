@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { Ban, CircleAlert, History, OctagonX, RefreshCw } from "lucide-react"
 import { api } from "../api"
 import { EmptyState, ErrorFlash, IconAction, Layout, Loading } from "../components"
+import { ExpandableText } from "../components/expandable-text"
 import { Pagination } from "../components/pagination"
 import { StatCard, StatCardSkeleton } from "@/components/stat-card"
 import { Badge } from "@/components/ui/badge"
@@ -62,7 +63,7 @@ function ErrorCell({
 }) {
   if (!code && !reason && !detail) return <span className="text-muted-foreground">—</span>
   return (
-    <span className="flex max-w-[260px] flex-wrap items-center gap-1">
+    <div className="flex min-w-0 max-w-[320px] flex-wrap items-center gap-1">
       {code && (
         <span className="truncate font-mono text-xs" title={code}>
           {code}
@@ -73,17 +74,8 @@ function ErrorCell({
           {reason}
         </Badge>
       )}
-      {/* The provider's own sentence (usage_events.error_detail) — the
-          headline operators actually need; full text in the tooltip. */}
-      {detail && (
-        <span
-          className="w-full truncate text-xs text-muted-foreground"
-          title={detail}
-        >
-          {detail}
-        </span>
-      )}
-    </span>
+      {detail && <ExpandableText text={detail} className="w-full min-w-0" />}
+    </div>
   )
 }
 
@@ -112,15 +104,15 @@ function ByErrorCard({ rows }: { rows: FailureGroup[] }) {
             description="Nothing has failed — widen the time range if you expected rows here."
           />
         ) : (
-          <Table flush>
+          <Table flush className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead>Kind</TableHead>
+                <TableHead className="w-24">Kind</TableHead>
                 <TableHead>Error</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Provider</TableHead>
-                <TableHead className="text-right">Count</TableHead>
-                <TableHead className="text-right">Last seen</TableHead>
+                <TableHead className="hidden lg:table-cell lg:w-44">Model</TableHead>
+                <TableHead className="hidden lg:table-cell lg:w-32">Provider</TableHead>
+                <TableHead className="w-16 text-right">Count</TableHead>
+                <TableHead className="hidden text-right lg:table-cell lg:w-32">Last seen</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -129,15 +121,21 @@ function ByErrorCard({ rows }: { rows: FailureGroup[] }) {
                   <TableCell>
                     <KindBadge kind={g.kind} />
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="max-w-0">
                     <ErrorCell code={g.code} reason={g.reason} />
+                    <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground lg:hidden" title={`${g.model ?? "—"}${g.provider ? ` · ${g.provider}` : ""}`}>
+                      {g.model ?? (g.kind === "upstream" ? "(deleted)" : "—")}
+                      {g.provider ? ` · ${g.provider}` : ""}
+                    </div>
                   </TableCell>
-                  <TableCell className="max-w-[220px] truncate font-mono text-xs" title={g.model ?? undefined}>
+                  <TableCell className="hidden max-w-0 truncate font-mono text-xs lg:table-cell" title={g.model ?? undefined}>
                     {g.model ?? (g.kind === "upstream" ? "(deleted)" : "—")}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{g.provider ?? "—"}</TableCell>
+                  <TableCell className="hidden max-w-0 truncate font-mono text-xs lg:table-cell" title={g.provider ?? undefined}>
+                    {g.provider ?? "—"}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{fmtNum(g.count)}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">
+                  <TableCell className="hidden text-right tabular-nums text-muted-foreground lg:table-cell">
                     <EventTime ts={new Date(g.last_ts * 1000).toISOString()} />
                   </TableCell>
                 </TableRow>
@@ -147,6 +145,56 @@ function ByErrorCard({ rows }: { rows: FailureGroup[] }) {
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function FailureEventListItem({
+  event: e,
+  onTimeline,
+}: {
+  event: FailureEvent
+  onTimeline: (requestRef: string) => void
+}) {
+  return (
+    <li className="space-y-3 px-5 py-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-mono text-xs text-muted-foreground tabular-nums">
+          <EventTime ts={new Date(e.ts * 1000).toISOString()} />
+        </span>
+        <KindBadge kind={e.kind} />
+        <span className={`font-mono text-xs font-semibold ${e.status != null ? statusClass(e.status) : "text-muted-foreground"}`}>
+          {e.status ?? "—"}
+        </span>
+        {e.request_ref && (
+          <span className="ml-auto">
+            <IconAction label="Timeline" onClick={() => onTimeline(e.request_ref!)}>
+              <History />
+            </IconAction>
+          </span>
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-mono text-sm" title={modelLabel(e)}>
+          {modelLabel(e)}
+        </div>
+        {e.provider && (
+          <div className="mt-1 truncate font-mono text-xs text-muted-foreground" title={e.provider}>
+            {e.provider}
+          </div>
+        )}
+      </div>
+      <ErrorCell code={e.code} reason={e.reason} detail={e.detail} />
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">Key</dt>
+        <dd className="min-w-0 truncate font-mono" title={e.key_prefix ?? undefined}>{e.key_prefix ?? "—"}</dd>
+        <dt className="text-muted-foreground">Node</dt>
+        <dd className="min-w-0 truncate font-mono" title={e.node ?? undefined}>{e.node ?? "—"}</dd>
+        <dt className="text-muted-foreground">Request ID</dt>
+        <dd className="min-w-0 [&>button]:max-w-full">
+          {e.request_id ? <CopyMono text={e.request_id} /> : "—"}
+        </dd>
+      </dl>
+    </li>
   )
 }
 
@@ -311,65 +359,79 @@ export function Failures() {
                   }
                 />
               ) : (
-                <Table flush>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Time</TableHead>
-                      <TableHead>Kind</TableHead>
-                      <TableHead>Model</TableHead>
-                      <TableHead>Provider</TableHead>
-                      <TableHead>Key</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Error</TableHead>
-                      <TableHead>Node</TableHead>
-                      <TableHead>Request ID</TableHead>
-                      <TableHead className="w-10">
-                        <span className="sr-only">Timeline</span>
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
+                <>
+                  <ul className="divide-y divide-border/60 lg:hidden" aria-label="Failure events">
                     {events.map((e, i) => (
-                      <TableRow key={e.request_id ?? e.request_ref ?? `${e.kind}-${e.ts}-${i}`}>
-                        <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
-                          <EventTime ts={new Date(e.ts * 1000).toISOString()} />
-                        </TableCell>
-                        <TableCell>
-                          <KindBadge kind={e.kind} />
-                        </TableCell>
-                        <TableCell
-                          className="max-w-[220px] truncate font-mono text-xs"
-                          title={modelLabel(e)}
-                        >
-                          {modelLabel(e)}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">{e.provider ?? "—"}</TableCell>
-                        <TableCell className="font-mono text-xs">{e.key_prefix ?? "—"}</TableCell>
-                        <TableCell
-                          className={`font-mono text-xs font-semibold ${e.status != null ? statusClass(e.status) : "text-muted-foreground"}`}
-                        >
-                          {e.status ?? "—"}
-                        </TableCell>
-                        <TableCell>
-                          <ErrorCell code={e.code} reason={e.reason} detail={e.detail} />
-                        </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">
-                          {e.node ?? "—"}
-                        </TableCell>
-                        <TableCell>
-                          {e.request_id ? <CopyMono text={e.request_id} /> : "—"}
-                        </TableCell>
-                        <TableCell>
-                          {e.request_ref && (
-                            <IconAction label="Timeline" onClick={() => setTimelineRef(e.request_ref)}>
-                              <History />
-                            </IconAction>
-                          )}
-                        </TableCell>
-                      </TableRow>
+                      <FailureEventListItem
+                        key={e.request_id ?? e.request_ref ?? `${e.kind}-${e.ts}-${i}`}
+                        event={e}
+                        onTimeline={setTimelineRef}
+                      />
                     ))}
-                  </TableBody>
-                </Table>
+                  </ul>
+                  <div className="hidden lg:block">
+                    <Table flush className="table-fixed">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-32">Time</TableHead>
+                          <TableHead className="w-24">Kind</TableHead>
+                          <TableHead className="w-48">Model</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-40">Provider</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-28">Key</TableHead>
+                          <TableHead className="w-16">Status</TableHead>
+                          <TableHead>Error</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-36">Node</TableHead>
+                          <TableHead className="hidden 2xl:table-cell 2xl:w-40">Request ID</TableHead>
+                          <TableHead className="w-10">
+                            <span className="sr-only">Timeline</span>
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {events.map((e, i) => (
+                          <TableRow key={e.request_id ?? e.request_ref ?? `${e.kind}-${e.ts}-${i}`}>
+                            <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
+                              <EventTime ts={new Date(e.ts * 1000).toISOString()} />
+                            </TableCell>
+                            <TableCell>
+                              <KindBadge kind={e.kind} />
+                            </TableCell>
+                            <TableCell className="max-w-0 truncate font-mono text-xs" title={modelLabel(e)}>
+                              {modelLabel(e)}
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 truncate font-mono text-xs 2xl:table-cell" title={e.provider ?? undefined}>
+                              {e.provider ?? "—"}
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 truncate font-mono text-xs 2xl:table-cell" title={e.key_prefix ?? undefined}>
+                              {e.key_prefix ?? "—"}
+                            </TableCell>
+                            <TableCell
+                              className={`font-mono text-xs font-semibold ${e.status != null ? statusClass(e.status) : "text-muted-foreground"}`}
+                            >
+                              {e.status ?? "—"}
+                            </TableCell>
+                            <TableCell className="max-w-0 whitespace-normal">
+                              <ErrorCell code={e.code} reason={e.reason} detail={e.detail} />
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 truncate font-mono text-xs text-muted-foreground 2xl:table-cell" title={e.node ?? undefined}>
+                              {e.node ?? "—"}
+                            </TableCell>
+                            <TableCell className="hidden max-w-0 2xl:table-cell [&>button]:max-w-full">
+                              {e.request_id ? <CopyMono text={e.request_id} /> : "—"}
+                            </TableCell>
+                            <TableCell>
+                              {e.request_ref && (
+                                <IconAction label="Timeline" onClick={() => setTimelineRef(e.request_ref)}>
+                                  <History />
+                                </IconAction>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
               )}
               <div className="px-5">
                 <Pagination

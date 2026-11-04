@@ -24,6 +24,7 @@ Quiet precision: a restrained light or dark admin theme driven by cool-neutral O
 - Icon actions use shared Button variants and a 32–36px comfortable target, not bare tiny glyphs. Small visual checkboxes keep a larger pseudo-element hit area.
 - Account groups credential tasks into persistent sections, so switching sections does not discard unsaved input. Passkey removal requires explicit confirmation.
 - Tables stay document-flow with `Table flush`; long cells truncate or use `ExpandableText` for full evidence. Secondary gateway metadata uses accessible row disclosures.
+- Usage and Failures use compact event lists below desktop widths and fixed, truncated tables on larger screens. Provider errors expand inline, and summary tables move secondary metadata into compact rows on smaller screens.
 - Loading, empty, error, disabled, stale, and partial-data states are intentional compositions, not blank cards.
 
 ## Layout
