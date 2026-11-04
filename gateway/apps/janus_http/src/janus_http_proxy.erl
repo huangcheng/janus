@@ -534,6 +534,8 @@ proxy_picked(ClientProto, Pick, Body, Map, Req, State) ->
                 {ok, ProviderProto} ->
                     dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State);
                 {error, unknown_protocol} ->
+                    %% Detail before the row: track is the writer.
+                    _ = put(janus_error_detail, <<"provider has unknown protocol">>),
                     _ = track(502, Route, #{}),
                     _ = release_route_inflight(Route),
                     reply_err(
@@ -1467,9 +1469,11 @@ decisions_terminal({error, crashed}, Route, Req, State) ->
     _ = release_route_inflight(Route),
     reply_err(openai_decisions, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
 decisions_terminal({error, response_too_large}, Route, Req, State) ->
+    {Code, Msg} = decisions_local_error(response_too_large),
+    %% Detail (and code) resolved BEFORE the row is written.
+    _ = put(janus_error_detail, Msg),
     _ = track_proxied(502, Route, #{}),
     _ = release_route_inflight(Route),
-    {Code, Msg} = decisions_local_error(response_too_large),
     reply_err(openai_decisions, Req, State, 502, Code, Msg);
 decisions_terminal({error, Reason}, Route, Req, State) ->
     Status = error_http_status(Reason),
@@ -1697,6 +1701,12 @@ handle_upstream(ClientProto, _ProviderProto, {error, worker_lost}, Route, _Trans
     %% In-flight worker death (N9): abort, no retry. Counts as a rate
     %% failure on the master (spec §4.1) without cooling the provider.
     note_usage_outcome(error),
+    %% Detail BEFORE the row, not after. `track_proxied` is what writes the
+    %% usage row, and `reply_err` (which normally stashes this key) runs
+    %% afterwards — so setting it there left every worker_lost row with
+    %% error_detail NULL and error_code empty, which is why four production
+    %% 502s on this path could not be told apart from any other failure.
+    _ = put(janus_error_detail, <<"upstream worker lost">>),
     _ = track_proxied(502, Route, #{}),
     _ = note_attempt_outcome(Route, provider, worker_lost, worker_lost),
     _ = release_route_inflight(Route),
@@ -1719,6 +1729,7 @@ handle_upstream(
     %% and stashed the distinguishing `wire_enc_inflate_fail` usage
     %% outcome (first-write-wins — note_usage_outcome stays inert).
     note_usage_outcome(error),
+    _ = put(janus_error_detail, <<"internal wire inflate failed">>),
     _ = track_proxied(502, Route, #{}),
     _ = release_route_inflight(Route),
     logger:error(#{
@@ -2665,10 +2676,9 @@ record_failover_row(Route, Status, {Reason, NativeCode}) ->
                 is_terminal => false,
                 request_id => get(janus_request_id),
                 failover_reason => atom_to_binary(Reason, utf8),
-                %% Per-attempt attribution (2026-10-28): the arrival
-                %% stash belongs to THIS attempt's upstream answer —
-                %% without it the walk's terminal row kept attempt 1's
-                %% message (live: dashscope's text on a minimax row).
+                %% Per-attempt attribution: the arrival stash belongs to
+                %% THIS attempt's upstream answer — without it the walk's
+                %% terminal row kept attempt 1's message.
                 error_detail =>
                     case get(janus_error_detail) of
                         D when is_binary(D) -> D;
