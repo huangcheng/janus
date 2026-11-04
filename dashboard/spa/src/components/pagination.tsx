@@ -9,9 +9,8 @@ import {
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 
-/** Shared pagination control. Sliding five-page window with prev/next
- * arrows; optional rows-per-page select. Works for server-side
- * (page + total from the API) and client-side tables. */
+/** Sliding page-number window for the shared pagination control. Small
+ * screens render only the current page between the previous/next arrows. */
 function pageWindow(page: number, pageCount: number): (number | "gap")[] {
   if (pageCount <= 7) return Array.from({ length: pageCount }, (_, i) => i + 1)
   const out: (number | "gap")[] = [1]
@@ -83,7 +82,7 @@ export function Pagination({
           </Button>
           {pageWindow(page, pageCount).map((p, i) =>
             p === "gap" ? (
-              <span key={`gap-${i}`} className="px-1 text-muted-foreground">
+              <span key={`gap-${i}`} className="hidden px-1 text-muted-foreground sm:inline">
                 …
               </span>
             ) : (
@@ -93,7 +92,10 @@ export function Pagination({
                 size="icon-xs"
                 aria-current={p === page ? "page" : undefined}
                 onClick={() => onPageChange(p)}
-                className={cn("tabular-nums", p === page ? "pointer-events-none" : undefined)}
+                className={cn(
+                  "tabular-nums",
+                  p === page ? "inline-flex pointer-events-none" : "hidden sm:inline-flex",
+                )}
               >
                 {p}
               </Button>

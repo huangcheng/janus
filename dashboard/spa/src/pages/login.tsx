@@ -304,6 +304,7 @@ export function Login() {
                   <Input
                     id="username"
                     autoComplete="username"
+                    spellCheck={false}
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     autoFocus

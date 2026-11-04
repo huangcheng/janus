@@ -14,7 +14,7 @@ function Table({
     <div
       data-slot="table-container"
       className={cn(
-        "relative w-full overflow-x-auto",
+        "relative w-full overflow-x-auto overscroll-x-contain scrollbar-thin",
         flush &&
           "[&_td:first-child]:pl-5 [&_td:last-child]:pr-5 [&_th:first-child]:pl-5 [&_th:last-child]:pr-5",
       )}

@@ -60,7 +60,7 @@ export function Audit() {
   return (
     <Layout
       title="Audit log"
-      description="Every dashboard mutation, newest first. Ring buffer — last 1000 events, in-memory."
+      description="Dashboard mutations, newest first. Up to 1000 events, persisted across restarts."
     >
       {error && <ErrorFlash message={error} />}
       <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">

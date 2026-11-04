@@ -8,6 +8,7 @@
    sizes (xs/icon-xs) live on the button component itself. */
 
 :root {
+  color-scheme: light;
   --radius: 0.625rem;
   --background: oklch(0.978 0.004 258);
   --foreground: oklch(0.21 0.012 258);
@@ -54,6 +55,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: oklch(0.155 0.009 258);
   --foreground: oklch(0.95 0.005 258);
   --card: oklch(0.205 0.011 258);
@@ -195,6 +197,11 @@
   }
   body {
     @apply bg-background text-foreground font-sans;
+  }
+  a,
+  button {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: color-mix(in oklch, var(--primary) 18%, transparent);
   }
   h1,
   h2,

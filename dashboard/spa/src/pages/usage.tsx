@@ -448,7 +448,7 @@ export function Usage() {
     >
       {error && <ErrorFlash message={error} />}
       {!summary && !error && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
           {Array.from({ length: 6 }).map((_, i) => (
             <StatCardSkeleton key={i} />
           ))}
@@ -457,7 +457,7 @@ export function Usage() {
 
       {summary && totals && (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
             <div className="relative animate-fade-up">
               <StatCard label="Requests" value={totals.requests} icon={Activity} className="h-full" />
               {summary.writer && summary.writer.dropped > 0 && (

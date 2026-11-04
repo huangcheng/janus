@@ -1,3 +1,4 @@
+import { type ReactNode } from "react"
 import { ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -5,10 +6,12 @@ export function ExpandableText({
   text,
   summary,
   className,
+  children,
 }: {
   text: string
   summary?: string
   className?: string
+  children?: ReactNode
 }) {
   return (
     <details className={cn("group min-w-0", className)}>
@@ -20,7 +23,7 @@ export function ExpandableText({
         <ChevronDown className="size-3.5 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/45 p-3 font-mono text-xs leading-5 text-foreground [overflow-wrap:anywhere]">
-        {text}
+        {children ?? text}
       </pre>
     </details>
   )

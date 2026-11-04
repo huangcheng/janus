@@ -46,8 +46,8 @@ export function StatCard({
           // numeric size — step down a level and pin the line box so all
           // cards in a row keep equal heights.
           typeof value === "string" && value.length > 6
-            ? "text-xl leading-8"
-            : "text-[1.75rem] leading-8",
+            ? "text-lg leading-8 sm:text-xl"
+            : "text-lg leading-8 sm:text-[1.75rem]",
         )}
       >
         {typeof value === "number" ? (

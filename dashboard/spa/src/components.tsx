@@ -264,6 +264,8 @@ function AppSidebar() {
           <img
             src={`${import.meta.env.BASE_URL}icon.png`}
             alt="Janus"
+            width={36}
+            height={36}
             className="size-9 rounded-xl shadow-sm ring-1 ring-border"
           />
           <div className="flex flex-col gap-0.5">
@@ -343,25 +345,26 @@ export function Layout({
   title,
   description,
   actions,
-  fill,
 }: {
   children: ReactNode
   title: string
   description?: string
   actions?: ReactNode
-  /** App-panel pages (e.g. Logs): the content column fills the viewport and
-   *  never scrolls the page — the page's own inner pane owns scrolling
-   *  (live tail / stick-to-bottom needs a stable scroller). */
-  fill?: boolean
 }) {
   return (
     <SidebarProvider>
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-primary-foreground"
+      >
+        Skip to content
+      </a>
       <AppSidebar />
       <SidebarInset>
-        <header className="sticky top-0 z-20 flex min-h-16 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/80 bg-background/90 px-4 py-3 backdrop-blur-md md:px-7">
+        <header className="sticky top-0 z-20 flex min-h-16 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/80 bg-background/90 px-4 py-3 backdrop-blur-md md:px-7">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="hidden data-[orientation=vertical]:h-5 sm:block" />
-          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+          <div className="flex min-w-24 flex-1 flex-col gap-1.5">
             <h1 className="truncate text-xl leading-7 font-semibold tracking-[-0.025em] text-pretty">
               {title}
             </h1>
@@ -374,20 +377,15 @@ export function Layout({
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2 [&>span]:hidden sm:[&>span]:inline-flex">{actions}</div>
-          <ThemeToggle />
+          <div className="ml-auto flex max-w-full items-center gap-2 [&>span]:hidden sm:[&>span]:inline-flex">{actions}</div>
+          <div>
+            <ThemeToggle />
+          </div>
         </header>
-        {/* Document pages: flex-none sizes to content (flex-1/flex-auto would
-            let the fixed-height main flex column squash this box to the
-            viewport, flushing every page's last cards past the bottom padding
-            — flush-cut at the scroll end). Fill pages: the column fills the
-            viewport and the page never scrolls, so its inner pane (live log
-            tail) can own scrolling and stick to the bottom. */}
         <div
-          className={
-            "mx-auto flex w-full max-w-[88rem] min-w-0 flex-col gap-6 p-4 md:p-7 " +
-            (fill ? "min-h-0 flex-1 pb-4 md:pb-6" : "flex-none pb-12 md:pb-16")
-          }
+          id="main-content"
+          tabIndex={-1}
+          className="mx-auto flex w-full max-w-[88rem] min-w-0 scroll-mt-24 flex-none flex-col gap-6 p-4 pb-12 md:p-7 md:pb-16"
         >
           {children}
         </div>

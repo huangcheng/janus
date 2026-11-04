@@ -9,6 +9,8 @@ export function AuthShell({ children, footer }: { children: ReactNode; footer?: 
           <img
             src={`${import.meta.env.BASE_URL}icon.png`}
             alt="Janus"
+            width={40}
+            height={40}
             className="size-10 rounded-xl shadow-sm ring-1 ring-border"
           />
           <span className="text-lg font-semibold tracking-[-0.02em]">Janus</span>

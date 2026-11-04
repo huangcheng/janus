@@ -114,6 +114,8 @@ function QrFigure({ uri, className }: { uri: string; className?: string }) {
     <img
       src={url}
       alt="Authenticator QR code"
+      width={176}
+      height={176}
       className={cn("size-44 shrink-0 rounded-lg border bg-white p-2.5", className)}
     />
   ) : (

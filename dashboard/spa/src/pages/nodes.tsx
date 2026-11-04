@@ -579,7 +579,7 @@ export function Nodes() {
         </CardContent>
       </Card>
 
-      <Card className="mt-4 flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
         <CardHeader className="border-b">
           <CardTitle>Master failure health</CardTitle>
           <CardDescription>
@@ -625,7 +625,7 @@ export function Nodes() {
         </CardContent>
       </Card>
 
-      <Card className="mt-4 flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Workers</CardTitle>
           <CardDescription>

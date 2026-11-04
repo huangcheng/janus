@@ -9,7 +9,6 @@ Quiet precision: a restrained light or dark admin theme driven by cool-neutral O
 - Use the semantic variables in `spa/src/index.css`; do not introduce page-specific hex colors.
 - Keep muted text readable in both themes and preserve semantic success, warning, and destructive states.
 - Floating layers use `popover`, `popover-foreground`, `border`, and `shadow-md`, with clear separation from the page.
-- The log terminal uses the shared `terminal-*` semantic tokens for its surface, border, body text, and severity levels in both themes.
 
 ## Typography
 
@@ -33,8 +32,8 @@ Quiet precision: a restrained light or dark admin theme driven by cool-neutral O
 - Data-plane endpoints live in the compact API endpoints popover in the sidebar footer, not a permanently expanded endpoint list.
 - Page descriptions wrap when useful. Dense tables stay fluid; forms and settings use intentional reading widths.
 - Use predictable form groups and tier grids with consistent spacing. Responsive behavior is structural: grids collapse and dialog content remains within the viewport.
-- Logs are the exception to document flow: `Layout fill` keeps the dedicated internal scroller, follow state, and live-tail behavior.
-- Below the `sm` breakpoint, terminal log rows wrap the message onto its own full-width line so evidence stays readable on phones instead of starving the message column.
+- Logs use the same document-flow `Table flush` and shared client pagination as Audit. OTP and Ops events keep separate sources, filters, expandable details, and two-second refresh.
+- Wide log tables own horizontal scrolling on narrow screens; the page itself must not overflow.
 
 ## Motion
 

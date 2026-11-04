@@ -294,7 +294,7 @@ export function Dashboard() {
     >
       {error && <ErrorFlash message={error} />}
       {!data && !error ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
           {Array.from({ length: 6 }).map((_, i) => (
             <StatCardSkeleton key={i} />
           ))}
@@ -302,7 +302,7 @@ export function Dashboard() {
       ) : null}
       {data && (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
             {stats.map((s, i) => (
               <StatCard
                 key={s.label}

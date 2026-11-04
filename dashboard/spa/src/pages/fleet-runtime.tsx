@@ -200,7 +200,7 @@ export function FleetRuntime({
   )
 
   return (
-    <Card className="mt-1 w-full self-start animate-fade-up">
+    <Card className="w-full self-start animate-fade-up">
       <CardHeader className="border-b">
         <CardTitle>Fleet runtime</CardTitle>
         <CardDescription>
@@ -419,6 +419,7 @@ function NodeChip({
         rx={10}
         strokeWidth={1.5}
         className={cn(
+          "group-focus-visible:stroke-ring group-focus-visible:stroke-[3px]",
           dead
             ? "fill-card stroke-destructive/60"
             : master

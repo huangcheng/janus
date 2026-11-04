@@ -1592,11 +1592,11 @@ function AutoRouterCard({
               onChange={(e) => onChange({ ...cfg, cache_ttl_sec: Number(e.target.value) })}
             />
           </Field>
-          <Field>
+          <Field className="sm:col-span-2 lg:col-span-2">
             <FieldLabel htmlFor="auto-judge-prompt">Judge prompt</FieldLabel>
-            <textarea
+            <Textarea
               id="auto-judge-prompt"
-              className="min-h-[9rem] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="max-h-64 min-h-36 w-full overflow-auto font-mono text-xs"
               placeholder="Leave empty to use the gateway's built-in instruction"
               value={cfg.judge_prompt ?? ""}
               onChange={(e) => onChange({ ...cfg, judge_prompt: e.target.value })}

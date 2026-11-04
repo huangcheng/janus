@@ -401,7 +401,7 @@ export function Providers() {
           </CardAction>
         </CardHeader>
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-3">
-          <span className="mr-2 text-xs font-medium text-muted-foreground">Endpoint features</span>
+          <span className="mr-2 w-full text-xs font-medium text-muted-foreground sm:w-auto">Endpoint features</span>
           <Button
             variant={toolsTranslate ? "secondary" : "outline"}
             size="xs"

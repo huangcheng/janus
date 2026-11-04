@@ -262,13 +262,9 @@ async def embeddings(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse(
-            {"error": {"message": "invalid JSON body"}}, status_code=400
-        )
+        return JSONResponse({"error": {"message": "invalid JSON body"}}, status_code=400)
     if not isinstance(body, dict):
-        return JSONResponse(
-            {"error": {"message": "body must be a JSON object"}}, status_code=400
-        )
+        return JSONResponse({"error": {"message": "body must be a JSON object"}}, status_code=400)
     model = body.get("model", "mock-embed")
 
     # Echo the shape the caller sent so the row can assert the gateway did
@@ -279,10 +275,7 @@ async def embeddings(request: Request):
     # either way, which is what a real provider does for the array forms.
     inp = body.get("input")
     n = len(inp) if isinstance(inp, list) else 1
-    data = [
-        {"object": "embedding", "index": i, "embedding": [0.1, 0.2, 0.3]}
-        for i in range(n)
-    ]
+    data = [{"object": "embedding", "index": i, "embedding": [0.1, 0.2, 0.3]} for i in range(n)]
     out = {"object": "list", "data": data, "model": model}
     if "nousage" not in model:
         out["usage"] = {"prompt_tokens": 3, "total_tokens": 3}

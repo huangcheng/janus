@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { ArrowDownToLine, Database, RefreshCw } from "lucide-react"
+import { Database, RefreshCw } from "lucide-react"
 import { api } from "../api"
-import { ErrorFlash, Layout } from "../components"
+import { EmptyState, ErrorFlash, Layout } from "../components"
+import { ExpandableText } from "../components/expandable-text"
+import { Pagination, useClientPagination } from "../components/pagination"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ComboboxSingle } from "@/components/combobox"
 import { EventTime } from "./shared"
@@ -20,6 +23,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 
 type LogEvent = {
   idx: number
@@ -54,14 +65,6 @@ type OpsMarker = {
 /** Stream source: OTP logger lines vs drained ops events — never merged. */
 type StreamKind = "otp" | "ops"
 
-const LEVEL_STYLE: Record<string, string> = {
-  error: "text-terminal-error",
-  warn: "text-terminal-warning",
-  warning: "text-terminal-warning",
-  info: "text-terminal-info",
-  notice: "text-terminal-notice",
-}
-
 const ALL_NODES = "All nodes"
 const ALL_TYPES = "All types"
 
@@ -76,8 +79,8 @@ export function Logs() {
   const [nodeFilter, setNodeFilter] = useState<string | null>(null)
   const [opsType, setOpsType] = useState<string | null>(null)
   const [nodeOptions, setNodeOptions] = useState<string[]>([])
-  const [autoScroll, setAutoScroll] = useState(true)
-  const paneRef = useRef<HTMLDivElement>(null)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
   // Node filter options come from the registry; a failure here only
   // leaves the filter at "All nodes", never blocks the stream.
@@ -153,6 +156,7 @@ export function Logs() {
   useEffect(() => {
     otpPayloadRef.current = ""
     opsPayloadRef.current = ""
+    setPage(1)
   }, [stream, level, nodeFilter, live, opsType])
 
   // The interval must call the CURRENT load: `load` is a dep so a
@@ -164,21 +168,23 @@ export function Logs() {
     return () => clearInterval(t)
   }, [load])
 
-  useEffect(() => {
-    // Scroll only the pane — scrollIntoView would drag the window along,
-    // pushing the card header off-screen in the fill-height layout.
-    const pane = paneRef.current
-    if (autoScroll && pane) {
-      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
-      pane.scrollTo({ top: pane.scrollHeight, behavior: reduceMotion ? "auto" : "smooth" })
-    }
-  }, [events, opsEvents, opsMarkers, autoScroll])
-
   const opsLines = useMemo(
     () => mergeOpsLines(opsEvents, opsMarkers),
     [opsEvents, opsMarkers],
   )
-  const lineCount = stream === "ops" ? opsLines.length : events.length
+  const otpPagination = useClientPagination(events, pageSize, page)
+  const opsPagination = useClientPagination(opsLines, pageSize, page)
+  const pagination = stream === "ops" ? opsPagination : otpPagination
+  const lineCount = pagination.total
+  useEffect(() => {
+    setPage((current) => Math.min(current, pagination.pageCount))
+  }, [pagination.pageCount])
+  let emptyTitle: string
+  if (error) {
+    emptyTitle = stream === "ops" ? "Ops events unavailable" : "Log events unavailable"
+  } else {
+    emptyTitle = stream === "ops" ? "No ops events yet" : "No log lines yet"
+  }
   let streamDescription: string
   if (stream === "ops") {
     streamDescription = "ops events from Postgres (cool_edge / task_run + markers)"
@@ -217,16 +223,15 @@ export function Logs() {
 
   return (
     <Layout
-      fill
       title="Logs"
       description="OTP logger stream and drained ops events (cool / task) — toggle sources; they are never merged."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex max-h-full min-h-0 flex-1 flex-col overflow-hidden">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
         <CardHeader className="border-b">
           <CardTitle>Event stream</CardTitle>
           <CardDescription>
-            Last {lineCount} lines · {streamDescription}
+            {lineCount} lines fetched · {streamDescription}
           </CardDescription>
           <CardAction className="flex flex-wrap items-center gap-2">
             <Select
@@ -285,15 +290,6 @@ export function Logs() {
               placeholder={ALL_NODES}
               className="w-44"
             />
-            <Button
-              variant={autoScroll ? "secondary" : "outline"}
-              size="sm"
-              aria-pressed={autoScroll}
-              onClick={() => setAutoScroll(!autoScroll)}
-            >
-              <ArrowDownToLine />
-              Follow
-            </Button>
             {stream === "otp" ? (
               <Select
                 value={level}
@@ -314,95 +310,95 @@ export function Logs() {
             </Button>
           </CardAction>
         </CardHeader>
-        <CardContent className="flex min-h-0 flex-1 flex-col">
-          <div
-            ref={paneRef}
-            tabIndex={0}
-            role="region"
-            aria-label="Log event stream"
-            className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-terminal-bg p-3 font-mono text-[13px] leading-6 ring-1 ring-terminal-border scrollbar-thin focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-          >
-            {stream === "otp" ? (
-              <>
-                {events.length === 0 && (
-                  <div className="flex min-h-full items-center justify-center">
-                    <p className={error ? "text-terminal-error" : "text-terminal-muted"}>
-                      {error ? `Could not load logs — ${error}` : "No log lines yet"}
-                    </p>
-                  </div>
-                )}
-                {events.map((e) => (
-                  <div
-                    key={`${e.node ?? ""}:${e.idx}:${e.ts}`}
-                    className="flex max-sm:flex-wrap gap-3 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
-                  >
-                    <span className="shrink-0 text-terminal-muted tabular-nums">
-                      <EventTime ts={e.ts} />
-                    </span>
-                    {!nodeFilter && e.node && (
-                      <span className="shrink-0 text-terminal-dim">{e.node}</span>
-                    )}
-                    <span
-                      className={`inline-flex w-16 shrink-0 items-center gap-1.5 font-medium ${LEVEL_STYLE[e.level] ?? "text-terminal-info"}`}
-                    >
-                      <span className="size-1.5 shrink-0 rounded-full bg-current" />
-                      {e.level}
-                    </span>
-                    <span className="min-w-0 max-sm:basis-full flex-1 text-terminal-text">{formatFields(e.fields)}</span>
-                  </div>
-                ))}
-              </>
-            ) : (
-              <>
-                {opsLines.length === 0 && (
-                  <div className="flex min-h-full items-center justify-center">
-                    <p className={error ? "text-terminal-error" : "text-terminal-muted"}>
-                      {error ? `Could not load ops events — ${error}` : "No ops events yet"}
-                    </p>
-                  </div>
-                )}
-                {opsLines.map((line) =>
-                  line.kind === "marker" ? (
-                    <div
-                      key={line.key}
-                      className="flex max-sm:flex-wrap gap-3 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
-                    >
-                      <span className="shrink-0 text-terminal-muted tabular-nums">
-                        <EventTime ts={line.ts} />
-                      </span>
-                      {!nodeFilter && line.nodeLabel && (
-                        <span className="shrink-0 text-terminal-dim">{line.nodeLabel}</span>
-                      )}
-                      <span className="inline-flex w-20 shrink-0 items-center gap-1.5 font-medium text-terminal-warning">
-                        <span className="size-1.5 shrink-0 rounded-full bg-current" />
-                        marker
-                      </span>
-                      <span className="min-w-0 max-sm:basis-full flex-1 text-terminal-text">{line.text}</span>
-                    </div>
-                  ) : (
-                    <div
-                      key={line.key}
-                      className="flex max-sm:flex-wrap gap-3 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
-                    >
-                      <span className="shrink-0 text-terminal-muted tabular-nums">
-                        <EventTime ts={line.ts} />
-                      </span>
-                      {!nodeFilter && line.nodeLabel && (
-                        <span className="shrink-0 text-terminal-dim">{line.nodeLabel}</span>
-                      )}
-                      <span className="inline-flex w-20 shrink-0 items-center gap-1.5 font-medium text-terminal-notice">
-                        <span className="size-1.5 shrink-0 rounded-full bg-current" />
-                        {line.type}
-                      </span>
-                      <span className="min-w-0 max-sm:basis-full flex-1 text-terminal-text">{line.text}</span>
-                    </div>
-                  ),
-                )}
-              </>
+        <CardContent className="min-h-0 px-0">
+          {lineCount === 0 ? (
+            <EmptyState
+              title={emptyTitle}
+              description={
+                error
+                  ? "The current source could not be read. Try Refresh."
+                  : "New events will appear here when the gateway emits them."
+              }
+            />
+          ) : (
+            <Table flush aria-label="Log event stream">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Time</TableHead>
+                  {!nodeFilter && <TableHead>Node</TableHead>}
+                  <TableHead>{stream === "ops" ? "Type" : "Level"}</TableHead>
+                  <TableHead>Details</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {stream === "otp"
+                  ? otpPagination.slice.map((e) => (
+                      <TableRow key={`${e.node ?? ""}:${e.idx}:${e.ts}`}>
+                        <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
+                          <EventTime ts={e.ts} />
+                        </TableCell>
+                        {!nodeFilter && (
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            <span className="block max-w-[200px] truncate" title={e.node}>
+                              {e.node ?? "—"}
+                            </span>
+                          </TableCell>
+                        )}
+                        <TableCell>
+                          <Badge variant={levelBadgeVariant(e.level)} className="font-mono">
+                            {e.level}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="w-full whitespace-normal">
+                          <LogDetails fields={e.fields} />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  : opsPagination.slice.map((line) => (
+                      <TableRow key={line.key}>
+                        <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
+                          <EventTime ts={line.ts} />
+                        </TableCell>
+                        {!nodeFilter && (
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            <span className="block max-w-[200px] truncate" title={line.nodeLabel}>
+                              {line.nodeLabel ?? "—"}
+                            </span>
+                          </TableCell>
+                        )}
+                        <TableCell>
+                          <Badge
+                            variant={line.kind === "marker" ? "warning" : "outline"}
+                            className="font-mono"
+                          >
+                            {line.kind === "marker" ? "marker" : line.type}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="w-full whitespace-normal">
+                          <ExpandableText text={line.text} className="max-w-[720px]" />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+              </TableBody>
+            </Table>
+          )}
+          <div className="px-5">
+            {lineCount > 0 && (
+              <Pagination
+                page={pagination.page}
+                pageCount={pagination.pageCount}
+                total={pagination.total}
+                pageSize={pageSize}
+                onPageChange={setPage}
+                onPageSizeChange={(n) => {
+                  setPageSize(n)
+                  setPage(1)
+                }}
+              />
             )}
-          </div>
-          <div className="mt-2 flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-            {footer}
+            <div className="flex items-center gap-2 pt-2 pb-4 text-xs text-muted-foreground">
+              {footer}
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -422,11 +418,58 @@ function formatValue(v: unknown): string {
   }
 }
 
+function fieldEntries(fields: Record<string, unknown>) {
+  return Object.entries(fields).filter(([key]) => key !== "idx")
+}
+
 function formatFields(fields: Record<string, unknown>): string {
-  const parts = Object.entries(fields)
-    .filter(([k]) => k !== "idx")
-    .map(([k, v]) => `${k}=${formatValue(v)}`)
-  return parts.join(" ")
+  return fieldEntries(fields)
+    .map(([key, value]) => `${key}=${formatValue(value)}`)
+    .join(" ")
+}
+
+function levelBadgeVariant(level: string): "danger" | "warning" | "default" | "secondary" {
+  switch (level.toLowerCase()) {
+    case "error":
+    case "crit":
+    case "critical":
+    case "alert":
+    case "emerg":
+    case "emergency":
+      return "danger"
+    case "warn":
+    case "warning":
+      return "warning"
+    case "notice":
+      return "default"
+    default:
+      return "secondary"
+  }
+}
+
+function LogDetails({ fields }: { fields: Record<string, unknown> }) {
+  const text = formatFields(fields)
+  if (!text) return "—"
+  return (
+    <ExpandableText text={text} className="max-w-[720px]">
+      <LogFields fields={fields} />
+    </ExpandableText>
+  )
+}
+
+function LogFields({ fields }: { fields: Record<string, unknown> }) {
+  return (
+    <>
+      {fieldEntries(fields).map(([key, value]) => (
+        <span key={key}>
+          <span className="text-muted-foreground">{key}=</span>
+          <span className={value === null || typeof value !== "object" ? "text-primary" : undefined}>
+            {formatValue(value)}
+          </span>{" "}
+        </span>
+      ))}
+    </>
+  )
 }
 
 type OpsLine =

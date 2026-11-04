@@ -97,6 +97,8 @@ export function Setup() {
                 <FieldLabel htmlFor="setup-username">Username</FieldLabel>
                 <Input
                   id="setup-username"
+                  autoComplete="username"
+                  spellCheck={false}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoFocus
