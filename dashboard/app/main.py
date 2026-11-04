@@ -60,6 +60,9 @@ from .routers import (
     settings as settings_router,
 )
 from .routers import (
+    tokens as tokens_router,
+)
+from .routers import (
     usage as usage_router,
 )
 
@@ -250,6 +253,7 @@ app.include_router(provider_admin.keys_router, prefix="/api/provider-keys", tags
 app.include_router(provider_admin.models_router, prefix="/api/provider-models", tags=["providers"])
 app.include_router(models.router, prefix="/api/models", tags=["models"])
 app.include_router(keys.router, prefix="/api/keys", tags=["keys"])
+app.include_router(tokens_router.router, prefix="/api/tokens", tags=["tokens"])
 app.include_router(nodes_router.router, prefix="/api/nodes", tags=["nodes"])
 app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
 app.include_router(catalog.router, prefix="/api/catalog", tags=["catalog"])
@@ -286,7 +290,7 @@ async def mcp_bare(request: Request):
     307 preserves method and body — to the real endpoint /mcp/."""
     denied = await mcp_server.gate()
     if denied is None:
-        denied = mcp_server.auth_failure(request.headers.get("authorization"))
+        denied = await mcp_server.auth_failure(request.headers.get("authorization"))
     if denied is not None:
         return denied
     # root_path-aware and query-preserving: a prefix-proxied deployment

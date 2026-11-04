@@ -254,4 +254,46 @@ async def require_auth(
                 }
             },
         )
+    if payload.get("scope") == "bridge":
+        # The MCP REST bridge's internal swap bearer. Accepted ONLY the
+        # moment it is consumed in-process: a one-shot jti registered at
+        # mint (see register_bridge_jti). A hand-minted or replayed bridge
+        # bearer — including a leaked one — is rejected everywhere.
+        if not consume_bridge_jti(payload.get("jti") or ""):
+            raise HTTPException(
+                status_code=401,
+                detail={"error": {"code": "unauthorized", "message": "invalid token"}},
+            )
     return payload
+
+
+# --- One-shot bridge registry ------------------------------------------------
+# jtis of swap JWTs minted by the MCP bridge this process. dict[jti, mint
+# monotonic time]: entries older than twice the swap TTL are pruned at
+# insert, so mints whose REST call never lands cannot accumulate.
+# BRIDGE_TOKEN_TTL_SEC is the single source of truth — the bridge mints
+# with it (tools._token) so the prune bound can never drift from the mint.
+_BRIDGE_JTIS: dict[str, float] = {}
+BRIDGE_TOKEN_TTL_SEC = 60
+
+
+def register_bridge_jti(jti: str) -> None:
+    now = time.monotonic()
+    stale = [k for k, ts in _BRIDGE_JTIS.items() if now - ts > 2 * BRIDGE_TOKEN_TTL_SEC]
+    for k in stale:
+        _BRIDGE_JTIS.pop(k, None)
+    _BRIDGE_JTIS[jti] = now
+
+
+def consume_bridge_jti(jti: str) -> bool:
+    """Membership check AND pop — each swap JWT is usable exactly once."""
+    return _BRIDGE_JTIS.pop(jti, None) is not None
+
+
+def mint_bridge_token(sub: str) -> str:
+    """Mint the one-shot swap JWT AND register its jti in one step, so
+    registration can never drift from the mint (and callers never need
+    to re-decode the token they just signed)."""
+    token = create_token(sub=sub, scope="bridge", ttl=BRIDGE_TOKEN_TTL_SEC)
+    register_bridge_jti(verify_token(token)["jti"])
+    return token

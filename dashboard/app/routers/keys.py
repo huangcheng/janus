@@ -3,7 +3,6 @@
 import logging
 import math
 import time
-from collections import defaultdict
 from decimal import Decimal
 
 import asyncpg
@@ -13,6 +12,11 @@ from fastapi.responses import JSONResponse
 from .. import audit, database, decisions
 from ..auth import _client_ip, require_auth
 from ..crypto import _active_key, decrypt, encrypt, generate_agent_key, hash_agent_key
+from ..reveal_limit import (
+    CREATE_HEADERS as _CREATE_HEADERS,
+    REVEAL_HEADERS as _REVEAL_HEADERS,
+    check_reveal_rate as _check_reveal_rate,
+)
 
 router = APIRouter()
 logger = logging.getLogger("janus.dashboard.keys")
@@ -23,14 +27,6 @@ JANUS_AUTO = "janus-auto"
 _SCHEMA_PROBE_TTL_SEC = 60.0
 _schema_probe_at: float | None = None
 _schema_probe_ok: bool = False
-
-# Reveal rate limit: 30/min per login session (JWT sub+jti; else client IP).
-_REVEAL_LIMIT = 30
-_REVEAL_WINDOW_SEC = 60.0
-_reveal_hits: dict[str, list[float]] = defaultdict(list)
-
-_REVEAL_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
-_CREATE_HEADERS = {"Cache-Control": "no-store"}
 
 
 def _err(
@@ -81,41 +77,6 @@ async def _secret_column_ready() -> bool:
     _schema_probe_at = now
     _schema_probe_ok = ready
     return ready
-
-
-def _check_reveal_rate(bucket: str) -> None:
-    """In-memory 30/min. Limiter bugs → 503 limiter_unavailable (not a fake 429)."""
-    try:
-        now = time.monotonic()
-        # Prune this bucket and drop empty peers so keys cannot grow unboundedly.
-        stale = [
-            k
-            for k, ts in _reveal_hits.items()
-            if k != bucket and not any(now - t < _REVEAL_WINDOW_SEC for t in ts)
-        ]
-        for k in stale:
-            _reveal_hits.pop(k, None)
-        hits = [t for t in _reveal_hits[bucket] if now - t < _REVEAL_WINDOW_SEC]
-        if len(hits) >= _REVEAL_LIMIT:
-            _reveal_hits[bucket] = hits
-            raise _err(
-                429,
-                "rate_limited",
-                "reveal rate limit exceeded; try again later",
-                retry_after=60,
-                headers={**_REVEAL_HEADERS, "Retry-After": "60"},
-            )
-        hits.append(now)
-        _reveal_hits[bucket] = hits
-    except HTTPException:
-        raise
-    except Exception:
-        raise _err(
-            503,
-            "limiter_unavailable",
-            "reveal rate limiter unavailable",
-            headers=dict(_REVEAL_HEADERS),
-        )
 
 
 def _parse_reveal_key_id(raw: str) -> int | None:

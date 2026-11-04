@@ -399,6 +399,34 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             """
         )
         await conn.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS daily_cost_limit NUMERIC")
+        # Management-plane API tokens (jm-…): the MCP gate's bearer today,
+        # third-party API access later. Dashboard-owned — the gateway never
+        # reads it (named-column catalog loads), so no gateway migration and
+        # no generation bump. Mirrors api_keys: HMAC hash for verification,
+        # JSEC envelope for the recoverable reveal, unique prefix + hash.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id BIGSERIAL PRIMARY KEY,
+                label TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                token_hash BYTEA NOT NULL,
+                secret_ciphertext BYTEA,
+                enabled SMALLINT NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                scope TEXT NOT NULL DEFAULT 'full',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ
+            )
+            """
+        )
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_token_hash_uidx "
+            "ON api_tokens (token_hash)"
+        )
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_prefix_uidx ON api_tokens (prefix)"
+        )
         # Cascade journal (spec 2026-10-22 §3): what a provider/listing/model
         # retirement turned off, so enabling the provider again (or re-adding
         # it, or re-binding the model) can replay it. Dashboard-owned — the

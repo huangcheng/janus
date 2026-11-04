@@ -10,8 +10,12 @@ Gating (both checks run before any MCP protocol bytes are served):
      never consume it), read per request, and fail-closed: off, missing,
      or DB-unreachable all read as off and answer 404 in the house error
      shape, exactly as if no MCP server existed;
-  2. the operator bearer token — verified with auth.verify_token; partial
-     (TOTP challenge) scopes are rejected like everywhere else.
+  2. the bearer — exactly four outcomes: an operator session JWT
+     (auth.verify_token) passes; a jm- API token passes via
+     tokens.verify_api_token (identity published on tokens.current_identity
+     for the bridge); a partial (TOTP challenge) scope is rejected; and a
+     bridge scope (the REST bridge's internal swap JWT) is rejected
+     outright — it may never re-enter this gate.
 """
 
 import json
@@ -22,7 +26,7 @@ from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .. import database
+from .. import database, tokens
 from . import api, tools
 from ..auth import verify_token
 
@@ -72,21 +76,36 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
 
-def auth_failure(authorization: str | None) -> JSONResponse | None:
+async def auth_failure(authorization: str | None) -> JSONResponse | None:
     """Bearer check shared by the mount and the bare-/mcp route. Mirrors
-    auth.require_auth's outcomes without its FastAPI dependency plumbing."""
+    auth.require_auth's outcomes without its FastAPI dependency plumbing.
+    Async: a jm- candidate needs a DB lookup (verify_api_token)."""
     # Case-insensitive scheme, like FastAPI's HTTPBearer on the REST side —
     # the same header must not pass /api/* and fail /mcp/.
     if not authorization or authorization[:7].lower() != "bearer ":
         return _error(401, "unauthorized", "missing bearer token")
+    candidate = authorization[7:]
     try:
-        payload = verify_token(authorization[7:])
+        payload = verify_token(candidate)
     except jwt.ExpiredSignatureError:
         return _error(401, "token_expired", "session expired")
     except jwt.InvalidTokenError:
-        return _error(401, "unauthorized", "invalid token")
+        # A jm- token is not a JWT, so it lands here: DB-backed check.
+        # Disabled/deleted/expired/unknown all read as one 401 — no oracle.
+        identity = await tokens.verify_api_token(candidate)
+        if identity is None:
+            return _error(401, "unauthorized", "invalid token")
+        # Publish for the request's lifetime: the bridge mints the
+        # attributed swap JWT from this without a second DB read. Set
+        # here (not in __call__ — auth_failure returns None on success,
+        # leaving the caller nothing to stash).
+        tokens.current_identity.set(identity)
+        return None
     if payload.get("scope") == "partial":
         return _error(401, "unauthorized", "challenge token is not a session")
+    if payload.get("scope") == "bridge":
+        # The bridge's internal swap bearer never re-enters the gate.
+        return _error(401, "unauthorized", "invalid token")
     return None
 
 
@@ -116,7 +135,7 @@ class _GatedMcpApp:
                 if key == b"authorization":
                     header = value.decode("latin-1")
                     break
-            denied = auth_failure(header)
+            denied = await auth_failure(header)
         if denied is not None:
             await denied(scope, receive, send)
             return

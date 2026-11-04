@@ -18,6 +18,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from .. import tokens
+from ..auth import mint_bridge_token
 from . import api
 
 
@@ -655,6 +657,15 @@ def _render(data: Any) -> str:
 
 
 def _token(ctx: Context) -> str:
+    """The bearer the REST bridge forwards for this tool call.
+
+    Session JWTs pass through unchanged (operator calls keep their own
+    sub). A jm- API token is SWAPPED for a one-shot internal JWT: the REST
+    layer accepts JWTs only, so the bridge mints a 60s scope="bridge"
+    bearer attributed to the token (sub="api-token:<token_id>") with the
+    jti registered at mint — require_auth consumes that jti exactly once,
+    and the gate rejects the bridge scope outright, so the swap bearer is
+    useless outside this in-process hop."""
     request = ctx.request_context.request
     header = getattr(request, "headers", None)
     if header is None:
@@ -667,7 +678,18 @@ def _token(ctx: Context) -> str:
     # Strip the scheme here, not in call_api: the gate validated this exact
     # header, and the REST call rebuilds "Bearer <token>". Case-insensitive
     # like HTTPBearer, so a lowercase "bearer" passes the gate and works.
-    return value[7:] if value[:7].lower() == "bearer " else value
+    raw = value[7:] if value[:7].lower() == "bearer " else value
+    if not raw.startswith("jm-"):
+        return raw
+    identity = tokens.current_identity.get()
+    if identity is None:
+        # Gate and tool must agree; None here means the gate verified a
+        # token whose identity never landed — fail loud, never mint blind.
+        raise ToolError("api token identity missing in request context")
+    # sub keys on the unique token id (labels are not unique); the label
+    # rides the api_token.use audit row instead. mint_bridge_token mints
+    # and registers the jti in one step.
+    return mint_bridge_token(f"api-token:{identity['token_id']}")
 
 
 def _signature_for(spec: Spec) -> inspect.Signature:

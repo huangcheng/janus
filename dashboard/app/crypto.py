@@ -209,6 +209,30 @@ def generate_agent_key() -> str:
     return f"sk-{rand[:5]}-{rand}"
 
 
+# Domain separation prefix for management-plane API tokens: same pepper as
+# agent keys (the hash_recovery_code precedent — one deployment secret, no
+# new env var), but a distinct HMAC message space so digests from one plane
+# are useless for attacking the other.
+_API_TOKEN_DOMAIN = b"janus-api-token-v1:"
+
+
+def hash_api_token(raw_token: str) -> tuple[str, bytes]:
+    """HMAC-SHA256 (domain-separated) for jm- API tokens; (prefix_8, hash).
+
+    NOT byte-compatible with the gateway's agent-key hash on purpose —
+    these tokens never leave the management plane.
+    """
+    pepper = config.api_key_pepper.encode()
+    digest = hmac.new(pepper, _API_TOKEN_DOMAIN + raw_token.encode(), hashlib.sha256).digest()
+    return raw_token[:8], digest
+
+
+def generate_api_token() -> str:
+    """Generate a new management-plane API token (jm-XXXXX-random)."""
+    rand = base64.urlsafe_b64encode(os.urandom(24)).decode().rstrip("=")
+    return f"jm-{rand[:5]}-{rand}"
+
+
 # Validate the keyring at import (startup) so a typo'd/truncated entry is
 # visible immediately instead of only when the first secret is decrypted.
 _parse_keyring(config.secrets_key)
