@@ -6,6 +6,8 @@
 %% Agent-face registry read by /readyz (write-gate advertisement,
 %% Decisions spec §4.3) and by eunit.
 -export([agent_routes/0, agent_protocols/0, publish_agent_protocols/0]).
+%% Exported for eunit: the idle-timeout resolution is pure per value.
+-export([idle_timeout_ms/1, idle_timeout_default/0]).
 %% Static route entries (master agent :8080 + admin :8090), exported
 %% for the downstream-enc F6 route-table eunit: NO route may ever
 %% carry a Cowboy-level compress option — the shared agent routes
@@ -85,11 +87,11 @@ master_http_children(Port, AdminPort, AdminBind, LogTail) ->
     AdminDispatch = admin_dispatch(),
     ProtocolOpts = #{
         env => #{dispatch => Dispatch},
-        idle_timeout => 300_000
+        idle_timeout => idle_timeout_ms()
     },
     AdminProtocolOpts = #{
         env => #{dispatch => AdminDispatch},
-        idle_timeout => 300_000
+        idle_timeout => idle_timeout_ms()
     },
     AutoRouter = #{
         id => janus_auto,
@@ -216,8 +218,59 @@ admin_listener_child(AdminPort, undefined) ->
 admin_listener_child(AdminPort, AdminBind) ->
     admin_listener_spec(AdminPort, AdminBind, #{
         env => #{dispatch => admin_dispatch()},
-        idle_timeout => 300_000
+        idle_timeout => idle_timeout_ms()
     }).
+
+%% Cowboy connection idle timeout.
+%%
+%% This is NOT the agent-facing inactivity ceiling (that is
+%% janus_worker_wire:stream_inactivity_timeout_ms/0, which restarts on every
+%% forwarded chunk). Cowboy's idle_timeout bounds how long a connection may
+%% sit without the request/response cycle making progress, and it applies to
+%% a response that is still being streamed.
+%%
+%% It was hardcoded to 300_000, which silently truncated any stream older
+%% than five minutes: measured live, a stream delivering an event every
+%% ~100ms with ZERO idle gaps was cut at exactly 300.0s, and Caddy was
+%% eliminated as the cause by hitting 127.0.0.1:8080 directly. The agent's
+%% own total-stream ceiling is 600_000 (janus_worker_wire:stream_timeout_ms/0),
+%% so any value below that guarantees the proxy kills the connection before
+%% the gateway's own deadline can act — the failure then surfaces as a silent
+%% stop with no status code and nothing in the log, because the response head
+%% was already committed.
+%%
+%% The default is therefore above the stream ceiling, and it is
+%% operator-tunable via JANUS_HTTP_IDLE_TIMEOUT_MS so a deployment can raise
+%% it without a release.
+idle_timeout_ms() ->
+    idle_timeout_ms(os:getenv("JANUS_HTTP_IDLE_TIMEOUT_MS")).
+
+%% Pure once the value is in hand, so a test can drive every branch.
+idle_timeout_ms(false) ->
+    idle_timeout_default();
+idle_timeout_ms("") ->
+    idle_timeout_default();
+idle_timeout_ms(Val) when is_list(Val) ->
+    try list_to_integer(Val) of
+        N when N >= 1000 ->
+            N;
+        _ ->
+            logger:warning(#{what => janus_http_idle_timeout_invalid, value => Val}),
+            idle_timeout_default()
+    catch
+        _:_ ->
+            logger:warning(#{what => janus_http_idle_timeout_invalid, value => Val}),
+            idle_timeout_default()
+    end.
+
+%% MUST exceed the gateway's own total-stream ceiling. Below it, Cowboy closes
+%% a stream that is still delivering: measured live at exactly 300.0s with an
+%% event every ~100ms and zero idle gaps, and reproduced on 127.0.0.1:8080 so
+%% no proxy was involved. The failure has no status code and no log line — the
+%% response head is already committed — which is why it reads as a silent stop.
+%% Twice the ceiling leaves room for connect and drain on either side.
+idle_timeout_default() ->
+    janus_worker_wire:stream_timeout_ms() * 2.
 
 admin_port_log(_AdminPort, undefined) ->
     skipped;
