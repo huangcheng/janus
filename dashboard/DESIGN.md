@@ -33,7 +33,7 @@ Quiet precision: a restrained light or dark admin theme driven by cool-neutral O
 - Page descriptions wrap when useful. Dense tables stay fluid; forms and settings use intentional reading widths.
 - Use predictable form groups and tier grids with consistent spacing. Responsive behavior is structural: grids collapse and dialog content remains within the viewport.
 - Logs use the same document-flow `Table flush` and shared client pagination as Audit. OTP and Ops events keep separate sources, filters, expandable details, and two-second refresh.
-- Wide log tables own horizontal scrolling on narrow screens; the page itself must not overflow.
+- Log and Audit tables use fixed columns. Secondary node, actor, and target metadata moves beneath timestamps on phones, preserving the information without horizontal scrolling.
 
 ## Motion
 

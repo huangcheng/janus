@@ -434,8 +434,8 @@ export function ActionBadge({ action }: { action: string }) {
   const verb = action.split(".").pop() ?? ""
   const variant = /delete|revoke|disable/.test(verb) ? "destructive" : "secondary"
   return (
-    <Badge variant={variant} className="font-mono text-[11px] font-normal">
-      {action}
+    <Badge variant={variant} className="max-w-full font-mono text-[11px] font-normal" title={action}>
+      <span className="line-clamp-2 whitespace-normal break-words">{action}</span>
     </Badge>
   )
 }

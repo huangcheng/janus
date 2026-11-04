@@ -19,7 +19,7 @@ export function ExpandableText({
         <span className="min-w-0 flex-1 truncate" title={summary ?? text}>
           {summary ?? text}
         </span>
-        <span className="shrink-0 text-primary">Details</span>
+        <span className="shrink-0 text-primary max-sm:sr-only">Details</span>
         <ChevronDown className="size-3.5 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/45 p-3 font-mono text-xs leading-5 text-foreground [overflow-wrap:anywhere]">

@@ -321,12 +321,14 @@ export function Logs() {
               }
             />
           ) : (
-            <Table flush aria-label="Log event stream">
+            <Table flush aria-label="Log event stream" className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Time</TableHead>
-                  {!nodeFilter && <TableHead>Node</TableHead>}
-                  <TableHead>{stream === "ops" ? "Type" : "Level"}</TableHead>
+                  <TableHead className="w-[136px] sm:w-[144px]">Time</TableHead>
+                  {!nodeFilter && <TableHead className="hidden md:table-cell">Node</TableHead>}
+                  <TableHead className="w-28 px-2 sm:w-[120px] sm:px-3">
+                    {stream === "ops" ? "Type" : "Level"}
+                  </TableHead>
                   <TableHead>Details</TableHead>
                 </TableRow>
               </TableHeader>
@@ -336,15 +338,21 @@ export function Logs() {
                       <TableRow key={`${e.node ?? ""}:${e.idx}:${e.ts}`}>
                         <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
                           <EventTime ts={e.ts} />
+                          {!nodeFilter && e.node && (
+                            <span className="mt-1 line-clamp-2 whitespace-normal text-muted-foreground md:hidden" title={e.node}>
+                              <span className="sr-only">Node: </span>
+                              {e.node}
+                            </span>
+                          )}
                         </TableCell>
                         {!nodeFilter && (
-                          <TableCell className="font-mono text-xs text-muted-foreground">
+                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">
                             <span className="block max-w-[200px] truncate" title={e.node}>
                               {e.node ?? "—"}
                             </span>
                           </TableCell>
                         )}
-                        <TableCell>
+                        <TableCell className="px-2 sm:px-3">
                           <Badge variant={levelBadgeVariant(e.level)} className="font-mono">
                             {e.level}
                           </Badge>
@@ -358,15 +366,21 @@ export function Logs() {
                       <TableRow key={line.key}>
                         <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
                           <EventTime ts={line.ts} />
+                          {!nodeFilter && line.nodeLabel && (
+                            <span className="mt-1 line-clamp-2 whitespace-normal text-muted-foreground md:hidden" title={line.nodeLabel}>
+                              <span className="sr-only">Node: </span>
+                              {line.nodeLabel}
+                            </span>
+                          )}
                         </TableCell>
                         {!nodeFilter && (
-                          <TableCell className="font-mono text-xs text-muted-foreground">
+                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">
                             <span className="block max-w-[200px] truncate" title={line.nodeLabel}>
                               {line.nodeLabel ?? "—"}
                             </span>
                           </TableCell>
                         )}
-                        <TableCell>
+                        <TableCell className="px-2 sm:px-3">
                           <Badge
                             variant={line.kind === "marker" ? "warning" : "outline"}
                             className="font-mono"
@@ -375,7 +389,7 @@ export function Logs() {
                           </Badge>
                         </TableCell>
                         <TableCell className="w-full whitespace-normal">
-                          <ExpandableText text={line.text} className="max-w-[720px]" />
+                          <ExpandableText text={line.text} className="w-full" />
                         </TableCell>
                       </TableRow>
                     ))}
@@ -451,7 +465,7 @@ function LogDetails({ fields }: { fields: Record<string, unknown> }) {
   const text = formatFields(fields)
   if (!text) return "—"
   return (
-    <ExpandableText text={text} className="max-w-[720px]">
+    <ExpandableText text={text} className="w-full">
       <LogFields fields={fields} />
     </ExpandableText>
   )

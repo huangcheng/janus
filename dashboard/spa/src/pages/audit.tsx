@@ -84,13 +84,13 @@ export function Audit() {
               description="Dashboard mutations will show up here as you change config."
             />
           ) : (
-            <Table flush>
+            <Table flush className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Time</TableHead>
-                  <TableHead>Actor</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead>Target</TableHead>
+                  <TableHead className="w-[136px] sm:w-[144px]">Time</TableHead>
+                  <TableHead className="hidden md:table-cell">Actor</TableHead>
+                  <TableHead className="w-[108px] sm:w-[132px]">Action</TableHead>
+                  <TableHead className="hidden md:table-cell">Target</TableHead>
                   <TableHead>Detail</TableHead>
                 </TableRow>
               </TableHeader>
@@ -99,21 +99,32 @@ export function Audit() {
                   <TableRow key={`${a.ts}|${a.action}|${a.target ?? ""}`}>
                     <TableCell className="font-mono text-xs whitespace-nowrap tabular-nums">
                       <EventTime ts={a.ts} />
+                      <span className="mt-1 line-clamp-2 whitespace-normal text-muted-foreground md:hidden" title={`${a.actor}${a.target ? ` · ${a.target}` : ""}`}>
+                        <span className="sr-only">Actor: </span>
+                        {a.actor}
+                        {a.target ? (
+                          <>
+                            {" · "}
+                            <span className="sr-only">Target: </span>
+                            {a.target}
+                          </>
+                        ) : null}
+                      </span>
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
+                    <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">
                       {a.actor}
                     </TableCell>
                     <TableCell>
                       <ActionBadge action={a.action} />
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
+                    <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">
                       <span className="block max-w-[240px] truncate" title={a.target ?? undefined}>
                         {a.target ?? "—"}
                       </span>
                     </TableCell>
                     <TableCell className="whitespace-normal text-muted-foreground">
                       {a.detail ? (
-                        <ExpandableText text={a.detail} summary={auditDetailSummary(a.detail)} className="max-w-[360px]" />
+                        <ExpandableText text={a.detail} summary={auditDetailSummary(a.detail)} className="w-full" />
                       ) : (
                         "—"
                       )}
