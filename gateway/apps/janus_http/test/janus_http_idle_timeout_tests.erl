@@ -39,27 +39,32 @@ unset_uses_default_test() ->
         janus_http_sup:idle_timeout_ms("")
     ).
 
-%% A real value is honoured.
+%% A value above the ceiling is honoured.
 explicit_value_test() ->
-    ?assertEqual(900_000, janus_http_sup:idle_timeout_ms("900000")).
+    Above = janus_worker_wire:stream_timeout_ms() + 1,
+    ?assertEqual(
+        Above,
+        janus_http_sup:idle_timeout_ms(integer_to_list(Above))
+    ).
 
-%% Garbage and too-small values fall back LOUDLY rather than becoming an
-%% unusable listener. A zero or negative timeout would close every connection
-%% immediately; silently accepting it would look like a network fault.
+%% A value AT OR BELOW the ceiling is refused, not honoured. This is the whole
+%% point: accepting it reintroduces the silent truncation, and the operator who
+%% set 300000 would have no way to connect a silent stop to a timeout knob.
+at_or_below_ceiling_is_refused_test() ->
+    Ceiling = janus_worker_wire:stream_timeout_ms(),
+    Default = janus_http_sup:idle_timeout_default(),
+    %% The exact value that caused the production failure.
+    ?assertEqual(Default, janus_http_sup:idle_timeout_ms("300000")),
+    ?assertEqual(Default, janus_http_sup:idle_timeout_ms(integer_to_list(Ceiling))),
+    ?assertEqual(Default, janus_http_sup:idle_timeout_ms(integer_to_list(Ceiling - 1))),
+    ?assertEqual(Default, janus_http_sup:idle_timeout_ms("1000")).
+
+%% Garbage falls back LOUDLY rather than becoming an unusable listener.
 invalid_values_fall_back_test() ->
     Default = janus_http_sup:idle_timeout_default(),
     lists:foreach(
         fun(V) ->
             ?assertEqual(Default, janus_http_sup:idle_timeout_ms(V))
         end,
-        ["abc", "0", "-1", "999", "1.5", " 900000 "]
-    ).
-
-%% The boundary that matters: 1000 is the smallest accepted value. Anything
-%% below it would be shorter than a single upstream first byte.
-boundary_test() ->
-    ?assertEqual(1000, janus_http_sup:idle_timeout_ms("1000")),
-    ?assertEqual(
-        janus_http_sup:idle_timeout_default(),
-        janus_http_sup:idle_timeout_ms("999")
+        ["abc", "0", "-1", "1.5", " 900000 ", ""]
     ).

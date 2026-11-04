@@ -250,10 +250,25 @@ idle_timeout_ms(false) ->
     idle_timeout_default();
 idle_timeout_ms("") ->
     idle_timeout_default();
+%% An explicit value is honoured only when it actually satisfies the
+%% invariant. A number below the stream ceiling reintroduces the exact bug
+%% this change exists to remove, and "the operator asked for it" is not a
+%% defence: the failure mode is a silent stop with no status code and no log
+%% line, so nobody would connect it back to this setting. Such a value is
+%% raised to the default and logged, rather than accepted.
 idle_timeout_ms(Val) when is_list(Val) ->
+    Ceiling = janus_worker_wire:stream_timeout_ms(),
     try list_to_integer(Val) of
-        N when N >= 1000 ->
+        N when is_integer(N), N > Ceiling ->
             N;
+        N when is_integer(N) ->
+            logger:warning(#{
+                what => janus_http_idle_timeout_too_low,
+                value => N,
+                must_exceed => Ceiling,
+                using => idle_timeout_default()
+            }),
+            idle_timeout_default();
         _ ->
             logger:warning(#{what => janus_http_idle_timeout_invalid, value => Val}),
             idle_timeout_default()
