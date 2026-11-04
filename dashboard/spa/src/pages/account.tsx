@@ -5,18 +5,22 @@ import {
   Check,
   Copy,
   Download,
+  Eye,
   Fingerprint,
   KeyRound,
   LoaderCircle,
   Plus,
+  Power,
   QrCode,
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  Webhook,
 } from "lucide-react"
 import { api, apiFetch } from "../api"
-import { ErrorFlash, Layout } from "../components"
-import { fmtIsoLocalCompact, fmtIsoLocalMonthDayHm } from "../lib/time-format"
+import { EmptyState, ErrorFlash, IconAction, Layout, Loading } from "../components"
+import { StateBadge } from "./shared"
+import { fmtIsoLocalCompact, fmtIsoLocalMonthDayHm, parseBackendInstant } from "../lib/time-format"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -41,10 +45,20 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldFooter, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Table,
   TableBody,
@@ -233,6 +247,7 @@ const ACCOUNT_SECTIONS = [
   { id: "totp", label: "Two-factor", icon: ShieldCheck },
   { id: "recovery", label: "Recovery", icon: ShieldAlert },
   { id: "passkeys", label: "Passkeys", icon: Fingerprint },
+  { id: "tokens", label: "API tokens", icon: Webhook },
 ] as const
 
 type AccountSection = (typeof ACCOUNT_SECTIONS)[number]["id"]
@@ -330,6 +345,9 @@ export function Account() {
           </section>
           <section hidden={section !== "passkeys"} aria-label="Passkey settings">
             <PasskeyCard passkeys={passkeys} onDone={load} />
+          </section>
+          <section hidden={section !== "tokens"} aria-label="API tokens">
+            <TokensCard active={section === "tokens"} />
           </section>
         </div>
       </div>
@@ -1154,5 +1172,490 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
         </AlertDialogContent>
       </AlertDialog>
     </>
+  )
+}
+
+type ApiToken = {
+  id: number
+  label: string
+  prefix: string
+  scope: string
+  enabled: boolean
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+}
+
+type TokenModal = "create" | { toggle: ApiToken } | { remove: ApiToken } | null
+
+// Single client-side source for the TTL contract (mirrors the backend's
+// presets and custom bound; drift shows up as a 400 toast, so keep named).
+const TTL_PRESETS = [30, 90, 365] as const
+const TTL_CUSTOM_MAX = 3650
+
+function isExpired(t: ApiToken): boolean {
+  // Same normaliser as the display columns: a naive UTC value would be
+  // off by the local offset with raw new Date().
+  return t.expires_at !== null && parseBackendInstant(t.expires_at).getTime() <= Date.now()
+}
+
+/** Management-plane jm-… bearer tokens: MCP agents today, third-party API
+ *  callers later. Disable revokes immediately; delete is final; the secret
+ *  is shown at creation and via the rate-limited reveal. */
+function TokensCard({ active }: { active: boolean }) {
+  const [tokens, setTokens] = useState<ApiToken[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const aliveRef = useRef(true)
+  // Request sequence: drop out-of-order list responses; and the live
+  // active flag — Radix dialogs portal to <body>, so they are NOT hidden
+  // with the section and a late resolve must not pop over another tab.
+  const seqRef = useRef(0)
+  const activeRef = useRef(active)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+  const [busy, setBusy] = useState(false)
+  const [modal, setModal] = useState<TokenModal>(null)
+  const [label, setLabel] = useState("")
+  const [ttl, setTtl] = useState<string>("90")
+  const [customDays, setCustomDays] = useState("")
+  // Secret display lives in its own state: a slow reveal must never
+  // clobber an open confirmation dialog.
+  const [created, setCreated] = useState<string | null>(null)
+  const [revealed, setRevealed] = useState<string | null>(null)
+  const [revealTarget, setRevealTarget] = useState<ApiToken | null>(null)
+  const [revealing, setRevealing] = useState(false)
+  // State updates land on the next render; only a ref guards synchronously.
+  const revealingRef = useRef(false)
+
+  // Single list-refresh path (mount effect and every mutation); the alive
+  // ref keeps a late response off an unmounted card.
+  const reload = useCallback(async () => {
+    const seq = ++seqRef.current
+    try {
+      const r = await api<{ tokens: ApiToken[] }>("/tokens")
+      if (!aliveRef.current || seq !== seqRef.current) return
+      setTokens(r.tokens ?? [])
+      setErr(null)
+      setLoaded(true)
+    } catch (e: any) {
+      // Terminal: without this, a failed first load renders the spinner
+      // forever next to the error flash.
+      if (aliveRef.current) {
+        setErr(e.message)
+        setLoaded(true)
+      }
+    }
+  }, [])
+
+  // The section stays mounted (hidden-toggle), so fetch when it becomes
+  // visible instead of on every account-page load; expiry/last-used stay
+  // fresh on each tab return.
+  useEffect(() => {
+    activeRef.current = active
+    if (active) {
+      void reload()
+    } else {
+      setRevealed(null)
+      setRevealTarget(null)
+      setCreated(null)
+    }
+  }, [active, reload])
+
+  async function act(fn: () => Promise<unknown>, okMsg: string) {
+    setBusy(true)
+    try {
+      await fn()
+      toast.success(okMsg)
+      // reload inside the try: busy must stay true until the refresh
+      // lands, or the action buttons re-enable mid-refresh and a second
+      // mutation can interleave.
+      await reload()
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function ttlDays(): number | null {
+    if (ttl === "custom") {
+      // Number + isInteger: parseInt silently truncates "1e3" to 1 day.
+      const n = Number(customDays)
+      return Number.isInteger(n) && n >= 1 && n <= TTL_CUSTOM_MAX ? n : null
+    }
+    return Number.parseInt(ttl, 10)
+  }
+
+  function resetCreateForm() {
+    setLabel("")
+    setTtl("90")
+    setCustomDays("")
+  }
+
+  function openCreate() {
+    resetCreateForm()
+    setModal("create")
+  }
+
+  async function create(e: FormEvent) {
+    e.preventDefault()
+    const days = ttlDays()
+    if (!label.trim() || days === null) return
+    setBusy(true)
+    try {
+      const r = await api<{ token: string }>("/tokens", {
+        method: "POST",
+        body: { label: label.trim(), ttl_days: days },
+      })
+      resetCreateForm()
+      setModal(null)
+      if (typeof r.token !== "string" || r.token === "") {
+        toast.error("token created but the secret was not returned — use Reveal")
+        await reload()
+        return
+      }
+      setCreated(r.token)
+      await reload()
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function reveal(t: ApiToken) {
+    // Guarded: the reveal budget is shared with agent keys (30/min), so an
+    // accidental double click must not burn it twice.
+    if (revealingRef.current) return
+    revealingRef.current = true
+    setRevealing(true)
+    try {
+      const r = await api<{ token: string }>(`/tokens/${t.id}/secret`)
+      if (typeof r.token !== "string" || r.token.length === 0) {
+        toast.error("secret unavailable")
+        return
+      }
+      if (!activeRef.current) return
+      setRevealTarget(t)
+      setRevealed(r.token)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      revealingRef.current = false
+      setRevealing(false)
+    }
+  }
+
+  const toggleTarget = modal !== null && typeof modal === "object" && "toggle" in modal ? modal.toggle : null
+  const removeTarget = modal !== null && typeof modal === "object" && "remove" in modal ? modal.remove : null
+
+  // Early returns instead of a chained ternary: loading, error-with-no-data
+  // (the flash above already tells the story), then the empty state, then
+  // the table.
+  function renderBody(table: React.ReactNode): React.ReactNode {
+    if (!loaded) return <div className="border-y px-5 py-8"><Loading /></div>
+    if (err) return null
+    if (tokens.length === 0) {
+      return (
+        <EmptyState
+          title="No API tokens"
+          description="Create one to let an agent or a third-party service call this console."
+        />
+      )
+    }
+    return table
+  }
+
+  return (
+    <Card className="w-full self-start overflow-hidden">
+      <CardHeader>
+        <CardTitle>API tokens</CardTitle>
+        <CardDescription>
+          Bearer tokens for machine callers — MCP agents at <code>/mcp/</code> today
+          (header <code>Authorization: Bearer jm-…</code>), third-party API access
+          later. Disable revokes instantly; the secret can be re-revealed from the
+          table, rate-limited.
+        </CardDescription>
+        <CardAction>
+          <Button size="sm" onClick={openCreate}>
+            <Plus />
+            Create token
+          </Button>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="px-0 pt-0">
+        {err && (
+          <div className="flex items-center gap-3 border-y px-5 py-3">
+            <div className="min-w-0 flex-1"><ErrorFlash message={err} /></div>
+            <Button size="sm" variant="outline" onClick={() => void reload()}>
+              Retry
+            </Button>
+          </div>
+        )}
+        {renderBody(
+          <Table flush>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Label</TableHead>
+                <TableHead>Prefix</TableHead>
+                <TableHead>Expires</TableHead>
+                <TableHead>Last used</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right pr-5">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {tokens.map((t) => (
+                <TableRow key={t.id}>
+                  <TableCell className="max-w-[16rem] truncate font-medium" title={t.label}>
+                    {t.label}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tracking-wider text-muted-foreground">
+                    {t.prefix}…
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs tabular-nums">
+                    {t.expires_at ? fmtIsoLocalCompact(t.expires_at) : "No expiry"}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs tabular-nums">
+                    {t.last_used_at ? fmtIsoLocalMonthDayHm(t.last_used_at) : "Never"}
+                  </TableCell>
+                  <TableCell>
+                    {isExpired(t) ? (
+                      <Badge variant="warning">Expired</Badge>
+                    ) : (
+                      <StateBadge enabled={t.enabled} />
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right pr-5">
+                    <span className="inline-flex items-center gap-1">
+                      <IconAction
+                        label={`Reveal ${t.label}`}
+                        disabled={revealing || busy}
+                        onClick={() => void reveal(t)}
+                      >
+                        <Eye />
+                      </IconAction>
+                      <IconAction
+                        label={t.enabled ? `Disable ${t.label}` : `Enable ${t.label}`}
+                        // Enabling an expired token is a silent no-op at the
+                        // gate — don't offer it.
+                        disabled={busy || isExpired(t)}
+                        onClick={() => setModal({ toggle: t })}
+                      >
+                        <Power />
+                      </IconAction>
+                      <IconAction
+                        label={`Delete ${t.label}`}
+                        disabled={busy}
+                        onClick={() => setModal({ remove: t })}
+                      >
+                        <Trash2 />
+                      </IconAction>
+                    </span>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+
+      <Dialog open={modal === "create"} onOpenChange={(open) => !open && setModal(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create API token</DialogTitle>
+            <DialogDescription>
+              The bearer secret is shown after creation and can be re-revealed later (rate-limited).
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={create} className="flex flex-col gap-4">
+            <Field>
+              <FieldLabel htmlFor="token-label">Label</FieldLabel>
+              <Input
+                id="token-label"
+                placeholder="ci-agent on builder"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                maxLength={120}
+              />
+              <FieldDescription>What this token is for — shown in the audit trail.</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="token-ttl">Expires after</FieldLabel>
+              <Select value={ttl} onValueChange={setTtl}>
+                <SelectTrigger id="token-ttl" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TTL_PRESETS.map((d) => (
+                    <SelectItem key={d} value={String(d)}>
+                      {d === 365 ? "1 year" : `${d} days`}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="custom">Custom…</SelectItem>
+                  <SelectItem value="0">No expiry</SelectItem>
+                </SelectContent>
+              </Select>
+              {ttl === "custom" && (
+                <Input
+                  aria-label="Custom TTL in days"
+                  type="number"
+                  min={1}
+                  max={TTL_CUSTOM_MAX}
+                  placeholder={`Days (1–${TTL_CUSTOM_MAX})`}
+                  value={customDays}
+                  onChange={(e) => setCustomDays(e.target.value)}
+                  className="mt-2"
+                />
+              )}
+            </Field>
+            <DialogError
+              message={
+                ttl === "custom" && customDays !== "" && ttlDays() === null
+                  ? `Custom TTL must be 1–${TTL_CUSTOM_MAX} whole days`
+                  : null
+              }
+            />
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setModal(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || !label.trim() || ttlDays() === null}>
+                {busy && <LoaderCircle className="animate-spin" />}
+                Create
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={created !== null} onOpenChange={(open) => !open && setCreated(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Token created</DialogTitle>
+            <DialogDescription>Copy the secret into your client configuration.</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <p className="text-warning flex items-start gap-2 text-xs">
+              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+              Copy it into your client now — it can be re-revealed later from the
+              table, rate-limited.
+            </p>
+            <Input
+              readOnly
+              value={created ?? ""}
+              className="font-mono select-all"
+              onFocus={(e) => e.currentTarget.select()}
+              onClick={(e) => e.currentTarget.select()}
+            />
+            <CopyButton value={created ?? ""} />
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setCreated(null)}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={revealed !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRevealed(null)
+            setRevealTarget(null)
+          }
+        }}
+      >
+        <DialogContent size="sm">
+          <DialogHeader>
+            <DialogTitle>Token secret{revealTarget ? ` — ${revealTarget.label}` : ""}</DialogTitle>
+            <DialogDescription>The bearer value, revealed rate-limited.</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <Input
+              readOnly
+              aria-label={revealTarget ? `Bearer secret for ${revealTarget.label}` : "Bearer secret"}
+              value={revealed ?? ""}
+              className="font-mono select-all"
+              onFocus={(e) => e.currentTarget.select()}
+              onClick={(e) => e.currentTarget.select()}
+            />
+            <CopyButton value={revealed ?? ""} />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={toggleTarget !== null} onOpenChange={(open) => !open && setModal(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {toggleTarget?.enabled ? "Disable" : "Enable"} {toggleTarget?.label}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {toggleTarget?.enabled
+                ? "Calls made with this token are rejected immediately. The token can be re-enabled later."
+                : "Calls made with this token will be accepted again."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const target = toggleTarget
+                setModal(null)
+                if (target) {
+                  void act(
+                    () =>
+                      api(`/tokens/${target.id}/${target.enabled ? "disable" : "enable"}`, {
+                        method: "POST",
+                        body: {},
+                      }),
+                    target.enabled ? "Token disabled" : "Token enabled",
+                  )
+                }
+              }}
+            >
+              {toggleTarget?.enabled ? "Disable" : "Enable"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={removeTarget !== null} onOpenChange={(open) => !open && setModal(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {removeTarget?.label}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The token stops working immediately and the row is removed. This
+              cannot be undone — create a new token if needed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                const target = removeTarget
+                setModal(null)
+                if (target) {
+                  void act(
+                    () => api(`/tokens/${target.id}`, { method: "DELETE" }),
+                    "Token deleted",
+                  )
+                }
+              }}
+            >
+              Delete token
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Card>
   )
 }
