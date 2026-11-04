@@ -797,6 +797,7 @@ dispatch(ClientProto, ProviderProto, Route, Body, Map, Req, State) ->
     of
         true ->
             _ = release_route_inflight(Route),
+            _ = put(janus_error_detail, <<"computer use requires a native provider route">>),
             _ = track(400, Route, #{}),
             reply_err(
                 ClientProto, Req, State, 400,
@@ -824,6 +825,7 @@ dispatch_after_computer_use(ClientProto, ProviderProto, Route, Body, Map, Req, S
     of
         true ->
             _ = release_route_inflight(Route),
+            _ = put(janus_error_detail, <<"streaming requires a same-protocol provider route">>),
             _ = track(400, Route, #{}),
             reply_err(
                 ClientProto, Req, State, 400,
@@ -920,6 +922,7 @@ call_translate(ClientProto, ProviderProto, Route, Map, WantStream, Req, State) -
     case janus_protocol_translate:translate_request(ClientProto, ProviderProto, Map) of
         {error, {translate_unsupported, Msg}} ->
             _ = release_route_inflight(Route),
+            _ = put(janus_error_detail, Msg),
             _ = track(400, Route, #{}),
             janus_shape_capture:translate_reject(ClientProto, Map, Msg),
             reply_err(ClientProto, Req, State, 400, <<"translate_unsupported">>, Msg);
@@ -1465,6 +1468,7 @@ decisions_terminal({ok, Status, Headers, RespBody}, Route, Req, State) ->
     Req2 = janus_downstream_enc:reply(Status, filter_headers_json(Headers), RespBody, Req),
     {ok, Req2, State};
 decisions_terminal({error, crashed}, Route, Req, State) ->
+    _ = put(janus_error_detail, <<"upstream call crashed">>),
     _ = track_proxied(500, Route, #{}),
     _ = release_route_inflight(Route),
     reply_err(openai_decisions, Req, State, 500, <<"internal_error">>, <<"upstream call crashed">>);
@@ -1477,6 +1481,12 @@ decisions_terminal({error, response_too_large}, Route, Req, State) ->
     reply_err(openai_decisions, Req, State, 502, Code, Msg);
 decisions_terminal({error, Reason}, Route, Req, State) ->
     Status = error_http_status(Reason),
+    %% Detail before the row: track_proxied is the writer.
+    _ =
+        case decisions_local_error(Reason) of
+            {_Code, Msg} when is_binary(Msg) -> put(janus_error_detail, Msg);
+            _ -> ok
+        end,
     _ = track_proxied(Status, Route, #{}),
     case is_transient(Reason) of
         true ->
@@ -1693,6 +1703,7 @@ handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Rou
     ),
     reply_upstream_body(ClientProto, ProviderProto, Status, Headers, RespBody, Translate, Req, State);
 handle_upstream(ClientProto, _ProviderProto, {error, crashed}, Route, _Translate, Req, State) ->
+    _ = put(janus_error_detail, <<"upstream call crashed">>),
     note_usage_outcome(error),
     _ = track_proxied(500, Route, #{}),
     _ = release_route_inflight(Route),
