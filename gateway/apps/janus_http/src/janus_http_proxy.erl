@@ -1238,6 +1238,13 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
     WireReason = wire_reason(Reason),
     {ok, Frames, St1} = janus_protocol_translate:finalize_sse(ClientProto, WireReason, St0),
     put(janus_sse_state, St1),
+    %% How close did this stream come to the accumulator ceilings? The caps
+    %% are only visible when they TRIP, which made "is the limit too low?" a
+    %% question with no data behind it: a stream that used 250 KiB of the
+    %% 256 KiB budget looked identical to one that used 2 KiB. Logged once
+    %% per finished stream, at INFO only when it matters (see the ratio
+    %% guard), so the ring stays readable.
+    note_cap_headroom(St1),
     case Reason of
         normal ->
             TrackStatus = 200,
@@ -1294,6 +1301,40 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
     end,
     _ = release_route_inflight(Route),
     {ok, Req2, State}.
+
+%% One line per finished translate stream when it came within 50% of any
+%% ceiling. Silent below that: a short exchange is the common case and does
+%% not need a log line.
+note_cap_headroom(#sse_st{tools = Tools, total_args = Total}) ->
+    Calls = map_size(Tools),
+    %% Largest single call, in argument bytes.
+    PerCall =
+        maps:fold(
+            fun(_K, #tool_acc{args_bytes = B}, Acc) -> max(Acc, B) end,
+            0,
+            Tools
+        ),
+    Caps = [
+        {calls, Calls, janus_protocol_translate:tool_cap(calls)},
+        {per_call, PerCall, janus_protocol_translate:tool_cap(per_call)},
+        {total, Total, janus_protocol_translate:tool_cap(total)}
+    ],
+    Near = [
+        {Kind, Used, Cap}
+     || {Kind, Used, Cap} <- Caps, Cap > 0, Used * 2 >= Cap
+    ],
+    case Near of
+        [] ->
+            ok;
+        _ ->
+            logger:info(#{
+                what => janus_translate_cap_headroom,
+                calls => Calls,
+                largest_call_args => PerCall,
+                total_args => Total,
+                near => Near
+            })
+    end.
 
 finalize_quiet(ClientProto) ->
     St0 = get(janus_sse_state),
