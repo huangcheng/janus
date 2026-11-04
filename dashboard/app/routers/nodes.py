@@ -13,6 +13,7 @@ from ..nodes import (
     _auth_headers,
     _tls_verify,
     assemble_nodes_payload,
+    health_data,
     poll_node,
     poll_sched,
     stats_url,
@@ -181,8 +182,131 @@ async def fleet_runtime(user: dict = Depends(require_auth)):
     older than the command answer unknown_command -> 409, which the SPA
     renders as "deploy the new gateway image first".
     """
+    last_status, last_body = await _issue_fleet_command("runtime_snapshot")
+    return _fleet_audit_tail(
+        "node.runtime_snapshot", "runtime_snapshot", None, last_status, last_body
+    )
+
+
+def _fleet_audit_tail(action, command, target, last_status, last_body, fail_on_error=False):
+    """Shared audit + unwrap tail for fleet-command callers: audit the
+    outcome (target truncated — a hostile caller must not amplify DB
+    writes), then raise the house error envelope on non-200 — and, for
+    mutating commands (fail_on_error), on outcome=error too: the gateway
+    answers HTTP 200 with outcome=error when the command succeeded
+    nowhere, and a failed fleet-wide mutation must not read as done at
+    the HTTP layer. Read-only callers (runtime snapshot) keep the
+    pass-through."""
+    _results = last_body.get("results") if isinstance(last_body, dict) else {}
+    _n = len(_results) if isinstance(_results, dict) else 0
+    _outcome = last_body.get("outcome") if isinstance(last_body, dict) else "?"
+    _target = json.dumps(target, sort_keys=True)[:512] if target else "none"
+    audit.log(action, "fleet", f"command={command} target={_target} outcome={_outcome} nodes={_n}")
+    if last_status != 200 or (fail_on_error and _outcome == "error"):
+        raise HTTPException(
+            502 if last_status == 200 else last_status,
+            detail={"error": {"code": "gateway_error", "message": last_body}},
+        )
+    return last_body
+
+
+# The gateway's closed command enum (janus_fleet_commands.erl). Anything
+# not here is rejected before a single byte leaves the dashboard — the
+# admin plane is fleet-wide power, and this endpoint is what the MCP
+# `fleet_command` tool (and, later, the SPA) drives.
+_FLEET_COMMANDS = frozenset(
+    {
+        "fleet_status",
+        "pool_ping",
+        "runtime_snapshot",
+        "worker_geo_refresh",
+        "lb_cool_clear",
+        "config_reload_nudge",
+        "catalog_cache_flush",
+    }
+)
+
+
+def _fleet_target_error(message: str) -> HTTPException:
+    return HTTPException(400, detail={"error": {"code": "invalid_target", "message": message}})
+
+
+def _target_id(value) -> int | None:
+    """Cool rows are keyed by INTEGER ids. The gateway's decoder also
+    accepts binaries, but a binary id matches no row (cool_clear swallows
+    the miss and answers ok), so accept an int or a numeric string and
+    ALWAYS coerce to int — anything else is a display name or garbage."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        # isdecimal, not isdigit: superscripts pass isdigit but crash int();
+        # positive only — row ids are positive and cool_clear swallows misses.
+        if value.isdecimal():
+            try:
+                return int(value) if int(value) > 0 else None
+            except ValueError:
+                return None
+    return None
+
+
+def _validate_fleet_target(command: str, target) -> dict | None:
+    """Mirror the gateway's target kinds (janus_http_fleet target decode).
+    Returns the validated target (ids coerced to int), or None when the
+    command takes none."""
+    if command == "lb_cool_clear":
+        if not isinstance(target, dict):
+            raise _fleet_target_error("lb_cool_clear requires a target object")
+        kind = target.get("kind")
+        # Rebuilt from ONLY the expected keys: caller-supplied extras must
+        # not ride to the gateway or into the audit trail.
+        if kind == "route":
+            provider = _target_id(target.get("provider"))
+            if provider is None:
+                raise _fleet_target_error("kind=route requires provider (row id)")
+            model = target.get("model")
+            if model is not None:
+                model = _target_id(model)
+                if model is None:
+                    raise _fleet_target_error("kind=route model must be a row id or null")
+            return {"kind": "route", "provider": provider, "model": model}
+        if kind == "provider":
+            provider = _target_id(target.get("provider"))
+            if provider is None:
+                raise _fleet_target_error("kind=provider requires provider (row id)")
+            return {"kind": "provider", "provider": provider}
+        if kind == "provider_key":
+            key = _target_id(target.get("key"))
+            if key is None:
+                raise _fleet_target_error("kind=provider_key requires key (row id)")
+            return {"kind": "provider_key", "key": key}
+        if kind == "listing":
+            name = target.get("name")
+            if not isinstance(name, str) or not name or len(name) > 256:
+                raise _fleet_target_error("kind=listing requires name (<=256 chars)")
+            return {"kind": "listing", "name": name}
+        raise _fleet_target_error("kind must be route | provider | provider_key | listing")
+    if command == "worker_geo_refresh":
+        if not isinstance(target, dict) or target.get("kind") != "worker":
+            raise _fleet_target_error("worker_geo_refresh requires {kind: worker, node}")
+        node = target.get("node")
+        # Same shape contract as POST /{node_id}/workers/geo-refresh: a
+        # long name, bounded, so a garbage value is rejected here instead
+        # of being relayed to every enabled row.
+        if not isinstance(node, str) or "@" not in node or len(node) > 253:
+            raise _fleet_target_error("node must be a worker long name (janus@host)")
+        return {"kind": "worker", "node": node}
+    if target is not None:
+        raise _fleet_target_error(f"{command} takes no target")
+    return None
+
+
+async def _issue_fleet_command(command: str, target: dict | None = None):
+    """Issue a fleet command against a master-preferred enabled row, with
+    the same row ordering and error envelope as the runtime snapshot."""
     rows = await database.fetch(
-        "SELECT id, name, stats_host, stats_port, stats_token_ciphertext, health_snapshot "
+        "SELECT id, name, stats_host, stats_port, stats_token_ciphertext "
         "FROM gateway_nodes WHERE enabled ORDER BY id"
     )
     if not rows:
@@ -190,18 +314,21 @@ async def fleet_runtime(user: dict = Depends(require_auth)):
             409, detail={"error": {"code": "no_nodes", "message": "no enabled gateway nodes"}}
         )
 
-    # Prefer a master row (it can reach workers via erpc); a stale/absent
-    # health snapshot falls through to trying every enabled row in order.
-    def _is_master(row) -> bool:
-        snap = row["health_snapshot"]
-        if isinstance(snap, str):
-            try:
-                snap = json.loads(snap)
-            except ValueError:
-                snap = {}
-        return str((snap or {}).get("role") or "").lower() == "master"
+    # Prefer a master row (it can reach workers via erpc; local-only
+    # commands like pool_ping only work there). The persisted
+    # health_snapshot column is the /stats/health body, which carries NO
+    # role — the live /stats cache does (root body includes role). Before
+    # the first poll cycle the cache is empty and ordering degenerates to
+    # id order, same as trying rows in sequence.
+    live_health = health_data()
+    ordered = sorted(
+        rows,
+        key=lambda r: str((live_health.get(r["id"]) or {}).get("role") or "").lower() != "master",
+    )
 
-    ordered = sorted(rows, key=lambda r: not _is_master(r))
+    payload = {"command": command}
+    if target is not None:
+        payload["target"] = target
 
     last_status, last_body = (
         502,
@@ -217,31 +344,86 @@ async def fleet_runtime(user: dict = Depends(require_auth)):
             async with egress.pinned_async_client(
                 row["stats_host"], timeout=30.0, verify=_tls_verify()
             ) as client:
-                resp = await client.post(
-                    url, json={"command": "runtime_snapshot"}, headers=_auth_headers(token)
-                )
+                resp = await client.post(url, json=payload, headers=_auth_headers(token))
                 body = await egress.read_body_capped(resp, max_bytes=8 * 1024 * 1024)
         except Exception as e:
-            logger.debug("runtime snapshot via node %s failed: %s", row["id"], e)
+            logger.debug("fleet command %s via node %s failed: %s", command, row["id"], e)
             continue
         try:
             data = json.loads(body)
         except ValueError:
             data = {"raw": body[:200].decode(errors="replace")}
         last_status, last_body = resp.status_code, data
-        if resp.status_code == 200:
+        # Break only on a REAL success: the gateway answers HTTP 200 with
+        # outcome=error when the command failed on that row — a non-master
+        # row first in cold-cache order (local-only commands like pool_ping
+        # only work on the master) must not end the search. Keep trying;
+        # the last result stands if no row succeeds.
+        if resp.status_code == 200 and not (
+            isinstance(data, dict) and data.get("outcome") == "error"
+        ):
             break
+    return last_status, last_body
 
-    _results = last_body.get("results") if isinstance(last_body, dict) else {}
-    _n = len(_results) if isinstance(_results, dict) else 0
-    _outcome = last_body.get("outcome") if isinstance(last_body, dict) else "?"
-    audit.log("node.runtime_snapshot", "fleet", f"outcome={_outcome} nodes={_n}")
-    if last_status != 200:
+
+@router.post("/fleet-command")
+async def fleet_command(request: Request, user: dict = Depends(require_auth)):
+    """POST /api/nodes/fleet-command {command, target?} — issue an
+    allowlisted gateway fleet command against a master row. pool_ping and
+    worker_geo_refresh execute on the master itself; the others fan out
+    over erpc from it. Every invocation is audited here AND in the
+    gateway's own command ring."""
+    try:
+        body = await request.json()
+    except ValueError:
+        # json()/body() raise ValueError subclasses on malformed input; the
+        # global JSONDecodeError handler covers the plain-parse case too.
+        body = None
+    if not isinstance(body, dict):
         raise HTTPException(
-            last_status,
-            detail={"error": {"code": "gateway_error", "message": last_body}},
+            400, detail={"error": {"code": "invalid", "message": "JSON object body required"}}
         )
-    return last_body
+    command = body.get("command")
+    # Type first: an unhashable command (list/dict) against the frozenset
+    # would TypeError into the 500 handler instead of this 400.
+    if not isinstance(command, str) or command not in _FLEET_COMMANDS:
+        # Rejections are audited too — the gateway ring only sees commands
+        # that were dispatched, so this is the only trace of a probe.
+        # Truncated: a hostile caller must not amplify DB writes.
+        audit.log(
+            "node.fleet_command",
+            "fleet",
+            f"rejected=unknown_command command={str(command)[:64]!r}",
+        )
+        raise HTTPException(
+            400,
+            detail={
+                "error": {
+                    "code": "unknown_command",
+                    "message": f"command must be one of {sorted(_FLEET_COMMANDS)}",
+                }
+            },
+        )
+    try:
+        target = _validate_fleet_target(command, body.get("target"))
+    except HTTPException:
+        audit.log("node.fleet_command", "fleet", f"rejected=invalid_target command={command[:64]}")
+        raise
+
+    # Audit BEFORE dispatch: a no_nodes 409 or a DB failure below would
+    # otherwise leave a fleet-wide mutation attempt with no trace (the
+    # gateway ring only sees dispatched commands). target is validated and
+    # rebuilt from known keys here, so logging it is safe.
+    audit.log(
+        "node.fleet_command",
+        "fleet",
+        f"attempt command={command} "
+        f"target={json.dumps(target, sort_keys=True)[:512] if target else 'none'}",
+    )
+    last_status, last_body = await _issue_fleet_command(command, target)
+    return _fleet_audit_tail(
+        "node.fleet_command", command, target, last_status, last_body, fail_on_error=True
+    )
 
 
 @router.put("/workers/note")
