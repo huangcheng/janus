@@ -102,6 +102,13 @@
     resp_id = undefined :: undefined | binary(),
     item_seq = 0 :: non_neg_integer(),
     msg_item = undefined :: undefined | map(),
+    %% The open `reasoning` output item on the responses face. Separate
+    %% from msg_item because a reasoning summary and the answer are two
+    %% distinct output items with their own output_index; interleaving
+    %% them into one item made the client render the summary as answer
+    %% text. Reasoning arrives BEFORE any text on every upstream seen so
+    %% far, but nothing here depends on that.
+    reason_item = undefined :: undefined | map(),
     items = [] :: list(),
     content_bytes = 0 :: non_neg_integer()
 }).

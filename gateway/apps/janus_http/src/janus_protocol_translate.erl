@@ -3514,15 +3514,54 @@ chat_resp_finish(Choice, Delta, St, Acc) ->
 %% Deferred bytes count against the content budget AT DEFER TIME (the
 %% only accumulation point for them — the flush never re-counts).
 resp_text_delta(Delta, St) ->
+    %% Reasoning first: a chat upstream may send reasoning_content and
+    %% content in the same delta, and they belong to different output
+    %% items. Dropping reasoning_content here was the chat-side half of
+    %% the empty-answer bug (a turn that only reasons streamed no text at
+    %% all).
+    case resp_reasoning_delta(Delta, St) of
+        {error, _, _} = Err ->
+            Err;
+        {ReasonFrames, St1} -> resp_text_delta_1(Delta, ReasonFrames, St1)
+    end.
+
+resp_reasoning_delta(Delta, St) ->
+    case maps:get(<<"reasoning_content">>, Delta, undefined) of
+        R when is_binary(R), R =/= <<>> ->
+            case St#sse_st.open_tool of
+                undefined ->
+                    resp_emit_reasoning(R, St);
+                _ ->
+                    %% Deferred under C5 exactly like text: emitting while a
+                    %% tool call is open would interleave items.
+                    case resp_budget(St, byte_size(R)) of
+                        true ->
+                            {[],
+                                St#sse_st{
+                                    deferred = [{reasoning, R} | St#sse_st.deferred],
+                                    content_bytes = St#sse_st.content_bytes + byte_size(R)
+                                }};
+                        false ->
+                            {error, translate_unsupported, St}
+                    end
+            end;
+        _ ->
+            {[], St}
+    end.
+
+resp_text_delta_1(Delta, Acc, St) ->
     case maps:get(<<"content">>, Delta, undefined) of
         C when is_binary(C), C =/= <<>> ->
             case St#sse_st.open_tool of
                 undefined ->
-                    resp_emit_text(C, St);
+                    case resp_emit_text(C, St) of
+                        {error, _, _} = Err -> Err;
+                        {TextFrames, St2} -> {Acc ++ TextFrames, St2}
+                    end;
                 _ ->
                     case resp_budget(St, byte_size(C)) of
                         true ->
-                            {[],
+                            {Acc,
                                 St#sse_st{
                                     deferred = [{text, C} | St#sse_st.deferred],
                                     content_bytes = St#sse_st.content_bytes + byte_size(C)
@@ -3532,7 +3571,7 @@ resp_text_delta(Delta, St) ->
                     end
             end;
         _ ->
-            {[], St}
+            {Acc, St}
     end.
 
 chat_resp_tool_entries([], St, Acc) ->
@@ -3647,8 +3686,12 @@ anthro_to_responses_stream(#{type := <<"content_block_start">>, data := D}, St) 
                 _ -> {ok, [], St}
             end;
         <<"thinking">> ->
-            %% Dropped on this face (corpus-pending reasoning framing).
-            {ok, [], St};
+            %% A thinking block carries its first text on the start
+            %% object, same as text blocks do.
+            case maps:get(<<"thinking">>, B, undefined) of
+                T when is_binary(T), T =/= <<>> -> resp_wrap(resp_emit_reasoning(T, St));
+                _ -> {ok, [], St}
+            end;
         <<"tool_use">> ->
             anthro_resp_tool_start(D, St);
         _ ->
@@ -3667,7 +3710,10 @@ anthro_to_responses_stream(#{type := <<"content_block_delta">>, data := D}, St) 
                 _ -> {ok, [], St}
             end;
         <<"thinking_delta">> ->
-            {ok, [], St};
+            case maps:get(<<"thinking">>, Delta, undefined) of
+                T when is_binary(T), T =/= <<>> -> resp_wrap(resp_emit_reasoning(T, St));
+                _ -> {ok, [], St}
+            end;
         <<"signature_delta">> ->
             {ok, [], St};
         <<"input_json_delta">> ->
@@ -3694,8 +3740,13 @@ anthro_to_responses_stream(#{type := <<"content_block_stop">>, data := D}, St) w
             {ok, [], St};
         _ ->
             %% Text/thinking block stop: the message item stays open so
-            %% later text deltas continue the same output item.
-            {ok, [], St}
+            %% later text deltas continue the same output item, but a
+            %% reasoning item CLOSES here. Two consecutive thinking blocks
+            %% are two summaries; leaving the first open would append the
+            %% second into it and emit one merged summary where the
+            %% upstream sent two.
+            {ReasonFrames, St1} = resp_reason_close(St),
+            {ok, ReasonFrames, St1}
     end;
 anthro_to_responses_stream(#{type := <<"content_block_stop">>}, St) ->
     {ok, [], St};
@@ -3843,6 +3894,81 @@ resp_ensure_created(St) ->
     ),
     {[Frame], St#sse_st{role_sent = true, resp_id = Id}}.
 
+%% A reasoning summary delta on the responses face. Emitted as its own
+%% output item (`reasoning`) ahead of the message item, because that is
+%% what the wire shape means: the client renders the summary separately
+%% from the answer and PI, for one, reports the answer as empty when the
+%% summary is folded into it.
+%%
+%% Upstreams that hand us thinking text today: anthropic `thinking`
+%% blocks and chat `reasoning_content`. Both reach here as plain text.
+%% Budget-checked like any other content; a cap trip surfaces as the
+%% same translate_unsupported the text path raises.
+resp_emit_reasoning(C, St) when is_binary(C), C =/= <<>> ->
+    case resp_budget(St, byte_size(C)) of
+        false ->
+            {error, translate_unsupported, St};
+        true ->
+            resp_reasoning_frames(C, St#sse_st{
+                content_bytes = St#sse_st.content_bytes + byte_size(C)
+            })
+    end;
+resp_emit_reasoning(_C, St) ->
+    {ok, [], St}.
+
+resp_reasoning_frames(C, St) ->
+    {Created, St1} = resp_ensure_created(St),
+    {Added, St2} = resp_ensure_reason_item(St1),
+    #{id := Rid, index := RIdx} = St2#sse_st.reason_item,
+    Delta = responses_frame(
+        <<"response.reasoning_summary_text.delta">>,
+        #{
+            <<"type">> => <<"response.reasoning_summary_text.delta">>,
+            <<"item_id">> => Rid,
+            <<"output_index">> => RIdx,
+            <<"summary_index">> => 0,
+            <<"delta">> => C
+        }
+    ),
+    St3 = St2#sse_st{
+        reason_item = (St2#sse_st.reason_item)#{text := [C | maps:get(text, St2#sse_st.reason_item)]}
+    },
+    {Created ++ Added ++ [Delta], St3}.
+
+resp_ensure_reason_item(#sse_st{reason_item = I} = St) when is_map(I) ->
+    {[], St};
+resp_ensure_reason_item(St) ->
+    %% Items are SEQUENTIAL: a new item takes the next output_index, so an
+    %% item already open must be closed first or the wire hands out
+    %% indices out of order (done before done-of-lower, and the terminal
+    %% `output` array no longer matches its own indices). Reasoning
+    %% normally arrives before any text, but a chat upstream may send
+    %% `content` in one chunk and `reasoning_content` in a later one, and
+    %% a deferred flush at a tool close can put text first.
+    {MsgFrames, St1} = resp_msg_close_1(St),
+    {Added, St2} = resp_ensure_reason_item_1(St1),
+    {MsgFrames ++ Added, St2}.
+
+resp_ensure_reason_item_1(St) ->
+    Id = responses_item_id(),
+    Idx = St#sse_st.item_seq,
+    Frame = responses_frame(
+        <<"response.output_item.added">>,
+        #{
+            <<"type">> => <<"response.output_item.added">>,
+            <<"output_index">> => Idx,
+            <<"item">> => #{
+                <<"id">> => Id,
+                <<"type">> => <<"reasoning">>,
+                <<"summary">> => []
+            }
+        }
+    ),
+    {[Frame], St#sse_st{
+        reason_item = #{id => Id, index => Idx, text => []},
+        item_seq = Idx + 1
+    }}.
+
 %% Open the message output item if none is open, then the text delta.
 %% Budget-checked and counted HERE (direct/anthropic text path); the
 %% deferred flush uses resp_text_frames/2 directly (already counted at
@@ -3877,7 +4003,19 @@ resp_text_frames(C, St) ->
     St3 = St2#sse_st{msg_item = (St2#sse_st.msg_item)#{text := [C | Rev]}},
     {Created ++ Added ++ [Delta], St3}.
 
-resp_ensure_msg_item(#sse_st{msg_item = undefined} = St) ->
+resp_ensure_msg_item(#sse_st{msg_item = undefined} = St0) ->
+    %% Same sequencing rule as the reasoning side: items are sequential,
+    %% so an open reasoning item closes before the message item takes the
+    %% next index. This IS the normal path — a chat delta carrying both
+    %% reasoning and content opens the summary first, and the answer
+    %% follows in the same fold.
+    {ReasonFrames, St} = resp_reason_close(St0),
+    {MsgFrames, St2} = resp_ensure_msg_item_1(St),
+    {ReasonFrames ++ MsgFrames, St2};
+resp_ensure_msg_item(St) ->
+    {[], St}.
+
+resp_ensure_msg_item_1(#sse_st{msg_item = undefined} = St) ->
     Id = responses_item_id(),
     Idx = St#sse_st.item_seq,
     Frame = responses_frame(
@@ -3897,16 +4035,47 @@ resp_ensure_msg_item(#sse_st{msg_item = undefined} = St) ->
     {[Frame], St#sse_st{
         msg_item = #{id => Id, index => Idx, text => []},
         item_seq = Idx + 1
-    }};
-resp_ensure_msg_item(St) ->
-    {[], St}.
+    }}.
+
+%% Close the open reasoning item (output_item.done carrying the collected
+%% summary). A reasoning item is ALWAYS closed before the message item:
+%% the summary precedes the answer on the wire, and leaving it open left
+%% a client with an item that never completed — the terminal event named
+%% output indices the client had never seen finished.
+resp_reason_close(#sse_st{reason_item = undefined} = St) ->
+    {[], St};
+resp_reason_close(St) ->
+    #{id := Id, index := Idx, text := Rev} = St#sse_st.reason_item,
+    Summary = iolist_to_binary(lists:reverse(Rev)),
+    Item = #{
+        <<"id">> => Id,
+        <<"type">> => <<"reasoning">>,
+        <<"summary">> => [
+            #{<<"type">> => <<"summary_text">>, <<"text">> => Summary}
+        ]
+    },
+    Frame = responses_frame(
+        <<"response.output_item.done">>,
+        #{
+            <<"type">> => <<"response.output_item.done">>,
+            <<"output_index">> => Idx,
+            <<"item">> => Item
+        }
+    ),
+    {[Frame], St#sse_st{reason_item = undefined, items = [Item | St#sse_st.items]}}.
 
 %% Close the open message item (output_item.done with the full text);
 %% no-op when none is open. Text items always have content (they only
-%% open on the first delta).
-resp_msg_close(#sse_st{msg_item = undefined} = St) ->
+%% open on the first delta). The reasoning item closes first, so no
+%% caller has to remember the order.
+resp_msg_close(St0) ->
+    {ReasonFrames, St} = resp_reason_close(St0),
+    {MsgFrames, St2} = resp_msg_close_1(St),
+    {ReasonFrames ++ MsgFrames, St2}.
+
+resp_msg_close_1(#sse_st{msg_item = undefined} = St) ->
     {[], St};
-resp_msg_close(St) ->
+resp_msg_close_1(St) ->
     #{id := Id, index := Idx, text := Rev} = St#sse_st.msg_item,
     Full = iolist_to_binary(lists:reverse(Rev)),
     Item = #{
@@ -4068,9 +4237,13 @@ resp_flush_deferred(#sse_st{deferred = []} = St) ->
 resp_flush_deferred(St) ->
     Runs = merge_runs(lists:reverse(St#sse_st.deferred), []),
     lists:foldl(
-        fun({text, Bin}, {FAcc, SAcc}) ->
-            {F, S2} = resp_text_frames(Bin, SAcc),
-            {FAcc ++ F, S2}
+        fun
+            ({text, Bin}, {FAcc, SAcc}) ->
+                {F, S2} = resp_text_frames(Bin, SAcc),
+                {FAcc ++ F, S2};
+            ({reasoning, Bin}, {FAcc, SAcc}) ->
+                {F, S2} = resp_reasoning_frames(Bin, SAcc),
+                {FAcc ++ F, S2}
         end,
         {[], St#sse_st{deferred = []}},
         Runs
