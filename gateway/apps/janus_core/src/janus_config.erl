@@ -720,17 +720,23 @@ refresh_http_idle_timeout_for(Ref, Value) ->
                     {error, Other}
             end;
         Other ->
-            %% Not running (boot, worker, stopped node) is normal and not
-            %% worth a line; anything else is a shape change worth seeing.
+            %% Not running is normal and not worth a line. ranch replies
+            %% `undefined` (not an exit) when the ref was never started, and
+            %% this runs on EVERY settings reload, so logging it would be
+            %% recurring noise on a worker with no HTTP face.
             case Other of
-                {'EXIT', _} -> ok;
-                _ -> logger:notice(#{
-                    what => janus_http_idle_timeout_no_listener,
-                    listener => Ref,
-                    reason => Other
-                })
-            end,
-            ok
+                {'EXIT', _} ->
+                    ok;
+                undefined ->
+                    ok;
+                _ ->
+                    logger:notice(#{
+                        what => janus_http_idle_timeout_no_listener,
+                        listener => Ref,
+                        reason => Other
+                    }),
+                    ok
+            end
     end.
 
 decode_json(Bin) when is_binary(Bin) ->

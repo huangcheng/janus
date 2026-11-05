@@ -51,14 +51,31 @@ totals_match_the_wire_module_test() ->
 
 %% No listener in a unit-test node: the key is present and null, so a
 %% caller can tell "not applicable here" from "the field was dropped".
+%%
+%% This is also the crash-safety test: the whole listener lookup must be
+%% inside a try, or an absent subsystem would take /stats down with a 500
+%% instead of degrading. Calling it here with no listener running is the
+%% same path a worker takes.
 idle_timeout_is_null_without_a_listener_test() ->
     B = janus_gateway_stats:stream_budgets(),
     ?assertEqual(null, maps:get(http_idle_timeout_ms, B)).
 
-%% The listener refs have ONE definition; both the reload refresh and this
-%% report read it. Renaming a listener must not silently no-op both.
-listener_refs_are_shared_test() ->
-    Refs = janus_http_sup:listener_refs(),
-    ?assert(is_list(Refs)),
-    ?assert(length(Refs) >= 1),
-    ?assert(lists:member(janus_http_listener, Refs)).
+%% A subsystem that is missing must degrade, never raise: /stats is polled
+%% continuously and an exception here is a 500 for the whole endpoint.
+budgets_survive_a_missing_listener_test() ->
+    ?assertEqual(
+        null,
+        try janus_gateway_stats:stream_budgets() of
+            B -> maps:get(http_idle_timeout_ms, B)
+        catch
+            C:E -> {C, E}
+        end
+    ).
+
+%% The listener refs have ONE definition, read by both the reload refresh
+%% and this report. The assertion that matters is that the DATA-PLANE
+%% listener is the one this report reads, since that is the listener whose
+%% ceiling bounds a stream; janus_http_sup owns the list itself.
+data_plane_listener_is_the_one_reported_test() ->
+    [First | _] = janus_http_sup:listener_refs(),
+    ?assertEqual(janus_http_listener, First).

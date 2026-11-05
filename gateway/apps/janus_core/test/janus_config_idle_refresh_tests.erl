@@ -53,9 +53,18 @@ dispatch_survives_the_rewrite_test() ->
 missing_listener_is_not_an_error_test() ->
     ?assertEqual(ok, janus_config:refresh_http_idle_timeout_for(janus_no_such_listener, 1_000)).
 
-%% A listener that is not running must not make a config reload fail.
-missing_listener_is_ignored_test() ->
-    ?assertEqual(ok, janus_config:refresh_http_idle_timeout_for(janus_no_such_listener, 1_000)).
+%% ranch replies `undefined` (not an exit) when the ref was never started.
+%% This runs on EVERY settings reload, so that shape must stay a no-op
+%% rather than an error — a config reload must not fail on a node whose
+%% HTTP face is not up.
+%%
+%% Scope note: this asserts the RETURN, not the absence of a log line. A
+%% test cannot easily capture logger output here, so the "quiet" half is
+%% covered by the code shape (undefined and {'EXIT', _} both return ok
+%% without logging) rather than by this assertion.
+unknown_listener_ref_is_a_noop_test() ->
+    ?assertEqual(ok, janus_config:refresh_http_idle_timeout_for(janus_no_such_listener, 2_000)),
+    ?assertEqual(ok, janus_config:refresh_http_idle_timeout_for(janus_also_missing, 3_000)).
 
 %% --- helper: a throwaway Ranch listener -----------------------------
 

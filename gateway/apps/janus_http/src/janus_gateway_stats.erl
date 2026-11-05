@@ -749,10 +749,16 @@ safe_stream_budgets() ->
 %% The data-plane listener, named by janus_http_sup so this and the
 %% settings-reload refresh cannot drift apart.
 listener_idle_timeout() ->
-    [Ref | _] = janus_http_sup:listener_refs(),
-    try ranch:get_protocol_options(Ref) of
-        Opts when is_map(Opts) -> maps:get(idle_timeout, Opts, null);
-        _ -> null
+    %% Everything lives inside the try: a missing janus_http_sup, an empty
+    %% ref list or a badmatch here would escape into /stats and turn the
+    %% whole endpoint into a 500. The contract is that every read in this
+    %% module degrades to a value, never to a crash.
+    try
+        [Ref | _] = janus_http_sup:listener_refs(),
+        case ranch:get_protocol_options(Ref) of
+            Opts when is_map(Opts) -> maps:get(idle_timeout, Opts, null);
+            _ -> null
+        end
     catch
         _:_ -> null
     end.
