@@ -31,6 +31,9 @@
 -behaviour(cowboy_handler).
 
 -export([init/2, sched_json/1, health_json/1]).
+%% Exported for eunit: the assembler is pure, so the numbers and their
+%% ordering can be pinned without a live listener.
+-export([stream_budgets/0]).
 
 init(Req0, State) ->
     Req =
@@ -65,7 +68,7 @@ handle(<<"GET">>, [], Req) ->
         %% long stream dies at the HTTP layer with no status code and no
         %% log line. Reading the LIVE listener (not recomputing) reports
         %% what the transport actually honours after a config reload.
-        stream_budgets => safe_stream_budgets(),
+        stream_budgets => stream_budgets(),
         routes_cooling => janus_lb:cooling_count(),
         models_serving => janus_http_stats:models_serving(),
         %% Master/worker role for Maintenance master discovery
@@ -732,6 +735,9 @@ reply_json(Status, Map, Req) ->
 %% The two ceilings that bound a stream, plus the transport idle timeout the
 %% running listener honours. Every read is catch-guarded: /stats must answer
 %% even on a node where a subsystem is absent.
+stream_budgets() ->
+    safe_stream_budgets().
+
 safe_stream_budgets() ->
     #{
         total_ms => safe_num(fun janus_worker_wire:stream_timeout_ms/0),
@@ -740,8 +746,11 @@ safe_stream_budgets() ->
         http_idle_timeout_ms => listener_idle_timeout()
     }.
 
+%% The data-plane listener, named by janus_http_sup so this and the
+%% settings-reload refresh cannot drift apart.
 listener_idle_timeout() ->
-    try ranch:get_protocol_options(janus_http_listener) of
+    [Ref | _] = janus_http_sup:listener_refs(),
+    try ranch:get_protocol_options(Ref) of
         Opts when is_map(Opts) -> maps:get(idle_timeout, Opts, null);
         _ -> null
     catch

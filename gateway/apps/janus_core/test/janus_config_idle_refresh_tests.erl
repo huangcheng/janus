@@ -30,6 +30,29 @@ idle_timeout_lands_on_protocol_options_test() ->
         end
     ).
 
+%% The rewrite REPLACES the whole protocol-options map, so the thing most
+%% likely to regress is the dispatch table disappearing — every route on
+%% the listener would unmount, and a test that only looked for the new
+%% idle_timeout would stay green. The dispatch must survive verbatim.
+dispatch_survives_the_rewrite_test() ->
+    with_listener(
+        fun(Ref) ->
+            Before = ranch:get_protocol_options(Ref),
+            DispatchBefore = maps:get(dispatch, maps:get(env, Before)),
+            ?assertNotEqual([], DispatchBefore),
+            ok = janus_config:refresh_http_idle_timeout_for(Ref, 1_800_000),
+            After = ranch:get_protocol_options(Ref),
+            ?assertEqual(DispatchBefore, maps:get(dispatch, maps:get(env, After))),
+            %% Everything else the listener needs is still there.
+            ?assert(maps:is_key(env, After))
+        end
+    ).
+
+%% A listener that is not running stays a no-op, but a broken write must be
+%% REPORTED: the bug this fixes was a silent no-op that still said ok.
+missing_listener_is_not_an_error_test() ->
+    ?assertEqual(ok, janus_config:refresh_http_idle_timeout_for(janus_no_such_listener, 1_000)).
+
 %% A listener that is not running must not make a config reload fail.
 missing_listener_is_ignored_test() ->
     ?assertEqual(ok, janus_config:refresh_http_idle_timeout_for(janus_no_such_listener, 1_000)).

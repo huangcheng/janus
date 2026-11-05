@@ -13,6 +13,16 @@
 %% {undef,[{janus_http_sup,idle_timeout_ms,[],[]}]} before the HTTP face
 %% comes up. The /1 arity is exported for eunit (pure per value).
 -export([idle_timeout_ms/0, idle_timeout_ms/1, idle_timeout_default/0]).
+%% The listener refs, named once. janus_config refreshes idle_timeout on
+%% them after a settings reload and /stats reports their live value; if
+%% either hardcoded the atom, renaming a listener here would silently turn
+%% both into no-ops with no compile error.
+-export([listener_refs/0]).
+%% Exported for eunit: the route-table proof must cover every REGISTERED
+%% route, the env-driven echo included (ocr r3).
+-export([master_routes/0, admin_routes/0, echo_routes/0]).
+
+listener_refs() -> [janus_http_listener, janus_admin_listener].
 %% Static route entries (master agent :8080 + admin :8090), exported
 %% for the downstream-enc F6 route-table eunit: NO route may ever
 %% carry a Cowboy-level compress option — the shared agent routes
@@ -21,8 +31,6 @@
 %% pinned mechanism is manual gzip in janus_downstream_enc).
 %% echo_routes/0 is exported for the SAME eunit (ocr r3: the proof
 %% must cover every REGISTERED route, the env-driven echo included).
--export([master_routes/0, admin_routes/0, echo_routes/0]).
-
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 

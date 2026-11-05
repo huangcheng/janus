@@ -692,7 +692,7 @@ refresh_http_idle_timeout() ->
     Value = janus_http_sup:idle_timeout_ms(),
     lists:foreach(
         fun(Ref) -> refresh_http_idle_timeout_for(Ref, Value) end,
-        [janus_http_listener, janus_admin_listener]
+        janus_http_sup:listener_refs()
     ),
     ok.
 
@@ -703,9 +703,33 @@ refresh_http_idle_timeout() ->
 refresh_http_idle_timeout_for(Ref, Value) ->
     case catch ranch:get_protocol_options(Ref) of
         Opts when is_map(Opts) ->
-            _ = catch ranch:set_protocol_options(Ref, Opts#{idle_timeout => Value}),
-            ok;
-        _ ->
+            case catch ranch:set_protocol_options(Ref, Opts#{idle_timeout => Value}) of
+                ok ->
+                    ok;
+                Other ->
+                    %% The bug this fixes WAS a silent no-op that still
+                    %% reported success, so this path must not repeat it:
+                    %% an operator who raised the ceiling deserves to know
+                    %% the listener did not take it.
+                    logger:warning(#{
+                        what => janus_http_idle_timeout_refresh_failed,
+                        listener => Ref,
+                        wanted => Value,
+                        reason => Other
+                    }),
+                    {error, Other}
+            end;
+        Other ->
+            %% Not running (boot, worker, stopped node) is normal and not
+            %% worth a line; anything else is a shape change worth seeing.
+            case Other of
+                {'EXIT', _} -> ok;
+                _ -> logger:notice(#{
+                    what => janus_http_idle_timeout_no_listener,
+                    listener => Ref,
+                    reason => Other
+                })
+            end,
             ok
     end.
 
