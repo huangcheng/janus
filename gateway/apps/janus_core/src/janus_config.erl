@@ -24,6 +24,10 @@
     terminate/2,
     code_change/3
 ]).
+%% Exported for eunit: drives ONE listener so the test can assert the
+%% refreshed value lands on top-level protocol options rather than in env.
+-export([refresh_http_idle_timeout_for/2]).
+
 %% Worker capacity override read seam (worker-capacity-override spec
 %% Part 1). Absent key = no override, hence the defaulted accessor.
 -export([worker_capacity_overrides/0]).
@@ -679,15 +683,31 @@ start_fleet_child() ->
 %% set_env is cheap and idempotent; a listener that is not running (boot,
 %% or a stopped node) is simply skipped. Total: never fails a config
 %% reload over a cosmetic refresh.
+%% idle_timeout is a TOP-LEVEL protocol option, not an entry in the `env`
+%% sub-map. cowboy:set_env/3 writes through to env — so using it here set
+%% env.idle_timeout, which Cowboy never reads, and every long stream kept
+%% dying at the boot-time ceiling while the code looked correct. The value
+%% has to be replaced on the protocol options themselves through ranch.
 refresh_http_idle_timeout() ->
     Value = janus_http_sup:idle_timeout_ms(),
     lists:foreach(
-        fun(Ref) ->
-            _ = catch cowboy:set_env(Ref, idle_timeout, Value)
-        end,
+        fun(Ref) -> refresh_http_idle_timeout_for(Ref, Value) end,
         [janus_http_listener, janus_admin_listener]
     ),
     ok.
+
+%% Exported so a test can drive one throwaway listener and prove the value
+%% reaches the TOP-LEVEL protocol options (see
+%% janus_config_idle_refresh_tests). Total: a listener that is not running
+%% is not an error, because a config reload must not fail on it.
+refresh_http_idle_timeout_for(Ref, Value) ->
+    case catch ranch:get_protocol_options(Ref) of
+        Opts when is_map(Opts) ->
+            _ = catch ranch:set_protocol_options(Ref, Opts#{idle_timeout => Value}),
+            ok;
+        _ ->
+            ok
+    end.
 
 decode_json(Bin) when is_binary(Bin) ->
     try
