@@ -60,6 +60,12 @@ handle(<<"GET">>, [], Req) ->
         ready => janus_config:ready(),
         backend => janus_db:select_backend(),
         uptime_sec => uptime_sec(),
+        %% Effective stream budgets. Both ceilings are operator-settable,
+        %% and the transport one must stay above the stream one or a
+        %% long stream dies at the HTTP layer with no status code and no
+        %% log line. Reading the LIVE listener (not recomputing) reports
+        %% what the transport actually honours after a config reload.
+        stream_budgets => safe_stream_budgets(),
         routes_cooling => janus_lb:cooling_count(),
         models_serving => janus_http_stats:models_serving(),
         %% Master/worker role for Maintenance master discovery
@@ -722,3 +728,30 @@ reply_json(Status, Map, Req) ->
     cowboy_req:reply(Status, #{
         <<"content-type">> => <<"application/json">>
     }, Body, Req).
+
+%% The two ceilings that bound a stream, plus the transport idle timeout the
+%% running listener honours. Every read is catch-guarded: /stats must answer
+%% even on a node where a subsystem is absent.
+safe_stream_budgets() ->
+    #{
+        total_ms => safe_num(fun janus_worker_wire:stream_timeout_ms/0),
+        inactivity_ms => safe_num(fun janus_worker_wire:stream_inactivity_timeout_ms/0),
+        keepalive_ms => safe_num(fun janus_worker_wire:stream_keepalive_ms/0),
+        http_idle_timeout_ms => listener_idle_timeout()
+    }.
+
+listener_idle_timeout() ->
+    try ranch:get_protocol_options(janus_http_listener) of
+        Opts when is_map(Opts) -> maps:get(idle_timeout, Opts, null);
+        _ -> null
+    catch
+        _:_ -> null
+    end.
+
+safe_num(F) ->
+    try F() of
+        N when is_integer(N) -> N;
+        _ -> null
+    catch
+        _:_ -> null
+    end.
