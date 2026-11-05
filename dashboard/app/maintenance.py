@@ -359,6 +359,37 @@ async def _resolve_maxmind_creds() -> tuple[str, str]:
     return account, license_key
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface the 302 instead of following it, so the caller can decide what
+    credentials the second hop carries."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_following_one_redirect(req: urllib.request.Request, timeout: int):
+    """Open req, and if it answers a redirect, re-issue to the Location
+    WITHOUT the Authorization header.
+
+    MaxMind hands out a presigned S3 URL; the signature is the only credential
+    that hop accepts, and sending Basic auth there is both useless and a
+    credential leak. One hop is enough: a redirect chain longer than one is a
+    shape this code does not know how to authorise, so it fails rather than
+    guessing.
+    """
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        return opener.open(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code not in (301, 302, 303, 307, 308):
+            raise
+        location = e.headers.get("Location")
+        if not location:
+            raise
+        second = urllib.request.Request(location, method="GET")
+        return urllib.request.urlopen(second, timeout=timeout)
+
+
 def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
     """Fetch GeoLite2-City.mmdb to dest (atomic replace). Returns byte size.
 
@@ -381,13 +412,21 @@ def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
     try:
         tgz = work / "GeoLite2-City.tar.gz"
         auth = base64.b64encode(f"{account}:{license_key}".encode()).decode()
+        # The permalink answers 302 to a presigned S3 URL. urllib drops the
+        # Authorization header on a cross-host redirect, by design (it would
+        # otherwise leak Basic credentials to whichever host the redirect
+        # names) — and S3 then rejects the request with
+        # "Missing x-amz-content-sha256", surfacing here as MaxMind HTTP 400.
+        # The redirect target carries its own signature, so the second hop
+        # must be made WITHOUT our credentials: follow one redirect by hand
+        # rather than letting urlopen follow it.
         req = urllib.request.Request(
             _MAXMIND_URL,
             headers={"Authorization": f"Basic {auth}"},
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with _open_following_one_redirect(req, timeout=180) as resp:
                 tgz.write_bytes(resp.read())
         except urllib.error.HTTPError as e:
             raise HTTPException(
