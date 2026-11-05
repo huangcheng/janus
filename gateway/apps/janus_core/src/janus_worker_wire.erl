@@ -75,8 +75,51 @@ non_stream_timeout_ms() -> 120_000.
 %% long-standing "no release on timeout" policy). Revisit if a
 %% legitimately longer generation shape appears — that would need a
 %% configurable knob, not a bigger constant.
+%%
+%% Operator-adjustable since 2026-11-05 (settings key `translate`
+%% -> `stream_total_timeout_ms`). The constant below is the shipped
+%% default; the setting is read on every call (a persistent_term read,
+%% no I/O), so raising it needs no release.
+%%
+%% The 600s ceiling was sized from a window whose tail was LEFT-CENSORED
+%% at pi's 300s client timeout, so it could not measure the real upper
+%% bound. A reasoning-heavy long task then hit it live: 141,960 chars of
+%% reasoning streamed steadily for 600s and was torn down before the
+%% first byte of the answer, with the provider perfectly healthy. A total
+%% budget cannot tell "still thinking" from "stuck"; the inactivity
+%% deadline (stream_inactivity_timeout_ms/0) already draws that line, so
+%% the total cap only needs to be generous enough not to cut a working
+%% stream.
 -spec stream_timeout_ms() -> pos_integer().
-stream_timeout_ms() -> 600_000.
+stream_timeout_ms() ->
+    %% The ordering `inactivity < total` is load-bearing: the inactivity
+    %% deadline is what distinguishes a stuck stream from a slow one, and
+    %% a total budget at or below it would tear down a healthy stream
+    %% before the stall detector could ever speak. It is enforced HERE,
+    %% at the read site, because the value can be written by the
+    %% dashboard PUT, a direct settings-row edit, or an ops script — a
+    %% guarantee that only holds for one writer is not a guarantee.
+    Total = setting_ms(<<"stream_total_timeout_ms">>, 600_000),
+    Inactivity = stream_inactivity_timeout_ms(),
+    case Total > Inactivity of
+        true -> Total;
+        false -> 600_000
+    end.
+
+%% Same shape as janus_protocol_translate:tool_cap/1: absent or malformed
+%% falls back to the shipped default, so an unconfigured gateway behaves
+%% exactly as before. Zero, negatives and non-integers are malformed —
+%% none of them may mean "no ceiling".
+setting_ms(Key, Default) ->
+    case persistent_term:get({janus, translate_cfg}, undefined) of
+        Cfg when is_map(Cfg) ->
+            case maps:get(Key, Cfg, undefined) of
+                N when is_integer(N), N > 0 -> N;
+                _ -> Default
+            end;
+        _ ->
+            Default
+    end.
 
 %% Mid-stream INACTIVITY ceiling (2026-10-29): stream_timeout_ms/0 is a
 %% TOTAL budget for the whole stream; producers that never die but

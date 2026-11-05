@@ -796,6 +796,15 @@ _TRANSLATE_CAP_LIMITS = {
     "tool_args_per_call_cap": (1024, 64 * 1024 * 1024),
     "tool_calls_per_stream_cap": (1, 4096),
     "tool_args_total_cap": (1024, 256 * 1024 * 1024),
+    # Total age of one stream. Raised to a setting after a reasoning-heavy
+    # task streamed 600s of thinking and was torn down before the first
+    # byte of the answer; the inactivity deadline is what tells a stuck
+    # stream from a slow one, so this cap only needs to be generous.
+    # Floor sits ABOVE the gateway's inactivity deadline (180s): the
+    # ordering "inactivity < total" is what lets the stall detector speak
+    # first, and a total below it would tear down a healthy streaming task
+    # and blame the budget. Ceiling one hour.
+    "stream_total_timeout_ms": (240_000, 3_600_000),
 }
 _TRANSLATE_BOOL_KEYS = ("tools", "responses")
 
@@ -830,6 +839,7 @@ def _translate_defaults() -> dict:
         "tool_args_per_call_cap": 256 * 1024,
         "tool_calls_per_stream_cap": 64,
         "tool_args_total_cap": 1024 * 1024,
+        "stream_total_timeout_ms": 600_000,
     }
 
 

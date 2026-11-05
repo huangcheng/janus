@@ -400,7 +400,15 @@ distribute_settings(Rows) ->
             (#{key := <<"translate">>, value := V}) ->
                 case decode_json(V) of
                     {ok, Map} when is_map(Map) ->
-                        persistent_term:put({janus, translate_cfg}, Map);
+                        persistent_term:put({janus, translate_cfg}, Map),
+                        %% The stream ceiling may have moved, and Cowboy
+                        %% read idle_timeout ONCE at listener start. Without
+                        %% this a hot raise would leave the HTTP layer
+                        %% closing long streams at the old ceiling — a
+                        %% silent stop with no status code and no log line,
+                        %% which is the failure this whole knob exists to
+                        %% avoid.
+                        refresh_http_idle_timeout();
                     _ ->
                         logger:warning(#{
                             what => janus_settings_bad_value, key => translate
@@ -666,6 +674,20 @@ start_fleet_child() ->
             logger:error(#{what => janus_fleet_start_failed, reason => Reason}),
             {error, Reason}
     end.
+
+%% Re-apply Cowboy's idle_timeout after the stream ceiling changed.
+%% set_env is cheap and idempotent; a listener that is not running (boot,
+%% or a stopped node) is simply skipped. Total: never fails a config
+%% reload over a cosmetic refresh.
+refresh_http_idle_timeout() ->
+    Value = janus_http_sup:idle_timeout_ms(),
+    lists:foreach(
+        fun(Ref) ->
+            _ = catch cowboy:set_env(Ref, idle_timeout, Value)
+        end,
+        [janus_http_listener, janus_admin_listener]
+    ),
+    ok.
 
 decode_json(Bin) when is_binary(Bin) ->
     try

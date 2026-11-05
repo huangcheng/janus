@@ -116,3 +116,95 @@ positive_test() ->
     ?assert(janus_worker_wire:stream_inactivity_timeout_ms() > 0),
     ?assert(janus_worker_wire:stream_timeout_ms() > 0),
     ?assert(janus_worker_wire:non_stream_timeout_ms() > 0).
+%% --- the total budget is operator-adjustable ------------------------
+%%
+%% Live 2026-11-05: a reasoning-heavy task streamed 141,960 chars of
+%% reasoning for 600s and was torn down before the first byte of the
+%% answer, provider healthy throughout. The shipped constant could not
+%% tell "still thinking" from "stuck" — the inactivity deadline is the
+%% one that draws that line — so the total cap has to be raisable
+%% without a release.
+
+with_translate_cfg(Cfg, Fun) ->
+    Key = {janus, translate_cfg},
+    Prev = persistent_term:get(Key, undefined),
+    try
+        persistent_term:put(Key, Cfg),
+        Fun()
+    after
+        case Prev of
+            undefined -> persistent_term:erase(Key);
+            _ -> persistent_term:put(Key, Prev)
+        end
+    end.
+
+default_when_unset_test() ->
+    Key = {janus, translate_cfg},
+    Prev = persistent_term:get(Key, undefined),
+    persistent_term:erase(Key),
+    try
+        ?assertEqual(600_000, janus_worker_wire:stream_timeout_ms())
+    after
+        case Prev of
+            undefined -> ok;
+            _ -> persistent_term:put(Key, Prev)
+        end
+    end.
+
+operator_override_is_honoured_test() ->
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => 1_800_000},
+        fun() -> ?assertEqual(1_800_000, janus_worker_wire:stream_timeout_ms()) end
+    ).
+
+%% Malformed values fall back to the shipped default rather than
+%% disabling the cap: a garbage setting must not mean "no ceiling".
+malformed_override_falls_back_test() ->
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => <<"soon">>},
+        fun() -> ?assertEqual(600_000, janus_worker_wire:stream_timeout_ms()) end
+    ),
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => 0},
+        fun() -> ?assertEqual(600_000, janus_worker_wire:stream_timeout_ms()) end
+    ),
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => -5},
+        fun() -> ?assertEqual(600_000, janus_worker_wire:stream_timeout_ms()) end
+    ).
+
+%% Whatever the operator picks, the inactivity deadline must still fire
+%% first — that is what distinguishes a stuck stream from a slow one.
+inactivity_still_first_under_override_test() ->
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => 1_800_000},
+        fun() ->
+            ?assert(
+                janus_worker_wire:stream_inactivity_timeout_ms() <
+                    janus_worker_wire:stream_timeout_ms()
+            )
+        end
+    ).
+
+%% The invariant is enforced at the READ site, not only by the dashboard:
+%% the settings row can be edited directly, so a total at or below the
+%% inactivity deadline must fall back rather than silently disable the
+%% stall detector. Both the dashboard floor and this guard exist for the
+%% same reason — a 60s total would tear down a healthy streaming task and
+%% blame the budget, which is the exact incident the knob was added for.
+total_at_or_below_inactivity_falls_back_test() ->
+    Inactivity = janus_worker_wire:stream_inactivity_timeout_ms(),
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => Inactivity},
+        fun() -> ?assertEqual(600_000, janus_worker_wire:stream_timeout_ms()) end
+    ),
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => 60_000},
+        fun() -> ?assertEqual(600_000, janus_worker_wire:stream_timeout_ms()) end
+    ),
+    with_translate_cfg(
+        #{<<"stream_total_timeout_ms">> => Inactivity + 1},
+        fun() ->
+            ?assertEqual(Inactivity + 1, janus_worker_wire:stream_timeout_ms())
+        end
+    ).
