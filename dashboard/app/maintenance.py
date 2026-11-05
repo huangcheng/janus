@@ -49,6 +49,7 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -386,8 +387,15 @@ def _open_following_one_redirect(req: urllib.request.Request, timeout: int):
         location = e.headers.get("Location")
         if not location:
             raise
+        # The signature is in the URL, so this hop must not carry our
+        # credentials — but it must also not follow a second redirect of its
+        # own, and it must be https: a redirect to plain http would send the
+        # presigned query string in the clear, and urllib's own handler would
+        # happily follow `file://` too. One hop to https, or fail.
+        if urllib.parse.urlsplit(location).scheme != "https":
+            raise
         second = urllib.request.Request(location, method="GET")
-        return urllib.request.urlopen(second, timeout=timeout)
+        return urllib.request.build_opener(_NoRedirect).open(second, timeout=timeout)
 
 
 def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
