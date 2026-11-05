@@ -1199,6 +1199,137 @@ function isExpired(t: ApiToken): boolean {
   return t.expires_at !== null && parseBackendInstant(t.expires_at).getTime() <= Date.now()
 }
 
+/** One status line for a token: expired wins over disabled, because an
+ *  expired token cannot be re-enabled and the reason it stops working is
+ *  more useful than the flag. Same dot vocabulary as StateBadge. */
+function TokenStatus({ token }: { token: ApiToken }) {
+  if (isExpired(token)) {
+    // Destructive, not warning: an expired token cannot even be re-enabled,
+    // so it must not read as the same "off" state as Disabled.
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground">
+        <span className="size-1.5 rounded-full bg-destructive" />
+        Expired
+      </span>
+    )
+  }
+  return <StateBadge enabled={token.enabled} />
+}
+
+/** The two secondary values, formatted once. The desktop row and the phone
+ *  block both show them; a second copy of the fallback strings would let
+ *  the two views drift. */
+function tokenExpiry(t: ApiToken): string {
+  return t.expires_at ? fmtIsoLocalCompact(t.expires_at) : "No expiry"
+}
+
+function tokenLastUsed(t: ApiToken): string {
+  return t.last_used_at ? fmtIsoLocalMonthDayHm(t.last_used_at) : "Never"
+}
+
+/** The three row actions, shared by the desktop row and the phone block so
+ *  their disabled rules cannot drift apart. */
+function TokenActions({
+  token: t,
+  busy,
+  revealing,
+  onReveal,
+  onToggle,
+  onRemove,
+}: {
+  token: ApiToken
+  busy: boolean
+  revealing: boolean
+  onReveal: () => void
+  onToggle: () => void
+  onRemove: () => void
+}) {
+  // icon-xs overhangs its box by 4px on every side (after:-inset-1), so two
+  // neighbours need an 8px gap before their hit areas stop touching: gap-2.
+  // Anything narrower lets the later sibling's overlay claim the earlier
+  // button's edge, and clicking the left of Delete would fire the toggle.
+  return (
+    <span className="inline-flex items-center justify-end gap-2">
+      <IconAction label={`Reveal ${t.label}`} disabled={revealing || busy} onClick={onReveal}>
+        <Eye />
+      </IconAction>
+      <IconAction
+        label={t.enabled ? `Disable ${t.label}` : `Enable ${t.label}`}
+        // Enabling an expired token is a silent no-op at the gate — don't
+        // offer it.
+        disabled={busy || isExpired(t)}
+        onClick={onToggle}
+      >
+        <Power />
+      </IconAction>
+      <IconAction label={`Delete ${t.label}`} disabled={busy} destructive onClick={onRemove}>
+        <Trash2 />
+      </IconAction>
+    </span>
+  )
+}
+
+/** Phone row for a token. Secondary metadata sits beneath the label and the
+ *  actions share one right-aligned group, so the whole row is readable
+ *  without horizontal scrolling. */
+function TokenListItem({
+  token: t,
+  busy,
+  revealing,
+  onReveal,
+  onToggle,
+  onRemove,
+}: {
+  token: ApiToken
+  busy: boolean
+  revealing: boolean
+  onReveal: () => void
+  onToggle: () => void
+  onRemove: () => void
+}) {
+  return (
+    <li className="space-y-3 px-5 py-4">
+      {/* Status wraps below the label rather than squeezing it: a truncated
+          label is the one thing on this row the operator cannot recover, and
+          the status is a single word. */}
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+        <div className="min-w-0 flex-1 basis-40">
+          <div className="text-sm break-words font-medium">
+            {t.label}
+          </div>
+          <div
+            className="truncate font-mono text-xs tracking-tight text-muted-foreground"
+            title={`${t.prefix}…`}
+          >
+            {t.prefix}…
+          </div>
+        </div>
+        <TokenStatus token={t} />
+      </div>
+      <dl className="grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <dt className="text-muted-foreground">Expires</dt>
+          <dd className="mt-0.5 tabular-nums">{tokenExpiry(t)}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Last used</dt>
+          <dd className="mt-0.5 tabular-nums">{tokenLastUsed(t)}</dd>
+        </div>
+      </dl>
+      <div className="flex items-center justify-end">
+        <TokenActions
+          token={t}
+          busy={busy}
+          revealing={revealing}
+          onReveal={onReveal}
+          onToggle={onToggle}
+          onRemove={onRemove}
+        />
+      </div>
+    </li>
+  )
+}
+
 /** Management-plane jm-… bearer tokens: MCP agents today, third-party API
  *  callers later. Disable revokes immediately; delete is final; the secret
  *  is shown at creation and via the rate-limited reveal. */
@@ -1356,8 +1487,8 @@ function TokensCard({ active }: { active: boolean }) {
 
   // Early returns instead of a chained ternary: loading, error-with-no-data
   // (the flash above already tells the story), then the empty state, then
-  // the table.
-  function renderBody(table: React.ReactNode): React.ReactNode {
+  // the list.
+  function renderBody(body: React.ReactNode): React.ReactNode {
     if (!loaded) return <div className="border-y px-5 py-8"><Loading /></div>
     if (err) return null
     if (tokens.length === 0) {
@@ -1365,10 +1496,16 @@ function TokensCard({ active }: { active: boolean }) {
         <EmptyState
           title="No API tokens"
           description="Create one to let an agent or a third-party service call this console."
+          action={
+            <Button size="sm" onClick={openCreate}>
+              <Plus />
+              Create token
+            </Button>
+          }
         />
       )
     }
-    return table
+    return body
   }
 
   return (
@@ -1376,10 +1513,9 @@ function TokensCard({ active }: { active: boolean }) {
       <CardHeader>
         <CardTitle>API tokens</CardTitle>
         <CardDescription>
-          Bearer tokens for machine callers — MCP agents at <code>/mcp/</code> today
-          (header <code>Authorization: Bearer jm-…</code>), third-party API access
-          later. Disable revokes instantly; the secret can be re-revealed from the
-          table, rate-limited.
+          Bearer tokens for machine callers. MCP agents use them at <code>/mcp/</code> today;
+          third-party API access later. Disable revokes instantly. The secret can be
+          re-revealed from the list, rate-limited.
         </CardDescription>
         <CardAction>
           <Button size="sm" onClick={openCreate}>
@@ -1398,70 +1534,79 @@ function TokensCard({ active }: { active: boolean }) {
           </div>
         )}
         {renderBody(
-          <Table flush>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Label</TableHead>
-                <TableHead>Prefix</TableHead>
-                <TableHead>Expires</TableHead>
-                <TableHead>Last used</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right pr-5">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+          <>
+            {/* Phones: one block per token, secondary metadata beneath
+                the label. A six-column table here would scroll sideways,
+                which DESIGN.md forbids. */}
+            <ul
+              className="divide-y divide-border/60 lg:hidden"
+              aria-label={`API tokens (${tokens.length})`}
+            >
               {tokens.map((t) => (
-                <TableRow key={t.id}>
-                  <TableCell className="max-w-[16rem] truncate font-medium" title={t.label}>
-                    {t.label}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs tracking-wider text-muted-foreground">
-                    {t.prefix}…
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-xs tabular-nums">
-                    {t.expires_at ? fmtIsoLocalCompact(t.expires_at) : "No expiry"}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-xs tabular-nums">
-                    {t.last_used_at ? fmtIsoLocalMonthDayHm(t.last_used_at) : "Never"}
-                  </TableCell>
-                  <TableCell>
-                    {isExpired(t) ? (
-                      <Badge variant="warning">Expired</Badge>
-                    ) : (
-                      <StateBadge enabled={t.enabled} />
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right pr-5">
-                    <span className="inline-flex items-center gap-1">
-                      <IconAction
-                        label={`Reveal ${t.label}`}
-                        disabled={revealing || busy}
-                        onClick={() => void reveal(t)}
-                      >
-                        <Eye />
-                      </IconAction>
-                      <IconAction
-                        label={t.enabled ? `Disable ${t.label}` : `Enable ${t.label}`}
-                        // Enabling an expired token is a silent no-op at the
-                        // gate — don't offer it.
-                        disabled={busy || isExpired(t)}
-                        onClick={() => setModal({ toggle: t })}
-                      >
-                        <Power />
-                      </IconAction>
-                      <IconAction
-                        label={`Delete ${t.label}`}
-                        disabled={busy}
-                        onClick={() => setModal({ remove: t })}
-                      >
-                        <Trash2 />
-                      </IconAction>
-                    </span>
-                  </TableCell>
-                </TableRow>
+                <TokenListItem
+                  key={t.id}
+                  token={t}
+                  busy={busy}
+                  revealing={revealing}
+                  onReveal={() => void reveal(t)}
+                  onToggle={() => setModal({ toggle: t })}
+                  onRemove={() => setModal({ remove: t })}
+                />
               ))}
-            </TableBody>
-          </Table>
+            </ul>
+            <div className="hidden lg:block">
+              <Table flush className="table-fixed">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Token</TableHead>
+                    <TableHead className="w-32">Expires</TableHead>
+                    <TableHead className="w-32">Last used</TableHead>
+                    <TableHead className="w-24">Status</TableHead>
+                    <TableHead className="w-40 pr-5 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {tokens.map((t) => (
+                    <TableRow key={t.id}>
+                      <TableCell className="min-w-0">
+                        {/* Prefix rides under the label instead of taking a
+                            column: it identifies the token, and a dedicated
+                            column of truncated jm-… values was unreadable. */}
+                        <div className="truncate font-medium" title={t.label}>
+                          {t.label}
+                        </div>
+                        <div
+                          className="truncate font-mono text-xs tracking-tight text-muted-foreground"
+                          title={`${t.prefix}…`}
+                        >
+                          {t.prefix}…
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-xs whitespace-nowrap tabular-nums text-muted-foreground">
+                        {tokenExpiry(t)}
+                      </TableCell>
+                      <TableCell className="text-xs whitespace-nowrap tabular-nums text-muted-foreground">
+                        {tokenLastUsed(t)}
+                      </TableCell>
+                      <TableCell>
+                        <TokenStatus token={t} />
+                      </TableCell>
+                      <TableCell className="pr-5 text-right">
+                        <TokenActions
+                          token={t}
+                          busy={busy}
+                          revealing={revealing}
+                          onReveal={() => void reveal(t)}
+                          onToggle={() => setModal({ toggle: t })}
+                          onRemove={() => setModal({ remove: t })}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </>
         )}
       </CardContent>
 
@@ -1544,7 +1689,7 @@ function TokensCard({ active }: { active: boolean }) {
             <p className="text-warning flex items-start gap-2 text-xs">
               <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
               Copy it into your client now — it can be re-revealed later from the
-              table, rate-limited.
+              token list, rate-limited.
             </p>
             <Input
               readOnly
