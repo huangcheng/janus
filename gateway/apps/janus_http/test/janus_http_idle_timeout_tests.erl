@@ -39,6 +39,17 @@ unset_uses_default_test() ->
         janus_http_sup:idle_timeout_ms("")
     ).
 
+%% The env-reading arity is called ACROSS MODULES by
+%% janus_config:refresh_http_idle_timeout/0 on master boot, so it must be
+%% exported. A local-only function satisfies every test above and then kills
+%% the master with {undef,[{janus_http_sup,idle_timeout_ms,[],[]}]} before
+%% the HTTP face exists — the 2026-11-05 fleet rollout crashed exactly that
+%% way. Calling it from THIS module is what pins the export.
+env_arity_is_callable_from_another_module_test() ->
+    Value = janus_http_sup:idle_timeout_ms(),
+    ?assert(is_integer(Value)),
+    ?assert(Value > janus_worker_wire:stream_timeout_ms()).
+
 %% A value above the ceiling is honoured.
 explicit_value_test() ->
     Above = janus_worker_wire:stream_timeout_ms() + 1,

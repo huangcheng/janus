@@ -6,8 +6,13 @@
 %% Agent-face registry read by /readyz (write-gate advertisement,
 %% Decisions spec §4.3) and by eunit.
 -export([agent_routes/0, agent_protocols/0, publish_agent_protocols/0]).
-%% Exported for eunit: the idle-timeout resolution is pure per value.
--export([idle_timeout_ms/1, idle_timeout_default/0]).
+%% idle_timeout_ms/0 reads the env var and is called ACROSS MODULES by
+%% janus_config:refresh_http_idle_timeout/0 on master boot and on every
+%% settings reload. It MUST stay exported: as a local-only function it
+%% compiles cleanly yet kills the master with
+%% {undef,[{janus_http_sup,idle_timeout_ms,[],[]}]} before the HTTP face
+%% comes up. The /1 arity is exported for eunit (pure per value).
+-export([idle_timeout_ms/0, idle_timeout_ms/1, idle_timeout_default/0]).
 %% Static route entries (master agent :8080 + admin :8090), exported
 %% for the downstream-enc F6 route-table eunit: NO route may ever
 %% carry a Cowboy-level compress option — the shared agent routes

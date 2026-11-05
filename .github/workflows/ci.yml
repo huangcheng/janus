@@ -58,6 +58,16 @@ jobs:
         # the cases are the real summary shapes rebar3 and EUnit emit.
         run: ./scripts/verification/selftest_assert_eunit_nonempty.sh
 
+      - name: Remote calls resolve
+        # Every `mod:fun(...)` must name a function that module exports.
+        # Erlang resolves remote calls at RUNTIME, so a call to a
+        # module-internal function compiles cleanly and passes EUnit, then
+        # fails with `undef` in production — 2026-11-05 that took the master
+        # down on boot (janus_config -> janus_http_sup:idle_timeout_ms/0).
+        # Neither the compiler, EUnit, nor the diff-scoped code reviewer
+        # sees this class, so it gets its own gate.
+        run: escript scripts/verification/check_remote_exports.escript
+
       - name: EUnit (non-vacuous)
         # The wrapper fails on: nonzero eunit exit, any failure, no summary,
         # a zero-count suite, or a summed total of zero. It resolves the app
