@@ -1810,6 +1810,11 @@ handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Rou
 handle_upstream(ClientProto, ProviderProto, {ok, Status, Headers, RespBody}, Route, Translate, Req, State) ->
     _ = note_key_success(Route),
     _ = note_route_success(Route),
+    %% Canonical success outcome. Without this a LOCAL 200 recorded
+    %% `outcome = null' while a WORKER 200 recorded `completed', so the
+    %% same response meant different things depending on which node
+    %% executed it. A span status derived from `outcome' inherited that.
+    note_usage_outcome(ok),
     _ = track_proxied(
         Status,
         Route,
@@ -3471,6 +3476,8 @@ do_track(Status, Route, Usage, Observe) ->
             Usage1 = merge_worker_done_usage(Usage),
             Prompt = maps:get(prompt, Usage1, null),
             Completion = maps:get(completion, Usage1, null),
+            CacheRead = maps:get(cache_read, Usage1, null),
+            CacheWrite = maps:get(cache_write, Usage1, null),
             case {get(janus_quota_charge_id), maps:get(id, Agent, null)} of
                 {ChargeId, Aid} when is_binary(ChargeId), is_integer(Aid) ->
                     _ = janus_quota:charge_tokens(ChargeId, Aid, Prompt, Completion);
@@ -3493,6 +3500,8 @@ do_track(Status, Route, Usage, Observe) ->
                         status => Status,
                         prompt => Prompt,
                         completion => Completion,
+                        cache_read_input_tokens => CacheRead,
+                        cache_write_input_tokens => CacheWrite,
                         latency_ms => LatencyMs,
                         error_code => NativeCode,
                         attempt => pd(janus_failover_attempt, 1),

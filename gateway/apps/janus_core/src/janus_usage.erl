@@ -329,7 +329,8 @@ do_flush_now(#state{buf = Buf} = State) ->
         <<"(ts, agent_key_id, model_id, provider_id, provider_key_id, "
           " protocol, stream, status, prompt_tokens, completion_tokens, latency_ms, "
           " error_code, attempt, request_ref, is_terminal, request_id, "
-          " modality, units, outcome, cache_read_input_tokens, "
+          " modality, units, outcome, cache_read_input_tokens, cache_write_input_tokens, "
+          " span_id, parent_span_id, "
           " failover_reason, trace_id, requested_model, error_detail)">>,
     %% Successful chunks are written and gone; failed chunks are KEPT
     %% (oldest-first) for the next attempt. Only the FK salvage path
@@ -442,8 +443,10 @@ fk_keep_keys() ->
     [
         ts, protocol, stream, status, prompt, completion, latency_ms,
         error_code, attempt, request_ref, is_terminal, request_id,
+        cache_write_input_tokens, span_id, parent_span_id,
         failover_reason, trace_id, modality, units, outcome,
-        cache_read_input_tokens, requested_model, error_detail
+        cache_read_input_tokens, cache_write_input_tokens,
+        span_id, parent_span_id, requested_model, error_detail
     ].
 
 chunk(L, N) ->
@@ -469,7 +472,7 @@ build_insert(Cols, Rows) ->
     {ValuesSql, Params} =
         lists:foldl(
             fun(Ev, {SqlAcc, PAcc}) ->
-                Ph = string:join(lists:duplicate(24, "?"), ", "),
+                Ph = string:join(lists:duplicate(27, "?"), ", "),
                 Params = [
                     maps:get(ts, Ev, erlang:system_time(second)),
                     int_or_null(maps:get(agent_key_id, Ev, null)),
@@ -491,6 +494,9 @@ build_insert(Cols, Rows) ->
                     num_or_null(maps:get(units, Ev, null)),
                     outcome_bin(maps:get(outcome, Ev, null)),
                     int_or_null(maps:get(cache_read_input_tokens, Ev, null)),
+                    int_or_null(maps:get(cache_write_input_tokens, Ev, null)),
+                    bin_or_null(maps:get(span_id, Ev, null)),
+                    bin_or_null(maps:get(parent_span_id, Ev, null)),
                     bin_or_null(maps:get(failover_reason, Ev, null)),
                     bin_or_null(maps:get(trace_id, Ev, null)),
                     bin_or_null(maps:get(requested_model, Ev, null)),
@@ -629,12 +635,13 @@ build_insert_shape_test() ->
             }
         ]
     ),
-    %% 24 placeholders per row (16 legacy + error_code/attempt/
+    %% 27 placeholders per row (16 legacy + error_code/attempt/
     %% request_ref/is_terminal/request_id + modality/units/outcome/
-    %% cache_read_input_tokens + failover_reason/trace_id +
-    %% requested_model + error_detail), one VALUES group per row.
-    ?assertEqual(48, length(Params)),
-    Row24 = lists:duplicate(24, "?"),
+    %% cache_read_input_tokens/cache_write_input_tokens + span_id/
+    %% parent_span_id + failover_reason/trace_id + requested_model +
+    %% error_detail), one VALUES group per row.
+    ?assertEqual(54, length(Params)),
+    Row24 = lists:duplicate(27, "?"),
     ?assertMatch(
         {ok, _},
         begin
@@ -654,24 +661,30 @@ build_insert_shape_test() ->
     %% modality defaults to chat, units and outcome to null;
     %% failover_reason/trace_id ride through as binaries.
     %%
-    %% Indices are row-2 absolute positions: each row carries 24 params and
+    %% Indices are row-2 absolute positions: each row carries 27 params and
     %% `ts` is param 1 (it is defaulted, not required, so it is easy to
-    %% forget when counting). Row 2 therefore starts at 25.
-    ?assertEqual(502, lists:nth(32, Params)),
-    ?assertEqual(null, lists:nth(33, Params)),
-    ?assertEqual(1, lists:nth(37, Params)),
-    ?assertEqual(true, lists:nth(39, Params)),
-    ?assertEqual(null, lists:nth(40, Params)),
-    ?assertEqual(<<"chat">>, lists:nth(41, Params)),
-    ?assertEqual(null, lists:nth(42, Params)),
+    %% forget when counting). Row 2 therefore starts at 28.
+    ?assertEqual(502, lists:nth(35, Params)),
+    ?assertEqual(null, lists:nth(36, Params)),
+    ?assertEqual(1, lists:nth(40, Params)),
+    ?assertEqual(true, lists:nth(42, Params)),
     ?assertEqual(null, lists:nth(43, Params)),
-    ?assertEqual(null, lists:nth(44, Params)),
-    ?assertEqual(<<"auth">>, lists:nth(45, Params)),
-    ?assertEqual(<<"4bf92f3577b34da6a3ce929d0e0e4736">>, lists:nth(46, Params)),
+    ?assertEqual(<<"chat">>, lists:nth(44, Params)),
+    ?assertEqual(null, lists:nth(45, Params)),
+    ?assertEqual(null, lists:nth(46, Params)),
+    %% cache_read/cache_write default to null (unreported), not 0 — a real
+    %% zero and "the provider said nothing" must stay distinguishable.
+    ?assertEqual(null, lists:nth(47, Params)),
+    ?assertEqual(null, lists:nth(48, Params)),
+    %% span_id/parent_span_id default to null until P1 populates them.
+    ?assertEqual(null, lists:nth(49, Params)),
+    ?assertEqual(null, lists:nth(50, Params)),
+    ?assertEqual(<<"auth">>, lists:nth(51, Params)),
+    ?assertEqual(<<"4bf92f3577b34da6a3ce929d0e0e4736">>, lists:nth(52, Params)),
     %% requested_model defaults to null; error_detail rides last and
     %% defaults to null.
-    ?assertEqual(null, lists:nth(47, Params)),
-    ?assertEqual(null, lists:nth(48, Params)).
+    ?assertEqual(null, lists:nth(53, Params)),
+    ?assertEqual(null, lists:nth(54, Params)).
 
 %% FK-race salvage keeps the FULL semantic column set (only the FK id
 %% columns are stripped) — a salvaged non-terminal row must not flip
@@ -682,8 +695,10 @@ fk_salvage_keep_list_test() ->
     Want = lists:sort([
         ts, protocol, stream, status, prompt, completion, latency_ms,
         error_code, attempt, request_ref, is_terminal, request_id,
+        cache_write_input_tokens, span_id, parent_span_id,
         failover_reason, trace_id, modality, units, outcome,
-        cache_read_input_tokens, requested_model, error_detail
+        cache_read_input_tokens, cache_write_input_tokens,
+        span_id, parent_span_id, requested_model, error_detail
     ]),
     ?assertEqual(Want, lists:sort(fk_keep_keys())).
 

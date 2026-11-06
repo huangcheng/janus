@@ -90,15 +90,19 @@ nested(Map) ->
 
 norm(U) when is_map(U), map_size(U) > 0 ->
     Base = first_int(U, [<<"prompt_tokens">>, <<"input_tokens">>]),
-    Cache =
-        first_int(U, [<<"cache_creation_input_tokens">>]) +
-            first_int(U, [<<"cache_read_input_tokens">>]),
-    P = Base + Cache,
+    %% Cache READ and cache WRITE are distinct dimensions, not one pool.
+    %% They used to be summed into `prompt` and both discarded, which lost
+    %% two reportable signals: a cache hit (read) and a cache fill
+    %% (creation/write). They stay in `prompt` for billing parity with the
+    %% provider's own input count, and are ALSO reported separately.
+    Write = first_int(U, [<<"cache_creation_input_tokens">>, <<"cache_write_input_tokens">>]),
+    Read = first_int(U, [<<"cache_read_input_tokens">>]),
+    P = Base + Write + Read,
     C = first_int(U, [<<"completion_tokens">>, <<"output_tokens">>]),
     %% A usage object carrying any recognized key is a REAL report — even
     %% a genuine {0, 0} — and must not collapse to "unreported".
     case has_known_key(U) of
-        true -> #{prompt => P, completion => C};
+        true -> #{prompt => P, completion => C, cache_read => Read, cache_write => Write};
         false -> undefined
     end;
 norm(_) ->
@@ -113,6 +117,7 @@ has_known_key(U) ->
             <<"completion_tokens">>,
             <<"output_tokens">>,
             <<"cache_creation_input_tokens">>,
+            <<"cache_write_input_tokens">>,
             <<"cache_read_input_tokens">>
         ]
     ).

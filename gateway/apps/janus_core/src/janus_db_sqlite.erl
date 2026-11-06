@@ -18,6 +18,9 @@
     cas_generation/2
 ]).
 
+%% Exported for eunit only (pure operation over the migration body).
+-export([split_sql_for_test/1]).
+
 -export([
     init/1,
     handle_call/3,
@@ -370,8 +373,32 @@ exec_stmts(Conn, [Stmt | Rest]) ->
         {error, _} = Err -> Err
     end.
 
+%% Test seam: the splitter is pure over the migration body, so its
+%% comment/semicolon interaction can be pinned without a live database.
+-spec split_sql_for_test(binary()) -> [binary()].
+split_sql_for_test(Sql) -> split_sql(Sql).
+
+%% Remove every `--' comment line from a migration body, keeping line
+%% structure so statement boundaries stay intact.
+strip_sql_comments(Sql) ->
+    Lines = binary:split(Sql, <<"\n">>, [global]),
+    iolist_to_binary(
+        lists:join(<<"\n">>, [strip_sql_comment_line(L) || L <- Lines])
+    ).
+
+strip_sql_comment_line(Line) ->
+    case binary:match(Line, <<"--">>) of
+        nomatch -> Line;
+        {Pos, _} -> binary:part(Line, 0, Pos)
+    end.
+
+%% Splitting on `;' is only safe once comments are gone: a semicolon in
+%% a `--' comment otherwise cuts a statement in half, and the two halves
+%% both fail. That is exactly how a well-documented migration (migration
+%% 029) failed to apply at boot. Strip comments FIRST, line by line, then
+%% split on the remaining semicolons.
 split_sql(Sql) ->
-    Parts = binary:split(Sql, <<";">>, [global]),
+    Parts = binary:split(strip_sql_comments(Sql), <<";">>, [global]),
     lists:filtermap(
         fun(Part) ->
             Trimmed = strip_leading_sql_comments(trim_sql(Part)),
@@ -383,6 +410,13 @@ split_sql(Sql) ->
         Parts
     ).
 
+%% Strip EVERY leading `--' comment line, not just the first.
+%%
+%% The single-strip version silently broke any migration with a
+%% multi-line header comment: the remaining `--' lines were glued onto
+%% the first statement, SQLite rejected it, and the whole migration
+%% failed at boot. Comments are documentation; they must never decide
+%% whether a migration applies.
 strip_leading_sql_comments(<<>>) ->
     <<>>;
 strip_leading_sql_comments(<<"--", Rest/binary>>) ->
