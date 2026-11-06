@@ -7,7 +7,8 @@ import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Tooltip } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { fmtUnixTsLocal, fmtUtcBucketLabel, parseBackendInstant, pad2 } from "@/lib/time-format"
+import { fmtUnixTsLocal, parseBackendInstant, pad2 } from "@/lib/time-format"
+import { copyText } from "@/lib/clipboard"
 
 export type KeyMeta = { id: number; key_id: string; weight: number; enabled: boolean }
 export type ProviderModel = { id: number; provider_id: number; name: string; enabled: boolean; modality?: string }
@@ -238,11 +239,6 @@ export function fmtNum(n: number) {
   return n.toLocaleString("en-US")
 }
 
-/** Local label for a UTC usage bucket key; aggregation boundaries stay UTC server-side. */
-export function fmtBucket(bucket: string, range: string) {
-  return fmtUtcBucketLabel(bucket, range)
-}
-
 /** Unix seconds → local "MM-DD HH:MM:SS" (charts and tables share one clock). */
 export function fmtTs(ts: number) {
   return fmtUnixTsLocal(ts)
@@ -404,7 +400,6 @@ export function AffinityPinBadge({
   )
 }
 
-/** Unique providers from a model's routes, for the models table. */
 export function ProviderBadges({ routes }: { routes: Route[] }) {
   const byId = new Map<number, { name: string; enabled: boolean }>()
   for (const r of routes) {
@@ -497,7 +492,7 @@ export function CopyMono({ text, label = "request ID" }: { text: string; label?:
   const [failed, setFailed] = useState(false)
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(text)
+      await copyText(text)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
@@ -512,19 +507,19 @@ export function CopyMono({ text, label = "request ID" }: { text: string; label?:
       onClick={copy}
       title={failed ? `Copy failed — select the ${label} manually` : `Copy ${text}`}
       aria-label={failed ? `Copy failed for ${label} ${text}` : `Copy ${label} ${text}`}
-      className="group flex min-h-8 max-w-[160px] items-center gap-1.5 rounded text-left font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+      className="group flex min-h-8 max-w-[160px] items-center gap-1.5 rounded text-left font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <span className={"truncate" + (failed ? " text-destructive" : "")}>{text}</span>
       <span className="relative grid size-3.5 shrink-0 place-items-center">
         <Check
           className={
-            "col-start-1 row-start-1 size-3.5 text-success transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            "col-start-1 row-start-1 size-3.5 text-success transition-[opacity,scale,filter] duration-200 ease-[cubic-bezier(0.2,0,0,1)] " +
             (copied ? "scale-100 opacity-100 blur-0" : "scale-[0.25] opacity-0 blur-[4px]")
           }
         />
         <Copy
           className={
-            "col-start-1 row-start-1 size-3.5 text-muted-foreground/50 transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            "col-start-1 row-start-1 size-3.5 text-muted-foreground/70 transition-[opacity,scale,filter] duration-200 ease-[cubic-bezier(0.2,0,0,1)] " +
             (copied
               ? "scale-[0.25] opacity-0 blur-[4px]"
               : "scale-100 opacity-0 blur-0 group-hover:opacity-100 group-focus-visible:opacity-100")

@@ -80,6 +80,7 @@ import {
   protocolLabel,
   shortNode,
 } from "./shared"
+import { SHOW_MODEL_PRICES } from "@/lib/flags"
 
 /** True when the provider/protocol selection is the OpenAI Decisions
  * native face (spec 2026-10-07) — bills per decision upstream. */
@@ -372,7 +373,7 @@ export function Providers() {
       description="Upstream endpoints and their encrypted credentials."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Providers</CardTitle>
           <CardDescription>
@@ -2083,13 +2084,6 @@ function AddListingModal({
  * the agent-visible surface (bound + synced listing names); free text
  * is allowed so a not-yet-synced listing can be priced ahead of
  * traffic. */
-// Build-time feature flag: build the SPA with VITE_FLAG_MODEL_PRICES=1 to
-// bring the per-1M-token price editor back once its UX is reworked
-// (hidden 2026-10-18). The /prices API and the Usage spend report are
-// unaffected. Remote toggling (GrowthBook/OpenFeature) is the upgrade path
-// if flags ever need to flip without a rebuild.
-const SHOW_MODEL_PRICES = import.meta.env.VITE_FLAG_MODEL_PRICES === "1"
-
 function ModelPricesCard() {
   const [prices, setPrices] = useState<ModelPrice[] | null>(null)
   const [error, setError] = useState("")
@@ -2160,7 +2154,7 @@ function ModelPricesCard() {
   }
 
   return (
-    <Card className="w-full self-start overflow-hidden animate-fade-up">
+    <Card className="w-full self-start overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Model prices</CardTitle>
         <CardDescription>

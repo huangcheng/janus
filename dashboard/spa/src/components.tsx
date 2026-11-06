@@ -53,6 +53,7 @@ import {
 import { Toaster } from "@/components/ui/sonner"
 import { Tooltip } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { copyText } from "@/lib/clipboard"
 
 // ---------- theme ----------
 
@@ -95,13 +96,13 @@ export function ThemeToggle() {
       <span className="relative grid size-4 place-items-center">
         <Moon
           className={
-            "col-start-1 row-start-1 size-4 transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            "col-start-1 row-start-1 size-4 transition-[opacity,scale,filter] duration-200 ease-[cubic-bezier(0.2,0,0,1)] " +
             (theme === "light" ? "scale-100 opacity-100 blur-0" : "scale-[0.25] opacity-0 blur-[4px]")
           }
         />
         <Sun
           className={
-            "col-start-1 row-start-1 size-4 transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            "col-start-1 row-start-1 size-4 transition-[opacity,scale,filter] duration-200 ease-[cubic-bezier(0.2,0,0,1)] " +
             (theme === "dark" ? "scale-100 opacity-100 blur-0" : "scale-[0.25] opacity-0 blur-[4px]")
           }
         />
@@ -189,7 +190,7 @@ function EndpointRow({ label, url }: { label: string; url: string }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(url)
+      await copyText(url)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
@@ -212,13 +213,13 @@ function EndpointRow({ label, url }: { label: string; url: string }) {
       <span className="relative grid size-3.5 shrink-0 place-items-center">
         <Check
           className={
-            "col-start-1 row-start-1 size-3.5 text-success transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            "col-start-1 row-start-1 size-3.5 text-success transition-[opacity,scale,filter] duration-200 ease-[cubic-bezier(0.2,0,0,1)] " +
             (copied ? "scale-100 opacity-100 blur-0" : "scale-[0.25] opacity-0 blur-[4px]")
           }
         />
         <Copy
           className={
-            "col-start-1 row-start-1 size-3.5 text-muted-foreground/50 transition-[opacity,scale,filter] duration-300 ease-[cubic-bezier(0.2,0,0,1)] " +
+            "col-start-1 row-start-1 size-3.5 text-muted-foreground/70 transition-[opacity,scale,filter] duration-200 ease-[cubic-bezier(0.2,0,0,1)] " +
             (copied
               ? "scale-[0.25] opacity-0 blur-[4px]"
               : "scale-100 opacity-0 blur-0 group-hover:opacity-100")
@@ -277,7 +278,7 @@ function AppSidebar() {
       <SidebarContent className="gap-1 py-2">
         {NAV_GROUPS.map((group) => (
           <SidebarGroup key={group} className="px-3 py-1">
-            <SidebarGroupLabel className="h-7 px-2 text-[10px] font-semibold tracking-[0.12em] text-muted-foreground/80 uppercase">
+            <SidebarGroupLabel className="h-7 px-2 text-[10px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
               {group}
             </SidebarGroupLabel>
             <SidebarGroupContent>

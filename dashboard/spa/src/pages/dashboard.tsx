@@ -128,7 +128,7 @@ function AlertsCardBody({ alerts, error }: { alerts: AlertsResponse | null; erro
 
 function AlertsCard({ alerts, error }: { alerts: AlertsResponse | null; error: string }) {
   return (
-    <Card className="animate-fade-up overflow-hidden" style={{ animationDelay: "280ms" }}>
+    <Card className="overflow-hidden">
       <CardHeader className="border-b bg-muted/20">
         <CardTitle>Active alerts</CardTitle>
         <CardDescription>Firing alert rules across nodes and providers</CardDescription>
@@ -303,20 +303,18 @@ export function Dashboard() {
       {data && (
         <>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
-            {stats.map((s, i) => (
+            {stats.map((s) => (
               <StatCard
                 key={s.label}
                 label={s.label}
                 value={s.value}
                 icon={s.icon}
-                className="animate-fade-up"
-                style={{ animationDelay: `${i * 40}ms` }}
               />
             ))}
           </div>
 
           <div className="grid items-stretch gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-            <Card className="animate-fade-up" style={{ animationDelay: "240ms" }}>
+            <Card>
               <CardHeader>
                 <CardTitle>Activity</CardTitle>
                 <CardDescription>Dashboard mutations per hour, last 24 hours (local time)</CardDescription>
@@ -331,10 +329,7 @@ export function Dashboard() {
 
           {/* Stack below xl: side-by-side at lg left both tables ~350px wide,
               forcing inner horizontal scrollbars. */}
-          <div
-            className="grid animate-fade-up items-stretch gap-4 xl:grid-cols-2"
-            style={{ animationDelay: "320ms" }}
-          >
+          <div className="grid items-stretch gap-4 xl:grid-cols-2">
             <Card className="flex h-full min-h-0 w-full flex-col overflow-hidden">
               <CardHeader className="shrink-0 border-b">
                 <CardTitle>Providers</CardTitle>

@@ -16,6 +16,7 @@ import {
 import { Field, FieldFooter, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
+import { b64urlToBuffer, bufferToB64url } from "@/lib/base64url"
 
 const TURNSTILE_SITEKEY = (import.meta.env.VITE_TURNSTILE_SITEKEY as string | undefined)?.trim() || ""
 const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
@@ -66,22 +67,6 @@ function loadTurnstileScript(): Promise<TurnstileApi> {
     script.onerror = () => reject(new Error("failed to load Turnstile"))
     document.head.appendChild(script)
   })
-}
-
-function b64urlToBuffer(s: string): ArrayBuffer {
-  const pad = "=".repeat((4 - (s.length % 4)) % 4)
-  const b64 = (s + pad).replace(/-/g, "+").replace(/_/g, "/")
-  const raw = atob(b64)
-  const buf = new Uint8Array(raw.length)
-  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i)
-  return buf.buffer
-}
-
-function bufferToB64url(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf)
-  let s = ""
-  for (const b of bytes) s += String.fromCharCode(b)
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 }
 
 type AuthStatus = {

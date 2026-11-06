@@ -33,7 +33,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 
 type SchedConfig = {
@@ -373,7 +373,7 @@ function BackupPlanTable({ plan }: { plan: BackupPlan }) {
 function BackupWarnings({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null
   return (
-    <ul className="list-disc space-y-1 pl-5 text-sm text-warning">
+    <ul className="list-disc pl-5 text-sm text-warning [&>li+li]:mt-1">
       {warnings.map((warning, index) => (
         <li key={`${index}-${warning}`}>{warning}</li>
       ))}
@@ -560,7 +560,7 @@ function ConfigBackupCard() {
   confirmLines.push("Continue?")
 
   return (
-    <Card className="animate-fade-up">
+    <Card>
       <CardHeader className="border-b">
         <CardTitle className="text-base">Config backup</CardTitle>
         <CardDescription>
@@ -570,7 +570,7 @@ function ConfigBackupCard() {
           that error names the cap.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4 pt-4">
+      <CardContent className="flex flex-col gap-4 pt-4">
         <div className="flex flex-wrap gap-2">
           <Button size="sm" disabled={busy !== null} onClick={() => void exportBackup()}>
             {busy === "export" ? <LoaderCircle className="animate-spin" /> : <Download />}
@@ -657,7 +657,7 @@ function ConfigBackupCard() {
         {actionError ? <p role="alert" className="text-sm text-destructive">{actionError}</p> : null}
 
         {previewCurrent && plan ? (
-          <div className="space-y-3">
+          <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">Preview</span>
               <Badge variant="outline">{plan.mode}</Badge>
@@ -674,7 +674,7 @@ function ConfigBackupCard() {
         ) : null}
 
         {applied ? (
-          <div className="space-y-3">
+          <div className="flex flex-col gap-3">
             {loudDrift.length > 0 ? (
               <Alert tone="danger" title="Plan drift on insert or delete">
                 <p>
@@ -748,7 +748,7 @@ function ConfigBackupCard() {
             <AlertDialogTitle>
               {replaceMode ? "Apply replace restore?" : "Apply config restore?"}
             </AlertDialogTitle>
-            <AlertDialogDescription className="space-y-2">
+            <AlertDialogDescription className="flex flex-col gap-2">
               {confirmLines.map((line) => (
                 <span key={line} className="block">
                   {line}
@@ -1137,7 +1137,7 @@ export function Maintenance() {
         </div>
       )}
 
-      <Card className="animate-fade-up">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle className="text-base">Live effective state</CardTitle>
           <CardDescription>
@@ -1184,7 +1184,7 @@ export function Maintenance() {
       </Card>
 
       {geoWarning && (
-        <Alert tone="danger" title="Geo desired but MMDB missing" className="animate-fade-up">
+        <Alert tone="danger" title="Geo desired but MMDB missing">
           Geo scheduling stays off until MaxMind data is present at JANUS_MMDB_PATH on the master.
           Use <strong>Refresh GeoLite2</strong> below (requires MaxMind credentials on the
           dashboard), or redeploy so step 3b fetches it.
@@ -1194,7 +1194,7 @@ export function Maintenance() {
         </Alert>
       )}
 
-      <Card className="animate-fade-up">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle className="text-base">GeoLite2 MMDB</CardTitle>
           <CardDescription>
@@ -1203,7 +1203,7 @@ export function Maintenance() {
             City DB and reloads locus without a full gateway restart.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4 pt-4">
+        <CardContent className="flex flex-col gap-4 pt-4">
           <div className="text-sm text-muted-foreground">
             Present:{" "}
             <span className="font-medium text-foreground">
@@ -1270,7 +1270,7 @@ export function Maintenance() {
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="animate-fade-up">
+        <Card>
           <CardHeader className="border-b">
             <CardTitle className="text-base">Scheduler</CardTitle>
             <CardDescription>
@@ -1280,7 +1280,7 @@ export function Maintenance() {
                 : null}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4 pt-4">
+          <CardContent className="flex flex-col gap-4 pt-4">
             {!schedCfg ? (
               <EmptyState
                 title="Scheduler settings unavailable"
@@ -1367,26 +1367,27 @@ export function Maintenance() {
           </CardContent>
         </Card>
 
-        <Card className="animate-fade-up">
+        <Card>
           <CardHeader className="border-b">
             <CardTitle className="text-base">Model sync interval</CardTitle>
             <CardDescription>
               Hot on the master. Use 0 for manual-only sync; otherwise at least 60 seconds.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4 pt-4">
+          <CardContent className="flex flex-col gap-4 pt-4">
             {!modelSyncCfg ? (
               <Loading />
             ) : (
               <>
                 <FieldGroup>
-                  <Field>
+                  <Field data-invalid={modelSyncInvalid ? true : undefined}>
                     <FieldLabel htmlFor="sync-interval">Interval (seconds)</FieldLabel>
                     <Input
                       id="sync-interval"
                       type="number"
                       min={0}
                       step={60}
+                      aria-invalid={modelSyncInvalid ? true : undefined}
                       className="max-w-32 tabular-nums"
                       value={modelSyncCfg.interval_sec}
                       onChange={(e) =>
@@ -1397,9 +1398,9 @@ export function Maintenance() {
                     />
                     <FieldDescription>0 = manual only. Values 1–59 are rejected.</FieldDescription>
                     {modelSyncInvalid ? (
-                      <p className="text-xs text-destructive">
+                      <FieldError>
                         Interval must be 0 (manual) or ≥ 60 seconds.
-                      </p>
+                      </FieldError>
                     ) : null}
                   </Field>
                 </FieldGroup>
@@ -1430,14 +1431,14 @@ export function Maintenance() {
 
       <ConfigBackupCard />
 
-      <Card className="animate-fade-up">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle className="text-base">Signal fleet (legacy)</CardTitle>
           <CardDescription>
             Desired state only — not hot. Recommended OFF; worker pool capacity is independent.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4 pt-4">
+        <CardContent className="flex flex-col gap-4 pt-4">
           {fleetRestartPending && (
             <Badge variant="warning">
               Restart required — desired ≠ effective until gateway recreate

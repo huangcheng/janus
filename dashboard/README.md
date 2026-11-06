@@ -335,6 +335,22 @@ cd spa && npm install && npm run dev  # vite on :3000, proxies /api
 npm run build  # outputs to spa/dist, served by FastAPI in production
 ```
 
+### SPA development environment
+
+The vite dev server and the SPA read a few variables that are separate from
+the backend table above. None are required for a default `npm run dev`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `JANUS_DASHBOARD_PROXY` | `http://127.0.0.1:8091` | Backend the dev server proxies `/api` to. Point it at a live gateway to HMR against the real stack. |
+| `JANUS_DEV_AUTO_LOGIN` | unset | Set to `1` to mint a dev JWT from `JANUS_DASHBOARD_PASSWORD` and inject it into proxied `/api` requests. Dev-server only; never reaches the production build. Requires a configured password-only account (setup/TOTP/passkey accounts still sign in manually). |
+| `JANUS_DASHBOARD_PASSWORD` | unset | Consumed only when `JANUS_DEV_AUTO_LOGIN=1`; the password used to mint the dev JWT. |
+| `VITE_TURNSTILE_SITEKEY` | unset | Cloudflare Turnstile site key for the login page. Unset = no challenge widget. |
+| `VITE_FLAG_MODEL_PRICES` | unset | Set to `1` to show the per-1M-token price editor on the Providers page (hidden pending a UX rework). The `/prices` API and the Usage spend report work regardless. |
+
+The SPA has no `.env` file of its own; pass these through the environment when
+starting `npm run dev`.
+
 ## Docker
 
 ```bash

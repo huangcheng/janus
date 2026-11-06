@@ -45,6 +45,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { AgentKey, StateBadge, fmtIsoLocalCompact } from "./shared"
+import { copyText } from "@/lib/clipboard"
 
 type Modal =
   | "create"
@@ -58,32 +59,6 @@ function copyKeyLabel(hasSecret: boolean | undefined, copying: boolean): string 
   if (!hasSecret) return "Key not recoverable — revoke and create a new one."
   if (copying) return "Copying…"
   return "Copy key"
-}
-
-/** Clipboard helper with execCommand fallback (non-secure contexts / Clipboard API denial). */
-async function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return
-    } catch {
-      // fall through to execCommand when present-but-denied (NotAllowedError, etc.)
-    }
-  }
-  const ta = document.createElement("textarea")
-  ta.value = text
-  ta.setAttribute("readonly", "")
-  ta.style.position = "fixed"
-  ta.style.left = "-9999px"
-  document.body.appendChild(ta)
-  ta.select()
-  try {
-    if (!document.execCommand("copy")) {
-      throw new Error("execCommand copy failed")
-    }
-  } finally {
-    document.body.removeChild(ta)
-  }
 }
 
 export function Keys() {
@@ -130,7 +105,7 @@ export function Keys() {
       description="Bearer keys for the data plane — stored as peppered HMAC hashes."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Keys</CardTitle>
           <CardDescription>
@@ -793,7 +768,7 @@ function AccessKeyModal({
             )}
 
             {restrictEmpty && (
-              <p className="text-sm text-destructive">Select at least one model, or choose All models.</p>
+              <p role="alert" className="text-sm text-destructive">Select at least one model, or choose All models.</p>
             )}
           </div>
 

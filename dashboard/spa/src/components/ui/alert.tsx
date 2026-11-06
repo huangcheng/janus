@@ -11,6 +11,10 @@ const alertVariants = cva(
         default: "bg-card text-card-foreground",
         destructive:
           "text-destructive bg-card [&>svg]:text-current *:data-[slot=alert-description]:text-destructive/90",
+        warning:
+          "text-warning bg-card *:data-[slot=alert-description]:text-foreground",
+        success:
+          "text-success bg-card *:data-[slot=alert-description]:text-foreground",
       },
     },
     defaultVariants: {
@@ -18,6 +22,12 @@ const alertVariants = cva(
     },
   }
 )
+
+const TONE_VARIANT = {
+  danger: "destructive",
+  warning: "warning",
+  success: "success",
+} as const
 
 function Alert({
   className,
@@ -31,7 +41,7 @@ function Alert({
     tone?: "info" | "success" | "warning" | "danger"
     title?: string
   }) {
-  const v = tone === "danger" || tone === "warning" ? "destructive" : variant
+  const v = tone && tone !== "info" ? TONE_VARIANT[tone] : variant
   return (
     <div
       data-slot="alert"

@@ -1,4 +1,4 @@
-import { ComponentProps, ComponentType, CSSProperties } from "react"
+import { ComponentProps, ComponentType } from "react"
 import NumberFlow from "@number-flow/react"
 import { cn } from "@/lib/utils"
 import { Card } from "@/components/ui/card"
@@ -17,7 +17,6 @@ export function StatCard({
   subtitle,
   format,
   className,
-  style,
 }: {
   label: string
   value: number | string
@@ -27,10 +26,9 @@ export function StatCard({
   subtitle?: string
   format?: ComponentProps<typeof NumberFlow>["format"]
   className?: string
-  style?: CSSProperties
 }) {
   return (
-    <Card className={cn("gap-2 overflow-hidden py-4", className)} style={style}>
+    <Card className={cn("gap-2 overflow-hidden py-4", className)}>
       <div className="flex items-center justify-between gap-2 px-4">
         <span className="truncate text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
           {label}

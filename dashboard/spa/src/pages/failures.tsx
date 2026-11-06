@@ -88,7 +88,7 @@ function modelLabel(e: FailureEvent): string {
 
 function ByErrorCard({ rows }: { rows: FailureGroup[] }) {
   return (
-    <Card className="animate-fade-up overflow-hidden" style={{ animationDelay: "160ms" }}>
+    <Card className="overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>By error</CardTitle>
         <CardDescription>
@@ -156,7 +156,7 @@ function FailureEventListItem({
   onTimeline: (requestRef: string) => void
 }) {
   return (
-    <li className="space-y-3 px-5 py-4">
+    <li className="flex flex-col gap-3 px-5 py-4">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs text-muted-foreground tabular-nums">
           <EventTime ts={new Date(e.ts * 1000).toISOString()} />
@@ -287,37 +287,30 @@ export function Failures() {
               label="Failures"
               value={totals.failures}
               icon={OctagonX}
-              className="animate-fade-up"
             />
             <StatCard
               label="Upstream errors"
               value={totals.upstream}
               subtitle="answered by a provider"
               icon={CircleAlert}
-              className="animate-fade-up"
-              style={{ animationDelay: "40ms" }}
             />
             <StatCard
               label="Rejected calls"
               value={totals.rejects}
               subtitle="pre-pick · from gateway logs"
               icon={Ban}
-              className="animate-fade-up"
-              style={{ animationDelay: "80ms" }}
             />
             <StatCard
               label="Top error"
               value={top ? fmtNum(top.count) : "—"}
               subtitle={top ? `${top.code ?? top.reason ?? "unclassified"} · ${top.model ?? "—"}` : "in window"}
               icon={CircleAlert}
-              className="animate-fade-up"
-              style={{ animationDelay: "120ms" }}
             />
           </div>
 
           <ByErrorCard rows={summary.by_error} />
 
-          <Card className="animate-fade-up overflow-hidden" style={{ animationDelay: "240ms" }}>
+          <Card className="overflow-hidden">
             <CardHeader className="border-b">
               <CardTitle>Recent failures</CardTitle>
               <CardDescription>

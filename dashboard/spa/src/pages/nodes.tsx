@@ -387,7 +387,7 @@ export function Nodes() {
 
       <FleetRuntime workers={workers} />
 
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Gateways</CardTitle>
           <CardDescription>Health + /stats/sched polled every 10s</CardDescription>
@@ -579,7 +579,7 @@ export function Nodes() {
         </CardContent>
       </Card>
 
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Master failure health</CardTitle>
           <CardDescription>
@@ -640,7 +640,7 @@ export function Nodes() {
             )}
           </CardAction>
         </CardHeader>
-        <CardContent className="min-h-0 space-y-4 px-0 pb-4">
+        <CardContent className="flex flex-col min-h-0 gap-4 px-0 pb-4">
           {!unavailable && <FleetStrip fleet={fleet} stale={workersStale} disabled={fleetDisabled} />}
           {unmatchedPins.length > 0 && (
             <div className="mx-5 flex flex-wrap items-start gap-x-2 gap-y-1 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs">
@@ -705,7 +705,7 @@ export function Nodes() {
                     <TableCell className="font-mono text-xs font-medium">{w.node}</TableCell>
                     <TableCell className="text-xs">
                       {noteEdit === w.node ? (
-                        <input
+                        <Input
                           autoFocus
                           value={noteDraft}
                           aria-label={`Edit note for ${w.node}`}
@@ -716,7 +716,7 @@ export function Nodes() {
                           }}
                           onBlur={() => saveNote(w)}
                           placeholder="e.g. Aliyun Wuhan"
-                          className="w-36 rounded border bg-background px-1.5 py-0.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                          className="h-auto w-36 px-1.5 py-0.5 text-xs"
                         />
                       ) : (
                         <button
@@ -724,9 +724,9 @@ export function Nodes() {
                           title="Edit note"
                           aria-label={`Edit note for ${w.node}`}
                           onClick={() => { setNoteEdit(w.node); setNoteDraft(w.note ?? "") }}
-                          className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-md px-1.5 text-muted-foreground/90 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+                          className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-md px-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
-                          {w.note ? w.note : <span className="opacity-40">＋</span>}
+                          {w.note ? w.note : <span className="opacity-60">＋</span>}
                         </button>
                       )}
                     </TableCell>
@@ -895,7 +895,7 @@ function FailureRow({ node }: { node: Node }) {
         <Tooltip
           side="top"
           content={
-            <div className="space-y-1">
+            <div className="flex flex-col gap-1">
               {(f.cool ?? []).slice(0, 8).map((c, i) => (
                 <div key={i}>
                   {c.target?.kind}/{c.target?.id}
@@ -1145,7 +1145,7 @@ function CapacityCell({
   if (editing) {
     return (
       <span className="inline-flex flex-col gap-0.5">
-        <input
+        <Input
           ref={inputRef}
           autoFocus
           value={draft}
@@ -1160,7 +1160,7 @@ function CapacityCell({
           }}
           onBlur={() => void commit(draft)}
           placeholder={declared === null ? "declared: ∞" : `declared: ${declared}`}
-          className="w-20 rounded border bg-background px-1.5 py-0.5 text-xs tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50"
+          className="h-auto w-20 px-1.5 py-0.5 text-xs tabular-nums disabled:opacity-50"
         />
         {saving ? (
           <span className="text-[10px] text-muted-foreground">saving… (was {previous})</span>
@@ -1192,7 +1192,7 @@ function CapacityCell({
         title="Edit capacity override"
         aria-label={`Edit capacity override for ${worker.node} (current ${previous})`}
         onClick={open}
-        className="inline-flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+        className="inline-flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {override !== undefined ? (
           <span className="font-medium text-warning underline decoration-dotted underline-offset-2">
@@ -1202,7 +1202,7 @@ function CapacityCell({
           <span>{dash(worker.capacity)}</span>
         )}
         {override !== undefined && memberRow && declared !== override && (
-          <span className="text-[10px] text-muted-foreground/80">decl {declared === null ? "∞" : declared}</span>
+          <span className="text-[10px] text-muted-foreground">decl {declared === null ? "∞" : declared}</span>
         )}
         {pending && <Badge variant="secondary" className="text-[10px]">pending</Badge>}
       </button>
@@ -1216,7 +1216,7 @@ function CapacityCell({
  * mode 7 — visible here, with no automatic mitigation). */
 function PinnedProvidersCell({ pinned }: { pinned: Provider[] }) {
   if (pinned.length === 0) {
-    return <span className="text-muted-foreground/40">—</span>
+    return <span className="text-muted-foreground">—</span>
   }
   const names = pinned.map((p) => p.name)
   return (

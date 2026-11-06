@@ -60,6 +60,7 @@ import {
 } from "./shared"
 import { Pagination } from "../components/pagination"
 import { fmtUtcBucketLabel, utcUsageBucketKey } from "@/lib/time-format"
+import { PRICES_HINT } from "@/lib/flags"
 
 const tokensConfig = {
   prompt: { label: "Tokens in", color: "var(--color-chart-1)" },
@@ -104,7 +105,7 @@ function ResolutionCard({ rows }: { rows: UsageSummary["by_resolution"] }) {
   // (settings.auto_router.model) — direct calls to real models are not
   // resolutions and never reach this card.
   return (
-    <Card className="animate-fade-up overflow-hidden" style={{ animationDelay: "360ms" }}>
+    <Card className="overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Resolutions</CardTitle>
         <CardDescription>
@@ -188,7 +189,7 @@ function BreakdownCard({ title, rows }: { title: string; rows: UsageSummary["by_
                   <TableCell>
                     <div className="h-1.5 w-full rounded bg-muted" aria-hidden>
                       <div
-                        className="h-1.5 w-full origin-left rounded bg-primary/60 transition-transform duration-500 ease-out"
+                        className="h-1.5 w-full origin-left rounded bg-primary/60 transition-transform duration-200 ease-out"
                         style={{ transform: `scaleX(${r.requests / maxReq})` }}
                       />
                   </div>
@@ -254,15 +255,29 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
           ? ` mixed ${data.currencies.join("/")}`
           : ""
 
+  let spendDescription: string
+  const anyPricedRow = data ? data.rows.some((r) => r.cost !== null) : false
+  if (error) {
+    // The body already renders ErrorFlash with the API's own message; the
+    // header stays neutral instead of repeating (or hardcoding) the path.
+    spendDescription = "Spend unavailable right now."
+  } else if (!data) {
+    spendDescription = "Loading priced usage…"
+  } else if (anyPricedRow) {
+    spendDescription = `Priced usage ${fmtCost(total)}${cur} in window — computed at query time from operator-entered prices`
+  } else if (data.rows.length > 0) {
+    spendDescription = `No priced usage in this window — every model in the group lacks a price row, so only unpriced token totals are shown. ${PRICES_HINT}`
+  } else {
+    // The body's EmptyState already states this; repeating it in the header
+    // would render the same sentence twice in one card.
+    spendDescription = ""
+  }
+
   return (
-    <Card className="animate-fade-up overflow-hidden">
+    <Card className="overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Spend</CardTitle>
-        <CardDescription>
-          {data
-            ? `Priced usage ${fmtCost(total)}${cur} in window — computed at query time from operator-entered prices`
-            : "Per-1M-token prices are set on the Providers page"}
-        </CardDescription>
+        {spendDescription && <CardDescription>{spendDescription}</CardDescription>}
         <CardAction>
           <div className="flex flex-wrap items-center gap-2">
             {windows.length > 0 && (
@@ -301,7 +316,7 @@ function SpendCard({ tsFrom, tsTo }: { tsFrom: number; tsTo: number }) {
         ) : data.rows.length === 0 && unpricedTotal === 0 ? (
           <EmptyState
             title="No usage in this window"
-            description="No tokens to price. Set prices on the Providers page to see spend."
+            description="Try widening the time range."
           />
         ) : (
           <Table flush className="table-fixed">
@@ -380,7 +395,7 @@ function UsageEventListItem({
   onTimeline: (requestRef: string) => void
 }) {
   return (
-    <li className="space-y-3 px-5 py-4">
+    <li className="flex flex-col gap-3 px-5 py-4">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs text-muted-foreground tabular-nums">{fmtTs(e.ts)}</span>
         <span className={`font-mono text-xs font-semibold ${statusClass(e.status)}`}>
@@ -524,7 +539,7 @@ export function Usage() {
       {summary && totals && (
         <>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
-            <div className="relative animate-fade-up">
+            <div className="relative">
               <StatCard label="Requests" value={totals.requests} icon={Activity} className="h-full" />
               {summary.writer && summary.writer.dropped > 0 && (
                 <Tooltip
@@ -551,23 +566,17 @@ export function Usage() {
               label="Tokens in"
               value={totals.prompt_tokens}
               icon={ArrowDownToLine}
-              className="animate-fade-up"
-              style={{ animationDelay: "40ms" }}
             />
             <StatCard
               label="Tokens out"
               value={totals.completion_tokens}
               icon={ArrowUpFromLine}
-              className="animate-fade-up"
-              style={{ animationDelay: "80ms" }}
             />
             <StatCard
               label="Errors"
               value={totals.errors}
               subtitle={`${((totals.errors / Math.max(1, totals.requests)) * 100).toFixed(1)}% of requests`}
               icon={CircleAlert}
-              className="animate-fade-up"
-              style={{ animationDelay: "120ms" }}
             />
             <StatCard
               label="p95 latency"
@@ -575,8 +584,6 @@ export function Usage() {
               suffix=" ms"
               subtitle="non-stream"
               icon={Timer}
-              className="animate-fade-up"
-              style={{ animationDelay: "160ms" }}
             />
             <StatCard
               label="p95 stream"
@@ -584,8 +591,6 @@ export function Usage() {
               suffix=" ms"
               subtitle="end-to-end drain"
               icon={TimerReset}
-              className="animate-fade-up"
-              style={{ animationDelay: "200ms" }}
             />
           </div>
 
@@ -596,7 +601,7 @@ export function Usage() {
             </p>
           )}
 
-          <div className="grid animate-fade-up gap-4 lg:grid-cols-2" style={{ animationDelay: "240ms" }}>
+          <div className="grid gap-4 lg:grid-cols-2">
             <Card>
               <CardHeader>
                 <CardTitle>Tokens</CardTitle>
@@ -648,10 +653,7 @@ export function Usage() {
             </Card>
           </div>
 
-          <div
-            className="grid animate-fade-up items-stretch gap-4 xl:grid-cols-2"
-            style={{ animationDelay: "320ms" }}
-          >
+          <div className="grid items-stretch gap-4 xl:grid-cols-2">
             <BreakdownCard title="Per agent key" rows={liveKeyRows} />
             <BreakdownCard title="Per model" rows={summary.by_model} />
             <BreakdownCard title="Per provider" rows={summary.by_provider} />
@@ -663,7 +665,7 @@ export function Usage() {
 
           <SpendCard tsFrom={summary.ts_from} tsTo={summary.ts_to} />
 
-          <Card className="animate-fade-up overflow-hidden" style={{ animationDelay: "400ms" }}>
+          <Card className="overflow-hidden">
             <CardHeader className="border-b">
               <CardTitle>Recent requests</CardTitle>
               <CardDescription>

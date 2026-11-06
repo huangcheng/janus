@@ -501,7 +501,7 @@ export function RouterPage() {
       description="Public model names agents call, each bound to one or more provider listings."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Bindings</CardTitle>
           <CardDescription>
@@ -548,7 +548,7 @@ export function RouterPage() {
           ) : (
             <div className="flex flex-col">
               {selected.size > 0 && (
-                <div className="flex animate-fade-up flex-wrap items-center gap-2 border-b bg-muted/35 px-5 py-2.5">
+                <div className="flex flex-wrap items-center gap-2 border-b bg-muted/35 px-5 py-2.5">
                   <span className="text-sm font-medium tabular-nums">{selected.size} selected</span>
                   <div className="min-w-2 flex-1" />
                   <Button variant="outline" size="sm" disabled={busy} onClick={() => bulk("enable")}>Enable</Button>
@@ -1246,7 +1246,7 @@ function SortableTierItem({
         type="button"
         aria-label={`Drag to reorder ${name}`}
         title="Drag to reorder"
-        className="grid size-6 shrink-0 cursor-grab touch-none place-items-center rounded text-muted-foreground hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+        className="grid size-6 shrink-0 cursor-grab touch-none place-items-center rounded text-muted-foreground hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         {...attributes}
         {...listeners}
       >
@@ -1605,9 +1605,7 @@ function AutoRouterCard({
               The instruction the judge is given. This is the only lever that changes how tiers are
               chosen &mdash; the model reads it and answers <code>fast</code>, <code>big</code> or{" "}
               <code>flagship</code>. It must name all three tiers.{" "}
-              <span className="text-muted-foreground/80">
-                {new TextEncoder().encode(cfg.judge_prompt ?? "").length} / 4096 bytes
-              </span>
+              {new TextEncoder().encode(cfg.judge_prompt ?? "").length} / 4096 bytes
             </p>
           </Field>
           <Field>
@@ -1644,7 +1642,7 @@ function AutoRouterCard({
                 }
                 className="mt-0.5"
               />
-              <div className="min-w-0 flex-1 space-y-2">
+              <div className="flex flex-col min-w-0 flex-1 gap-2">
                 <FieldLabel htmlFor="auto-tier-failover" className="cursor-pointer">
                   Same-tier next-name failover
                 </FieldLabel>
@@ -2139,7 +2137,7 @@ function LimitsCoverageCard() {
   const pasteEntries = Object.keys(parsedPaste.entries).length
 
   return (
-    <Card className="flex h-fit w-full flex-col self-start overflow-hidden animate-fade-up">
+    <Card className="flex h-fit w-full flex-col self-start overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Limits coverage</CardTitle>
         <CardDescription>

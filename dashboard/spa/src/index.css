@@ -24,26 +24,37 @@
   --muted-foreground: oklch(0.50 0.018 258);
   --accent: oklch(0.945 0.014 258);
   --accent-foreground: oklch(0.35 0.055 258);
-  --destructive: oklch(0.577 0.245 27.325);
+  /* Darkened from oklch(0.577 0.245) so the ONE destructive color clears AA on
+     every surface it appears on: solid button label (5.61:1), plain danger
+     text (5.49:1), the Badge "danger" /10 tint (4.91:1) and the highest tint
+     actually in use, the /15 entitlement chip (4.51:1). The old value left
+     11-12px tinted text at 3.94:1. */
+  --destructive: oklch(0.53 0.20 27.325);
+  --destructive-foreground: oklch(0.985 0.004 258);
   --success: oklch(0.48 0.115 168);
   --warning: oklch(0.46 0.13 70);
   --border: oklch(0.89 0.009 258);
-  --input: oklch(0.89 0.009 258);
+  /* Input borders are a WCAG 1.4.11 boundary, not decoration: a form field
+     has to be findable without relying on its shadow, so this is deliberately
+     darker than --border (3.3:1 against --card vs 1.4:1 for card edges). */
+  --input: oklch(0.64 0.012 258);
   --ring: oklch(0.62 0.09 258);
   --chart-1: oklch(0.56 0.13 258);
   --chart-2: oklch(0.62 0.10 190);
   --chart-3: oklch(0.60 0.13 70);
   --chart-4: oklch(0.55 0.12 310);
   --chart-5: oklch(0.58 0.16 25);
-  --terminal-muted: oklch(0.65 0.016 286);
-  --terminal-dim: oklch(0.74 0.016 286);
-  --terminal-bg: oklch(0.19 0.012 258);
-  --terminal-border: oklch(0.31 0.014 258);
-  --terminal-text: oklch(0.88 0.008 258);
-  --terminal-error: oklch(0.78 0.15 25);
-  --terminal-warning: oklch(0.82 0.13 85);
-  --terminal-info: oklch(0.78 0.08 230);
-  --terminal-notice: oklch(0.78 0.11 200);
+  /* The authenticator QR needs a white quiet zone in BOTH themes to stay
+     scannable, and its placeholder spinner has to read against that white —
+     so these are deliberately theme-invariant: declared once here and NOT
+     overridden in .dark (custom properties inherit, so the absence of a
+     dark copy is what keeps the quiet zone white at night). */
+  --qr-bg: oklch(1 0 0);
+  --qr-ink: oklch(0.60 0.01 258);
+  /* Light theme has no field fill (transparent inputs); declared so the
+     token always resolves even if a future call site forgets dark:. */
+  --field-fill: transparent;
+  --field-fill-hover: transparent;
   --sidebar: oklch(0.988 0.003 258);
   --sidebar-foreground: oklch(0.25 0.014 258);
   --sidebar-primary: oklch(0.48 0.12 258);
@@ -71,23 +82,32 @@
   --accent: oklch(0.285 0.022 258);
   --accent-foreground: oklch(0.90 0.025 258);
   --destructive: oklch(0.70 0.18 24);
+  /* Dark destructive is a LIGHT red, so its button label is near-black — the
+     same pairing shadcn uses for dark --primary. Hardcoded white text only
+     reached 2.90:1 here (below even the 3:1 floor) and forced button.tsx and
+     badge.tsx into a dark:bg-destructive/60 wash to compensate. */
+  --destructive-foreground: oklch(0.18 0.02 258);
   --success: oklch(0.72 0.12 168);
   --warning: oklch(0.79 0.12 80);
   --border: oklch(1 0.005 258 / 10%);
-  --input: oklch(1 0.005 258 / 14%);
+  /* Same 1.4.11 reasoning as the light theme: this is the input's border
+     color, raised to ~3.2:1 against --card. Historically the primitives also
+     derived the dark field FILL from this token (bg-input/30 over the old
+     14% alpha); that coupling is gone — the fill now lives in --field-fill,
+     whose values were chosen to match the old effective wash. */
+  --input: oklch(1 0.005 258 / 35%);
+  /* Dark field FILL, decoupled from --input (a border-only token at full
+     alpha). Values equal the old effective washes (35% x 12% = 4.2%,
+     35% x 20% = 7%), so raising --input for border contrast can no longer
+     brighten every dark field. */
+  --field-fill: oklch(1 0.005 258 / 4.2%);
+  --field-fill-hover: oklch(1 0.005 258 / 7%);
   --ring: oklch(0.72 0.105 258);
   --chart-1: oklch(0.72 0.105 258);
   --chart-2: oklch(0.70 0.12 190);
   --chart-3: oklch(0.77 0.16 70);
   --chart-4: oklch(0.72 0.12 310);
   --chart-5: oklch(0.68 0.16 25);
-  --terminal-bg: oklch(0.19 0.012 258);
-  --terminal-border: oklch(0.31 0.014 258);
-  --terminal-text: oklch(0.88 0.008 258);
-  --terminal-error: oklch(0.78 0.15 25);
-  --terminal-warning: oklch(0.82 0.13 85);
-  --terminal-info: oklch(0.78 0.08 230);
-  --terminal-notice: oklch(0.78 0.11 200);
   --sidebar: oklch(0.18 0.01 258);
   --sidebar-foreground: oklch(0.90 0.008 258);
   --sidebar-primary: oklch(0.72 0.105 258);
@@ -118,25 +138,21 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-border: var(--border);
   --color-input: var(--input);
+  --color-field-fill: var(--field-fill);
+  --color-field-fill-hover: var(--field-fill-hover);
   --color-ring: var(--ring);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
-  --color-terminal-muted: var(--terminal-muted);
-  --color-terminal-dim: var(--terminal-dim);
-  --color-terminal-bg: var(--terminal-bg);
-  --color-terminal-border: var(--terminal-border);
-  --color-terminal-text: var(--terminal-text);
-  --color-terminal-error: var(--terminal-error);
-  --color-terminal-warning: var(--terminal-warning);
-  --color-terminal-info: var(--terminal-info);
-  --color-terminal-notice: var(--terminal-notice);
+  --color-qr-bg: var(--qr-bg);
+  --color-qr-ink: var(--qr-ink);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -151,7 +167,13 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    /* outline-ring at FULL opacity, not the stock /50. The shadcn primitives
+       opt out of the UA outline (outline-none) and draw their own 3:1
+       focus-visible border-ring, so they are unaffected. Everything that does
+       NOT opt out — raw <button>s in dense table cells, link badges, the skip
+       link — falls back to this outline, and ring/50 measured only 1.78:1
+       against the light card, below WCAG 1.4.11's 3:1 floor. */
+    @apply border-border outline-ring;
     /* One scrollbar language everywhere: thin, rounded, tinted from the
        palette. Without this, Windows renders classic scrollbars (wide gray
        tracks + arrow buttons) in every table and the main pane. */
@@ -217,21 +239,6 @@
   }
 }
 
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@utility animate-fade-up {
-  animation: fade-up 0.45s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -240,9 +247,6 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
-  }
-  .animate-fade-up {
-    animation: none;
   }
 }
 

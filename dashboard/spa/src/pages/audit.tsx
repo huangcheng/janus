@@ -63,7 +63,7 @@ export function Audit() {
       description="Dashboard mutations, newest first. Up to 1000 events, persisted across restarts."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Events</CardTitle>
           <CardDescription>

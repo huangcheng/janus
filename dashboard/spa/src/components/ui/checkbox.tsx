@@ -4,18 +4,23 @@ import { Checkbox as CheckboxPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 
+import { useFieldControlProps } from "@/components/ui/field"
+
 function Checkbox({
   className,
   ...props
 }: React.ComponentProps<typeof CheckboxPrimitive.Root>) {
+  const { id, "aria-describedby": describedBy, rest } = useFieldControlProps(props)
   return (
     <CheckboxPrimitive.Root
+      id={id}
+      aria-describedby={describedBy}
       data-slot="checkbox"
       className={cn(
-        "group peer relative size-4 shrink-0 rounded-[4px] border border-input shadow-xs transition-shadow outline-none after:absolute after:-inset-2 after:content-[''] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground dark:bg-input/30 dark:aria-invalid:ring-destructive/40 dark:data-[state=checked]:bg-primary",
+        "group peer relative size-4 shrink-0 rounded-[4px] border border-input shadow-xs transition-shadow outline-none after:absolute after:-inset-2 after:content-[''] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground dark:bg-field-fill dark:aria-invalid:ring-destructive/40 dark:data-[state=checked]:bg-primary",
         className
       )}
-      {...props}
+      {...rest}
     >
       <CheckboxPrimitive.Indicator
         data-slot="checkbox-indicator"

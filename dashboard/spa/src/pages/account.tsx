@@ -67,6 +67,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { copyText } from "@/lib/clipboard"
+import { b64urlToBuffer, bufferToB64url } from "@/lib/base64url"
 
 type Status = {
   configured: boolean
@@ -86,22 +88,6 @@ type Passkey = {
 }
 
 type Recovery = { total: number; remaining: number }
-
-function b64urlToBuffer(s: string): ArrayBuffer {
-  const pad = "=".repeat((4 - (s.length % 4)) % 4)
-  const b64 = (s + pad).replace(/-/g, "+").replace(/_/g, "/")
-  const raw = atob(b64)
-  const buf = new Uint8Array(raw.length)
-  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i)
-  return buf.buffer
-}
-
-function bufferToB64url(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf)
-  let s = ""
-  for (const b of bytes) s += String.fromCharCode(b)
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-}
 
 function useQrDataUrl(text: string | undefined): string {
   const [url, setUrl] = useState("")
@@ -130,16 +116,16 @@ function QrFigure({ uri, className }: { uri: string; className?: string }) {
       alt="Authenticator QR code"
       width={176}
       height={176}
-      className={cn("size-44 shrink-0 rounded-lg border bg-white p-2.5", className)}
+      className={cn("size-44 shrink-0 rounded-lg border bg-qr-bg p-2.5", className)}
     />
   ) : (
     <div
       className={cn(
-        "flex size-44 shrink-0 items-center justify-center rounded-lg border bg-white",
+        "flex size-44 shrink-0 items-center justify-center rounded-lg border bg-qr-bg",
         className,
       )}
     >
-      <LoaderCircle className="size-5 animate-spin text-zinc-400" />
+      <LoaderCircle className="size-5 animate-spin text-qr-ink" />
     </div>
   )
 }
@@ -153,11 +139,11 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
       size="sm"
       onClick={async () => {
         try {
-          await navigator.clipboard.writeText(value)
+          await copyText(value)
           setCopied(true)
           setTimeout(() => setCopied(false), 1500)
-        } catch {
-          toast.error("clipboard unavailable")
+        } catch (e) {
+          toast.error(e instanceof Error ? e.message : "clipboard unavailable")
         }
       }}
     >
@@ -322,7 +308,7 @@ export function Account() {
               aria-current={section === id ? "page" : undefined}
               onClick={() => setSection(id)}
               className={cn(
-                "flex min-h-9 items-center gap-2 whitespace-nowrap rounded-lg px-3 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 lg:flex-none",
+                "flex min-h-9 items-center gap-2 whitespace-nowrap rounded-lg px-3 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
                 section === id
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -1288,7 +1274,7 @@ function TokenListItem({
   onRemove: () => void
 }) {
   return (
-    <li className="space-y-3 px-5 py-4">
+    <li className="flex flex-col gap-3 px-5 py-4">
       {/* Status wraps below the label rather than squeezing it: a truncated
           label is the one thing on this row the operator cannot recover, and
           the status is a single word. */}

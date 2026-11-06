@@ -70,6 +70,14 @@ const ALL_TYPES = "All types"
 // The mobile Time header uses this same 136px track to align the separate grids.
 const MOBILE_ROW_CLASS = "max-sm:grid max-sm:w-full max-sm:grid-cols-[136px_minmax(0,1fr)]"
 
+// Clearing a poll-fetched list with a fresh [] would allocate a new identity
+// on every 2s cycle and re-render the whole stream; returning the previous
+// array lets React bail out. Module scope keeps one stable identity and one
+// copy of the rationale for all three call sites.
+function clearList<T>(set: (updater: (prev: T[]) => T[]) => void) {
+  set((prev) => (prev.length === 0 ? prev : []))
+}
+
 export function Logs() {
   const [stream, setStream] = useState<StreamKind>("otp")
   const [events, setEvents] = useState<LogEvent[]>([])
@@ -130,17 +138,21 @@ export function Logs() {
           setOpsEvents((r.events ?? []) as OpsEvent[])
           setOpsMarkers((r.markers ?? []) as OpsMarker[])
         }
-        setEvents([])
+        // Returning the previous array when it is already empty lets React bail
+        // out. A bare setEvents([]) allocated a fresh identity on every 2s poll,
+        // which re-rendered the whole stream and cancelled out the payload diff
+        // above — the same reason the ops branch diffs instead of assigning.
+        clearList(setEvents)
       } else {
         const r = await fetchOtp()
         if (gen !== loadGen.current) return
         const nextPayload = JSON.stringify(r.events ?? [])
         if (nextPayload !== otpPayloadRef.current) {
           otpPayloadRef.current = nextPayload
-          setEvents(r.events)
+          setEvents(r.events ?? [])
         }
-        setOpsEvents([])
-        setOpsMarkers([])
+        clearList(setOpsEvents)
+        clearList(setOpsMarkers)
       }
       setError("")
     } catch (e: any) {
@@ -228,7 +240,7 @@ export function Logs() {
       description="OTP logger stream and drained ops events (cool / task) — toggle sources; they are never merged."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden animate-fade-up">
+      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Event stream</CardTitle>
           <CardDescription>

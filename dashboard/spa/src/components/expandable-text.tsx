@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const DETAILS_SCROLL_CLASS =
-  "mt-1 max-h-64 overflow-auto rounded-md font-mono text-xs leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+  "mt-1 max-h-64 overflow-auto rounded-md font-mono text-xs leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 
 export function ExpandableText({
   text,
@@ -34,7 +34,7 @@ export function ExpandableText({
 
   return (
     <details className={cn("group min-w-0", className)}>
-      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1 text-xs text-muted-foreground marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60">
+      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-1 text-xs text-muted-foreground marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <span
           id={summaryId}
           className="min-w-0 flex-1 truncate"

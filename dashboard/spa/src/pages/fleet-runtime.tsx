@@ -200,7 +200,7 @@ export function FleetRuntime({
   )
 
   return (
-    <Card className="w-full self-start animate-fade-up">
+    <Card className="w-full self-start">
       <CardHeader className="border-b">
         <CardTitle>Fleet runtime</CardTitle>
         <CardDescription>
