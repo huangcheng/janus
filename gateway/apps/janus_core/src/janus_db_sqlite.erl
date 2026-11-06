@@ -386,10 +386,26 @@ strip_sql_comments(Sql) ->
         lists:join(<<"\n">>, [strip_sql_comment_line(L) || L <- Lines])
     ).
 
+%% Truncate at the first `--' that is NOT inside a single-quoted literal.
+%% A migration is DDL and normally has no literals, but a data seed would:
+%% `INSERT ... VALUES ('--not-a-comment')' must survive intact. Quoting is
+%% tracked with the SQL rule that a doubled quote escapes itself.
 strip_sql_comment_line(Line) ->
-    case binary:match(Line, <<"--">>) of
-        nomatch -> Line;
-        {Pos, _} -> binary:part(Line, 0, Pos)
+    strip_sql_comment_line(Line, false, 0).
+
+strip_sql_comment_line(Line, _InQuote, Pos) when Pos >= byte_size(Line) ->
+    Line;
+strip_sql_comment_line(Line, InQuote, Pos) ->
+    case binary:at(Line, Pos) of
+        $' ->
+            strip_sql_comment_line(Line, not InQuote, Pos + 1);
+        $- when not InQuote ->
+            case binary:part(Line, Pos, min(2, byte_size(Line) - Pos)) of
+                <<"--">> -> binary:part(Line, 0, Pos);
+                _ -> strip_sql_comment_line(Line, InQuote, Pos + 1)
+            end;
+        _ ->
+            strip_sql_comment_line(Line, InQuote, Pos + 1)
     end.
 
 %% Splitting on `;' is only safe once comments are gone: a semicolon in

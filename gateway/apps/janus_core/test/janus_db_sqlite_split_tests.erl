@@ -35,15 +35,21 @@ leading_comments_without_semicolon_are_ignored_test() ->
     >>,
     ?assertEqual([<<"SELECT 1">>], split_via_seam(Sql)).
 
+double_dash_inside_string_literal_survives_test() ->
+    %% A literal must not be truncated by the comment stripper.
+    Sql = <<"SELECT '--not a comment' AS v\n">>,
+    ?assertEqual([<<"SELECT '--not a comment' AS v">>], split_via_seam(Sql)).
+
+doubled_quote_escapes_test() ->
+    %% SQL escapes a quote by doubling it; the toggle must handle that.
+    Sql = <<"SELECT 'it''s -- fine' AS v\n">>,
+    ?assertEqual([<<"SELECT 'it''s -- fine' AS v">>], split_via_seam(Sql)).
+
 inline_comment_after_statement_is_ignored_test() ->
     Sql = <<"SELECT 1 -- trailing note\n">>,
     ?assertEqual([<<"SELECT 1">>], split_via_seam(Sql)).
 
-%% The seam: `split_sql/1' is internal, so reach it the same way the
-%% runner does — by exporting nothing and calling through the module's
-%% own migration path is too heavy for a unit test. Instead assert the
-%% behaviour via the documented wrapper used by the runner.
+%% `split_sql/1' is internal; `split_sql_for_test/1' is the documented
+%% test seam and does nothing but delegate to it.
 split_via_seam(Sql) ->
-    %% erlang:apply on an unexported function is not possible; the
-    %% module exports split for tests below.
     janus_db_sqlite:split_sql_for_test(Sql).

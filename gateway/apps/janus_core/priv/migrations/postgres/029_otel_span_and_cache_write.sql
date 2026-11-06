@@ -6,6 +6,11 @@
 -- cache_write_input_tokens is the missing twin, so a cache fill stops
 -- being invisible while a cache hit is reported.
 --
+-- The ALTERs are deliberately NOT `IF NOT EXISTS`: the runner tracks
+-- applied migrations in `schema_migrations`, so each body runs exactly
+-- once. Adding the guard would hide a genuine re-run (a corrupted
+-- ledger) instead of surfacing it.
+--
 -- span_id/parent_span_id are nullable and appear only once spans exist
 -- (P1). They let the ledger join to the trace instead of reconstructing
 -- a timeline from `trace_id` + `attempt`.

@@ -443,7 +443,6 @@ fk_keep_keys() ->
     [
         ts, protocol, stream, status, prompt, completion, latency_ms,
         error_code, attempt, request_ref, is_terminal, request_id,
-        cache_write_input_tokens, span_id, parent_span_id,
         failover_reason, trace_id, modality, units, outcome,
         cache_read_input_tokens, cache_write_input_tokens,
         span_id, parent_span_id, requested_model, error_detail
@@ -641,14 +640,14 @@ build_insert_shape_test() ->
     %% parent_span_id + failover_reason/trace_id + requested_model +
     %% error_detail), one VALUES group per row.
     ?assertEqual(54, length(Params)),
-    Row24 = lists:duplicate(27, "?"),
+    Row27 = lists:duplicate(27, "?"),
     ?assertMatch(
         {ok, _},
         begin
             Want = iolist_to_binary([
                 <<"INSERT INTO usage_events (a, b) VALUES (">>,
-                string:join(Row24, ", "), <<"), (">>,
-                string:join(Row24, ", "), <<")">>
+                string:join(Row27, ", "), <<"), (">>,
+                string:join(Row27, ", "), <<")">>
             ]),
             case Sql of
                 Want -> {ok, matched};
@@ -695,7 +694,6 @@ fk_salvage_keep_list_test() ->
     Want = lists:sort([
         ts, protocol, stream, status, prompt, completion, latency_ms,
         error_code, attempt, request_ref, is_terminal, request_id,
-        cache_write_input_tokens, span_id, parent_span_id,
         failover_reason, trace_id, modality, units, outcome,
         cache_read_input_tokens, cache_write_input_tokens,
         span_id, parent_span_id, requested_model, error_detail
