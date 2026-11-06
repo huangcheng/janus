@@ -10,21 +10,32 @@
 #         OUT=/some/dir ./scripts/verification/otel_trace_e2e.sh
 #
 # Artifacts (server log, per-case output, result) land in $OUT.
-set -u
+set -u -o pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GW="$(cd "$HERE/../.." && pwd)"
 OUT="${OUT:-${TMPDIR:-/tmp}/janus-otel-trace-e2e}"
 mkdir -p "$OUT"
+
+for tool in erl curl; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "SKIP: $tool not found"; exit 77; }
+done
+[ -d "$GW/_build/default/lib/janus_core/ebin" ] || {
+  echo "SKIP: build absent — run 'rebar3 compile' in $GW first"; exit 77;
+}
 PORT=18080
 ADMIN=18090
 unset JANUS_DB_URL
 unset JANUS_DB_HOST
 
-EBINS=$(for d in "$GW"/_build/default/lib/*/ebin; do printf '%s ' "-pa" "$d"; done)
-erl -noshell $EBINS \
+EBINS=()
+for d in "$GW"/_build/default/lib/*/ebin; do EBINS+=(-pa "$d"); done
+erl -noshell "${EBINS[@]}" \
   -eval "
     application:set_env(janus, http_port, $PORT),
     application:set_env(janus, admin_port, $ADMIN),
+    %% The agent listener (:18080) is master-only; pin the role so the
+    %% script cannot silently start a worker and fail every case.
+    application:set_env(janus, role, master),
     
     {ok,_} = application:ensure_all_started(janus_core),
     {ok,_} = application:ensure_all_started(janus_http),
@@ -32,6 +43,8 @@ erl -noshell $EBINS \
     timer:sleep(120000),
     halt()." > "$OUT/server.log" 2>&1 &
 SRV=$!
+cleanup() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }
+trap cleanup EXIT INT TERM
 for i in $(seq 1 60); do grep -q READY "$OUT/server.log" 2>/dev/null && break; sleep 1; done
 if ! grep -q READY "$OUT/server.log"; then echo "SERVER FAILED"; tail -20 "$OUT/server.log"; kill $SRV 2>/dev/null; exit 1; fi
 sleep 2
@@ -46,12 +59,12 @@ present() { if [ -n "$2" ]; then echo "PASS $1 ($2)"; pass=$((pass+1)); else ech
 BASE="http://127.0.0.1:$PORT"
 
 # A1: no inbound traceparent -> both headers present, traceparent well-formed
-CHAT=(-s -X POST -H "content-type: application/json" -d '{"model":"m","messages":[]}')
+CHAT=(-s --max-time 10 -X POST -H "content-type: application/json" -d '{"model":"m","messages":[]}')
 H=$(curl -D - -o /dev/null "${CHAT[@]}" "$BASE/v1/chat/completions" 2>/dev/null || true)
 TP=$(printf '%s' "$H" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
 XT=$(printf '%s' "$H" | tr -d '\r' | awk 'tolower($1)=="x-trace-id:"{print $2}')
 present "A1 traceparent emitted" "$TP"
-present "A1 x-trace-id preserved" "$XT"
+present "A1 x-trace-id emitted" "$XT"
 check "A1 traceparent shape" "55" "${#TP}"
 check "A1 ids agree" "$XT" "$(printf '%s' "$TP" | cut -d- -f2)"
 
@@ -91,7 +104,6 @@ H7=$(curl -D - -o /dev/null "${CHAT[@]}" -H "tracestate: orphan=1" "$BASE/v1/cha
 TS7=$(printf '%s' "$H7" | tr -d '\r' | awk 'tolower($1)=="tracestate:"{print $2}')
 check "A7 orphan tracestate dropped" "" "$TS7"
 
-printf '%s\n' "--- $pass passed, $fail failed ---" | tee -a "$OUT/summary.txt"
+printf '%s\n' "--- $pass passed, $fail failed ---" | tee "$OUT/summary.txt"
 echo "$pass passed, $fail failed" > "$OUT/result.txt"
-kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 [ "$fail" -eq 0 ] || exit 1
