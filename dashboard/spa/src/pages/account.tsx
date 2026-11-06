@@ -1618,7 +1618,11 @@ function TokensCard({ active }: { active: boolean }) {
               The bearer secret is shown after creation and can be re-revealed later (rate-limited).
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={create} className="flex flex-col gap-4">
+          {/* The footer lives outside the form: it is sticky and carries
+              the dialog's bottom padding, so keeping it a sibling of the
+              fields keeps the scroll/sticky behaviour and the padding
+              model in one place. The submit button reaches the form by id. */}
+          <form id="token-create-form" onSubmit={create} className="flex flex-col gap-4">
             <Field>
               <FieldLabel htmlFor="token-label">Label</FieldLabel>
               <Input
@@ -1666,16 +1670,20 @@ function TokensCard({ active }: { active: boolean }) {
                   : null
               }
             />
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setModal(null)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={busy || !label.trim() || ttlDays() === null}>
-                {busy && <LoaderCircle className="animate-spin" />}
-                Create
-              </Button>
-            </DialogFooter>
           </form>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setModal(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              form="token-create-form"
+              disabled={busy || !label.trim() || ttlDays() === null}
+            >
+              {busy && <LoaderCircle className="animate-spin" />}
+              Create
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
