@@ -47,14 +47,16 @@ method_not_allowed(Req0) ->
     %% Task 3: trace context beside the request id — the POST path gets
     %% it from janus_http_preamble:read/2; this pre-preamble 405 branch
     %% resolves its own so the echo covers it too.
-    Trace = janus_trace:ensure(cowboy_req:header(<<"traceparent">>, Req0)),
-    Req1 = cowboy_req:set_resp_header(
-        <<"x-trace-id">>,
-        janus_trace:trace_id(Trace),
-        cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0)
+    Trace = janus_trace:ensure(
+        cowboy_req:header(<<"traceparent">>, Req0),
+        cowboy_req:header(<<"tracestate">>, Req0)
+    ),
+    put(janus_trace, Trace),
+    Req1 = janus_request_id:set_trace_response_headers(
+        cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
+        Trace
     ),
     put(janus_request_id, ReqId),
-    put(janus_trace, Trace),
     logger:warning(#{
         what => janus_agent_reject,
         status => 405,

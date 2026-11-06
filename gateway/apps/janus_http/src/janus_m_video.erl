@@ -546,13 +546,12 @@ upstream_get(Route, PathSuffix, TimeoutMs) ->
                             Headers = [
                                 {<<"authorization">>, <<"Bearer ", Token/binary>>},
                                 {<<"accept">>, <<"application/json">>},
-                                {<<"user-agent">>, janus_providers_http:user_agent()},
-                                %% Task 3: video is master-local — the poll/
-                                %% cancel request's own trace context is in
-                                %% the pdict (janus_modality:run/3); the
-                                %% parent-id is minted here per call.
-                                janus_trace:header()
-                            ],
+                                {<<"user-agent">>, janus_providers_http:user_agent()}
+                                %% Trace context (traceparent + tracestate);
+                                %% a fresh parent-id per call, so each poll
+                                %% is its own span. Read from the pdict
+                                %% stashed by janus_modality:run/3.
+                            ] ++ janus_trace:headers(),
                             janus_providers_http:get(
                                 #{host => Host, port => Port, path => Path, tls => Tls},
                                 Headers,

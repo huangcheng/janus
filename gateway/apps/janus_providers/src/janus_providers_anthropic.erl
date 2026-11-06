@@ -93,9 +93,8 @@ resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap,
                                         true -> <<"text/event-stream">>;
                                         false -> <<"application/json">>
                                     end},
-                                {<<"user-agent">>, janus_providers_http:user_agent()},
-                                janus_trace:header()
-                            ],
+                                {<<"user-agent">>, janus_providers_http:user_agent()}
+                            ] ++ janus_trace:headers(),
                             Target = #{host => Host, port => Port, path => Path, tls => Tls},
                             {ok, Target, Headers, OutBody};
                         {error, _} = Err ->

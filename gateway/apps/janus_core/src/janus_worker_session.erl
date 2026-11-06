@@ -82,13 +82,16 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
     %% rolling-deploy insurance: a new master strips the header at wire
     %% assembly, an old master never sends it — a stray one must still
     %% never produce a duplicate traceparent.
-    Trace = janus_trace:from_trace_id(maps:get(trace_id, Fields, undefined)),
+    %% `from_wire/1' reads the additive `sampled' / `tracestate' keys; an
+    %% old master sends only `trace_id', which degrades to the previous
+    %% behaviour (inherit-sampled, no vendor state) without a version
+    %% bump. The parent-id is minted HERE, once per job.
+    Trace = janus_trace:from_wire(Fields),
     put(janus_trace, Trace),
     Fields1 = Fields#{
-        headers => [
-            janus_trace:upstream_header(Trace)
-            | lists:keydelete(<<"traceparent">>, 1, maps:get(headers, Fields))
-        ]
+        headers =>
+            janus_trace:upstream_headers(Trace) ++
+                janus_trace:strip_trace_headers(maps:get(headers, Fields))
     },
     put(?PDICT_WIRE_ENC, WireEnc),
     put(?PDICT_CORRUPT_AFTER, janus_wire_enc:corrupt_after_from_env()),

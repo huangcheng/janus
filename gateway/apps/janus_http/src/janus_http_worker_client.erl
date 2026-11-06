@@ -345,10 +345,26 @@ provider_id(Route) when is_map(Route) ->
 %% caller has no trace context — e.g. pool-issued probes never ride this
 %% path; old peers tolerate the key either way, no version bump).
 wire_trace(#{headers := Headers} = Fields) ->
-    Fields1 = Fields#{headers => lists:keydelete(<<"traceparent">>, 1, Headers)},
-    case janus_trace:trace_id(get(janus_trace)) of
-        undefined -> Fields1;
-        TraceId -> Fields1#{trace_id => TraceId}
+    %% Strip BOTH trace headers: the fresh ones are assembled on the
+    %% executing node, and a stale `tracestate' from an earlier attempt
+    %% must never ride along.
+    Fields1 = Fields#{headers => janus_trace:strip_trace_headers(Headers)},
+    Trace = get(janus_trace),
+    case janus_trace:trace_id(Trace) of
+        undefined ->
+            %% No request context (pool-issued probe): the worker mints
+            %% a fresh trace, exactly as before.
+            Fields1;
+        TraceId ->
+            Fields2 = Fields1#{trace_id => TraceId, sampled => janus_trace:sampled(Trace)},
+            case janus_trace:tracestate(Trace) of
+                [] ->
+                    Fields2;
+                Ts ->
+                    %% Opaque vendor state; the worker re-emits it on its
+                    %% own outbound attempt so the chain is unbroken.
+                    Fields2#{tracestate => janus_trace:encode_tracestate(Ts)}
+            end
     end.
 
 finish_prepare({error, _} = Err, _ProviderId, _WantStream) ->
@@ -406,9 +422,8 @@ resolve_unary_upstream(Route, PathSuffix, Body, Opts) when
                                 {<<"authorization">>, <<"Bearer ", Token/binary>>},
                                 {<<"content-type">>, <<"application/json">>},
                                 {<<"accept">>, <<"application/json">>},
-                                {<<"user-agent">>, janus_providers_http:user_agent()},
-                                janus_trace:header()
-                            ],
+                                {<<"user-agent">>, janus_providers_http:user_agent()}
+                            ] ++ janus_trace:headers(),
                             Timeout = maps:get(
                                 timeout_ms, Opts, janus_worker_wire:non_stream_timeout_ms()
                             ),

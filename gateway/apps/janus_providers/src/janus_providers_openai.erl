@@ -212,9 +212,8 @@ decisions_headers(Token) when is_binary(Token) ->
         {<<"authorization">>, <<"Bearer ", Token/binary>>},
         {<<"content-type">>, <<"application/json">>},
         {<<"accept">>, <<"application/json">>},
-        {<<"user-agent">>, user_agent()},
-        janus_trace:header()
-    ].
+        {<<"user-agent">>, user_agent()}
+    ] ++ janus_trace:headers().
 
 %% OpenAI Decisions face path is /decisions. Aliyun 百炼 Decision /
 %% System One models (decision-model-preview) publish the same body
@@ -344,9 +343,8 @@ resolve_upstream(#{provider_id := Pid, provider_key := KeyMeta} = Route, ReqMap,
                                         true -> <<"text/event-stream">>;
                                         false -> <<"application/json">>
                                     end},
-                                {<<"user-agent">>, user_agent()},
-                                janus_trace:header()
-                            ],
+                                {<<"user-agent">>, user_agent()}
+                            ] ++ janus_trace:headers(),
                             Target = #{host => Host, port => Port, path => Path, tls => Tls},
                             {ok, Target, Headers, OutBody};
                         {error, _} = Err ->

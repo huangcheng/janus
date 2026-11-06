@@ -50,9 +50,12 @@ run(Plugin, Req0, State) ->
     %% the x-trace-id echo; the unconditional put also covers keep-alive
     %% process reuse. (Requests rejected by cowboy's own HTTP parser
     %% never reach here and echo neither x-trace-id nor x-request-id.)
-    Trace = janus_trace:ensure(cowboy_req:header(<<"traceparent">>, Req0)),
-    Req1 = cowboy_req:set_resp_header(<<"x-trace-id">>, janus_trace:trace_id(Trace), Req0),
+    Trace = janus_trace:ensure(
+        cowboy_req:header(<<"traceparent">>, Req0),
+        cowboy_req:header(<<"tracestate">>, Req0)
+    ),
     put(janus_trace, Trace),
+    Req1 = janus_request_id:set_trace_response_headers(Req0, Trace),
     %% Cowboy keep-alive hygiene for modality ACL / plugin process dict.
     erase(janus_req_model),
     erase(janus_requested_model),

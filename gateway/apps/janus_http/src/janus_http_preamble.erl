@@ -71,11 +71,14 @@ read(Req0, Opts) when is_map(Opts) ->
     %% Trace context beside the request id (Task 3): resolve ONCE per
     %% request — the unconditional put also overwrites any previous
     %% request's value on this keep-alive-reused process.
-    Trace = janus_trace:ensure(cowboy_req:header(<<"traceparent">>, Req0)),
-    Req1 = cowboy_req:set_resp_header(
-        <<"x-trace-id">>,
-        janus_trace:trace_id(Trace),
-        cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0)
+    Trace = janus_trace:ensure(
+        cowboy_req:header(<<"traceparent">>, Req0),
+        cowboy_req:header(<<"tracestate">>, Req0)
+    ),
+    put(janus_trace, Trace),
+    Req1 = janus_request_id:set_trace_response_headers(
+        cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
+        Trace
     ),
     put(janus_request_id, ReqId),
     %% Quota charge idempotency must NOT key on the client-controlled
@@ -84,7 +87,6 @@ read(Req0, Opts) when is_map(Opts) ->
     %% per-request server-side nonce; failover retries within this
     %% request reuse it via the pdict, so idempotent charging survives.
     janus_quota:mint_charge_id(),
-    put(janus_trace, Trace),
     AuthOpts = #{allow_x_api_key => maps:get(allow_x_api_key, Opts, false)},
     case janus_http_auth:require_agent(Req1, AuthOpts) of
         {ok, Agent, Req2} ->
