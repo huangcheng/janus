@@ -6,7 +6,7 @@ gate that fails if it comes back.
 
 ## 1. `undef` on master boot — the fleet half-died
 
-**Symptom.** After a routine release, four workers came up clean and the
+**Symptom.** After a routine release the workers came up clean and the
 master entered a restart loop. `janus_config` never started, so the node
 served nothing.
 
@@ -99,8 +99,8 @@ Two incidents were diagnosed with a stopwatch before this existed.
   `config_generation` bump. Use `PUT /api/settings/translate` (bumps
   automatically) rather than SQL.
 - Verify with `/stats.stream_budgets`, not by timing a stream.
-- Known-bad tag `7268001…` is listed in the private inventory; the deploy
-  and rollback scripts refuse it.
+- A tag known to crash the master is recorded in the operator's private
+  inventory, and the deploy and rollback scripts refuse it by name.
 
 ## What is still upstream's problem
 
