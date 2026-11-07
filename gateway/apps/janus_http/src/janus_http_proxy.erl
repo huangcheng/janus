@@ -1733,8 +1733,13 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
         {error, Reason} ->
             handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, false, Req, State)
     end;
-handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain}, Route, false, Req, State) ->
+handle_upstream(ClientProto, ProviderProto, {ok, stream, Status, Headers, Drain}, Route, false, Req, State) ->
     mark_client_committed(),
+    %% The captured usage bytes are in the PROVIDER's wire format: capture
+    %% happens before translation rewrites the chunk. Remember which
+    %% protocol that is so the parser picks the right cache-accounting
+    %% rule; on the passthrough path it equals ClientProto anyway.
+    put(janus_usage_wire_proto, ProviderProto),
     Req2 = cowboy_req:stream_reply(
         Status,
         filter_stream_headers(Headers),
@@ -3698,6 +3703,16 @@ maybe_trim(Chunks, _Size) ->
     {lists:reverse(Kept), Size}.
 
 stream_usage(ClientProto) ->
+    %% The bytes in the buffer are provider-format; `stream_usage/0''s
+    %% caller passes the client proto for its own reasons, so prefer the
+    %% protocol recorded at dispatch.
+    WireProto = case get(janus_usage_wire_proto) of
+        undefined -> ClientProto;
+        P -> P
+    end,
+    stream_usage_1(WireProto).
+
+stream_usage_1(WireProto) ->
     Head =
         case get(janus_usage_head) of
             undefined -> <<>>;
@@ -3710,7 +3725,7 @@ stream_usage(ClientProto) ->
         end,
     erase(janus_usage_head),
     erase(janus_usage_tail),
-    usage_or_undef(janus_usage_parse:from_sse(ClientProto, Head, Tail)).
+    usage_or_undef(janus_usage_parse:from_sse(WireProto, Head, Tail)).
 
 retry_reason(Headers, Status) when Status =:= 429; Status =:= 503 ->
     case maps:get(<<"retry-after">>, Headers, undefined) of

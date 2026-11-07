@@ -258,6 +258,7 @@ bad()  { echo "FAIL $1${2:+: $2}"; fail=$((fail+1)); }
 
 BASE="http://127.0.0.1:$PORT"
 TRACE_ID="aaaabbbbccccddddeeeeffff00002222"
+STREAM_TRACE_ID="aaaabbbbccccddddeeeeffff00003333"
 
 # ---------------------------------------------------------------- drive
 RESP=$(curl -s -D "$OUT/headers.txt" -o "$OUT/body.json" \
@@ -405,21 +406,23 @@ if [ "$SPAN_CHECK" -eq 0 ]; then pass=$((pass+6)); else fail=$((fail+1)); fi
 # gen_ai.usage attributes. The stream path used to drop the cache
 # dimensions entirely, so a streamed request and an identical unary one
 # disagreed about tokens.
-curl -s -o /dev/null --max-time 20 \
+SCODE=$(curl -s -o "$OUT/stream_body.txt" -w '%{http_code}' --max-time 20 \
   -H "Authorization: Bearer $AGENT_KEY" \
   -H "content-type: application/json" \
-  -H "traceparent: 00-aaaabbbbccccddddeeeeffff00003333-00f067aa0ba902b7-01" \
+  -H "traceparent: 00-$STREAM_TRACE_ID-00f067aa0ba902b7-01" \
   -d '{"model":"mock-model","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
-  "$BASE/v1/chat/completions" 2>/dev/null
+  "$BASE/v1/chat/completions" 2>/dev/null)
+if [ "$SCODE" = "200" ]; then ok "streamed request served"
+else bad "streamed request served" "http=$SCODE"; fi
 
 for _ in $(seq 1 12); do
-  grep -q "00003333" "$COLLECT" 2>/dev/null && break
+  grep -q "${STREAM_TRACE_ID: -8}" "$COLLECT" 2>/dev/null && break
   sleep 1
 done
 
-python3 - "$COLLECT" "$OUT" <<'PYSTREAM'
+python3 - "$COLLECT" "$OUT" "$STREAM_TRACE_ID" <<'PYSTREAM'
 import json, sys
-collect, out = sys.argv[1], sys.argv[2]
+collect, out, stream_tid = sys.argv[1], sys.argv[2], sys.argv[3]
 spans = []
 for line in open(collect):
     if not line.strip():
@@ -427,7 +430,7 @@ for line in open(collect):
     for rs in json.loads(line)["body"].get("resourceSpans", []):
         for ss in rs.get("scopeSpans", []):
             spans.extend(ss.get("spans", []))
-mine = [s for s in spans if s.get("traceId", "").endswith("00003333")]
+mine = [s for s in spans if s.get("traceId") == stream_tid]
 client = next((s for s in mine if s.get("kind") == 3), None)
 def a(s):
     return {x["key"]: next(iter(x["value"].values())) for x in s.get("attributes", [])}
