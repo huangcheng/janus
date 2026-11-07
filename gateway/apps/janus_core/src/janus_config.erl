@@ -417,12 +417,19 @@ distribute_settings(Rows) ->
                             ok ->
                                 persistent_term:put({janus, telemetry_cfg}, Map);
                             {error, Why} ->
-                                %% Bad value: keep the previous config
-                                %% rather than half-applying a typo.
+                                %% Bad value: FAIL CLOSED. Keeping the
+                                %% previous config would leave telemetry
+                                %% running (or off) on a value the
+                                %% operator believes they replaced;
+                                %% erasing makes the documented default
+                                %% (off) the state, and the warning says
+                                %% why. Loud beats stale.
+                                _ = persistent_term:erase({janus, telemetry_cfg}),
                                 logger:warning(#{
                                     what => janus_settings_bad_value,
                                     key => telemetry,
-                                    reason => Why
+                                    reason => Why,
+                                    action => telemetry_disabled
                                 })
                         end;
                     _ ->

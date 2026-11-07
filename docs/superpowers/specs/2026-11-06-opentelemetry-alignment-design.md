@@ -1378,6 +1378,45 @@ separately: tests can never catch it.
    under the db client conventions instead. Out of scope now; recorded so it is
    not mis-implemented later.
 
+## Appendix B: P0 as built
+
+P0 (the correctness floor) landed on branch `otel-alignment-p0` in six
+commits, each reviewed before commit. The behaviour differs from this
+document in four places worth recording, because each was discovered
+while building rather than while specifying.
+
+**1. Log correlation needed no formatter change.** §10.1 planned a
+`logger` primary filter stamping `meta.trace_id`. It turned out OTP's
+`logger:set_process_metadata/1` is captured at the call site and carried
+in the event's `meta` already, and `janus_log_fmt` renders every
+non-reserved `meta` key. So the whole feature is one call at handler
+entry — no filter, no formatter edit, no call-site edits. The filter
+would have been redundant work.
+
+**2. The sampler must not memoize.** The first implementation cached the
+resolved ratio in `persistent_term` on first read, which silently
+defeated hot reload: a dashboard change would never reach a running
+node. The ratio is now resolved per call; `persistent_term` reads are
+lock-free and the config distributor already did the expensive part.
+
+**3. The SQLite migration runner had a latent boot-breaker.** It split a
+migration body on `;` *before* stripping `--` comments, so any migration
+whose header comment contained a semicolon cut a statement in half and
+failed at boot. Migration 029 was the first migration to trigger it
+because it is the first with a multi-line header. Fixed (comments are
+stripped first, quote-aware) and pinned by
+`janus_db_sqlite_split_tests`.
+
+**4. Invalid telemetry config fails closed.** The first version kept the
+previous config on a validation error, so a typo left telemetry in
+whatever state it was in while the operator believed their edit applied.
+It now erases the config (the documented default, off) and logs why.
+
+Two P0 items were built but are unused until P1: `usage_events.span_id`/
+`parent_span_id` (nullable, never written) and `janus_req_started` (the
+request-arrival anchor, read by nothing yet). Both are recorded here so a
+reviewer does not mistake them for dead code.
+
 ## Appendix A: Implementer's checklist
 
 Concrete file-level work, in P-phase order. Sizes are order-of-magnitude to help

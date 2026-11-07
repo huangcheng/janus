@@ -75,8 +75,6 @@
 
 %% Once-per-boot flag for the malformed wire-map trace-id warning.
 -define(PT_WARNED, {?MODULE, malformed_wire_trace_id_warned}).
-%% Cached sampler ratio (persistent_term: read-mostly, set at most once).
--define(PT_RATIO, {?MODULE, sampler_ratio}).
 
 %% W3C Trace Context §3.3.1.5 limits. 32 list members; Janus keeps a
 %% little headroom under the "at least 512 characters" guidance by
@@ -294,14 +292,15 @@ strip_trace_headers(Headers) ->
 %% request (the OTel spec says log-and-ignore).
 -spec ratio() -> float().
 ratio() ->
-    case persistent_term:get(?PT_RATIO, undefined) of
-        undefined ->
-            R = resolve_ratio(),
-            persistent_term:put(?PT_RATIO, R),
-            R;
-        R ->
-            R
-    end.
+    %% NOT cached here. The old version memoized the resolved value in
+    %% persistent_term on first read, which silently defeated the
+    %% hot-reload contract: an operator could change `sampling.ratio' in
+    %% the dashboard and every node would keep the ratio it booted with,
+    %% with no error and no way to notice. `resolve_ratio/0' reads
+    %% persistent_term (already O(1) and lock-free) and the config
+    %% distributor has already done the expensive part, so there is
+    %% nothing to memoize.
+    resolve_ratio().
 
 %% `OTEL_TRACES_SAMPLER' wins over the arg: the two names an operator
 %% actually reaches for are `always_on' and `always_off', and silently

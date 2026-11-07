@@ -55,9 +55,14 @@ run(Plugin, Req0, State) ->
         cowboy_req:header(<<"tracestate">>, Req0)
     ),
     put(janus_trace, Trace),
+    %% Same arrival anchor as the chat faces: this entry point does not
+    %% go through `janus_http_preamble:read/2', so without this the
+    %% modality path would have no TTFC source.
+    put(janus_req_started, erlang:monotonic_time(microsecond)),
     ok = janus_trace:set_log_context(Trace),
     Req1 = janus_request_id:set_trace_response_headers(Req0, Trace),
     %% Cowboy keep-alive hygiene for modality ACL / plugin process dict.
+    erase(janus_req_started),
     erase(janus_req_model),
     erase(janus_requested_model),
     case enabled(Plugin:modality()) of

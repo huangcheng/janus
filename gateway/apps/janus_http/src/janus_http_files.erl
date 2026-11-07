@@ -16,10 +16,15 @@
 -behaviour(cowboy_handler).
 -export([init/2]).
 
+
 -define(MAX_BODY, 200 * 1024 * 1024).
 
 init(Req0, State) ->
     erase(janus_req_counted),
+    %% This face resolves no trace context, so drop any log context the
+    %% previous request left on this keep-alive process; its log lines
+    %% must not claim a foreign trace id.
+    ok = janus_trace:clear_log_context(),
     ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
     Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
     put(janus_request_id, ReqId),

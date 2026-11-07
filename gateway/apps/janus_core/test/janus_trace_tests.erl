@@ -356,15 +356,21 @@ trailing_flag(TP) ->
     Sz = byte_size(TP),
     binary:part(TP, Sz - 3, 3).
 
+%% Drive the ratio through the REAL config seam (the `telemetry'
+%% settings key), not a private cache key. That is the path an operator
+%% actually writes, so the tests fail if the seam or its precedence
+%% breaks — which a private key would hide. It also pins that the value
+%% is read per call, so a hot reload takes effect without a restart.
 with_ratio(R, Fun) ->
-    Old = persistent_term:get({janus_trace, sampler_ratio}, undefined),
-    persistent_term:put({janus_trace, sampler_ratio}, R),
+    Key = {janus, telemetry_cfg},
+    Old = persistent_term:get(Key, undefined),
+    persistent_term:put(Key, #{<<"sampling">> => #{<<"ratio">> => R}}),
     try
         Fun()
     after
         case Old of
-            undefined -> persistent_term:erase({janus_trace, sampler_ratio});
-            _ -> persistent_term:put({janus_trace, sampler_ratio}, Old)
+            undefined -> persistent_term:erase(Key);
+            _ -> persistent_term:put(Key, Old)
         end
     end.
 
