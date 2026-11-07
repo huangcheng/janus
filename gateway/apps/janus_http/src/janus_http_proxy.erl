@@ -1722,16 +1722,26 @@ is_content_chunk(_) ->
 is_content_chunk_map(Data) ->
     case maps:get(<<"type">>, Data, undefined) of
         <<"content_block_delta">> ->
-            has_delta_content(maps:get(<<"delta">>, Data, #{})),
             has_delta_content(maps:get(<<"delta">>, Data, #{}));
         <<"content_block_start">> ->
             has_block_content(maps:get(<<"content_block">>, Data, #{}));
+        <<"response.output_text.delta">> ->
+            %% Responses-family stream: the text rides at the top level.
+            is_nonempty_bin(maps:get(<<"delta">>, Data, undefined));
         _ ->
-            %% OpenAI-shaped chunks: choices[].delta with content or tool
-            %% calls. A delta carrying only `role` is the start marker and
-            %% is deliberately NOT content.
-            openai_has_content(maps:get(<<"choices">>, Data, undefined))
+            %% OpenAI chat-shaped chunks: choices[].delta with content or
+            %% tool calls. A delta carrying only `role` is the start
+            %% marker and is deliberately NOT content. The trailing
+            %% `delta` check covers the Responses shape, whose event
+            %% carries the same key without `choices`.
+            openai_has_content(maps:get(<<"choices">>, Data, undefined)) orelse
+                is_nonempty_bin(maps:get(<<"delta">>, Data, undefined))
     end.
+
+%% An attribute/stream value counts as content only when it is actually
+%% non-empty; `<<>>` deltas occur in keepalive-ish frames.
+is_nonempty_bin(B) ->
+    is_binary(B) andalso B =/= <<>>.
 
 has_delta_content(Delta) when is_map(Delta) ->
     Text = maps:get(<<"text">>, Delta, undefined),
@@ -1778,6 +1788,16 @@ openai_has_content(_) ->
 %% case for every chunk after the first token. Only the handful of chunks
 %% before it are actually parsed.
 note_ttfc_native(Chunk) ->
+    %% Telemetry must never break the response it is measuring: a decoder
+    %% throw here would abort a healthy passthrough stream. Swallow it and
+    %% leave TTFC unset for this request.
+    try
+        note_ttfc_native_1(Chunk)
+    catch
+        _:_ -> erase(janus_ttfc_buf), ok
+    end.
+
+note_ttfc_native_1(Chunk) ->
     case get(janus_first_content_chunk_us) of
         undefined ->
             Buffer = case get(janus_ttfc_buf) of
@@ -1798,7 +1818,10 @@ note_ttfc_native(Chunk) ->
                     end;
                 {error, leftover_cap} ->
                     %% Oversized frame: give up on TTFC for this request
-                    %% rather than holding an unbounded buffer.
+                    %% rather than holding an unbounded buffer. Recorded
+                    %% as unavailable so a reader can tell "no chunk yet"
+                    %% from "we stopped measuring".
+                    logger:warning(#{what => janus_ttfc_abandoned, reason => leftover_cap}),
                     erase(janus_ttfc_buf),
                     ok
             end;

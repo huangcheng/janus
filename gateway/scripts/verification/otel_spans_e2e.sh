@@ -84,6 +84,28 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if self.path.startswith("/late") or (wants_stream and b"late" in req):
+            role_only = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
+                         "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]}
+            usage_only = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
+                          "choices":[],"usage":{"prompt_tokens":100,"completion_tokens":7}}
+            content = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
+                       "choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":None}]}
+            parts = ["data: " + json.dumps(role_only) + "\n\n",
+                     "data: " + json.dumps(usage_only) + "\n\n"]
+            import time
+            payload = ""
+            # Genuine delay before the first CONTENT chunk: if TTFC counted
+            # the role-only chunk it would be ~0 despite this gap.
+            self.send_response(200)
+            self.send_header('content-type', 'text/event-stream')
+            self.end_headers()
+            for part in parts:
+                self.wfile.write(part.encode()); self.wfile.flush()
+            time.sleep(0.35)
+            for part in ["data: " + json.dumps(content) + "\n\n", "data: [DONE]\n\n"]:
+                self.wfile.write(part.encode()); self.wfile.flush()
+            return
         if wants_stream:
             # SSE terminal chunk carrying usage, so the stream path has a
             # real cache report to parse.
@@ -222,6 +244,13 @@ cat > "$OUT/seed.json" <<JSON
       "protocol": "anthropic_messages",
       "keys": ["upstream-secret"],
       "models": ["mock-claude"]
+    },
+    {
+      "name": "lateprov",
+      "base_url": "http://127.0.0.1:$MOCK_PORT/late",
+      "protocol": "openai_chat",
+      "keys": ["upstream-secret"],
+      "models": ["mock-late"]
     }
   ],
   "settings": {
@@ -543,8 +572,69 @@ ok = ok and str(attrs.get("gen_ai.usage.cache_write.input_tokens")) == "10"
 print(("PASS " if ok else "FAIL ")
       + "translated stream uses the WIRE protocol's additive accounting"
       + ("" if ok else f": input={attrs.get('gen_ai.usage.input_tokens')} (want 110)"))
+
+# The TRANSLATE path has its own TTFC hook (it decodes events itself), so
+# it needs its own assertion: the Anthropic message_start event carries
+# usage but no content, and must not count as the first chunk.
+raw = attrs.get("gen_ai.response.time_to_first_chunk")
+try:
+    tval = float(raw) > 0
+except (TypeError, ValueError):
+    tval = False
+print(("PASS " if tval else "FAIL ")
+      + "TTFC set on the TRANSLATED stream"
+      + ("" if tval else f": got {raw!r}"))
+sys.exit(0 if (ok and tval) else 1)
 sys.exit(0 if ok else 1)
 PYTR
+if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+
+# CONTENT-ONLY TTFC: the upstream sends a role-only chunk and a usage-only
+# chunk, then waits 350ms, then sends the first CONTENT chunk. A correct
+# implementation measures from the content chunk and reports >= 0.35s.
+# An implementation that counted the role-only event would report ~0.00s
+# and would be measuring connection setup, not generation.
+LATE_TRACE_ID="aaaabbbbccccddddeeeeffff00005555"
+LCODE=$(curl -s -o "$OUT/late_body.txt" -w '%{http_code}' --max-time 20 \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "content-type: application/json" \
+  -H "traceparent: 00-$LATE_TRACE_ID-00f067aa0ba902b7-01" \
+  -d '{"model":"mock-late","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+  "$BASE/v1/chat/completions" 2>/dev/null)
+if [ "$LCODE" = "200" ]; then ok "late-content stream served"
+else bad "late-content stream served" "http=$LCODE"; fi
+
+for _ in $(seq 1 12); do
+  grep -q "${LATE_TRACE_ID: -8}" "$COLLECT" 2>/dev/null && break
+  sleep 1
+done
+
+python3 - "$COLLECT" "$LATE_TRACE_ID" <<'PYLATE'
+import json, sys
+collect, tid = sys.argv[1], sys.argv[2]
+spans = []
+for line in open(collect):
+    if not line.strip():
+        continue
+    for rs in json.loads(line)["body"].get("resourceSpans", []):
+        for ss in rs.get("scopeSpans", []):
+            spans.extend(ss.get("spans", []))
+mine = [s for s in spans if s.get("traceId") == tid]
+client = next((s for s in mine if s.get("kind") == 3), None)
+attrs = {}
+if client:
+    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+raw = attrs.get("gen_ai.response.time_to_first_chunk")
+try:
+    val = float(raw)
+except (TypeError, ValueError):
+    val = None
+ok = val is not None and val >= 0.30
+print(("PASS " if ok else "FAIL ")
+      + "TTFC excludes role-only and usage-only chunks"
+      + ("" if ok else f": ttfc={raw!r} (want >= 0.30, i.e. measured at the content chunk)"))
+sys.exit(0 if ok else 1)
+PYLATE
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
 # Ledger join: the row must carry the span ids, so a trace can be joined
