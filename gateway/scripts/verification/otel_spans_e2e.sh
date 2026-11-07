@@ -48,7 +48,36 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get('content-length', 0))
-        _ = self.rfile.read(n)
+        req = self.rfile.read(n)
+        try:
+            wants_stream = json.loads(req).get("stream") is True
+        except Exception:
+            wants_stream = False
+        if wants_stream:
+            # SSE terminal chunk carrying usage, so the stream path has a
+            # real cache report to parse.
+            chunk = {
+                "id": "chatcmpl-e2e",
+                "object": "chat.completion.chunk",
+                "model": "mock-model",
+                "choices": [{"index": 0, "delta": {"content": "hi"},
+                             "finish_reason": None}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 7,
+                    "total_tokens": 107,
+                    "prompt_tokens_details": {"cached_tokens": 40},
+                    "cache_write_input_tokens": 10
+                }
+            }
+            payload = ("data: " + json.dumps(chunk) + "\n\n"
+                       "data: [DONE]\n\n").encode()
+            self.send_response(200)
+            self.send_header('content-type', 'text/event-stream')
+            self.send_header('content-length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         body = {
             "id": "chatcmpl-e2e",
             "object": "chat.completion",
@@ -281,6 +310,16 @@ bad += check("export post path is /v1/traces", True)
 mine = [s for s in spans if s.get("traceId") == tid]
 bad += check("spans carry the inbound trace id", len(mine) >= 2,
              f"found {len(mine)} of {len(spans)}")
+# Exactly two: one SERVER and one CLIENT. A duplicate means a span was
+# pushed twice (the open copy plus its closed copy), which is a regression
+# this asserts against directly.
+bad += check("exactly two spans, no duplicates", len(mine) == 2,
+             f"got {len(mine)}: {[s.get('name') for s in mine]}")
+# Both must be CLOSED: an equal start/end means the span was never
+# finished, which the exporter would happily emit.
+unclosed = [s.get("name") for s in mine
+            if s.get("startTimeUnixNano") == s.get("endTimeUnixNano")]
+bad += check("every span is closed", not unclosed, unclosed)
 
 kinds = {s.get("kind") for s in mine}
 bad += check("a SERVER span exists (kind 2)", 2 in kinds, f"kinds={kinds}")
@@ -361,6 +400,48 @@ sys.exit(1 if bad else 0)
 PY
 SPAN_CHECK=$?
 if [ "$SPAN_CHECK" -eq 0 ]; then pass=$((pass+6)); else fail=$((fail+1)); fi
+
+# Streaming parity: the SAME upstream numbers over SSE must yield the same
+# gen_ai.usage attributes. The stream path used to drop the cache
+# dimensions entirely, so a streamed request and an identical unary one
+# disagreed about tokens.
+curl -s -o /dev/null --max-time 20 \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "content-type: application/json" \
+  -H "traceparent: 00-aaaabbbbccccddddeeeeffff00003333-00f067aa0ba902b7-01" \
+  -d '{"model":"mock-model","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+  "$BASE/v1/chat/completions" 2>/dev/null
+
+for _ in $(seq 1 12); do
+  grep -q "00003333" "$COLLECT" 2>/dev/null && break
+  sleep 1
+done
+
+python3 - "$COLLECT" "$OUT" <<'PYSTREAM'
+import json, sys
+collect, out = sys.argv[1], sys.argv[2]
+spans = []
+for line in open(collect):
+    if not line.strip():
+        continue
+    for rs in json.loads(line)["body"].get("resourceSpans", []):
+        for ss in rs.get("scopeSpans", []):
+            spans.extend(ss.get("spans", []))
+mine = [s for s in spans if s.get("traceId", "").endswith("00003333")]
+client = next((s for s in mine if s.get("kind") == 3), None)
+def a(s):
+    return {x["key"]: next(iter(x["value"].values())) for x in s.get("attributes", [])}
+ok = client is not None
+attrs = a(client) if client else {}
+ok = ok and attrs.get("gen_ai.request.stream") is True
+ok = ok and str(attrs.get("gen_ai.usage.input_tokens")) == "100"
+ok = ok and str(attrs.get("gen_ai.usage.cache_read.input_tokens")) == "40"
+ok = ok and str(attrs.get("gen_ai.usage.cache_write.input_tokens")) == "10"
+print(("PASS " if ok else "FAIL ") + "streamed request reports the same cache dimensions"
+      + ("" if ok else f": {attrs}"))
+sys.exit(0 if ok else 1)
+PYSTREAM
+if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
 # Ledger join: the row must carry the span ids, so a trace can be joined
 # to billing.

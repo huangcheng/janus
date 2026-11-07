@@ -26,7 +26,7 @@ from_response_body(_, _) ->
 from_sse(Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
     Blob = <<Head/binary, "\n", Tail/binary>>,
     Lines = binary:split(Blob, <<"\n">>, [global]),
-    case lists:filtermap(fun data_line_usage/1, Lines) of
+    case lists:filtermap(fun(L) -> data_line_usage(Proto, L) end, Lines) of
         [] ->
             usage_regex_fallback(Proto, Blob);
         Usages ->
@@ -64,18 +64,18 @@ usage_regex_fallback(Proto, Blob) ->
 
 %%% internal
 
-data_line_usage(<<"data:", Rest/binary>>) ->
+data_line_usage(Proto, <<"data:", Rest/binary>>) ->
     Json = string:trim(Rest),
     case thoas:decode(Json) of
         {ok, Map} when is_map(Map) ->
-            case usage_in_map(Map) of
+            case usage_in_map(Proto, Map) of
                 undefined -> false;
                 U -> {true, U}
             end;
         _ ->
             false
     end;
-data_line_usage(_) ->
+data_line_usage(_Proto, _) ->
     false.
 
 usage_in_map(Proto, Map) ->
@@ -83,9 +83,6 @@ usage_in_map(Proto, Map) ->
         U when is_map(U) -> norm(Proto, U);
         _ -> nested(Proto, Map)
     end.
-
-usage_in_map(Map) ->
-    usage_in_map(unknown, Map).
 
 %% openai_responses nests usage under "response" (response.completed);
 %% Anthropic message_start nests it under "message".
