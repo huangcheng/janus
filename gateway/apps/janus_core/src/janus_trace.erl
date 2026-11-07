@@ -53,6 +53,8 @@
     upstream_headers/1,
     response_headers/1,
     encode_tracestate/1,
+    set_log_context/1,
+    clear_log_context/0,
     strip_trace_headers/1,
     ratio/0,
     %% Exported for eunit: the ratio sampler is pure over
@@ -240,6 +242,35 @@ response_headers(#trace{tid = Tid, sampled = Sampled, ts = Ts}) ->
         _ -> Base ++ [{<<"tracestate">>, encode_ts(Ts)}]
     end.
 
+%% @doc Publish the trace ids as `logger' PROCESS METADATA so every
+%% subsequent log line in this process carries them, with no call-site
+%% edits and no formatter change.
+%%
+%% Why process metadata and not the process dictionary: `logger' captures
+%% metadata AT THE CALL SITE and carries it in the event's `meta', so a
+%% formatter that read the pdict directly would read whatever dictionary
+%% happens to be current where formatting runs — wrong or absent for
+%% reports routed through a handler process. Process metadata is the OTP
+%% channel designed for exactly this, and `janus_log_fmt' already renders
+%% every non-reserved `meta' key as `key=value'.
+%%
+%% Must be called once per request on a Cowboy process: HTTP/1.1
+%% keep-alive reuses the process, and `set_process_metadata/1' REPLACES
+%% the map, so an unconditional call at handler entry cannot leak a
+%% previous request's ids.
+-spec set_log_context(t() | undefined) -> ok.
+set_log_context(undefined) ->
+    clear_log_context();
+set_log_context(#trace{tid = Tid}) ->
+    logger:set_process_metadata(#{trace_id => Tid}).
+
+%% @doc Drop the log context. Handlers that deliberately take no part in
+%% tracing (the models listing) call this so a keep-alive reuse cannot
+%% attribute their lines to the previous request's trace.
+-spec clear_log_context() -> ok.
+clear_log_context() ->
+    logger:unset_process_metadata().
+
 %% @doc Serialize tracestate entries back to a header value (`[]' when
 %% empty). Exported so the master→worker wire codec and the injector
 %% cannot drift into two encodings.
@@ -278,6 +309,27 @@ ratio() ->
 %% fall back to the ratio (spec: log-and-ignore would be loud; we stay
 %% quiet on the hot path and fall back).
 resolve_ratio() ->
+    %% Precedence: dashboard setting -> OTEL_TRACES_SAMPLER -> env arg
+    %% -> default. The setting is what the operator edits in the UI, so it
+    %% wins over a boot-time env var.
+    case setting_ratio() of
+        undefined -> resolve_ratio_env();
+        R -> R
+    end.
+
+setting_ratio() ->
+    try
+        case persistent_term:get({janus, telemetry_cfg}) of
+            #{<<"sampling">> := #{<<"ratio">> := R}} when is_number(R), R >= 0, R =< 1 ->
+                R * 1.0;
+            _ ->
+                undefined
+        end
+    catch
+        error:badarg -> undefined
+    end.
+
+resolve_ratio_env() ->
     case os:getenv("OTEL_TRACES_SAMPLER") of
         "always_on" -> 1.0;
         "always_off" -> 0.0;

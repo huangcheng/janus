@@ -354,6 +354,7 @@ distribute_settings(Rows) ->
     maybe_clear_absent(Present, <<"model_sync">>, fun janus_sched_knobs:put_model_sync_raw/1),
     maybe_clear_absent(Present, <<"fleet">>, fun janus_sched_knobs:put_fleet_raw/1),
     maybe_clear_absent(Present, <<"worker_capacity">>, fun clear_worker_capacity/1),
+    maybe_clear_absent(Present, <<"telemetry">>, fun clear_telemetry/1),
     lists:foreach(
         fun
             (#{key := <<"failover">>, value := V}) ->
@@ -396,6 +397,37 @@ distribute_settings(Rows) ->
                     _ ->
                         logger:warning(#{
                             what => janus_settings_bad_value, key => fleet
+                        })
+                end;
+            %% Telemetry knobs (OpenTelemetry alignment spec). Map
+            %% {"export": {"enabled": bool, "endpoint": str, ...},
+            %%  "sampling": {"ratio": float}}.
+            %%
+            %% Default OFF, and an ABSENT key means off — the consumer
+            %% (`janus_telemetry:enabled/0`) reads persistent_term with a
+            %% false default, so a fresh DB, a deleted row and an explicit
+            %% false all agree. The sampling ratio is the one field with a
+            %% live effect today (the trace sampler reads it per root
+            %% span); the export fields are consumed when the exporter
+            %% lands.
+            (#{key := <<"telemetry">>, value := V}) ->
+                case decode_json(V) of
+                    {ok, Map} when is_map(Map) ->
+                        case validate_telemetry(Map) of
+                            ok ->
+                                persistent_term:put({janus, telemetry_cfg}, Map);
+                            {error, Why} ->
+                                %% Bad value: keep the previous config
+                                %% rather than half-applying a typo.
+                                logger:warning(#{
+                                    what => janus_settings_bad_value,
+                                    key => telemetry,
+                                    reason => Why
+                                })
+                        end;
+                    _ ->
+                        logger:warning(#{
+                            what => janus_settings_bad_value, key => telemetry
                         })
                 end;
             %% Translation unblock knobs (translation spec 1.9): map
@@ -583,6 +615,31 @@ worker_capacity_overrides() ->
     persistent_term:get(?PT_WORKER_CAPACITY, #{}).
 
 %% maybe_clear_absent/3 only ever calls this with `undefined`.
+%% Telemetry config validation. Reject rather than coerce: a ratio of
+%% "0.5x" silently becoming 0.05 would look like working telemetry that
+%% samples a tenth of what the operator asked for.
+validate_telemetry(Map) ->
+    Sampling = maps:get(<<"sampling">>, Map, #{}),
+    Export = maps:get(<<"export">>, Map, #{}),
+    case {is_map(Sampling), is_map(Export)} of
+        {false, _} ->
+            {error, sampling_not_an_object};
+        {_, false} ->
+            {error, export_not_an_object};
+        _ ->
+            validate_ratio(maps:get(<<"ratio">>, Sampling, 0.05))
+    end.
+
+validate_ratio(R) when is_float(R), R >= 0.0, R =< 1.0 -> ok;
+validate_ratio(R) when is_integer(R), R >= 0, R =< 1 -> ok;
+validate_ratio(R) -> {error, {bad_sampling_ratio, R}}.
+
+%% Absent telemetry row => off. Erase so the consumer sees its default.
+-spec clear_telemetry(term()) -> ok.
+clear_telemetry(_Present) ->
+    persistent_term:erase({janus, telemetry_cfg}),
+    ok.
+
 -spec clear_worker_capacity(undefined) -> ok.
 clear_worker_capacity(undefined) ->
     %% Erase (not put(undefined)): a stale override must not survive

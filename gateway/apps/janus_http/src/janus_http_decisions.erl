@@ -52,6 +52,7 @@ method_not_allowed(Req0) ->
         cowboy_req:header(<<"tracestate">>, Req0)
     ),
     put(janus_trace, Trace),
+    ok = janus_trace:set_log_context(Trace),
     Req1 = janus_request_id:set_trace_response_headers(
         cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
         Trace

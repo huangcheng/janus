@@ -99,6 +99,28 @@ H6=$(curl -D - -o /dev/null "${CHAT[@]}" -H "traceparent: $IN6" "$BASE/v1/chat/c
 TP6=$(printf '%s' "$H6" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
 check "A6 version-01 trace continued" "4bf92f3577b34da6a3ce929d0e0e4736" "$(printf '%s' "$TP6" | cut -d- -f2)"
 
+
+# A8: log/trace correlation. The request's log line must carry the SAME
+# trace id the response advertises, so a log can be pivoted to a trace.
+# This is the whole point of the log-context work and no unit test can
+# prove it: it only holds if the logger metadata reaches the formatter
+# on a real Cowboy handler process.
+A8TID="00-aaaabbbbccccddddeeeeffff00001111-00f067aa0ba902b7-01"
+H8=$(curl -D - -o /dev/null "${CHAT[@]}" -H "traceparent: $A8TID" "$BASE/v1/chat/completions")
+sleep 1
+if grep -q "trace_id=aaaabbbbccccddddeeeeffff00001111" "$OUT/server.log"; then
+  echo "PASS A8 log line carries the request trace id"; pass=$((pass+1))
+else
+  echo "FAIL A8 no log line carried the request trace id"; fail=$((fail+1))
+fi
+
+# A9: a line logged with no active request (boot) must NOT claim an id.
+if grep -E "^[0-9T:.\-]+Z (info|warn|error) " "$OUT/server.log" | grep -qv "trace_id="; then
+  echo "PASS A9 lines outside a request carry no trace id"; pass=$((pass+1))
+else
+  echo "FAIL A9 every line claimed a trace id"; fail=$((fail+1))
+fi
+
 # A7: tracestate without traceparent is discarded
 H7=$(curl -D - -o /dev/null "${CHAT[@]}" -H "tracestate: orphan=1" "$BASE/v1/chat/completions")
 TS7=$(printf '%s' "$H7" | tr -d '\r' | awk 'tolower($1)=="tracestate:"{print $2}')

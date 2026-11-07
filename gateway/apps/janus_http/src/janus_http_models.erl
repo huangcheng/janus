@@ -9,7 +9,10 @@ init(Req0, State) ->
     Req1 = cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
     put(janus_request_id, ReqId),
     %% Task 3: /v1/models is deliberately EXCLUDED from trace
-    %% resolution/echo — no upstream call, no usage row.
+    %% resolution/echo — no upstream call, no usage row. It must also
+    %% CLEAR any log context left by the previous request on this
+    %% keep-alive process, or its log lines would claim a foreign trace.
+    ok = janus_trace:clear_log_context(),
     case janus_http_auth:require_agent(Req1) of
         {ok, Agent, Req2} ->
             %% Exact-match route yields path_info = undefined; the

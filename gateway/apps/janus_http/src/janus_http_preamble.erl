@@ -67,6 +67,7 @@ read(Req0, Opts) when is_map(Opts) ->
     %% a stale counted flag from the previous request must never leak.
     erase(janus_req_counted),
     erase(janus_error_detail),
+    erase(janus_req_started),
     ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
     %% Trace context beside the request id (Task 3): resolve ONCE per
     %% request — the unconditional put also overwrites any previous
@@ -75,7 +76,16 @@ read(Req0, Opts) when is_map(Opts) ->
         cowboy_req:header(<<"traceparent">>, Req0),
         cowboy_req:header(<<"tracestate">>, Req0)
     ),
+    %% Request-arrival anchor. `janus_usage_ctx.started' is captured at
+    %% PROXY entry, i.e. AFTER auth and quota admission, so it cannot time
+    %% the logical operation. Time-to-first-chunk must be measured from
+    %% here (the semconv's "before auth and the first attempt, including
+    %% retries"), so the anchor is taken once at the earliest point that
+    %% still has the trace context resolved.
+    put(janus_req_started, erlang:monotonic_time(microsecond)),
     put(janus_trace, Trace),
+    %% Every log line this request emits now carries trace_id=... .
+    ok = janus_trace:set_log_context(Trace),
     Req1 = janus_request_id:set_trace_response_headers(
         cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
         Trace
