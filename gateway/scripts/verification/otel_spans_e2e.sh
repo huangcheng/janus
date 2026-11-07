@@ -85,21 +85,35 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         if self.path.startswith("/untyped"):
+            import time
             # A provider-specific chat extension: no `type`, generated text
-            # at a TOP-LEVEL `delta`. This is the exact shape the
-            # `is_untyped_delta/1` branch exists for, so the assertion below
-            # fails if that branch is removed.
+            # at a TOP-LEVEL `delta`. That is the exact shape
+            # `is_untyped_delta/1` exists for.
+            #
+            # The FIRST frame carries an EMPTY delta (a keepalive-ish frame,
+            # which the code documents as real) and is sent alone, then a
+            # gap, then the frame with actual text. That makes the single
+            # assertion below discriminate all three states:
+            #   branch removed          -> TTFC absent
+            #   empty-delta guard gone  -> TTFC ~0.00 (stamped on the empty frame)
+            #   correct                 -> TTFC >= 0.30 (stamped on the text frame)
+            empty = {"id": "c", "object": "chat.completion.chunk",
+                     "model": "mock-untyped", "delta": ""}
             chunk = {"id": "c", "object": "chat.completion.chunk",
                      "model": "mock-untyped", "delta": "hi"}
             end = {"id": "c", "object": "chat.completion.chunk", "model": "mock-untyped",
                    "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2}}
-            payload = ("data: " + json.dumps(chunk) + "\n\n"
-                       "data: " + json.dumps(end) + "\n\ndata: [DONE]\n\n").encode()
             self.send_response(200)
             self.send_header('content-type', 'text/event-stream')
-            self.send_header('content-length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            self.wfile.write(("data: " + json.dumps(empty) + "\n\n").encode())
+            self.wfile.flush()
+            time.sleep(0.35)
+            for body in (chunk, end):
+                self.wfile.write(("data: " + json.dumps(body) + "\n\n").encode())
+                self.wfile.flush()
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
             return
         if self.path.startswith("/resp"):
             import time
@@ -375,6 +389,65 @@ if ! grep -q READY "$OUT/server.log"; then
   echo "FAIL: server did not boot"; tail -30 "$OUT/server.log"; exit 1
 fi
 sleep 2
+
+# Shared span-reading helper. The trace/span/attribute walk appears in five
+# assertions; duplicating it meant a fix to attribute decoding (arrayValue,
+# intValue) had to be made five times or the assertions would silently
+# diverge. Each heredoc imports this instead.
+cat > "$OUT/span_util.py" <<'PYSPANUTIL'
+import json, sys
+
+def load_spans(collect):
+    """Every span in every OTLP body the collector received."""
+    spans = []
+    for line in open(collect):
+        if not line.strip():
+            continue
+        for rs in json.loads(line)["body"].get("resourceSpans", []):
+            for ss in rs.get("scopeSpans", []):
+                spans.extend(ss.get("spans", []))
+    return spans
+
+def attrs_of(span):
+    """Flatten an OTLP attribute list into {key: python-value}.
+
+    OTLP types attributes as {key, value:{<type>Value: ...}}. intValue is
+    a DECIMAL STRING on the wire, so it is converted back to int; an
+    arrayValue is joined rather than silently taking its first element,
+    which is what `next(iter(...))` did.
+    """
+    out = {}
+    for a in span.get("attributes", []) or []:
+        val = a.get("value", {}) or {}
+        if "intValue" in val:
+            try:
+                out[a["key"]] = int(val["intValue"])
+            except (TypeError, ValueError):
+                out[a["key"]] = val["intValue"]
+        elif "doubleValue" in val:
+            out[a["key"]] = float(val["doubleValue"])
+        elif "boolValue" in val:
+            out[a["key"]] = bool(val["boolValue"])
+        elif "arrayValue" in val:
+            out[a["key"]] = [list(v.values())[0] for v in val["arrayValue"].get("values", [])]
+        else:
+            out[a["key"]] = next(iter(val.values())) if val else None
+    return out
+
+def client_for(collect, tid):
+    """(client_span, attrs) for the CLIENT span of one trace."""
+    mine = [s for s in load_spans(collect) if s.get("traceId") == tid]
+    client = next((s for s in mine if s.get("kind") == 3), None)
+    return client, (attrs_of(client) if client else {})
+
+def ttfc(attrs):
+    """TTFC as a float, or None when the attribute is absent/bad."""
+    raw = attrs.get("gen_ai.response.time_to_first_chunk")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+PYSPANUTIL
 
 pass=0; fail=0
 ok()   { echo "PASS $1"; pass=$((pass+1)); }
@@ -665,26 +738,13 @@ for _ in $(seq 1 12); do
   sleep 1
 done
 
-python3 - "$COLLECT" "$LATE_TRACE_ID" <<'PYLATE'
-import json, sys
-collect, tid = sys.argv[1], sys.argv[2]
-spans = []
-for line in open(collect):
-    if not line.strip():
-        continue
-    for rs in json.loads(line)["body"].get("resourceSpans", []):
-        for ss in rs.get("scopeSpans", []):
-            spans.extend(ss.get("spans", []))
-mine = [s for s in spans if s.get("traceId") == tid]
-client = next((s for s in mine if s.get("kind") == 3), None)
-attrs = {}
-if client:
-    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
-raw = attrs.get("gen_ai.response.time_to_first_chunk")
-try:
-    val = float(raw)
-except (TypeError, ValueError):
-    val = None
+python3 - "$COLLECT" "$LATE_TRACE_ID" "$OUT" <<'PYLATE'
+import sys
+sys.path.insert(0, sys.argv[3])
+from span_util import client_for, ttfc
+_collect, tid = sys.argv[1], sys.argv[2]
+_, attrs = client_for(_collect, tid)
+val = ttfc(attrs)
 ok = val is not None and val >= 0.30
 print(("PASS " if ok else "FAIL ")
       + "TTFC excludes role-only and usage-only chunks"
@@ -712,26 +772,14 @@ for _ in $(seq 1 12); do
   sleep 1
 done
 
-python3 - "$COLLECT" "$RESP_TRACE_ID" <<'PYRESP'
-import json, sys
-collect, tid = sys.argv[1], sys.argv[2]
-spans = []
-for line in open(collect):
-    if not line.strip():
-        continue
-    for rs in json.loads(line)["body"].get("resourceSpans", []):
-        for ss in rs.get("scopeSpans", []):
-            spans.extend(ss.get("spans", []))
-mine = [s for s in spans if s.get("traceId") == tid]
-client = next((s for s in mine if s.get("kind") == 3), None)
-attrs = {}
-if client:
-    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+python3 - "$COLLECT" "$RESP_TRACE_ID" "$OUT" <<'PYRESP'
+import sys
+sys.path.insert(0, sys.argv[3])
+from span_util import client_for, ttfc
+_collect, tid = sys.argv[1], sys.argv[2]
+_, attrs = client_for(_collect, tid)
 raw = attrs.get("gen_ai.response.time_to_first_chunk")
-try:
-    val = float(raw)
-except (TypeError, ValueError):
-    val = None
+val = ttfc(attrs)
 # >= 0.30s discriminates BOTH failure modes in one assertion: absent means
 # the family predicate missed response.* deltas, and ~0.00s means
 # `response.created` (which carries no text) was counted as content.
@@ -762,30 +810,21 @@ for _ in $(seq 1 12); do
   sleep 1
 done
 
-python3 - "$COLLECT" "$UNTYPED_TRACE_ID" <<'PYUNTYPED'
-import json, sys
-collect, tid = sys.argv[1], sys.argv[2]
-spans = []
-for line in open(collect):
-    if not line.strip():
-        continue
-    for rs in json.loads(line)["body"].get("resourceSpans", []):
-        for ss in rs.get("scopeSpans", []):
-            spans.extend(ss.get("spans", []))
-mine = [s for s in spans if s.get("traceId") == tid]
-client = next((s for s in mine if s.get("kind") == 3), None)
-attrs = {}
-if client:
-    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+python3 - "$COLLECT" "$UNTYPED_TRACE_ID" "$OUT" <<'PYUNTYPED'
+import sys
+sys.path.insert(0, sys.argv[3])
+from span_util import client_for, ttfc
+_collect, tid = sys.argv[1], sys.argv[2]
+_, attrs = client_for(_collect, tid)
 raw = attrs.get("gen_ai.response.time_to_first_chunk")
-try:
-    val = float(raw) > 0
-except (TypeError, ValueError):
-    val = False
-print(("PASS " if val else "FAIL ")
-      + "TTFC set on an UNTYPED top-level-delta chunk"
-      + ("" if val else f": got {raw!r} (is_untyped_delta branch missing?)"))
-sys.exit(0 if val else 1)
+val = ttfc(attrs)
+# >= 0.30 discriminates all three states: absent means the branch is gone,
+# ~0.00 means the EMPTY first delta was wrongly counted as content.
+ok_untyped = val is not None and val >= 0.30
+print(("PASS " if ok_untyped else "FAIL ")
+      + "TTFC on an UNTYPED chunk ignores the empty delta"
+      + ("" if ok_untyped else f": got {raw!r} (want >= 0.30; ~0 or absent both mean a bug)"))
+sys.exit(0 if ok_untyped else 1)
 PYUNTYPED
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
