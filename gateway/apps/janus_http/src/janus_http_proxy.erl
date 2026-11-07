@@ -1725,17 +1725,33 @@ is_content_chunk_map(Data) ->
             has_delta_content(maps:get(<<"delta">>, Data, #{}));
         <<"content_block_start">> ->
             has_block_content(maps:get(<<"content_block">>, Data, #{}));
-        <<"response.output_text.delta">> ->
-            %% Responses-family stream: the text rides at the top level.
-            is_nonempty_bin(maps:get(<<"delta">>, Data, undefined));
         _ ->
-            %% OpenAI chat-shaped chunks: choices[].delta with content or
-            %% tool calls. A delta carrying only `role` is the start
-            %% marker and is deliberately NOT content. The trailing
-            %% `delta` check covers the Responses shape, whose event
-            %% carries the same key without `choices`.
+            %% Chat-shaped chunks: choices[].delta with content or tool
+            %% calls. A delta carrying only `role` is the start marker and
+            %% is deliberately NOT content.
             openai_has_content(maps:get(<<"choices">>, Data, undefined)) orelse
-                is_nonempty_bin(maps:get(<<"delta">>, Data, undefined))
+                is_responses_delta(Data)
+    end.
+
+%% Responses-family streams tag every event with `type' ("response.*") and
+%% put the generated text under a top-level `delta'. Handled as a family
+%% rather than one event name at a time: `response.output_text.delta' is
+%% the common one, but the reasoning and function-argument deltas carry
+%% generated content the same way, and enumerating them would silently
+%% stop measuring TTFC the day a new one appears.
+%%
+%% The `type' prefix check is what keeps this from firing on chat chunks,
+%% which have no `type' but DO sometimes carry a top-level `delta' from
+%% provider-specific extensions.
+is_responses_delta(Data) ->
+    case maps:get(<<"type">>, Data, undefined) of
+        T when is_binary(T) ->
+            case T of
+                <<"response.", _/binary>> -> is_nonempty_bin(maps:get(<<"delta">>, Data, undefined));
+                _ -> false
+            end;
+        _ ->
+            false
     end.
 
 %% An attribute/stream value counts as content only when it is actually

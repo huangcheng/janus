@@ -84,7 +84,7 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
-        if self.path.startswith("/late") or (wants_stream and b"late" in req):
+        if self.path.startswith("/late"):
             role_only = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
                          "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]}
             usage_only = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
@@ -585,7 +585,6 @@ print(("PASS " if tval else "FAIL ")
       + "TTFC set on the TRANSLATED stream"
       + ("" if tval else f": got {raw!r}"))
 sys.exit(0 if (ok and tval) else 1)
-sys.exit(0 if ok else 1)
 PYTR
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
