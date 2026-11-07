@@ -627,7 +627,7 @@ done
 python3 - "$COLLECT" "$OUT" "$STREAM_TRACE_ID" <<'PYSTREAM'
 import sys
 sys.path.insert(0, sys.argv[2])
-from span_util import client_for
+from span_util import client_for, ttfc as ttfc_of
 _collect, _out, stream_tid = sys.argv[1], sys.argv[2], sys.argv[3]
 client, attrs = client_for(_collect, stream_tid)
 ok = client is not None
@@ -640,13 +640,10 @@ print(("PASS " if ok else "FAIL ") + "streamed request reports the same cache di
 
 # TTFC: required on a stream that produced content, and it must be a real
 # positive number, not 0 and not absent.
-ttfc = attrs.get("gen_ai.response.time_to_first_chunk")
-try:
-    ttfc_ok = float(ttfc) > 0
-except (TypeError, ValueError):
-    ttfc_ok = False
+ttfc_raw = attrs.get("gen_ai.response.time_to_first_chunk")
+ttfc_ok = (ttfc_of(attrs) or 0) > 0
 print(("PASS " if ttfc_ok else "FAIL ") + "gen_ai.response.time_to_first_chunk set on a stream"
-      + ("" if ttfc_ok else f": got {ttfc!r}"))
+      + ("" if ttfc_ok else f": got {ttfc_raw!r}"))
 sys.exit(0 if (ok and ttfc_ok) else 1)
 PYSTREAM
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
@@ -758,8 +755,8 @@ sys.path.insert(0, sys.argv[3])
 from span_util import client_for, ttfc
 _collect, tid = sys.argv[1], sys.argv[2]
 _, attrs = client_for(_collect, tid)
-raw = attrs.get("gen_ai.response.time_to_first_chunk")
 val = ttfc(attrs)
+raw = attrs.get("gen_ai.response.time_to_first_chunk")
 # >= 0.30s discriminates BOTH failure modes in one assertion: absent means
 # the family predicate missed response.* deltas, and ~0.00s means
 # `response.created` (which carries no text) was counted as content.
