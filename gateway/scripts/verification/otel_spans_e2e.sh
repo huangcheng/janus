@@ -400,6 +400,12 @@ if client:
                  a.get("gen_ai.request.stream"))
     bad += check("span name is '{op} {model}'",
                  client.get("name") == "chat mock-model", client.get("name"))
+    # A non-streaming request has no "first chunk"; the semconv says the
+    # attribute MUST NOT be set. Reporting 0 would be indistinguishable
+    # from an instantaneous response.
+    bad += check("no time_to_first_chunk on a unary request",
+                 "gen_ai.response.time_to_first_chunk" not in a,
+                 a.get("gen_ai.response.time_to_first_chunk"))
 
 # Token usage: the semconv wants billed input (cache included).
 if client:
@@ -480,7 +486,17 @@ ok = ok and str(attrs.get("gen_ai.usage.cache_read.input_tokens")) == "40"
 ok = ok and str(attrs.get("gen_ai.usage.cache_write.input_tokens")) == "10"
 print(("PASS " if ok else "FAIL ") + "streamed request reports the same cache dimensions"
       + ("" if ok else f": {attrs}"))
-sys.exit(0 if ok else 1)
+
+# TTFC: required on a stream that produced content, and it must be a real
+# positive number, not 0 and not absent.
+ttfc = attrs.get("gen_ai.response.time_to_first_chunk")
+try:
+    ttfc_ok = float(ttfc) > 0
+except (TypeError, ValueError):
+    ttfc_ok = False
+print(("PASS " if ttfc_ok else "FAIL ") + "gen_ai.response.time_to_first_chunk set on a stream"
+      + ("" if ttfc_ok else f": got {ttfc!r}"))
+sys.exit(0 if (ok and ttfc_ok) else 1)
 PYSTREAM
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 

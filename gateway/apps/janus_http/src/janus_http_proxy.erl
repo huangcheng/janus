@@ -88,6 +88,8 @@ handle(ClientProto, Agent, Body, Req, State) ->
     %% later keep-alive request parse its tokens under the previous
     %% request's provider accounting rule.
     erase(janus_usage_wire_proto),
+    erase(janus_first_content_chunk_us),
+    erase(janus_ttfc_buf),
     %% upstream_call/5 wall time: absent on paths that never reached
     %% upstream, and must never be inherited by a later keep-alive
     %% request (maybe_note_latency/1 feeds it into the LB EWMA).
@@ -1256,6 +1258,7 @@ translate_chunk(ClientProto, ProviderProto, Chunk, Req2) ->
                 lists:foldl(
                     fun(Ev, StAcc) ->
                         guard_chat_multi_choice(ProviderProto, Ev),
+                        _ = note_first_content_chunk(Ev),
                         case janus_protocol_translate:translate_sse(ClientProto, ProviderProto, Ev, StAcc) of
                             {ok, Frames, StNext} ->
                                 write_frames(Frames, Req2),
@@ -1674,6 +1677,149 @@ decisions_filter_headers(Headers) ->
     filter_headers_json(Headers).
 
 %%--------------------------------------------------------------------
+%% Time to first chunk (TTFC)
+%%
+%% The semconv defines `gen_ai.response.time_to_first_chunk' as seconds
+%% from the start of the LOGICAL operation (before auth, before the first
+%% attempt, including retries) to the arrival of the first content-bearing
+%% chunk, and says it MUST NOT be set when no chunk arrives. Two things
+%% follow, and both are easy to get wrong:
+%%
+%%   * The anchor is NOT `janus_usage_ctx.started' (captured at PROXY
+%%     entry, after auth and quota admission) and NOT `TtfbStart' (starts
+%%     at dispatch-ack, i.e. after the worker round trip). It is
+%%     `janus_req_started', taken in the preamble.
+%%   * A "chunk" is a CONTENT-BEARING decoded event. A role-only start
+%%     event arrives BEFORE any token is generated, so counting it would
+%%     report a TTFC that is really just connection setup and measure
+%%     nothing.
+%%--------------------------------------------------------------------
+
+%% Record the first content-bearing chunk for this request, once.
+note_first_content_chunk(Event) ->
+    case get(janus_first_content_chunk_us) of
+        undefined ->
+            case is_content_chunk(Event) of
+                true ->
+                    put(janus_first_content_chunk_us, erlang:monotonic_time(microsecond)),
+                    ok;
+                false ->
+                    ok
+            end;
+        _ ->
+            ok
+    end.
+
+%% True when this decoded SSE event actually carries generated content.
+%% Checked against the DECODED payload, not the raw bytes, so a keepalive
+%% comment, a `[DONE]` sentinel, a usage-only terminal event, or a bare
+%% role announcement cannot be mistaken for the first token.
+is_content_chunk(#{data := Data}) when is_map(Data) ->
+    is_content_chunk_map(Data);
+is_content_chunk(_) ->
+    false.
+
+is_content_chunk_map(Data) ->
+    case maps:get(<<"type">>, Data, undefined) of
+        <<"content_block_delta">> ->
+            has_delta_content(maps:get(<<"delta">>, Data, #{})),
+            has_delta_content(maps:get(<<"delta">>, Data, #{}));
+        <<"content_block_start">> ->
+            has_block_content(maps:get(<<"content_block">>, Data, #{}));
+        _ ->
+            %% OpenAI-shaped chunks: choices[].delta with content or tool
+            %% calls. A delta carrying only `role` is the start marker and
+            %% is deliberately NOT content.
+            openai_has_content(maps:get(<<"choices">>, Data, undefined))
+    end.
+
+has_delta_content(Delta) when is_map(Delta) ->
+    Text = maps:get(<<"text">>, Delta, undefined),
+    ToolInput = maps:get(<<"partial_json">>, Delta, undefined),
+    case is_binary(Text) andalso Text =/= <<>> of
+        true -> true;
+        false -> is_binary(ToolInput) andalso ToolInput =/= <<>>
+    end;
+has_delta_content(_) ->
+    false.
+
+has_block_content(Block) when is_map(Block) ->
+    Text = maps:get(<<"text">>, Block, undefined),
+    is_binary(Text) andalso Text =/= <<>>;
+has_block_content(_) ->
+    false.
+
+openai_has_content(Choices) when is_list(Choices) ->
+    lists:any(
+        fun
+            (Choice) when is_map(Choice) ->
+                case maps:get(<<"delta">>, Choice, undefined) of
+                    Delta when is_map(Delta) ->
+                        Content = maps:get(<<"content">>, Delta, undefined),
+                        ToolCalls = maps:get(<<"tool_calls">>, Delta, undefined),
+                        (is_binary(Content) andalso Content =/= <<>>) orelse
+                            (is_list(ToolCalls) andalso ToolCalls =/= []);
+                    _ ->
+                        false
+                end;
+            (_) ->
+                false
+        end,
+        Choices
+    );
+openai_has_content(_) ->
+    false.
+
+%% Native (passthrough) streams forward raw provider bytes and never
+%% decode them, so the first content chunk has to be found here.
+%%
+%% The cost is bounded and paid only until the answer is known: the first
+%% thing this does is check whether TTFC is already recorded, which is the
+%% case for every chunk after the first token. Only the handful of chunks
+%% before it are actually parsed.
+note_ttfc_native(Chunk) ->
+    case get(janus_first_content_chunk_us) of
+        undefined ->
+            Buffer = case get(janus_ttfc_buf) of
+                B when is_binary(B) -> B;
+                _ -> <<>>
+            end,
+            case janus_protocol_translate:sse_events(Buffer, Chunk) of
+                {ok, Events, Rest} ->
+                    put(janus_ttfc_buf, Rest),
+                    case lists:any(fun is_content_chunk/1, Events) of
+                        true ->
+                            put(janus_first_content_chunk_us, erlang:monotonic_time(microsecond)),
+                            %% Stop parsing from here on.
+                            erase(janus_ttfc_buf),
+                            ok;
+                        false ->
+                            ok
+                    end;
+                {error, leftover_cap} ->
+                    %% Oversized frame: give up on TTFC for this request
+                    %% rather than holding an unbounded buffer.
+                    erase(janus_ttfc_buf),
+                    ok
+            end;
+        _ ->
+            ok
+    end.
+
+%% The TTFC attribute value in SECONDS (the semconv's unit), or
+%% `undefined' when no content chunk ever arrived.
+ttfc_seconds() ->
+    case {get(janus_req_started), get(janus_first_content_chunk_us)} of
+        {Start, First} when is_integer(Start), is_integer(First) ->
+            case First >= Start of
+                true -> (First - Start) / 1000000;
+                false -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+%%--------------------------------------------------------------------
 %% Upstream result handling
 %%--------------------------------------------------------------------
 
@@ -1767,6 +1913,7 @@ handle_upstream(ClientProto, ProviderProto, {ok, stream, Status, Headers, Drain}
         Drain(
             fun(Chunk) ->
                 capture_usage_chunk(Chunk),
+                _ = note_ttfc_native(Chunk),
                 ok = note_sse_line_state(Chunk),
                 stream_client_frame(Chunk, nofin, Req2)
             end,
@@ -2643,8 +2790,14 @@ exhaust_reason(all_cooling) -> all_cooling;
 exhaust_reason(no_eligible) -> no_eligible;
 exhaust_reason(budget) -> budget;
 exhaust_reason(max_names) -> max_names;
-exhaust_reason(R) when is_atom(R) -> R;
-exhaust_reason(_) -> no_eligible.
+%% Deliberately NO "any atom passes through" clause. A metric label must
+%% come from a closed set: an unexpected atom would silently create a new
+%% time series, and a per-request label value is unbounded cardinality.
+%% Callers that reach here with something new collapse to a known class
+%% and the miss is visible in the logs rather than in the metric.
+exhaust_reason(R) ->
+    logger:warning(#{what => janus_metrics_unmapped_exhaust_reason, reason => R}),
+    no_eligible.
 
 skip_reason(unavailable) -> unavailable;
 skip_reason(stream_incompatible) -> stream_incompatible;
@@ -2653,8 +2806,11 @@ skip_reason(wrong_modality) -> wrong_modality;
 skip_reason(protocol_requires_native) -> protocol_requires_native;
 skip_reason(all_cooling) -> all_cooling;
 skip_reason(no_vision) -> no_vision;
-skip_reason(R) when is_atom(R) -> R;
-skip_reason(_) -> unavailable.
+%% Closed set, same reason as exhaust_reason/1: an unmapped atom must not
+%% mint a new time series per request.
+skip_reason(R) ->
+    logger:warning(#{what => janus_metrics_unmapped_skip_reason, reason => R}),
+    unavailable.
 
 %% Distinguish budget vs max_names exhaustion when gates fail mid-walk.
 %% (Caller already bumped no_eligible/all_cooling from next_eligible.)
@@ -4019,7 +4175,12 @@ attach_usage_to_span(Usage) when is_map(Usage) ->
                     <<"gen_ai.usage.input_tokens">> => maps:get(prompt, Usage, undefined),
                     <<"gen_ai.usage.output_tokens">> => maps:get(completion, Usage, undefined),
                     <<"gen_ai.usage.cache_read.input_tokens">> => nonzero(maps:get(cache_read, Usage, undefined)),
-                    <<"gen_ai.usage.cache_write.input_tokens">> => nonzero(maps:get(cache_write, Usage, undefined))
+                    <<"gen_ai.usage.cache_write.input_tokens">> => nonzero(maps:get(cache_write, Usage, undefined)),
+                    %% Streaming only, and only when a content chunk
+                    %% actually arrived: the semconv says MUST NOT set
+                    %% this if no chunk was received, so `undefined'
+                    %% omits the attribute rather than reporting 0.
+                    <<"gen_ai.response.time_to_first_chunk">> => ttfc_seconds()
                 },
                 Updated = janus_otel_span:set_attrs(Latest, Attrs),
                 _ = replace_span(Updated),
