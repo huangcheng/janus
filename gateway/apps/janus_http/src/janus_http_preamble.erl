@@ -68,6 +68,9 @@ read(Req0, Opts) when is_map(Opts) ->
     erase(janus_req_counted),
     erase(janus_error_detail),
     erase(janus_req_started),
+    %% Span state from the previous request on this keep-alive process.
+    erase(janus_otel_spans),
+    erase(janus_otel_server_span),
     ReqId = janus_request_id:resolve(cowboy_req:header(<<"x-request-id">>, Req0)),
     %% Trace context beside the request id (Task 3): resolve ONCE per
     %% request — the unconditional put also overwrites any previous
@@ -84,6 +87,12 @@ read(Req0, Opts) when is_map(Opts) ->
     %% still has the trace context resolved.
     put(janus_req_started, erlang:monotonic_time(microsecond)),
     put(janus_trace, Trace),
+    %% SERVER span for the logical operation, opened at the earliest point
+    %% that has the trace context and closed on the terminal reply. It is
+    %% the PARENT of every upstream attempt span, which is what makes the
+    %% gateway's internal fan-out (failover legs, retries) visible as
+    %% children instead of unrelated timings. A no-op when unsampled.
+    _ = janus_http_proxy:open_server_span(cowboy_req:method(Req0), cowboy_req:path(Req0)),
     %% Every log line this request emits now carries trace_id=... .
     ok = janus_trace:set_log_context(Trace),
     Req1 = janus_request_id:set_trace_response_headers(

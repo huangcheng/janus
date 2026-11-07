@@ -11,7 +11,7 @@
 
 -include("janus_protocol_translate.hrl").
 
--export([handle/5, model_field/1]).
+-export([handle/5, model_field/1, open_server_span/2, close_server_span/1]).
 %% Exported for eunit (usage capture helpers + Phase-2 knob).
 -export([
     maybe_trim/2,
@@ -1091,6 +1091,13 @@ translate_result(ClientProto, ProviderProto, Route, Result, Req, State, EstIn) -
 
 upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
     T0 = erlang:monotonic_time(millisecond),
+    %% One CLIENT span per upstream ATTEMPT (not per request): a retry or
+    %% failover leg is a distinct network call with its own latency,
+    %% status and upstream, and collapsing them would destroy exactly the
+    %% evidence the failover cascade exists to produce. The span is opened
+    %% before the call and closed by attach_attempt_span/3 once the
+    %% outcome is known.
+    AttemptSpan = open_attempt_span(ProviderProto, Route, Map, WantStream),
     Stream = janus_http_worker_client:normalize_want_stream(WantStream),
     Local = fun() -> call_adapter(ProviderProto, Route, Body, Map, #{stream => Stream}) end,
     Result =
@@ -1112,6 +1119,7 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
     %% latency EWMA. Retried attempts overwrite it — attribution always
     %% lands on the route that produced the terminal result.
     put(janus_upstream_ms, erlang:monotonic_time(millisecond) - T0),
+    _ = close_attempt_span(AttemptSpan, Result),
     normalize_drain_arity(Result).
 
 %% Drain arity normalization: the LOCAL adapter returns the provider's
@@ -2801,7 +2809,7 @@ failover_record_attempt(Route, {error, _Reason}, Classified) ->
 record_failover_row(Route, Status, {Reason, NativeCode}) ->
     case get(janus_usage_ctx) of
         #{started := _Started, agent := Agent, client_proto := Proto, stream := Stream} ->
-            janus_usage:record(#{
+            janus_usage:record((row_span_ids())#{
                 ts => erlang:system_time(second),
                 requested_model => pd(janus_requested_model, null),
                 agent_key_id => maps:get(id, Agent, null),
@@ -3478,6 +3486,13 @@ do_track(Status, Route, Usage, Observe) ->
             Completion = maps:get(completion, Usage1, null),
             CacheRead = maps:get(cache_read, Usage1, null),
             CacheWrite = maps:get(cache_write, Usage1, null),
+            %% Token counts belong on the CLIENT span (the semconv puts
+            %% usage there, not on the SERVER span: the server cannot know
+            %% what the upstream billed). Attached here because this is
+            %% where the parsed usage first exists, and it is the same map
+            %% the ledger row is written from, so a trace and the billing
+            %% row can never disagree.
+            ok = attach_usage_to_span(Usage1),
             case {get(janus_quota_charge_id), maps:get(id, Agent, null)} of
                 {ChargeId, Aid} when is_binary(ChargeId), is_integer(Aid) ->
                     _ = janus_quota:charge_tokens(ChargeId, Aid, Prompt, Completion);
@@ -3487,8 +3502,12 @@ do_track(Status, Route, Usage, Observe) ->
             case maps:get(provider_id, Route, undefined) of
                 Pid when is_integer(Pid) ->
                     Outcome = usage_outcome_or_null(),
+                    %% Close the SERVER span with the same terminal status
+                    %% the ledger row records, so a trace and the usage
+                    %% table can never disagree about how a request ended.
+                    ok = close_server_span(Status),
                     {FailoverReason, NativeCode} = terminal_classification(Status, Outcome),
-                    janus_usage:record(#{
+                    janus_usage:record((row_span_ids())#{
                         ts => erlang:system_time(second),
                         requested_model => pd(janus_requested_model, null),
                         agent_key_id => maps:get(id, Agent, null),
@@ -3520,7 +3539,11 @@ do_track(Status, Route, Usage, Observe) ->
                                 false -> null
                             end,
                         trace_id => janus_trace:trace_id(get(janus_trace))
-                    });
+                    }),
+                    %% Emit AFTER the row is written and after usage is
+                    %% on the span, so the exported trace and the ledger
+                    %% agree on tokens, span ids and status.
+                    ok = export_request_spans();
                 _ ->
                     %% TF-A.0b writer-side pin (reorder spec
                     %% terminal_count): rows without provider_id are
@@ -3723,6 +3746,293 @@ sanitize_upstream_error({Tag, Sub}) when is_atom(Tag), is_atom(Sub) -> {Tag, Sub
 sanitize_upstream_error({Tag, N}) when is_atom(Tag), is_integer(N) -> {Tag, N};
 sanitize_upstream_error({Tag, _}) when is_atom(Tag) -> Tag;
 sanitize_upstream_error(_) -> upstream_error.
+
+%%%===================================================================
+%%% OTel spans (P1)
+%%%
+%%% Telemetry never fails a request: every entry point here is total and
+%%% returns `undefined' when there is nothing to record. A span is only
+%%% opened when the trace is sampled, so an unsampled request pays one
+%%% sampler read and no allocation.
+%%%
+%%% The CLIENT span is stored in the process dictionary under
+%%% `janus_otel_spans' (a bounded list, newest first) so the terminal
+%%% usage row can carry its span id without threading a handle through
+%%% the whole dispatch chain.
+%%%===================================================================
+
+-define(SPAN_KEEP, 8).
+
+%% @doc Open the request's SERVER span. Called from the HTTP preamble at
+%% the earliest point that has the trace context, and closed on the
+%% terminal reply. Returns `undefined' when the trace is unsampled or the
+%% trace context is absent, in which case every downstream span helper
+%% becomes a no-op.
+%%
+%% SpanKind SERVER with `http.*' attributes: the `http.route' is the
+%% matched route TEMPLATE, never the concrete path, because a path
+%% contains ids and would be unbounded cardinality.
+open_server_span(Method, Path) ->
+    try
+        Trace = get(janus_trace),
+        case janus_trace:sampled(Trace) of
+            false ->
+                undefined;
+            true ->
+                Span0 = janus_otel_span:start(
+                    server, server_span_name(Method, Path), undefined, janus_trace:trace_id(Trace)
+                ),
+                Span1 = janus_otel_span:set_attrs(Span0, #{
+                    <<"http.request.method">> => iolist_to_binary(Method),
+                    <<"url.path">> => janus_otel_attr:sanitize_value(iolist_to_binary(Path))
+                }),
+                put(janus_otel_server_span, Span1),
+                Span1
+        end
+    catch
+        _:_ -> undefined
+    end.
+
+%% The semconv's HTTP span name is `{method} {route}'. The route template
+%% is not available at preamble time (routing has not run yet), so the
+%% method plus the path is used and the path is capped by the attribute
+%% sanitizer. Named for the method first so a backend can group by verb.
+server_span_name(Method, Path) ->
+    M = iolist_to_binary(Method),
+    P = janus_otel_attr:sanitize_value(iolist_to_binary(Path)),
+    <<M/binary, " ", P/binary>>.
+
+%% @doc Close the SERVER span with the terminal status. Called once from
+%% the terminal reply path; safe to call when no span was opened.
+close_server_span(Status) ->
+    try
+        case get(janus_otel_server_span) of
+            undefined ->
+                ok;
+            Span ->
+                Finished = janus_otel_span:finish(Span, Status),
+                put(janus_otel_server_span, Finished),
+                ok
+        end
+    catch
+        _:_ -> ok
+    end.
+
+%% @doc Open one CLIENT span for this upstream attempt, or `undefined'
+%% when the trace is not sampled. Returns the span record (closed later).
+open_attempt_span(ProviderProto, Route, Map, WantStream) ->
+    try
+        Trace = get(janus_trace),
+        case janus_trace:sampled(Trace) of
+            false ->
+                undefined;
+            true ->
+                Op = janus_otel_attr:operation_name(ProviderProto),
+                Model = requested_model_for_span(Map),
+                Parent = current_parent_span_id(),
+                Span0 = janus_otel_span:start(
+                    client,
+                    janus_otel_attr:span_name(Op, Model),
+                    Parent,
+                    janus_trace:trace_id(Trace)
+                ),
+                Span1 = janus_otel_span:set_attrs(Span0, #{
+                    <<"gen_ai.operation.name">> => Op,
+                    <<"gen_ai.provider.name">> => janus_otel_attr:provider_name(
+                        route_provider_name(Route)
+                    ),
+                    <<"gen_ai.request.model">> => Model,
+                    <<"gen_ai.request.stream">> => WantStream =:= true
+                }),
+                Span2 = add_server_address(Span1, Route),
+                push_span(Span2)
+        end
+    catch
+        _:_ -> undefined
+    end.
+
+%% The model the CLIENT actually asked the provider for. `janus_req_model'
+%% is the resolved name; the requested name is the client's original.
+requested_model_for_span(Map) ->
+    case get(janus_req_model) of
+        M when is_binary(M), M =/= <<>> ->
+            M;
+        _ ->
+            case Map of
+                #{<<"model">> := M} when is_binary(M) -> M;
+                _ -> undefined
+            end
+    end.
+
+%% `server.address'/`server.port' are Recommended/Required on the CLIENT
+%% span; both come from the provider's base URL. Omitted when the
+%% provider row is unavailable rather than guessed.
+add_server_address(Span, Route) ->
+    case route_provider_base(Route) of
+        {ok, Host, Port} ->
+            janus_otel_span:set_attrs(Span, #{
+                <<"server.address">> => Host,
+                <<"server.port">> => Port
+            });
+        _ ->
+            Span
+    end.
+
+route_provider_base(Route) ->
+    try
+        case janus_catalog:lookup_provider(maps:get(provider_id, Route, undefined)) of
+            {ok, #{base_url := Base0}} ->
+                case janus_providers_http:parse_base(iolist_to_binary(Base0)) of
+                    {ok, Host, Port, _Path, _Tls} -> {ok, Host, Port};
+                    _ -> error
+                end;
+            _ ->
+                error
+        end
+    catch
+        _:_ -> error
+    end.
+
+%% Close the attempt span with its outcome. Transport failures are the
+%% error class; an HTTP status uses the semconv rule via set_status.
+close_attempt_span(undefined, _Result) ->
+    ok;
+close_attempt_span(Span, Result) ->
+    try
+        Status =
+            case Result of
+                {ok, S, _H, _B} when is_integer(S) -> S;
+                {ok, stream, S, _H, _D} when is_integer(S) -> S;
+                _ -> undefined
+            end,
+        Span1 = janus_otel_span:finish(Span, Status),
+        Span2 = maybe_record_transport_error(Span1, Result),
+        push_span(fold_span(Span2)),
+        ok
+    catch
+        _:_ -> ok
+    end.
+
+maybe_record_transport_error(Span, {error, Reason}) ->
+    janus_otel_span:set_error(Span, span_error_class(Reason));
+maybe_record_transport_error(Span, _) ->
+    Span.
+
+%% Map a transport failure to the small closed set of error classes. The
+%% raw reason is not used directly: it can embed provider text.
+span_error_class(worker_lost) -> worker_lost;
+span_error_class(crashed) -> transport;
+span_error_class(timeout) -> timeout;
+span_error_class(cancelled) -> cancelled;
+span_error_class(R) when is_atom(R) -> transport;
+span_error_class(_) -> transport.
+
+%% The span stack: newest first, bounded so a pathological retry cascade
+%% cannot grow the pdict without limit.
+push_span(Span) ->
+    Prev = case get(janus_otel_spans) of
+        L when is_list(L) -> L;
+        _ -> []
+    end,
+    put(janus_otel_spans, lists:sublist([Span | Prev], ?SPAN_KEEP)),
+    ok.
+
+fold_span(Span) -> Span.
+
+%% The SERVER span id is the parent of every attempt span in this
+%% request; `undefined' when the SERVER span was never opened (see
+%% `server_span/0').
+current_parent_span_id() ->
+    case get(janus_otel_server_span) of
+        undefined -> undefined;
+        S -> janus_otel_span:id(S)
+    end.
+
+%% @doc Put the parsed token usage on this request's most recent CLIENT
+%% span.
+%%
+%% `prompt' already includes the cached tokens (billing parity with the
+%% provider's own input count), which is exactly what the semconv wants
+%% for `gen_ai.usage.input_tokens': "includes cached tokens, report the
+%% billed count". The cache dimensions ride as their own attributes and
+%% are SUBSETS of input_tokens — never additive.
+attach_usage_to_span(Usage) when is_map(Usage) ->
+    try
+        case attempt_spans() of
+            [Latest | Rest] ->
+                Attrs = #{
+                    <<"gen_ai.usage.input_tokens">> => maps:get(prompt, Usage, undefined),
+                    <<"gen_ai.usage.output_tokens">> => maps:get(completion, Usage, undefined),
+                    <<"gen_ai.usage.cache_read.input_tokens">> => nonzero(maps:get(cache_read, Usage, undefined)),
+                    <<"gen_ai.usage.cache_write.input_tokens">> => nonzero(maps:get(cache_write, Usage, undefined))
+                },
+                Updated = janus_otel_span:set_attrs(Latest, Attrs),
+                put(janus_otel_spans, [Updated | Rest]),
+                ok;
+            [] ->
+                ok
+        end
+    catch
+        _:_ -> ok
+    end;
+attach_usage_to_span(_) ->
+    ok.
+
+%% The semconv says report a cache attribute only when non-zero, so a
+%% provider that does not do caching does not emit a constant 0.
+nonzero(0) -> undefined;
+nonzero(undefined) -> undefined;
+nonzero(null) -> undefined;
+nonzero(V) -> V.
+
+%% @doc Hand this request's finished spans to the exporter. Called once on
+%% the terminal path, AFTER the SERVER span is closed so the batch is
+%% complete. Each span is passed individually and the exporter batches;
+%% `record/1' is a cast, so this costs the request one message send and
+%% never waits on the collector.
+%%
+%% Order matters for a reader: the SERVER span is emitted last so a
+%% backend that ingests a batch in order sees the parent after its
+%% children. OTLP does not require it, but a human tailing the collector
+%% log finds it easier.
+export_request_spans() ->
+    try
+        case get(janus_otel_server_span) of
+            undefined ->
+                ok;
+            Server ->
+                _ = [janus_otel_export:record(S) || S <- lists:reverse(attempt_spans())],
+                janus_otel_export:record(Server),
+                ok
+        end
+    catch
+        _:_ -> ok
+    end.
+
+%% @doc Spans recorded for this request, newest first. Read by the usage
+%% writer to stamp span ids on the ledger.
+attempt_spans() ->
+    case get(janus_otel_spans) of
+        L when is_list(L) -> L;
+        _ -> []
+    end.
+
+%% Span identity for a ledger row: the request's SERVER span and the
+%% attempt's CLIENT span. Both are `null' when unsampled, which is
+%% correct - an unsampled request has no span to join to, and writing a
+%% fabricated id would make the ledger lie.
+row_span_ids() ->
+    Server =
+        case get(janus_otel_server_span) of
+            undefined -> null;
+            S -> janus_otel_span:id(S)
+        end,
+    Client =
+        case attempt_spans() of
+            [Latest | _] -> janus_otel_span:id(Latest);
+            [] -> null
+        end,
+    #{span_id => Client, parent_span_id => Server}.
 
 route_provider_name(Route) ->
     case janus_catalog:lookup_provider(maps:get(provider_id, Route, undefined)) of

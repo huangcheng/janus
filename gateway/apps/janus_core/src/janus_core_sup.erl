@@ -40,7 +40,13 @@ master_children() ->
             lb_child(),
             usage_child(),
             config_child(),
-            model_sync_child()
+            model_sync_child(),
+            %% MUST be after config_child: the exporter reads the telemetry
+            %% config janus_config distributes, and starting before it
+            %% would leave the exporter with a stale view until the first
+            %% poll. Runs on the master because the master owns the SERVER
+            %% span for every request it fronts.
+            otel_export_child()
         ] ++
         %% Scheduler v2 (spec Part 0.5 / A.1): janus_geo before the
         %% pool's picks read the PT provider map.
@@ -50,6 +56,16 @@ master_children() ->
         %% settings resolve.
         sched_v2_children() ++
         master_worker_pool_children().
+
+otel_export_child() ->
+    #{
+        id => janus_otel_export,
+        start => {janus_otel_export, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [janus_otel_export]
+    }.
 
 ets_heir_child() ->
     #{
@@ -67,6 +83,10 @@ ets_heir_child() ->
 worker_children() ->
     [
         dist_monitor_child(),
+        %% The OTLP exporter runs on both roles: a worker executes upstream
+        %% I/O and owns its own attempt spans, so it must be able to emit
+        %% them. It is inert until export is enabled.
+        otel_export_child(),
         #{
             id => janus_worker_dispatch,
             start => {janus_worker_dispatch, start_link, []},

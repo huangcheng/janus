@@ -62,14 +62,22 @@ enabled() ->
         _ -> false
     end.
 
-%% @doc Whether OTLP export is actually available.
+%% @doc Whether spans are actually exported right now.
 %%
-%% Always false until the exporter ships. Kept as its own function so the
-%% call site that flips it is a one-line change and cannot be confused
-%% with the configuration flag above.
+%% Requires BOTH the operator's flag and a usable endpoint: a config that
+%% says "export" while pointing nowhere would make the exporter fail on
+%% every batch, so the endpoint is part of the predicate.
 -spec export_enabled() -> boolean().
 export_enabled() ->
-    false.
+    case config() of
+        #{<<"export">> := #{<<"enabled">> := true} = E} ->
+            case maps:get(<<"endpoint">>, E, ?DEFAULT_ENDPOINT) of
+                Url when is_binary(Url), byte_size(Url) > 0 -> true;
+                _ -> false
+            end;
+        _ ->
+            false
+    end.
 
 %% @doc The OTLP endpoint to export to (a binary URL).
 -spec export_endpoint() -> binary().

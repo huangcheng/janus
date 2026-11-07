@@ -21,7 +21,7 @@ cfg_test_() ->
         fun absent_is_disabled/0,
         fun explicit_false_is_disabled/0,
         fun explicit_true_is_enabled/0,
-        fun export_always_false_today/0,
+        fun export_needs_an_endpoint/0,
         fun default_endpoint/0,
         fun configured_endpoint/0,
         fun default_ratio/0,
@@ -41,10 +41,16 @@ explicit_true_is_enabled() ->
     persistent_term:put(?KEY, #{<<"export">> => #{<<"enabled">> => true}}),
     ?assertEqual(true, janus_telemetry:enabled()).
 
-%% Even with the config on, nothing exports until the writer exists.
-%% Reporting otherwise would be a lie an operator would act on.
-export_always_false_today() ->
+%% Export requires BOTH the flag and a usable endpoint: a config that
+%% says "on" while pointing nowhere would fail on every batch, so the
+%% endpoint is part of the predicate rather than a separate check at the
+%% call site that someone could forget.
+export_needs_an_endpoint() ->
     persistent_term:put(?KEY, #{<<"export">> => #{<<"enabled">> => true}}),
+    ?assertEqual(true, janus_telemetry:export_enabled()),
+    persistent_term:put(?KEY, #{
+        <<"export">> => #{<<"enabled">> => true, <<"endpoint">> => <<>>}
+    }),
     ?assertEqual(false, janus_telemetry:export_enabled()).
 
 default_endpoint() ->

@@ -10,9 +10,9 @@
 
 -spec from_response_body(atom(), binary()) ->
     #{prompt := non_neg_integer(), completion := non_neg_integer()} | undefined.
-from_response_body(_Proto, Body) when is_binary(Body) ->
+from_response_body(Proto, Body) when is_binary(Body) ->
     case thoas:decode(Body) of
-        {ok, Map} when is_map(Map) -> usage_in_map(Map);
+        {ok, Map} when is_map(Map) -> usage_in_map(Proto, Map);
         _ -> undefined
     end;
 from_response_body(_, _) ->
@@ -70,43 +70,94 @@ data_line_usage(<<"data:", Rest/binary>>) ->
 data_line_usage(_) ->
     false.
 
-usage_in_map(Map) ->
+usage_in_map(Proto, Map) ->
     case maps:get(<<"usage">>, Map, undefined) of
-        U when is_map(U) -> norm(U);
-        _ -> nested(Map)
+        U when is_map(U) -> norm(Proto, U);
+        _ -> nested(Proto, Map)
     end.
+
+usage_in_map(Map) ->
+    usage_in_map(unknown, Map).
 
 %% openai_responses nests usage under "response" (response.completed);
 %% Anthropic message_start nests it under "message".
-nested(Map) ->
+nested(Proto, Map) ->
     case maps:get(<<"response">>, Map, undefined) of
-        R when is_map(R) -> norm(maps:get(<<"usage">>, R, #{}));
+        R when is_map(R) -> norm(Proto, maps:get(<<"usage">>, R, #{}));
         _ ->
             case maps:get(<<"message">>, Map, undefined) of
-                M when is_map(M) -> norm(maps:get(<<"usage">>, M, #{}));
+                M when is_map(M) -> norm(Proto, maps:get(<<"usage">>, M, #{}));
                 _ -> undefined
             end
     end.
 
-norm(U) when is_map(U), map_size(U) > 0 ->
+nested(Map) ->
+    nested(unknown, Map).
+
+%% The two provider families count input tokens DIFFERENTLY, and getting
+%% this wrong silently inflates every request:
+%%
+%%   * OpenAI: `prompt_tokens' is the TOTAL input and ALREADY INCLUDES
+%%     cached tokens; `prompt_tokens_details.cached_tokens' is a subset of
+%%     it. There is no separate cache-write count.
+%%   * Anthropic: `input_tokens' EXCLUDES both cache reads and cache
+%%     creation, so the billed input is the sum of all three.
+%%
+%% So the cache dimensions are added to `prompt' only for the Anthropic
+%% shape. Adding them for OpenAI double-counts (observed: a 100-token
+%% request with 40 cached reported 140).
+norm(Proto, U) when is_map(U), map_size(U) > 0 ->
     Base = first_int(U, [<<"prompt_tokens">>, <<"input_tokens">>]),
     %% Cache READ and cache WRITE are distinct dimensions, not one pool.
     %% They used to be summed into `prompt` and both discarded, which lost
     %% two reportable signals: a cache hit (read) and a cache fill
-    %% (creation/write). They stay in `prompt` for billing parity with the
-    %% provider's own input count, and are ALSO reported separately.
+    %% (creation/write).
     Write = first_int(U, [<<"cache_creation_input_tokens">>, <<"cache_write_input_tokens">>]),
-    Read = first_int(U, [<<"cache_read_input_tokens">>]),
-    P = Base + Write + Read,
+    Read = read_tokens(U),
+    P =
+        case input_includes_cache(Proto) of
+            true -> max(Base, Base);
+            false -> Base + Write + Read
+        end,
     C = first_int(U, [<<"completion_tokens">>, <<"output_tokens">>]),
     %% A usage object carrying any recognized key is a REAL report — even
     %% a genuine {0, 0} — and must not collapse to "unreported".
     case has_known_key(U) of
         true -> #{prompt => P, completion => C, cache_read => Read, cache_write => Write};
         false -> undefined
-    end;
+    end.
+
+%% norm/1 has no protocol context. Default to the ADDITIVE interpretation,
+%% which is the Anthropic shape and the one that UNDER-reports if handled
+%% as inclusive - the safer error, because over-reporting a bill is worse.
+norm(U) when is_map(U) ->
+    norm(unknown, U);
 norm(_) ->
     undefined.
+
+%% OpenAI nests the cache-read count under `prompt_tokens_details' rather
+%% than exposing it at the top level, so both shapes are checked.
+read_tokens(U) ->
+    case first_int(U, [<<"cache_read_input_tokens">>]) of
+        0 ->
+            case maps:get(<<"prompt_tokens_details">>, U, undefined) of
+                #{<<"cached_tokens">> := N} when is_integer(N), N >= 0 -> N;
+                _ -> 0
+            end;
+        N ->
+            N
+    end.
+
+%% Does this protocol's input token count already include cached tokens?
+%%
+%% OpenAI counts them in `prompt_tokens'. Anthropic does not. Anything else
+%% is treated as ADDITIVE (recompute), because over-reporting a bill is
+%% worse than under-reporting: a provider that reports a small base and
+%% separate cache counts is the common shape.
+input_includes_cache(openai_chat) -> true;
+input_includes_cache(openai_responses) -> true;
+input_includes_cache(openai_decisions) -> true;
+input_includes_cache(_) -> false.
 
 has_known_key(U) ->
     lists:any(

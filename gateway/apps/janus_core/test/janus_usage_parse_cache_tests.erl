@@ -56,6 +56,11 @@ cache_absent_is_zero_not_missing_test() ->
 openai_cache_write_alias_test() ->
     %% Accept the OpenAI-shaped key too, so a provider that names it
     %% `cache_write_input_tokens' is not silently zeroed.
+    %%
+    %% `prompt' stays 20: OpenAI's `prompt_tokens' is the TOTAL input and
+    %% already INCLUDES cached tokens, so adding the cache dimensions
+    %% would double-count. (This assertion previously expected 28, which
+    %% encoded that double-count as correct.)
     Body = json(#{
         <<"usage">> => #{
             <<"prompt_tokens">> => 20,
@@ -65,7 +70,7 @@ openai_cache_write_alias_test() ->
     }),
     U = janus_usage_parse:from_response_body(openai_chat, Body),
     ?assertEqual(8, maps:get(cache_write, U)),
-    ?assertEqual(28, maps:get(prompt, U)).
+    ?assertEqual(20, maps:get(prompt, U)).
 
 unreported_usage_stays_undefined_test() ->
     ?assertEqual(undefined, janus_usage_parse:from_response_body(openai_chat, <<"{\"x\":1}">>)).
