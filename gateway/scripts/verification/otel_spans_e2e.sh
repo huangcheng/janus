@@ -53,6 +53,37 @@ class H(BaseHTTPRequestHandler):
             wants_stream = json.loads(req).get("stream") is True
         except Exception:
             wants_stream = False
+        if self.path.startswith("/anth"):
+            # Anthropic message_start carries input_tokens EXCLUDING cache;
+            # the cache counts are separate fields. This is the shape where
+            # client (openai_chat) and wire (anthropic_messages) protocols
+            # differ, so the accounting rule must follow the WIRE.
+            start = {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_e2e", "type": "message", "role": "assistant",
+                    "model": "mock-claude", "content": [],
+                    "usage": {"input_tokens": 60, "output_tokens": 0,
+                              "cache_read_input_tokens": 40,
+                              "cache_creation_input_tokens": 10}
+                }
+            }
+            delta = {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "hi"}
+            }
+            stop = {"type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 7}}
+            payload = ("event: message_start\ndata: " + json.dumps(start) + "\n\n"
+                       "event: content_block_delta\ndata: " + json.dumps(delta) + "\n\n"
+                       "event: message_delta\ndata: " + json.dumps(stop) + "\n\n").encode()
+            self.send_response(200)
+            self.send_header('content-type', 'text/event-stream')
+            self.send_header('content-length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if wants_stream:
             # SSE terminal chunk carrying usage, so the stream path has a
             # real cache report to parse.
@@ -184,6 +215,13 @@ cat > "$OUT/seed.json" <<JSON
       "protocol": "openai_chat",
       "keys": ["upstream-secret"],
       "models": ["mock-model"]
+    },
+    {
+      "name": "anthropicprov",
+      "base_url": "http://127.0.0.1:$MOCK_PORT/anth",
+      "protocol": "anthropic_messages",
+      "keys": ["upstream-secret"],
+      "models": ["mock-claude"]
     }
   ],
   "settings": {
@@ -444,6 +482,53 @@ print(("PASS " if ok else "FAIL ") + "streamed request reports the same cache di
       + ("" if ok else f": {attrs}"))
 sys.exit(0 if ok else 1)
 PYSTREAM
+if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+
+# TRANSLATED stream: an openai_chat client against an anthropic_messages
+# provider. The captured bytes are Anthropic SSE, so the ADDITIVE rule
+# applies: input 60 + read 40 + creation 10 = 110. Evaluating the client
+# protocol instead would use OpenAI's inclusive rule and report 60,
+# under-counting the bill by 50 tokens. This is the case that pins the
+# wire-protocol fix; the passthrough stream above cannot, because there
+# the client and provider protocols are identical by construction.
+TRANSLATE_TRACE_ID="aaaabbbbccccddddeeeeffff00004444"
+TCODE=$(curl -s -o "$OUT/translate_body.txt" -w '%{http_code}' --max-time 20 \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "content-type: application/json" \
+  -H "traceparent: 00-$TRANSLATE_TRACE_ID-00f067aa0ba902b7-01" \
+  -d '{"model":"mock-claude","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+  "$BASE/v1/chat/completions" 2>/dev/null)
+if [ "$TCODE" = "200" ]; then ok "translated stream served"
+else bad "translated stream served" "http=$TCODE"; fi
+
+for _ in $(seq 1 12); do
+  grep -q "${TRANSLATE_TRACE_ID: -8}" "$COLLECT" 2>/dev/null && break
+  sleep 1
+done
+
+python3 - "$COLLECT" "$TRANSLATE_TRACE_ID" <<'PYTR'
+import json, sys
+collect, tid = sys.argv[1], sys.argv[2]
+spans = []
+for line in open(collect):
+    if not line.strip():
+        continue
+    for rs in json.loads(line)["body"].get("resourceSpans", []):
+        for ss in rs.get("scopeSpans", []):
+            spans.extend(ss.get("spans", []))
+mine = [s for s in spans if s.get("traceId") == tid]
+client = next((s for s in mine if s.get("kind") == 3), None)
+attrs = {}
+if client:
+    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+ok = str(attrs.get("gen_ai.usage.input_tokens")) == "110"
+ok = ok and str(attrs.get("gen_ai.usage.cache_read.input_tokens")) == "40"
+ok = ok and str(attrs.get("gen_ai.usage.cache_write.input_tokens")) == "10"
+print(("PASS " if ok else "FAIL ")
+      + "translated stream uses the WIRE protocol's additive accounting"
+      + ("" if ok else f": input={attrs.get('gen_ai.usage.input_tokens')} (want 110)"))
+sys.exit(0 if ok else 1)
+PYTR
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
 # Ledger join: the row must carry the span ids, so a trace can be joined

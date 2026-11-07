@@ -84,6 +84,10 @@ handle(ClientProto, Agent, Body, Req, State) ->
     erase(janus_dead_jobs),
     erase(janus_usage_outcome),
     erase(janus_worker_done_usage),
+    %% Wire format of the captured usage bytes. A stale value would make a
+    %% later keep-alive request parse its tokens under the previous
+    %% request's provider accounting rule.
+    erase(janus_usage_wire_proto),
     %% upstream_call/5 wall time: absent on paths that never reached
     %% upstream, and must never be inherited by a later keep-alive
     %% request (maybe_note_latency/1 feeds it into the LB EWMA).
@@ -1174,6 +1178,13 @@ maybe_retry_include_usage(_, _, _, _, _, _, Result) ->
 %%%--------------------------------------------------------------------
 
 handle_translate_stream(ClientProto, ProviderProto, Status, Headers, Drain, Route, Req, State, EstIn) ->
+    %% The usage capture stores the RAW provider SSE (capture_usage_chunk
+    %% runs before translation rewrites the chunk), so the parser must be
+    %% told the PROVIDER's protocol. This is the only path where the two
+    %% protocols can differ, and picking the client's here applies the
+    %% wrong cache-accounting rule (OpenAI's inclusive input count vs
+    %% Anthropic's additive one) to a translated stream.
+    _ = record_usage_wire_proto(ProviderProto),
     put(janus_sse_state, janus_protocol_translate:new_sse_st(EstIn)),
     put(janus_sse_tracked, false),
     mark_client_committed(),
@@ -1735,11 +1746,10 @@ handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain
     end;
 handle_upstream(ClientProto, ProviderProto, {ok, stream, Status, Headers, Drain}, Route, false, Req, State) ->
     mark_client_committed(),
-    %% The captured usage bytes are in the PROVIDER's wire format: capture
-    %% happens before translation rewrites the chunk. Remember which
-    %% protocol that is so the parser picks the right cache-accounting
-    %% rule; on the passthrough path it equals ClientProto anyway.
-    put(janus_usage_wire_proto, ProviderProto),
+    %% Recorded for symmetry: on the passthrough path the provider protocol
+    %% and the client protocol are identical, so this cannot change the
+    %% answer. The path that MATTERS is handle_translate_stream/9.
+    _ = record_usage_wire_proto(ProviderProto),
     Req2 = cowboy_req:stream_reply(
         Status,
         filter_stream_headers(Headers),
@@ -3703,14 +3713,22 @@ maybe_trim(Chunks, _Size) ->
     {lists:reverse(Kept), Size}.
 
 stream_usage(ClientProto) ->
-    %% The bytes in the buffer are provider-format; `stream_usage/0''s
-    %% caller passes the client proto for its own reasons, so prefer the
-    %% protocol recorded at dispatch.
+    %% The bytes in the buffer are provider-format; the caller passes the
+    %% client proto for its own reasons, so prefer the protocol recorded at
+    %% dispatch. The key is set and cleared per request (see
+    %% `record_usage_wire_proto/1' and the header reset), so a keep-alive
+    %% reuse cannot leak the previous request's protocol.
     WireProto = case get(janus_usage_wire_proto) of
         undefined -> ClientProto;
         P -> P
     end,
     stream_usage_1(WireProto).
+
+%% Record the wire format of the usage bytes captured for this request.
+%% Cleared with the other per-request state at the top of `handle/5'.
+record_usage_wire_proto(Proto) ->
+    put(janus_usage_wire_proto, Proto),
+    ok.
 
 stream_usage_1(WireProto) ->
     Head =
