@@ -484,17 +484,17 @@ python3 - "$COLLECT" "$TRACE_ID" "$OUT" <<'PY'
 import json, sys, os
 
 collect, tid, out = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, out)
+from span_util import load_spans, attrs_of
+
 if not os.path.exists(collect) or os.path.getsize(collect) == 0:
     print("FAIL spans: no export captured"); sys.exit(1)
 
 posts = [json.loads(l) for l in open(collect) if l.strip()]
-spans = []
 for p in posts:
     if p.get("path") != "/v1/traces":
         print(f"FAIL path: got {p.get('path')}"); sys.exit(1)
-    for rs in p["body"].get("resourceSpans", []):
-        for ss in rs.get("scopeSpans", []):
-            spans.extend(ss.get("spans", []))
+spans = load_spans(collect)
 
 json.dump(spans, open(os.path.join(out, "spans.json"), "w"), indent=2)
 
@@ -545,7 +545,8 @@ ts_bad = [
 bad += check("timestamps are decimal strings", not ts_bad, ts_bad)
 
 def attrs(s):
-    return {a["key"]: next(iter(a["value"].values())) for a in s.get("attributes", [])}
+    """Shared decoder (intValue is a decimal string on the wire)."""
+    return attrs_of(s)
 
 if client:
     a = attrs(client)
@@ -624,21 +625,12 @@ for _ in $(seq 1 12); do
 done
 
 python3 - "$COLLECT" "$OUT" "$STREAM_TRACE_ID" <<'PYSTREAM'
-import json, sys
-collect, out, stream_tid = sys.argv[1], sys.argv[2], sys.argv[3]
-spans = []
-for line in open(collect):
-    if not line.strip():
-        continue
-    for rs in json.loads(line)["body"].get("resourceSpans", []):
-        for ss in rs.get("scopeSpans", []):
-            spans.extend(ss.get("spans", []))
-mine = [s for s in spans if s.get("traceId") == stream_tid]
-client = next((s for s in mine if s.get("kind") == 3), None)
-def a(s):
-    return {x["key"]: next(iter(x["value"].values())) for x in s.get("attributes", [])}
+import sys
+sys.path.insert(0, sys.argv[2])
+from span_util import client_for
+_collect, _out, stream_tid = sys.argv[1], sys.argv[2], sys.argv[3]
+client, attrs = client_for(_collect, stream_tid)
 ok = client is not None
-attrs = a(client) if client else {}
 ok = ok and attrs.get("gen_ai.request.stream") is True
 ok = ok and str(attrs.get("gen_ai.usage.input_tokens")) == "100"
 ok = ok and str(attrs.get("gen_ai.usage.cache_read.input_tokens")) == "40"
@@ -681,21 +673,12 @@ for _ in $(seq 1 12); do
   sleep 1
 done
 
-python3 - "$COLLECT" "$TRANSLATE_TRACE_ID" <<'PYTR'
-import json, sys
-collect, tid = sys.argv[1], sys.argv[2]
-spans = []
-for line in open(collect):
-    if not line.strip():
-        continue
-    for rs in json.loads(line)["body"].get("resourceSpans", []):
-        for ss in rs.get("scopeSpans", []):
-            spans.extend(ss.get("spans", []))
-mine = [s for s in spans if s.get("traceId") == tid]
-client = next((s for s in mine if s.get("kind") == 3), None)
-attrs = {}
-if client:
-    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+python3 - "$COLLECT" "$TRANSLATE_TRACE_ID" "$OUT" <<'PYTR'
+import sys
+sys.path.insert(0, sys.argv[3])
+from span_util import client_for, ttfc
+_collect, tid = sys.argv[1], sys.argv[2]
+_, attrs = client_for(_collect, tid)
 ok = str(attrs.get("gen_ai.usage.input_tokens")) == "110"
 ok = ok and str(attrs.get("gen_ai.usage.cache_read.input_tokens")) == "40"
 ok = ok and str(attrs.get("gen_ai.usage.cache_write.input_tokens")) == "10"
@@ -706,14 +689,10 @@ print(("PASS " if ok else "FAIL ")
 # The TRANSLATE path has its own TTFC hook (it decodes events itself), so
 # it needs its own assertion: the Anthropic message_start event carries
 # usage but no content, and must not count as the first chunk.
-raw = attrs.get("gen_ai.response.time_to_first_chunk")
-try:
-    tval = float(raw) > 0
-except (TypeError, ValueError):
-    tval = False
+tval = (ttfc(attrs) or 0) > 0
 print(("PASS " if tval else "FAIL ")
       + "TTFC set on the TRANSLATED stream"
-      + ("" if tval else f": got {raw!r}"))
+      + ("" if tval else f": got {attrs.get('gen_ai.response.time_to_first_chunk')!r}"))
 sys.exit(0 if (ok and tval) else 1)
 PYTR
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
@@ -748,7 +727,8 @@ val = ttfc(attrs)
 ok = val is not None and val >= 0.30
 print(("PASS " if ok else "FAIL ")
       + "TTFC excludes role-only and usage-only chunks"
-      + ("" if ok else f": ttfc={raw!r} (want >= 0.30, i.e. measured at the content chunk)"))
+      + ("" if ok else f": ttfc={attrs.get('gen_ai.response.time_to_first_chunk')!r} "
+                    "(want >= 0.30, i.e. measured at the content chunk)"))
 sys.exit(0 if ok else 1)
 PYLATE
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
