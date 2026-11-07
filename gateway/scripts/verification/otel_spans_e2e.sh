@@ -84,7 +84,25 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if self.path.startswith("/untyped"):
+            # A provider-specific chat extension: no `type`, generated text
+            # at a TOP-LEVEL `delta`. This is the exact shape the
+            # `is_untyped_delta/1` branch exists for, so the assertion below
+            # fails if that branch is removed.
+            chunk = {"id": "c", "object": "chat.completion.chunk",
+                     "model": "mock-untyped", "delta": "hi"}
+            end = {"id": "c", "object": "chat.completion.chunk", "model": "mock-untyped",
+                   "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2}}
+            payload = ("data: " + json.dumps(chunk) + "\n\n"
+                       "data: " + json.dumps(end) + "\n\ndata: [DONE]\n\n").encode()
+            self.send_response(200)
+            self.send_header('content-type', 'text/event-stream')
+            self.send_header('content-length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path.startswith("/resp"):
+            import time
             created = {"type": "response.created",
                        "response": {"id": "resp_e2e", "model": "mock-resp"}}
             delta = {"type": "response.output_text.delta",
@@ -92,14 +110,22 @@ class H(BaseHTTPRequestHandler):
             done = {"type": "response.completed",
                     "response": {"id": "resp_e2e", "model": "mock-resp",
                                  "usage": {"input_tokens": 10, "output_tokens": 2}}}
-            payload = ("event: response.created\ndata: " + json.dumps(created) + "\n\n"
-                       "event: response.output_text.delta\ndata: " + json.dumps(delta) + "\n\n"
-                       "event: response.completed\ndata: " + json.dumps(done) + "\n\n").encode()
+            # `response.created` carries NO text. It goes out first, then a
+            # real gap, then the text delta. The gap is what lets a single
+            # assertion tell the two failure modes apart: a predicate that
+            # treats any `response.*` event as content reports ~0.00s here.
             self.send_response(200)
             self.send_header('content-type', 'text/event-stream')
-            self.send_header('content-length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            self.wfile.write(("event: response.created\ndata: "
+                              + json.dumps(created) + "\n\n").encode())
+            self.wfile.flush()
+            time.sleep(0.35)
+            for ev, body in (("response.output_text.delta", delta),
+                             ("response.completed", done)):
+                self.wfile.write(("event: " + ev + "\ndata: "
+                                  + json.dumps(body) + "\n\n").encode())
+                self.wfile.flush()
             return
         if self.path.startswith("/late"):
             role_only = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
@@ -275,6 +301,13 @@ cat > "$OUT/seed.json" <<JSON
       "protocol": "openai_responses",
       "keys": ["upstream-secret"],
       "models": ["mock-resp"]
+    },
+    {
+      "name": "untypedprov",
+      "base_url": "http://127.0.0.1:$MOCK_PORT/untyped",
+      "protocol": "openai_chat",
+      "keys": ["upstream-secret"],
+      "models": ["mock-untyped"]
     }
   ],
   "settings": {
@@ -696,14 +729,64 @@ if client:
     attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
 raw = attrs.get("gen_ai.response.time_to_first_chunk")
 try:
+    val = float(raw)
+except (TypeError, ValueError):
+    val = None
+# >= 0.30s discriminates BOTH failure modes in one assertion: absent means
+# the family predicate missed response.* deltas, and ~0.00s means
+# `response.created` (which carries no text) was counted as content.
+ok_resp = val is not None and val >= 0.30
+print(("PASS " if ok_resp else "FAIL ")
+      + "TTFC on a RESPONSES stream is measured at the text delta"
+      + ("" if ok_resp else f": got {raw!r} (want >= 0.30; ~0 or absent both mean a bug)"))
+sys.exit(0 if ok_resp else 1)
+PYRESP
+if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+
+# UNTYPED-DELTA TTFC: a chat-stream chunk with no `type` and the generated
+# text at a top-level `delta`. This pins `is_untyped_delta/1`, the branch
+# restored after a review found it had been dropped while a comment
+# claimed it was handled. Without that branch TTFC is absent here.
+UNTYPED_TRACE_ID="aaaabbbbccccddddeeeeffff00007777"
+UCODE=$(curl -s -o "$OUT/untyped_body.txt" -w '%{http_code}' --max-time 20 \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "content-type: application/json" \
+  -H "traceparent: 00-$UNTYPED_TRACE_ID-00f067aa0ba902b7-01" \
+  -d '{"model":"mock-untyped","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+  "$BASE/v1/chat/completions" 2>/dev/null)
+if [ "$UCODE" = "200" ]; then ok "untyped-delta stream served"
+else bad "untyped-delta stream served" "http=$UCODE"; fi
+
+for _ in $(seq 1 12); do
+  grep -q "${UNTYPED_TRACE_ID: -8}" "$COLLECT" 2>/dev/null && break
+  sleep 1
+done
+
+python3 - "$COLLECT" "$UNTYPED_TRACE_ID" <<'PYUNTYPED'
+import json, sys
+collect, tid = sys.argv[1], sys.argv[2]
+spans = []
+for line in open(collect):
+    if not line.strip():
+        continue
+    for rs in json.loads(line)["body"].get("resourceSpans", []):
+        for ss in rs.get("scopeSpans", []):
+            spans.extend(ss.get("spans", []))
+mine = [s for s in spans if s.get("traceId") == tid]
+client = next((s for s in mine if s.get("kind") == 3), None)
+attrs = {}
+if client:
+    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+raw = attrs.get("gen_ai.response.time_to_first_chunk")
+try:
     val = float(raw) > 0
 except (TypeError, ValueError):
     val = False
 print(("PASS " if val else "FAIL ")
-      + "TTFC set on a RESPONSES-family stream"
-      + ("" if val else f": got {raw!r} (family predicate may not match response.* deltas)"))
+      + "TTFC set on an UNTYPED top-level-delta chunk"
+      + ("" if val else f": got {raw!r} (is_untyped_delta branch missing?)"))
 sys.exit(0 if val else 1)
-PYRESP
+PYUNTYPED
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
 # Ledger join: the row must carry the span ids, so a trace can be joined
