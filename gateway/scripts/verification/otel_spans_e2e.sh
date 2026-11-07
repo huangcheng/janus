@@ -84,6 +84,23 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if self.path.startswith("/resp"):
+            created = {"type": "response.created",
+                       "response": {"id": "resp_e2e", "model": "mock-resp"}}
+            delta = {"type": "response.output_text.delta",
+                     "delta": "hi", "item_id": "msg_1", "output_index": 0}
+            done = {"type": "response.completed",
+                    "response": {"id": "resp_e2e", "model": "mock-resp",
+                                 "usage": {"input_tokens": 10, "output_tokens": 2}}}
+            payload = ("event: response.created\ndata: " + json.dumps(created) + "\n\n"
+                       "event: response.output_text.delta\ndata: " + json.dumps(delta) + "\n\n"
+                       "event: response.completed\ndata: " + json.dumps(done) + "\n\n").encode()
+            self.send_response(200)
+            self.send_header('content-type', 'text/event-stream')
+            self.send_header('content-length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path.startswith("/late"):
             role_only = {"id":"c","object":"chat.completion.chunk","model":"mock-model",
                          "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]}
@@ -251,6 +268,13 @@ cat > "$OUT/seed.json" <<JSON
       "protocol": "openai_chat",
       "keys": ["upstream-secret"],
       "models": ["mock-late"]
+    },
+    {
+      "name": "respprov",
+      "base_url": "http://127.0.0.1:$MOCK_PORT/resp",
+      "protocol": "openai_responses",
+      "keys": ["upstream-secret"],
+      "models": ["mock-resp"]
     }
   ],
   "settings": {
@@ -634,6 +658,52 @@ print(("PASS " if ok else "FAIL ")
       + ("" if ok else f": ttfc={raw!r} (want >= 0.30, i.e. measured at the content chunk)"))
 sys.exit(0 if ok else 1)
 PYLATE
+if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+
+# RESPONSES-FAMILY TTFC: the upstream sends `response.created` (no text)
+# then `response.output_text.delta` (text). The family predicate must
+# recognise the delta and ignore the created event; if it did not, TTFC
+# would be absent entirely for /v1/responses streams.
+RESP_TRACE_ID="aaaabbbbccccddddeeeeffff00006666"
+RCODE=$(curl -s -o "$OUT/resp_body.txt" -w '%{http_code}' --max-time 20 \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "content-type: application/json" \
+  -H "traceparent: 00-$RESP_TRACE_ID-00f067aa0ba902b7-01" \
+  -d '{"model":"mock-resp","stream":true,"input":"hi"}' \
+  "$BASE/v1/responses" 2>/dev/null)
+if [ "$RCODE" = "200" ]; then ok "responses stream served"
+else bad "responses stream served" "http=$RCODE"; fi
+
+for _ in $(seq 1 12); do
+  grep -q "${RESP_TRACE_ID: -8}" "$COLLECT" 2>/dev/null && break
+  sleep 1
+done
+
+python3 - "$COLLECT" "$RESP_TRACE_ID" <<'PYRESP'
+import json, sys
+collect, tid = sys.argv[1], sys.argv[2]
+spans = []
+for line in open(collect):
+    if not line.strip():
+        continue
+    for rs in json.loads(line)["body"].get("resourceSpans", []):
+        for ss in rs.get("scopeSpans", []):
+            spans.extend(ss.get("spans", []))
+mine = [s for s in spans if s.get("traceId") == tid]
+client = next((s for s in mine if s.get("kind") == 3), None)
+attrs = {}
+if client:
+    attrs = {x["key"]: next(iter(x["value"].values())) for x in client.get("attributes", [])}
+raw = attrs.get("gen_ai.response.time_to_first_chunk")
+try:
+    val = float(raw) > 0
+except (TypeError, ValueError):
+    val = False
+print(("PASS " if val else "FAIL ")
+      + "TTFC set on a RESPONSES-family stream"
+      + ("" if val else f": got {raw!r} (family predicate may not match response.* deltas)"))
+sys.exit(0 if val else 1)
+PYRESP
 if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
 # Ledger join: the row must carry the span ids, so a trace can be joined

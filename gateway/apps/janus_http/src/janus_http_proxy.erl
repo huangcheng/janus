@@ -1730,7 +1730,8 @@ is_content_chunk_map(Data) ->
             %% calls. A delta carrying only `role` is the start marker and
             %% is deliberately NOT content.
             openai_has_content(maps:get(<<"choices">>, Data, undefined)) orelse
-                is_responses_delta(Data)
+                is_responses_delta(Data) orelse
+                is_untyped_delta(Data)
     end.
 
 %% Responses-family streams tag every event with `type' ("response.*") and
@@ -1752,6 +1753,16 @@ is_responses_delta(Data) ->
             end;
         _ ->
             false
+    end.
+
+%% A chat-shaped chunk with NO `type` that carries a non-empty top-level
+%% `delta`. Some OpenAI-compatible providers emit this shape. Only
+%% consulted when `type` is absent, so a Responses event (which always has
+%% one) cannot fall through to it and be double-counted.
+is_untyped_delta(Data) ->
+    case maps:is_key(<<"type">>, Data) of
+        true -> false;
+        false -> is_nonempty_bin(maps:get(<<"delta">>, Data, undefined))
     end.
 
 %% An attribute/stream value counts as content only when it is actually
