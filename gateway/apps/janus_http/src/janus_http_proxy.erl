@@ -3845,7 +3845,8 @@ open_attempt_span(ProviderProto, Route, Map, WantStream) ->
                     <<"gen_ai.request.stream">> => WantStream =:= true
                 }),
                 Span2 = add_server_address(Span1, Route),
-                push_span(Span2)
+                _ = push_span(Span2),
+                Span2
         end
     catch
         _:_ -> undefined
@@ -3907,7 +3908,7 @@ close_attempt_span(Span, Result) ->
             end,
         Span1 = janus_otel_span:finish(Span, Status),
         Span2 = maybe_record_transport_error(Span1, Result),
-        push_span(fold_span(Span2)),
+        _ = replace_span(Span2),
         ok
     catch
         _:_ -> ok
@@ -3927,6 +3928,29 @@ span_error_class(cancelled) -> cancelled;
 span_error_class(R) when is_atom(R) -> transport;
 span_error_class(_) -> transport.
 
+%% Replace an OPEN span with its closed version, keeping its position.
+%%
+%% Matching is by span_id, not by value: the span has changed (end time,
+%% status, and possibly usage attributes), so it can only be identified by
+%% identity. If the open copy is already gone (a caller closed twice) the
+%% closed copy is appended — never duplicated.
+replace_span(Closed) ->
+    Id = janus_otel_span:id(Closed),
+    Prev = case get(janus_otel_spans) of
+        L when is_list(L) -> L;
+        _ -> []
+    end,
+    case lists:any(fun(S) -> janus_otel_span:id(S) =:= Id end, Prev) of
+        true ->
+            put(janus_otel_spans, [case janus_otel_span:id(S) =:= Id of
+                true -> Closed;
+                false -> S
+            end || S <- Prev]),
+            ok;
+        false ->
+            push_span(Closed)
+    end.
+
 %% The span stack: newest first, bounded so a pathological retry cascade
 %% cannot grow the pdict without limit.
 push_span(Span) ->
@@ -3936,8 +3960,6 @@ push_span(Span) ->
     end,
     put(janus_otel_spans, lists:sublist([Span | Prev], ?SPAN_KEEP)),
     ok.
-
-fold_span(Span) -> Span.
 
 %% The SERVER span id is the parent of every attempt span in this
 %% request; `undefined' when the SERVER span was never opened (see
@@ -3959,7 +3981,7 @@ current_parent_span_id() ->
 attach_usage_to_span(Usage) when is_map(Usage) ->
     try
         case attempt_spans() of
-            [Latest | Rest] ->
+            [Latest | _] ->
                 Attrs = #{
                     <<"gen_ai.usage.input_tokens">> => maps:get(prompt, Usage, undefined),
                     <<"gen_ai.usage.output_tokens">> => maps:get(completion, Usage, undefined),
@@ -3967,7 +3989,7 @@ attach_usage_to_span(Usage) when is_map(Usage) ->
                     <<"gen_ai.usage.cache_write.input_tokens">> => nonzero(maps:get(cache_write, Usage, undefined))
                 },
                 Updated = janus_otel_span:set_attrs(Latest, Attrs),
-                put(janus_otel_spans, [Updated | Rest]),
+                _ = replace_span(Updated),
                 ok;
             [] ->
                 ok

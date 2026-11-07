@@ -23,17 +23,25 @@ from_response_body(_, _) ->
 %% message_delta output tokens, Responses response.completed).
 -spec from_sse(atom(), binary(), binary()) ->
     #{prompt := non_neg_integer(), completion := non_neg_integer()} | undefined.
-from_sse(_Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
+from_sse(Proto, Head, Tail) when is_binary(Head), is_binary(Tail) ->
     Blob = <<Head/binary, "\n", Tail/binary>>,
     Lines = binary:split(Blob, <<"\n">>, [global]),
     case lists:filtermap(fun data_line_usage/1, Lines) of
-        [] -> usage_regex_fallback(Blob);
+        [] ->
+            usage_regex_fallback(Proto, Blob);
         Usages ->
             %% Any decoded usage object is a REAL report — even {0, 0}
             %% (symmetric with from_response_body/2).
+            %%
+            %% Carry the cache dimensions through from the stream path too.
+            %% They were dropped here, so every STREAMED request reported
+            %% cache_read/cache_write as unreported while the identical
+            %% non-streamed request reported them — a silent asymmetry.
             P = lists:max([maps:get(prompt, U, 0) || U <- Usages]),
             C = lists:max([maps:get(completion, U, 0) || U <- Usages]),
-            #{prompt => P, completion => C}
+            CR = lists:max([maps:get(cache_read, U, 0) || U <- Usages]),
+            CW = lists:max([maps:get(cache_write, U, 0) || U <- Usages]),
+            #{prompt => P, completion => C, cache_read => CR, cache_write => CW}
     end;
 from_sse(_, _, _) ->
     undefined.
@@ -42,12 +50,12 @@ from_sse(_, _, _) ->
 %% response and can exceed the tail window) never decode as one line —
 %% but their trailing usage object survives. Extract the last
 %% "usage":{...} fragment (one nesting level for *_details objects).
-usage_regex_fallback(Blob) ->
+usage_regex_fallback(Proto, Blob) ->
     Pattern = <<"\"usage\"\\s*:\\s*(\\{(?:[^{}]|\\{[^{}]*\\})*\\})">>,
     case re:run(Blob, Pattern, [{capture, all_but_first, binary}, global]) of
         {match, Ms} ->
             case thoas:decode(lists:last(lists:flatten(Ms))) of
-                {ok, U} when is_map(U) -> norm(U);
+                {ok, U} when is_map(U) -> norm(Proto, U);
                 _ -> undefined
             end;
         nomatch ->
@@ -91,8 +99,6 @@ nested(Proto, Map) ->
             end
     end.
 
-nested(Map) ->
-    nested(unknown, Map).
 
 %% The two provider families count input tokens DIFFERENTLY, and getting
 %% this wrong silently inflates every request:
@@ -116,7 +122,7 @@ norm(Proto, U) when is_map(U), map_size(U) > 0 ->
     Read = read_tokens(U),
     P =
         case input_includes_cache(Proto) of
-            true -> max(Base, Base);
+            true -> Base;
             false -> Base + Write + Read
         end,
     C = first_int(U, [<<"completion_tokens">>, <<"output_tokens">>]),
@@ -125,7 +131,9 @@ norm(Proto, U) when is_map(U), map_size(U) > 0 ->
     case has_known_key(U) of
         true -> #{prompt => P, completion => C, cache_read => Read, cache_write => Write};
         false -> undefined
-    end.
+    end;
+norm(_Proto, _U) ->
+    undefined.
 
 %% norm/1 has no protocol context. Default to the ADDITIVE interpretation,
 %% which is the Anthropic shape and the one that UNDER-reports if handled

@@ -79,7 +79,7 @@ HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 PY
 
 # Collector: records every OTLP POST body verbatim.
-cat > "$GW/scripts/verification/_otlp_collector.py" <<'PY'
+cat > "$OUT/otlp_collector.py" <<'PY'
 #!/usr/bin/env python3
 """Throwaway OTLP/HTTP-JSON collector: appends every received body."""
 import json, sys
@@ -103,7 +103,7 @@ class H(BaseHTTPRequestHandler):
 open(OUT, 'w').close()
 HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 PY
-python3 "$GW/scripts/verification/_otlp_collector.py" "$COLLECTOR_PORT" "$COLLECT" 2>/dev/null &
+python3 "$OUT/otlp_collector.py" "$COLLECTOR_PORT" "$COLLECT" 2>/dev/null &
 COLLECTOR=$!
 
 python3 "$OUT/mock_provider.py" "$MOCK_PORT" 2>/dev/null &
@@ -165,7 +165,16 @@ cat > "$OUT/seed.json" <<JSON
   }
 }
 JSON
-sed -i "" "s/__COLLECTOR_PORT__/$COLLECTOR_PORT/" "$OUT/seed.json"
+python3 - "$OUT/seed.json" "$COLLECTOR_PORT" <<'PYEDIT'
+import sys
+path, port = sys.argv[1], sys.argv[2]
+# Read BEFORE opening for write: `open(p,'w')` truncates the file, so the
+# one-liner form silently produced an empty seed.
+with open(path) as f:
+    text = f.read()
+with open(path, 'w') as f:
+    f.write(text.replace('__COLLECTOR_PORT__', port))
+PYEDIT
 
 # Both the seed and the serving boot must share the pepper and secrets
 # key, or the seeded hash will not verify and every request 401s.
@@ -288,13 +297,15 @@ if server and client:
                  server.get("parentSpanId"))
 
 # Timestamps must be decimal STRINGS (OTLP/JSON): a numeric nanosecond
-# epoch is silently rounded by every JS consumer.
-for s in mine:
-    for k in ("startTimeUnixNano", "endTimeUnixNano"):
-        if not isinstance(s.get(k), str):
-            bad += check(f"{k} is a string", False, type(s.get(k)).__name__); break
-else:
-    bad += check("timestamps are decimal strings", True)
+# epoch is silently rounded by every JS consumer. Asserted per field on
+# every span, so a single bad one cannot hide behind a passing sibling.
+ts_bad = [
+    (s.get("name"), k)
+    for s in mine
+    for k in ("startTimeUnixNano", "endTimeUnixNano")
+    if not isinstance(s.get(k), str)
+]
+bad += check("timestamps are decimal strings", not ts_bad, ts_bad)
 
 def attrs(s):
     return {a["key"]: next(iter(a["value"].values())) for a in s.get("attributes", [])}
