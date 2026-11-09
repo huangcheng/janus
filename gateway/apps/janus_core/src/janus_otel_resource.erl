@@ -83,10 +83,24 @@ build() ->
         <<"janus.role">> => role_bin()
     },
     %% `OTEL_RESOURCE_ATTRIBUTES' is the standard override channel
-    %% (comma-separated key=value). Operator-supplied values WIN over the
-    %% computed defaults, which is what the spec's precedence rules say
-    %% and what makes a deployment re-targetable without a code change.
-    maps:merge(Base, env_attrs()).
+    %% (comma-separated key=value), and operator values win over the
+    %% computed defaults — but NOT for the identity attrs.
+    %%
+    %% `service.instance.id' is contractually UNIQUE per
+    %% (service.namespace, service.name). Letting an env var set it means
+    %% two nodes can be configured with the same id, silently merging two
+    %% replicas into one series in every backend — the exact failure the
+    %% attribute exists to prevent. The alias is excluded for the same
+    %% reason: it is the readable half of that identity, and the id is
+    %% derived from it, so they must not be able to disagree.
+    Protected = [
+        <<"service.instance.id">>,
+        <<"service.namespace">>,
+        <<"service.name">>,
+        <<"janus.node.alias">>
+    ],
+    Overrides = maps:without(Protected, env_attrs()),
+    maps:merge(Base, Overrides).
 
 %% @doc Readable node identity: `<provider>-<ordinal>'.
 %%
@@ -115,8 +129,18 @@ alias() ->
 derive_alias() ->
     Node = atom_to_binary(node(), utf8),
     case binary:split(Node, <<"@">>) of
-        [_Name, Host] when Host =/= <<>> -> sanitize_alias(Host);
-        _ -> <<"unknown">>
+        [_Name, Host] when Host =/= <<>>, Host =/= <<"nohost">> ->
+            sanitize_alias(Host);
+        _ ->
+            %% No usable long name (a bare `erl -noshell', or a node whose
+            %% long name is missing). Returning a constant here would give
+            %% two such nodes the SAME instance id, so fold in a short hash
+            %% of the full node name: still unreadable, but at least not
+            %% colliding, and this path is not reachable in a real
+            %% deployment where every node has a long name.
+            Digest = crypto:hash(sha256, Node),
+            Suffix = string:lowercase(binary:encode_hex(binary:part(Digest, 0, 4))),
+            <<"node-", Suffix/binary>>
     end.
 
 %% Keep the alias label-shaped: bounded, lowercase, no whitespace. It is

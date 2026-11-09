@@ -1,18 +1,24 @@
 %%%-------------------------------------------------------------------
 %%% @doc Telemetry configuration surface (OpenTelemetry alignment spec).
 %%%
-%%% ## Two configuration channels, spec precedence
+%%% ## Two configuration channels, and where each one wins
 %%%
-%%% Per the OTel SDK environment-variable specification, the ENVIRONMENT
-%%% wins over programmatic configuration. This module therefore resolves
-%%% in that order:
+%%% The two channels resolve differently, on purpose:
 %%%
-%%%   1. `OTEL_SDK_DISABLED' / `OTEL_EXPORTER_OTLP_*' / `OTEL_TRACES_SAMPLER*'
-%%%      — the standard variables, which is how an operator configures an
-%%%      OTel-emitting process without inventing app-specific settings
-%%%   2. the `telemetry' dashboard setting (distributed from Postgres on
-%%%      the master via `persistent_term')
-%%%   3. the built-in default (export OFF, 5 % sampling)
+%%% **Export endpoint/enablement — environment WINS.** An OTel-emitting
+%%% process is expected to be configurable with the standard variables,
+%%% and a per-node endpoint is a deployment concern (each node may ship
+%%% to a different collector). `OTEL_SDK_DISABLED' additionally wins over
+%%% everything.
+%%%
+%%% **Sampling ratio — the dashboard setting WINS.** The ratio is what an
+%%% operator changes in the UI at runtime; letting a boot-time env var
+%%% outrank it would make a live edit silently ineffective, which is the
+%%% hot-reload promise this whole feature exists to keep. The standard
+%%% `OTEL_TRACES_SAMPLER' names (`always_on' / `always_off') still apply,
+%%% resolved in `janus_trace'.
+%%%
+%%% Both fall back to a built-in default (export OFF, 5 % sampling).
 %%%
 %%% ## Why the environment channel is not optional
 %%%
@@ -138,7 +144,10 @@ env_endpoint() ->
         {ok, Url} ->
             {ok, strip_traces_suffix(Url)};
         error ->
-            nonempty(os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+            case nonempty(os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) of
+                {ok, Url} -> {ok, strip_traces_suffix(Url)};
+                error -> error
+            end
     end.
 
 %% The exporter appends `/v1/traces'; strip it from a traces-endpoint so
@@ -199,6 +208,9 @@ nonempty(V) when is_list(V) ->
         S -> {ok, list_to_binary(S)}
     end;
 nonempty(V) when is_binary(V), V =/= <<>> ->
-    {ok, V};
+    case string:trim(V, both, " \t") of
+        <<>> -> error;
+        B -> {ok, B}
+    end;
 nonempty(_) ->
     error.
