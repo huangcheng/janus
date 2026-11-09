@@ -101,8 +101,12 @@ record(_) ->
 %% @doc Exporter counters, for the admin stats face.
 -spec stats() -> map().
 stats() ->
+    %% SHORT timeout on purpose: the caller is the /metrics handler, and a
+    %% scrape must not block for 5 s behind a busy exporter. A timeout here
+    %% omits the exporter series (see the caller) rather than stalling the
+    %% scrape or inventing zeros.
     try
-        gen_server:call(?SERVER, stats, 5000)
+        gen_server:call(?SERVER, stats, 1000)
     catch
         _:_ -> #{available => false}
     end.
@@ -240,9 +244,29 @@ maybe_log_failure(LastLog, Why) ->
 
 %% Log a CLASS, not the raw reason: a collector's error body can echo the
 %% request, and this line goes to the gateway log.
-classify_failure({http, Status}) when is_integer(Status) -> {http_status, Status};
-classify_failure({error, Reason}) when is_atom(Reason) -> Reason;
-classify_failure(_) -> export_error.
+%% Every clause returns a FLAT atom or binary, because this value becomes a
+%% metric LABEL. A tuple would render as "{http_status,500}", which is both
+%% unreadable and a different series per spelling.
+classify_failure({http, Status}) when is_integer(Status) ->
+    %% Bucket by class, not by exact code: the label stays bounded and a
+    %% dashboard groups 4xx/5xx sensibly. The exact code is not needed to
+    %% answer "is the collector rejecting us, and how".
+    case Status of
+        S when S >= 500 -> collector_5xx;
+        S when S >= 400 -> collector_4xx;
+        _ -> collector_unexpected
+    end;
+classify_failure({partial, rejected}) ->
+    %% Delivered but partially rejected by the collector: distinct from a
+    %% transport failure, and the only class that implies real data loss
+    %% behind a 2xx.
+    partial_rejected;
+classify_failure({error, Reason}) when is_atom(Reason) ->
+    Reason;
+classify_failure({error, {Class, _}}) when is_atom(Class) ->
+    Class;
+classify_failure(_) ->
+    export_error.
 
 post(Spans) ->
     try
@@ -255,8 +279,12 @@ post(Spans) ->
         Opts = [{body_format, binary}],
         inets:start(),
         case httpc:request(post, Request, HttpOpts, Opts) of
-            {ok, {{_, Status, _}, _Hdrs, _Body}} when Status >= 200, Status < 300 ->
-                ok;
+            {ok, {{_, Status, _}, _Hdrs, Body}} when Status >= 200, Status < 300 ->
+                %% OTLP answers 200 even when it REJECTED part of the batch:
+                %% `{"partialSuccess":{"rejectedSpans":N,"errorMessage":...}}'.
+                %% Treating that as full success would hide collector-side
+                %% data loss behind a healthy-looking counter.
+                partial_success(Body);
             {ok, {{_, Status, _}, _Hdrs, _Body}} ->
                 {error, {http, Status}};
             {error, Reason} ->
@@ -265,6 +293,36 @@ post(Spans) ->
     catch
         Class:Reason2 -> {error, {error, {Class, Reason2}}}
     end.
+
+%% Interpret an OTLP 2xx response body.
+%%
+%% The spec allows a successful HTTP status with a `partialSuccess' object
+%% reporting `rejectedSpans'. Those spans ARE lost, so this must not be
+%% reported as a clean send — but it must also not be reported as a total
+%% failure, because the accepted portion did arrive and will never be
+%% retried. The batch is counted as sent (it was delivered) and the
+%% rejection is surfaced separately as a failure class.
+partial_success(Body) when is_binary(Body), byte_size(Body) > 0 ->
+    try
+        case thoas:decode(Body) of
+            {ok, #{<<"partialSuccess">> := PS}} when is_map(PS) ->
+                Rejected = maps:get(<<"rejectedSpans">>, PS, 0),
+                case is_integer(Rejected) andalso Rejected > 0 of
+                    true ->
+                        %% The collector's message can quote our payload, so
+                        %% only a fixed class is kept.
+                        {error, {partial, rejected}};
+                    false ->
+                        ok
+                end;
+            _ ->
+                ok
+        end
+    catch
+        _:_ -> ok
+    end;
+partial_success(_) ->
+    ok.
 
 %% `/v1/traces' appended to the configured base, tolerating a trailing
 %% slash so an operator's `http://collector:4318/' does not become

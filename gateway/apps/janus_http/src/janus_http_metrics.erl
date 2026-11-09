@@ -460,20 +460,24 @@ fleet_rows() ->
 otel_export_series() ->
     case catch janus_otel_export:stats() of
         M when is_map(M), map_get(available, M) =:= true ->
+            %% Every value is type-guarded like the usage-writer rows above:
+            %% a malformed stats map must not 500 the whole scrape, and a
+            %% non-integer in a counter line would be invalid exposition.
             Counters = [
                 {{counter, otel_export_spans_total, [{<<"result">>, <<"sent">>}]},
-                    maps:get(sent_total, M, 0)},
+                    int_or_zero(maps:get(sent_total, M, 0), otel_export_sent)},
                 {{counter, otel_export_spans_total, [{<<"result">>, <<"failed">>}]},
-                    maps:get(failed_total, M, 0)},
+                    int_or_zero(maps:get(failed_total, M, 0), otel_export_failed)},
                 {{counter, otel_export_spans_total, [{<<"result">>, <<"dropped_queue_full">>}]},
-                    maps:get(dropped_total, M, 0)},
+                    int_or_zero(maps:get(dropped_total, M, 0), otel_export_dropped)},
                 {{counter, otel_export_batches_total, [{<<"result">>, <<"sent">>}]},
-                    maps:get(batches_sent_total, M, 0)},
+                    int_or_zero(maps:get(batches_sent_total, M, 0), otel_export_batches_sent)},
                 {{counter, otel_export_batches_total, [{<<"result">>, <<"failed">>}]},
-                    maps:get(batches_failed_total, M, 0)}
+                    int_or_zero(maps:get(batches_failed_total, M, 0), otel_export_batches_failed)}
             ],
             Gauges = [
-                {otel_export_queue_depth, maps:get(queued, M, 0), #{}},
+                {otel_export_queue_depth,
+                    int_or_zero(maps:get(queued, M, 0), otel_export_queue), #{}},
                 %% 1 when telemetry export is switched on. A gauge so a
                 %% dashboard can show "collector configured" next to the
                 %% counters instead of leaving an empty panel ambiguous.
@@ -495,7 +499,10 @@ otel_export_series() ->
                         [];
                     Ms when is_integer(Ms), Ms > 0 ->
                         Age = max(0, erlang:system_time(millisecond) - Ms),
-                        [{otel_export_last_success_age_seconds, Age div 1000, #{}}];
+                        [
+                            {otel_export_last_success_age_seconds,
+                                int_or_zero(Age div 1000, otel_export_age), #{}}
+                        ];
                     _ ->
                         []
                 end,
