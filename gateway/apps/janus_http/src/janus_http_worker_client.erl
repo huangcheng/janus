@@ -389,12 +389,30 @@ finish_prepare({ok, #{url := Url, method := Method, headers := Headers, body := 
         protocol_meta => #{}
     },
     Fields1 = wire_trace(Fields0),
-    Fields =
+    Fields2 =
         case ProviderId of
             undefined -> Fields1;
             _ -> Fields1#{provider_id => ProviderId}
         end,
-    {ok, Fields}.
+    {ok, with_provider_name(Fields2)}.
+
+%% Attach the provider's catalog name so the executing node can label its
+%% span with something a human can read.
+%%
+%% The worker has no catalog, so it could only ever report the numeric id —
+%% which makes a trace say `provider = 1`. The name is resolved HERE, where
+%% the catalog is available, and rides the wire as an OPTIONAL additive key:
+%% an old worker ignores unknown keys, and a new worker falls back to the
+%% id when an old master omits it.
+with_provider_name(#{provider_id := Id} = Fields) when is_integer(Id) ->
+    case catch janus_catalog:lookup_provider(Id) of
+        {ok, #{name := Name}} when is_binary(Name), Name =/= <<>> ->
+            Fields#{provider_name => Name};
+        _ ->
+            Fields
+    end;
+with_provider_name(Fields) ->
+    Fields.
 
 %% Shared resolve for modality unary (local post + worker job). No stream/model rewrite.
 -spec resolve_unary_upstream(map(), binary(), binary(), map()) ->
