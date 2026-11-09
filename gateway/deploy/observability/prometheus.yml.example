@@ -32,11 +32,19 @@ scrape_configs:
     # `host.docker.internal` resolves to the HOST from inside the
     # container; 127.0.0.1 here would be the container's own loopback and
     # the tunnel lives on the host.
+    # Target-level labels describe THIS SCRAPE, not the node a metric is
+    # about, so they are prefixed. A target label that shares a name with
+    # an application label silently WINS (Prometheus defaults to
+    # honor_labels: false) and the application's value is renamed to
+    # exported_<label>. Naming one of these `node` would therefore
+    # overwrite the gateway's own per-metric `node` -- which names the
+    # worker a scheduler metric is about -- and every per-node panel would
+    # render the scrape source instead of the node.
     static_configs:
       - targets: ["<docker-bridge-gateway>:38945"]
         labels:
-          node: gateway
-          role: master
+          scrape_source: master
+          scrape_role: master
 
   # Self-observability of the collector.
   - job_name: tempo
