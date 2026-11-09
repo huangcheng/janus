@@ -507,11 +507,14 @@ health_ewma_json(_) ->
     #{}.
 
 %% Age of each health-EWMA sample in ms; `null` when unknown.
+%%
+%% The key is PRESENT with an explicit `null' rather than dropped: a
+%% consumer distinguishing "current" from "unknown" must be able to see
+%% that the node has an entry whose age we cannot vouch for.
 health_ewma_age_json(Ages) when is_map(Ages) ->
     maps:from_list([
-        {to_bin(Node), Age}
-     || {Node, Age} <- maps:to_list(Ages),
-        is_integer(Age)
+        {to_bin(Node), case is_integer(Age) of true -> Age; false -> null end}
+     || {Node, Age} <- maps:to_list(Ages)
     ]);
 health_ewma_age_json(_) ->
     #{}.

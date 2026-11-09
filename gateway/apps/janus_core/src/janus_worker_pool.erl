@@ -1319,7 +1319,7 @@ sort_key_rtt(ProviderId, Fallback, M, N) ->
 %% no timestamp is reported as `unknown' rather than assumed fresh: this
 %% map is new, so entries written before it existed must not be trusted.
 health_ewma_age_ms(EwmaAt) when is_map(EwmaAt) ->
-    Now = erlang:monotonic_time(millisecond),
+    Now = now_mono(),
     maps:map(fun(_Node, At) when is_integer(At) -> max(0, Now - At); (_N, _) -> unknown end, EwmaAt);
 health_ewma_age_ms(_) ->
     #{}.
@@ -1629,7 +1629,7 @@ handle_cast({sched, 2, {ttfb, JobRef, ElapsedMs}}, State) ->
                 ewma_step(maps:get(Node, State#state.ewma, none), ElapsedMs),
                 State#state.ewma
             ),
-            At1 = maps:put(Node, erlang:monotonic_time(millisecond), State#state.ewma_at),
+            At1 = maps:put(Node, now_mono(), State#state.ewma_at),
             {noreply, mark_dirty(State#state{ewma = Ewma1, ewma_at = At1})};
         _ ->
             {noreply, State}

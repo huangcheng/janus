@@ -7,7 +7,12 @@
 
 -behaviour(cowboy_handler).
 
--export([init/2]).
+-export([init/2,
+    %% Exported for eunit: the TTL boundary is a pure predicate and the
+    %% whole staleness contract hangs on it, so it is pinned directly
+    %% rather than inferred from a rendered scrape.
+    ewma_fresh/1
+]).
 %% v2.1 C.1 sched-series builders (eunit — the cap/overflow logic is
 %% pure over the pool counters map).
 -export([one_label_rows/4, dispatch_worker_rows/1, sched_workers_available/1]).
