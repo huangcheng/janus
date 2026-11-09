@@ -174,6 +174,19 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
 %% one would be worse than a root span in the same trace.
 open_job_span(Fields) ->
     try
+        case get(?PDICT_INTERNAL) of
+            true ->
+                %% Probe: excluded everywhere else, so excluded here too.
+                ok;
+            _ ->
+                open_job_span_1(Fields)
+        end
+    catch
+        _:_ -> ok
+    end.
+
+open_job_span_1(Fields) ->
+    try
         Trace = get(janus_trace),
         case janus_trace:sampled(Trace) of
             false ->
