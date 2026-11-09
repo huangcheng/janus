@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Check, Copy } from "lucide-react"
 
 import { api } from "../api"
@@ -487,24 +487,131 @@ export function statusClass(status: number) {
   return "text-success"
 }
 
-export function CopyMono({ text, label = "request ID" }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false)
-  const [failed, setFailed] = useState(false)
-  const copy = async () => {
+/** The timeline query string, preferring a pivot over the opening props.
+ *
+ * Written as a function rather than nested ternaries: the precedence (pivot
+ * beats prop beats request_ref) is the whole logic and is easier to read
+ * stated once.
+ */
+function timelineQuery(
+  pivot: { kind: "trace"; id: string } | null,
+  traceId: string | undefined,
+  requestRef: string | undefined,
+): string {
+  if (pivot) return `trace_id=${encodeURIComponent(pivot.id)}`
+  if (traceId) return `trace_id=${encodeURIComponent(traceId)}`
+  return `request_ref=${encodeURIComponent(requestRef as string)}`
+}
+
+function copyTitle(state: "idle" | "copied" | "failed", traceId: string): string {
+  if (state === "copied") return "Copied"
+  if (state === "failed") return "Copy failed"
+  return `Copy ${traceId}`
+}
+
+function copyAriaLabel(state: "idle" | "copied" | "failed", traceId: string): string {
+  if (state === "copied") return `Copied trace ID ${traceId}`
+  if (state === "failed") return `Copy failed for trace ID ${traceId}`
+  return `Copy trace ID ${traceId}`
+}
+
+function copyAnnouncement(state: "idle" | "copied" | "failed"): string {
+  if (state === "copied") return "Trace ID copied"
+  if (state === "failed") return "Copy failed"
+  return ""
+}
+
+/** A trace id that opens the timeline for that trace.
+ *
+ * The trace id is the one id in the UI that spans more than this gateway: it
+ * joins the client's request to the gateway and to everything downstream. So
+ * it is a navigation affordance as well as a copyable value — clicking it shows
+ * the timeline resolved BY TRACE, which the endpoint already supports.
+ */
+export function TraceLink({
+  traceId,
+  onOpen,
+}: {
+  traceId: string
+  onOpen: (traceId: string) => void
+}) {
+  const { state: copyState, copy } = useCopyFeedback()
+  const copied = copyState === "copied"
+  return (
+    <span className="flex min-w-0 items-center gap-1">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onOpen(traceId)
+        }}
+        title={`Open the timeline for trace ${traceId}`}
+        aria-label={`Open the timeline for trace ${traceId}`}
+        className="truncate font-mono text-xs text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {traceId}
+      </button>
+      <button
+        type="button"
+        onClick={(e) => void copy(traceId, e)}
+        title={copyTitle(copyState, traceId)}
+        aria-label={copyAriaLabel(copyState, traceId)}
+        className="grid size-4 shrink-0 place-items-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {copied ? (
+          <Check className="size-3 text-success" />
+        ) : (
+          <Copy className={copyState === "failed" ? "size-3 text-destructive" : "size-3"} />
+        )}
+      </button>
+      {/* The live region is a SIBLING of the button, not a child: several
+          screen readers ignore a status node nested inside an interactive
+          element, so the announcement would never be spoken. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copyAnnouncement(copyState)}
+      </span>
+    </span>
+  )
+}
+
+/** The clipboard-feedback state machine, shared by every copy affordance.
+ *
+ * Extracted rather than repeated: two copies of it had already drifted (one
+ * kept a timer ref, the other leaked its timer on unmount, and one swallowed
+ * failures). One implementation means one behaviour, and the cleanup lives
+ * here instead of in each caller.
+ */
+function useCopyFeedback() {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle")
+  const timer = useRef<number | null>(null)
+  useEffect(() => {
+    return () => {
+      if (timer.current !== null) window.clearTimeout(timer.current)
+    }
+  }, [])
+  const copy = useCallback(async (text: string, stopEvent?: React.MouseEvent) => {
+    // A failed clipboard write used to be swallowed silently (L-49).
+    stopEvent?.stopPropagation()
     try {
       await copyText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      setState("copied")
     } catch {
-      // L-49: a failed clipboard write used to be swallowed silently.
-      setFailed(true)
-      setTimeout(() => setFailed(false), 2000)
+      setState("failed")
     }
-  }
+    if (timer.current !== null) window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => setState("idle"), 2000)
+  }, [])
+  return { state, copy }
+}
+
+export function CopyMono({ text, label = "request ID" }: { text: string; label?: string }) {
+  const { state, copy } = useCopyFeedback()
+  const copied = state === "copied"
+  const failed = state === "failed"
   return (
     <button
       type="button"
-      onClick={copy}
+      onClick={() => void copy(text)}
       title={failed ? `Copy failed — select the ${label} manually` : `Copy ${text}`}
       aria-label={failed ? `Copy failed for ${label} ${text}` : `Copy ${label} ${text}`}
       className="group flex min-h-8 max-w-[160px] items-center gap-1.5 rounded text-left font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -531,23 +638,57 @@ export function CopyMono({ text, label = "request ID" }: { text: string; label?:
 }
 
 /** Per-attempt failover timeline dialog — usage events and failure rows
- * with a request_ref both drill into this. */
-export function TimelineDialog({ requestRef, onClose }: { requestRef: string; onClose: () => void }) {
+ * drill into this by request_ref, and a trace id drills in by trace_id.
+ *
+ * Both keys exist because they answer different questions: a request_ref is
+ * one gateway request, while a trace_id spans the client's request through the
+ * gateway and every service it called. The endpoint already distinguishes "in
+ * flight" from "not found" for either key, so that distinction is surfaced
+ * rather than collapsed into a generic error. */
+type TimelineKey = { requestRef: string; traceId?: never } | { traceId: string; requestRef?: never }
+
+export function TimelineDialog({
+  requestRef,
+  traceId,
+  onClose,
+}: TimelineKey & { onClose: () => void }) {
   const [data, setData] = useState<UsageTimeline | null>(null)
   const [error, setError] = useState("")
+  // A click on the trace id inside the dialog pivots the SAME dialog rather
+  // than opening a second one on top of the first.
+  const [pivot, setPivot] = useState<{ kind: "trace"; id: string } | null>(null)
+
+  const query = timelineQuery(pivot, traceId, requestRef)
 
   useEffect(() => {
-    api<UsageTimeline>(`/usage/timeline?request_ref=${requestRef}`)
-      .then(setData)
-      .catch((e) => setError(e.message))
-  }, [requestRef])
+    // Reset before fetching: a stale success or failure from the previous
+    // query would otherwise render as if it described the new one. The
+    // `alive` guard drops a late response from a query that is no longer
+    // current, which the pivot makes reachable.
+    setData(null)
+    setError("")
+    let alive = true
+    api<UsageTimeline>(`/usage/timeline?${query}`)
+      .then((d) => alive && setData(d))
+      .catch((e) => alive && setError(e.message))
+    return () => {
+      alive = false
+    }
+  }, [query])
 
   const req = data?.request
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (o) return
+        setPivot(null)
+        onClose()
+      }}
+    >
       <DialogContent
         size="lg"
-        title="Request timeline"
+        title={traceId || pivot ? "Trace timeline" : "Request timeline"}
         description="Every gateway attempt for this request, in order — non-terminal rows are the failover evidence."
       >
         {error ? (
@@ -574,10 +715,28 @@ export function TimelineDialog({ requestRef, onClose }: { requestRef: string; on
                 {req.attempts} attempt{req.attempts === 1 ? "" : "s"}
               </span>
             </div>
+            {pivot && (
+              <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2.5 py-1.5 text-xs">
+                <span className="text-muted-foreground">Viewing by trace</span>
+                <span className="truncate font-mono">{pivot.id}</span>
+                <button
+                  type="button"
+                  onClick={() => setPivot(null)}
+                  className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  Back to this request
+                </button>
+              </div>
+            )}
             {req.trace_id && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
                 <span className="shrink-0">trace</span>
-                <CopyMono text={req.trace_id} label="trace ID" />
+                <TraceLink
+                  traceId={req.trace_id}
+                  onOpen={(tid) => {
+                    setPivot({ kind: "trace", id: tid })
+                  }}
+                />
               </div>
             )}
             <ol className="flex flex-col gap-2">
