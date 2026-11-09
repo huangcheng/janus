@@ -56,6 +56,7 @@
     response_headers/1,
     encode_tracestate/1,
     set_log_context/1,
+    set_log_span/1,
     clear_log_context/0,
     strip_trace_headers/1,
     ratio/0,
@@ -283,7 +284,47 @@ response_headers(#trace{tid = Tid, sampled = Sampled, ts = Ts}) ->
 set_log_context(undefined) ->
     clear_log_context();
 set_log_context(#trace{tid = Tid}) ->
-    logger:set_process_metadata(#{trace_id => Tid}).
+    Meta =
+        case get(janus_log_span_id) of
+            SpanId when is_binary(SpanId), byte_size(SpanId) =:= 16 ->
+                #{trace_id => Tid, span_id => SpanId};
+            _ ->
+                #{trace_id => Tid}
+        end,
+    logger:set_process_metadata(Meta).
+
+%% @doc Publish the active span id for log correlation.
+%%
+%% Called by the span layer when a span opens, and cleared when it closes.
+%% Without it a log line carries `trace_id' but no `span_id', so a backend
+%% can find the trace but not the span the line belongs to — and the OTLP
+%% log record's `spanId' field would be permanently absent, which reads as
+%% "this line is outside any span" rather than "we never recorded it".
+-spec set_log_span(binary() | undefined) -> ok.
+set_log_span(undefined) ->
+    erase(janus_log_span_id),
+    refresh_log_meta();
+set_log_span(SpanId) when is_binary(SpanId) ->
+    put(janus_log_span_id, SpanId),
+    refresh_log_meta();
+set_log_span(_) ->
+    ok.
+
+%% Re-stamp the metadata from whatever is currently held. A span can open
+%% before or after the trace context is installed, so the two setters must
+%% compose rather than overwrite each other.
+refresh_log_meta() ->
+    case get(janus_trace) of
+        #trace{tid = Tid} when is_binary(Tid) ->
+            set_log_context(#trace{tid = Tid});
+        _ ->
+            case get(janus_log_span_id) of
+                Id when is_binary(Id) ->
+                    logger:set_process_metadata(#{span_id => Id});
+                _ ->
+                    ok
+            end
+    end.
 
 %% @doc Drop the log context. Handlers that deliberately take no part in
 %% tracing (the models listing) call this so a keep-alive reuse cannot

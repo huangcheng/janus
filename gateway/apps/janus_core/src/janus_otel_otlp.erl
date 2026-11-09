@@ -36,6 +36,8 @@
 -export([
     encode/2,
     encode_metrics/4,
+    encode_logs/2,
+    encode_attrs/1,
     encode_span/1,
     span_kind/1,
     status_code/1
@@ -96,6 +98,38 @@ encode(Spans, Resource) when is_list(Spans), is_map(Resource) ->
 %%% for a cumulative counter it must be the instant the measurement period
 %%% began, and every reset of that timestamp reads as a restart.
 %%% @end
+%%%-------------------------------------------------------------------
+%%% Logs (design §10.2)
+%%%
+%%% One resourceLogs entry carrying every record in the batch. The record's
+%%% `body' is the rendered text and its `attributes' are the flattened
+%%% report fields, which is the split the OTLP model asks for: a backend can
+%%% group by `what' without parsing the human-readable line.
+%%%
+%%% `traceId'/'spanId' are TOP-LEVEL proto fields, not attributes. They are
+%%% omitted entirely when absent — a line emitted outside any span has no
+%%% trace, and back-filling a fabricated id would attach unrelated log lines
+%%% to a real trace.
+%%% @end
+-spec encode_logs([map()], map()) -> map().
+encode_logs(Records, Resource) when is_list(Records), is_map(Resource) ->
+    #{
+        <<"resourceLogs">> => [
+            #{
+                <<"resource">> => #{<<"attributes">> => encode_attrs(Resource)},
+                <<"scopeLogs">> => [
+                    #{
+                        <<"scope">> => #{
+                            <<"name">> => <<"janus">>,
+                            <<"version">> => scope_version()
+                        },
+                        <<"logRecords">> => Records
+                    }
+                ]
+            }
+        ]
+    }.
+
 -spec encode_metrics([{tuple(), integer()}], [term()], map(), integer()) -> map().
 encode_metrics(Rows, Gauges, Resource, StartNs) when is_list(Rows), is_map(Resource) ->
     Counters = encode_counter_metrics(Rows, StartNs),

@@ -4224,6 +4224,9 @@ open_server_span(Method, Path) ->
                     <<"url.path">> => janus_otel_attr:sanitize_value(iolist_to_binary(Path))
                 }),
                 put(janus_otel_server_span, Span1),
+                %% Correlate log lines with the span they belong to, not
+                %% just with the trace.
+                _ = janus_trace:set_log_span(janus_otel_span:id(Span1)),
                 Span1
         end
     catch
@@ -4249,6 +4252,7 @@ close_server_span(Status) ->
             Span ->
                 Finished = janus_otel_span:finish(Span, Status),
                 put(janus_otel_server_span, Finished),
+                _ = janus_trace:set_log_span(undefined),
                 ok
         end
     catch

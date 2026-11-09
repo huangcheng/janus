@@ -35,7 +35,10 @@
 
 -behaviour(gen_server).
 
--export([start_link/0, record/1, stats/0, flush/0]).
+-export([start_link/0, record/1, record_log/1, stats/0, flush/0]).
+%% Conformance seam: the log record encoder, so the wire shape is asserted
+%% where it is built rather than inferred from the severity table.
+-export([encode_log_for_test/1]).
 -export([
     init/1,
     handle_call/3,
@@ -56,8 +59,20 @@
 %% not turn every flush into a log line.
 -define(FAIL_LOG_MS, 60000).
 
+%% Logs batching defaults from the Logs SDK (design §10.2): the delay is
+%% 1000 ms — half the trace flush — because a log line is only useful with
+%% its surroundings, so it should not sit in a queue for two seconds.
+-define(LOG_FLUSH_MS, 1000).
+-define(LOG_MAX_QUEUE, 2048).
+-define(LOG_MAX_BATCH, 512).
+
 -record(state, {
     queue = [] :: [map()],
+    %% Log records are buffered SEPARATELY from spans: different cadence,
+    %% different queue bound, and a log burst must never evict spans.
+    log_queue = [] :: [map()],
+    logs_sent = 0 :: non_neg_integer(),
+    logs_dropped = 0 :: non_neg_integer(),
     started = false :: boolean(),
     dropped = 0 :: non_neg_integer(),
     sent = 0 :: non_neg_integer(),
@@ -112,6 +127,13 @@ stats() ->
     end.
 
 %% @doc Force a drain now (tests and shutdown).
+%% @doc Hand one logger event to the exporter. A cast, so a slow or dead
+%% collector can never block the process that logged.
+-spec record_log(logger:log_event()) -> ok.
+record_log(Event) ->
+    catch gen_server:cast(?SERVER, {log, Event}),
+    ok.
+
 -spec flush() -> ok.
 flush() ->
     catch gen_server:cast(?SERVER, flush),
@@ -129,9 +151,16 @@ init([]) ->
     %% would look like a counter that just reset to its current value —
     %% which a backend renders as a sawtooth of resets, not a rate.
     persistent_term:put({janus, otel_start_ns}, erlang:system_time(nanosecond)),
+    %% The log handler is installed only when export is on, so a deployment
+    %% that exports nothing has no logger handler and no per-event cast.
+    case janus_telemetry:export_enabled() of
+        true -> ok = janus_otel_logs:install();
+        false -> ok
+    end,
     %% The timer is only started when export is enabled at boot; a config
     %% change that enables export later starts it lazily on the next cast.
     erlang:send_after(?FLUSH_MS, self(), tick),
+    erlang:send_after(?LOG_FLUSH_MS, self(), log_tick),
     {ok, #state{}}.
 
 handle_call(stats, _From, State) ->
@@ -143,7 +172,10 @@ handle_call(stats, _From, State) ->
         batches_sent = BS,
         batches_failed = BF,
         last_success_ms = LS,
-        last_error = LE
+        last_error = LE,
+        log_queue = LQ,
+        logs_sent = LSent,
+        logs_dropped = LDrop
     } = State,
     {reply, #{
         available => true,
@@ -155,21 +187,29 @@ handle_call(stats, _From, State) ->
         batches_sent_total => BS,
         batches_failed_total => BF,
         last_success_ms => LS,
-        last_error => LE
+        last_error => LE,
+        logs_queued => length(LQ),
+        logs_sent_total => LSent,
+        logs_dropped_total => LDrop
     }, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 handle_cast({span, Span}, State) ->
     {noreply, enqueue(State, Span)};
+handle_cast({log, Event}, State) ->
+    {noreply, enqueue_log(Event, State)};
 handle_cast(flush, State) ->
-    {noreply, do_flush(State)};
+    {noreply, do_flush(do_flush_logs(State))};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(tick, State) ->
     erlang:send_after(?FLUSH_MS, self(), tick),
-    {noreply, do_flush(State)};
+    {noreply, do_flush(ensure_log_handler(State))};
+handle_info(log_tick, State) ->
+    erlang:send_after(?LOG_FLUSH_MS, self(), log_tick),
+    {noreply, do_flush_logs(ensure_log_handler(State))};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -359,6 +399,216 @@ export_url() ->
 %% producer: service name/version, a stable instance id derived from the
 %% node alias, and the node alias itself). Kept behind this thin wrapper
 %% so the exporter does not care where it comes from.
+%%%-------------------------------------------------------------------
+%%% Log records (design §10.2)
+%%%-------------------------------------------------------------------
+
+%% Install or remove the logger handler so it always matches the knob.
+%%
+%% Doing this only in `init/1' would miss a deployment that enables export
+%% through the dashboard later: the handler would never be added and logs
+%% would never export. Reconciling on the timer costs one comparison per
+%% tick and makes the knob effective whenever it is flipped.
+ensure_log_handler(State) ->
+    Enabled = janus_telemetry:export_enabled(),
+    Installed = lists:member(janus_otel_logs, logger:get_handler_ids()),
+    case {Enabled, Installed} of
+        {true, false} -> ok = janus_otel_logs:install();
+        {false, true} -> ok = janus_otel_logs:uninstall();
+        _ -> ok
+    end,
+    State.
+
+%% Bound the queue by DROPPING THE OLDEST, matching the span queue's
+%% policy: the newest lines are the ones near the failure an operator is
+%% looking at, and a bounded buffer with counted loss is the contract
+%% telemetry must keep.
+enqueue_log(Event, #state{log_queue = Q, logs_dropped = D} = State) ->
+    case encode_log(Event) of
+        skip ->
+            State;
+        Rec ->
+            case length(Q) >= ?LOG_MAX_QUEUE of
+                true ->
+                    %% Drop the OLDEST: the newest lines are the ones near
+                    %% the failure an operator is looking at.
+                    State#state{
+                        log_queue = lists:droplast([Rec | Q]),
+                        logs_dropped = D + 1
+                    };
+                false ->
+                    State#state{log_queue = [Rec | Q]}
+            end
+    end.
+
+do_flush_logs(#state{log_queue = []} = State) ->
+    State;
+do_flush_logs(#state{log_queue = Q} = State) ->
+    All = lists:reverse(Q),
+    {Batch, Rest} = lists:split(min(length(All), ?LOG_MAX_BATCH), All),
+    case post_logs(Batch) of
+        ok ->
+            State#state{
+                log_queue = lists:reverse(Rest),
+                logs_sent = State#state.logs_sent + length(Batch)
+            };
+        {error, Why} ->
+            %% Dropped rather than retried, like the span queue: a log line
+            %% that missed its moment is worth less than the memory its
+            %% retry would pin.
+            %%
+            %% Deliberately NOT logged here: this function runs inside the
+            %% logger handler's own export path, so a log line would feed
+            %% itself back in. The failure surfaces through `stats/0'
+            %% (`last_error') instead.
+            State#state{
+                log_queue = lists:reverse(Rest),
+                logs_dropped = State#state.logs_dropped + length(Batch),
+                last_error = classify_failure(Why)
+            }
+    end.
+
+%% One logger event in the OTLP log data model.
+%%
+%% A line emitted outside any span carries NO traceId/spanId: absence is
+%% explicit and must not be back-filled with a fabricated id (§10.1).
+encode_log(#{level := Level, msg := Msg} = Event) ->
+    try
+        Meta = maps:get(meta, Event, #{}),
+        {SevNum, SevText} = janus_otel_logs:severity(normalize_level(Level)),
+        Base = #{
+            <<"timeUnixNano">> => integer_to_binary(now_ns()),
+            <<"observedTimeUnixNano">> => integer_to_binary(now_ns()),
+            <<"severityNumber">> => SevNum,
+            <<"severityText">> => SevText,
+            <<"body">> => #{<<"stringValue">> => render_body(Msg)},
+            <<"attributes">> => janus_otel_otlp:encode_attrs(
+                maps:merge(flatten_meta(Meta), report_fields(Msg))
+            )
+        },
+        maps:merge(Base, trace_ids(Meta))
+    catch
+        _:_ -> skip
+    end;
+encode_log(_) ->
+    skip.
+
+%% @doc Exposed for the conformance gate: the encoder above.
+-spec encode_log_for_test(logger:log_event()) -> map() | skip.
+encode_log_for_test(Event) ->
+    encode_log(Event).
+
+%% `warning' must land in the WARN band: §10.2 is explicit that
+%% severityNumber >= 17 means "erroneous" and backends count errors from it,
+%% so promoting a recoverable warning would misreport it as an error.
+normalize_level(L) when is_atom(L) -> L;
+normalize_level(_) -> info.
+
+%% Correlate from `meta', never from a process dictionary: `meta' is
+%% captured by `logger' at the call site and is therefore correct even when
+%% a report is formatted or handled in another process.
+trace_ids(Meta) ->
+    T =
+        case maps:get(trace_id, Meta, undefined) of
+            V when is_binary(V), byte_size(V) =:= 32 -> #{<<"traceId">> => V};
+            _ -> #{}
+        end,
+    S =
+        case maps:get(span_id, Meta, undefined) of
+            V2 when is_binary(V2), byte_size(V2) =:= 16 -> #{<<"spanId">> => V2};
+            _ -> #{}
+        end,
+    maps:merge(T, S).
+
+%% The structured report becomes ATTRIBUTES and the rendered text becomes
+%% the body, which is the split the OTLP model asks for: a backend can group
+%% by `what' without parsing the human-readable line.
+flatten_meta(Meta) ->
+    maps:fold(
+        fun(K, V, Acc) ->
+            case loggable(K) of
+                true -> Acc#{atom_to_binary(K, utf8) => attr_value(V)};
+                false -> Acc
+            end
+        end,
+        #{},
+        Meta
+    ).
+
+%% A structured report's own fields become ATTRIBUTES, so a backend can
+%% group by `what' without parsing the body. This is the split the module
+%% comment promises and the OTLP data model expects.
+report_fields({report, Report}) when is_map(Report) ->
+    flatten_meta(Report);
+report_fields(_) ->
+    #{}.
+
+%% Reserved OTP logger keys carry no information of their own, and
+%% `trace_id'/'span_id' ride the dedicated proto fields instead.
+loggable(gl) -> false;
+loggable(time) -> false;
+loggable(mfa) -> false;
+loggable(file) -> false;
+loggable(line) -> false;
+loggable(pid) -> false;
+loggable(domain) -> false;
+loggable(report_cb) -> false;
+loggable(trace_id) -> false;
+loggable(span_id) -> false;
+loggable(_) -> true.
+
+attr_value(V) when is_binary(V) -> V;
+attr_value(V) when is_integer(V) -> V;
+attr_value(V) when is_float(V) -> V;
+attr_value(V) when is_boolean(V) -> V;
+attr_value(V) when is_atom(V) -> atom_to_binary(V, utf8);
+attr_value(V) -> iolist_to_binary(io_lib:format("~0p", [V])).
+
+%% `msg' arrives in several shapes; every one must render as the text a
+%% human would have seen, never as a quoted Erlang term.
+render_body({string, Chardata}) ->
+    unicode:characters_to_binary(Chardata);
+render_body({report, Report}) when is_map(Report) ->
+    iolist_to_binary(io_lib:format("~0p", [Report]));
+render_body({Format, Args}) when is_list(Args) ->
+    try
+        iolist_to_binary(io_lib:format(Format, Args))
+    catch
+        _:_ -> iolist_to_binary(io_lib:format("~0p", [{Format, Args}]))
+    end;
+render_body(B) when is_binary(B) ->
+    B;
+render_body(Other) ->
+    iolist_to_binary(io_lib:format("~0p", [Other])).
+
+post_logs([]) ->
+    ok;
+post_logs(Records) ->
+    try
+        Body = janus_otel_otlp:encode_logs(Records, resource_attrs()),
+        Json = thoas:encode(Body),
+        Url = signal_url(<<"logs">>),
+        Headers = [{"content-type", "application/json"}],
+        Request = {Url, Headers, "application/json", Json},
+        HttpOpts = [{timeout, ?HTTP_TIMEOUT_MS}, {connect_timeout, 5000}],
+        Opts = [{body_format, binary}],
+        inets:start(),
+        case httpc:request(post, Request, HttpOpts, Opts) of
+            {ok, {{_, Status, _}, _H, _B}} when Status >= 200, Status < 300 -> ok;
+            {ok, {{_, Status, _}, _H, _B}} -> {error, {collector_http, Status}};
+            {error, Why} -> {error, Why}
+        end
+    catch
+        _Class:_Reason ->
+            %% Deliberately not logged: this runs inside the logger
+            %% handler's own export path, so a log line here would feed
+            %% itself back in. The failure surfaces through `stats/0'.
+            {error, encode_failed}
+    end.
+
+now_ns() ->
+    erlang:system_time(nanosecond).
+
 %% Export the metrics VIEW of the same ETS registry (design §8.1).
 %%
 %% Unlike spans these are not queued: the registry already holds the

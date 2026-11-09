@@ -524,5 +524,54 @@ check "otlp metrics encode the required shape" '
   end,
   halt().'
 
+# C13 -- the OTLP log record model: severity through the ENCODER, the
+# `{string, Chardata}' body shape, and correlation from `meta'.
+#
+# Three normative details: `severityNumber >= 17' is what a backend counts
+# as an ERROR, so `warning' MUST stay in the WARN band; `traceId'/'spanId'
+# are ABSENT when there is no span, never back-filled; and a body must
+# render as the text a human saw, not a quoted Erlang term.
+check "otlp logs encode severity, body and correlation" '
+  Want = [{debug, 5}, {info, 9}, {notice, 10}, {warning, 13},
+          {error, 17}, {critical, 18}, {alert, 21}, {emergency, 22}],
+  BadSev = [{L, N} || {L, N} <- Want,
+                      element(1, janus_otel_logs:severity(L)) =/= N],
+  WarningBand = element(1, janus_otel_logs:severity(warning)) < 17,
+  %% Drive the REAL event shape through the encoder, so severity and body
+  %% are asserted on the wire form rather than on the mapping table alone.
+  Ev = #{level => warning,
+         msg => {string, "plain text body"},
+         meta => #{what => probe_line, trace_id => <<"0af7651916cd43dd8448eb211c80319c">>}},
+  Rec = janus_otel_export:encode_log_for_test(Ev),
+  NoTrace = janus_otel_export:encode_log_for_test(
+              #{level => info, msg => {string, "no span"}, meta => #{what => x}}),
+  SevOk = maps:get(<<"severityNumber">>, Rec) =:= 13 andalso
+              maps:get(<<"severityText">>, Rec) =:= <<"WARN">>,
+  BodyOk = maps:get(<<"stringValue">>, maps:get(<<"body">>, Rec)) =:= <<"plain text body">>,
+  TraceOk = maps:get(<<"traceId">>, Rec) =:= <<"0af7651916cd43dd8448eb211c80319c">>,
+  AbsentOk = not maps:is_key(<<"traceId">>, NoTrace) andalso
+                 not maps:is_key(<<"spanId">>, NoTrace),
+  Attrs = maps:get(<<"attributes">>, Rec),
+  AttrOk = lists:any(fun(A) -> maps:get(<<"key">>, A) =:= <<"what">> end, Attrs),
+  if
+    BadSev =/= [] ->
+      io:format("FAIL severity mapping: ~p~n", [BadSev]);
+    not WarningBand ->
+      io:format("FAIL warning mapped into the ERROR band (>=17)~n");
+    not SevOk ->
+      io:format("FAIL severity lost through the encoder~n");
+    not BodyOk ->
+      io:format("FAIL {string, Chardata} body did not render as text~n");
+    not TraceOk ->
+      io:format("FAIL traceId not carried from meta~n");
+    not AbsentOk ->
+      io:format("FAIL traceId/spanId fabricated for a line outside any span~n");
+    not AttrOk ->
+      io:format("FAIL meta field did not become an attribute~n");
+    true ->
+      io:format("PASS log records encode severity, body text and correlation~n")
+  end,
+  halt().'
+
 echo "--- $pass passed, $fail failed ---"
 [ "$fail" -eq 0 ]
