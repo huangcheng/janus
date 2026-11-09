@@ -61,3 +61,18 @@ classify_tie_test() ->
 %% Both expired -> total budget, preserving the old semantics.
 classify_both_expired_test() ->
     ?assertEqual(timeout, janus_http_worker_client:classify_stream_timeout(0, 0)).
+%% The two deadlines are anchored together from ONE resolution of the
+%% ceilings, so a config reload landing between two separate reads cannot
+%% hand a stream a total from one generation and an inactivity ceiling from
+%% the next. The invariant the whole stall detector rests on must hold on
+%% the anchored pair.
+anchored_pair_keeps_the_ordering_test() ->
+    {Deadline, Inactivity} = janus_http_worker_client:stream_deadlines(),
+    ?assert(Inactivity < Deadline),
+    %% Both instants are anchored from the SAME `Now`, so their offset must
+    %% equal the offset of one resolution of the pair. Comparing only the
+    %% ordering would pass even if the two ceilings were read through
+    %% separate accessors, which is the straddle this guards against.
+    {Total, Idle} = janus_worker_wire:stream_budgets(),
+    ?assertEqual(Total - Idle, Deadline - Inactivity).
+

@@ -33,7 +33,15 @@
     cancel/1,
     credit/2,
     redact_job/1,
-    validate/1
+    validate/1,
+    %% Cadence for an already-resolved ceiling, so a caller reporting or
+    %% anchoring the ceilings stays within one config generation.
+    keepalive_for/1,
+    %% One resolution of the two ceilings, for callers that need both.
+    %% Reading them through the individual accessors can straddle a config
+    %% generation swap and yield one value from each, transiently inverting
+    %% `inactivity < total` inside a single stream.
+    stream_budgets/0
 ]).
 
 %% Floors for the two stream-timing knobs. MIN_IDLE_MS exists so the
@@ -43,6 +51,55 @@
 %% drain loop and the client into a ~1 kHz wakeup flood.
 -define(MIN_IDLE_MS, 1_000).
 -define(MIN_KEEPALIVE_MS, 50).
+
+%% Shipped total stream budget. Named because it now has two readers — the
+%% `stream_total_timeout_ms` setting and the invalid-pair fallback below —
+%% and the incident history in this file makes a future retune of it
+%% plausible. Two literals would let the "unset" and "invalid pair" paths
+%% silently disagree about the same constant.
+-define(DEFAULT_TOTAL_MS, 600_000).
+%% Shipped inactivity default, named for the same reason: the garbage-pair
+%% fallback needs it, and it must not drift from the value used when the
+%% settings row is simply absent.
+-define(DEFAULT_IDLE_MS, 180_000).
+%% Hard upper bound on the inactivity ceiling. The point of the ceiling is to
+%% speak BEFORE the client gives up: pi (and most HTTP clients) default the
+%% request idle timeout to 300s, so a ceiling above that leaves the gateway
+%% detecting a stall the client never lives to read — the 2026-10-29
+%% incident shape, where 15 turns died blind. Now that the ceiling is a hot
+%% knob this must be enforced in the resolver, not just by the shipped
+%% default: the dashboard range alone cannot express it.
+%%
+%% COUPLED TO THE CLIENT. 299_000 is one second under that 300s default, and
+%% it is a hard cap, not a suggestion: a stream that goes genuinely quiet
+%% longer than this is still torn down here. Raising it means keeping FOUR
+%% sites in step:
+%%
+%%   1. the client's own stream idle timeout (for the pi-based harness,
+%%      `streamIdleTimeoutMs`, default 300_000) — raise it first;
+%%   2. this macro;
+%%   3. `_TRANSLATE_CAP_LIMITS["stream_inactivity_timeout_ms"]` in
+%%      dashboard/app/routers/settings.py, whose upper bound is this same
+%%      value. The dashboard REFUSES a larger entry with a 400 rather than
+%%      clamping it, so raising the macro alone leaves the knob unsettable
+%%      through the UI (env var or a direct settings-row edit would still
+%%      work);
+%%   4. the pinned expectations in
+%%      gateway/apps/janus_http/test/janus_stream_inactivity_hot_tests.erl,
+%%      which fail until updated.
+%%
+%% Raising this macro above 300_000 ALSO needs a total budget raised with
+%% it, because idle_lead/2 additionally caps the idle deadline at
+%% `Total div 2` and the dashboard's total ceiling is 3_600_000 — so an
+%% inactivity ceiling above 1_800_000 can never be honoured through the UI,
+%% however high this macro goes.
+%%
+%% Any configured value above ?MAX_IDLE_MS is CLAMPED here, whichever path
+%% supplied it — dashboard, direct settings-row edit, or the env var — and
+%% `/stats.stream_budgets` then reports the clamped `inactivity_ms` without
+%% labelling it as a clamp. So a configured-but-ignored ceiling is silent,
+%% and the value in force is never higher than this macro.
+-define(MAX_IDLE_MS, 299_000).
 
 -define(VSN, 1).
 -define(METHODS, [get, post, put, delete, patch]).
@@ -92,34 +149,196 @@ non_stream_timeout_ms() -> 120_000.
 %% stream.
 -spec stream_timeout_ms() -> pos_integer().
 stream_timeout_ms() ->
-    %% The ordering `inactivity < total` is load-bearing: the inactivity
-    %% deadline is what distinguishes a stuck stream from a slow one, and
-    %% a total budget at or below it would tear down a healthy stream
-    %% before the stall detector could ever speak. It is enforced HERE,
-    %% at the read site, because the value can be written by the
-    %% dashboard PUT, a direct settings-row edit, or an ops script — a
-    %% guarantee that only holds for one writer is not a guarantee.
-    Total = setting_ms(<<"stream_total_timeout_ms">>, 600_000),
-    Inactivity = stream_inactivity_timeout_ms(),
-    case Total > Inactivity of
-        true -> Total;
-        false -> 600_000
+    element(1, resolve_stream_budgets()).
+
+%% Both ceilings from ONE resolution. Prefer this over the two individual
+%% accessors whenever a caller needs the pair, so a reload landing between
+%% the calls cannot mix generations.
+-spec stream_budgets() -> {pos_integer(), pos_integer()}.
+stream_budgets() ->
+    resolve_stream_budgets().
+
+%% The two ceilings are resolved TOGETHER so `inactivity < total` holds for
+%% every input rather than for the one the old code happened to compare.
+%%
+%% The ordering is load-bearing: the inactivity deadline is what
+%% distinguishes a stuck stream from a slow one, and a total budget at or
+%% below it would tear down a healthy stream before the stall detector
+%% could ever speak. Both halves of that rule are now enforced in one
+%% place, because the value can arrive from the dashboard PUT, a direct
+%% settings-row edit, or an ops script — a guarantee that only holds for
+%% one writer is not a guarantee:
+%%
+%%   1. The total is never LOWERED below ?DEFAULT_TOTAL_MS. When the pair
+%%      inverts, a total under the constant is lifted to it (the
+%%      pre-2026-11-09 fallback, kept: the incident behind it was a 60s
+%%      total tearing down a healthy stream), while a total the operator
+%%      raised ABOVE the constant is preserved — substituting the constant
+%%      there would re-arm the very teardown the raise was meant to avoid.
+%%   2. The inactivity side yields instead: it is capped at half the
+%%      resolved total, so neither an inverted pair nor a merely
+%%      above-half one can leave the stall detector unable to fire first.
+%%
+%% `/stats.stream_budgets` reports the resolved pair, so the effective
+%% value is never a guess.
+resolve_stream_budgets() ->
+    %% ONE snapshot of the settings map for both keys. Reading it twice (as
+    %% the two accessors would) lets a put land between the reads and mix
+    %% generations — an idle value neither generation configured. The
+    %% reconciliation below still repairs the ordering, but the pair would
+    %% then be one no operator ever wrote.
+    Cfg = persistent_term:get({janus, translate_cfg}, undefined),
+    Total0 = total_budget_ms(Cfg),
+    Idle0 = inactivity_budget_ms(Cfg),
+    %% The garbage threshold is 2 * ?MIN_IDLE_MS, not ?MIN_IDLE_MS, on
+    %% purpose: BELOW twice the idle floor, `Total div 2` in idle_lead/2
+    %% lands under ?MIN_IDLE_MS, so the half-total cap degenerates to a flat
+    %% idle floor and the stall detector loses the lead it needs to fire
+    %% first. Lowering this threshold breaks that invariant.
+    %%
+    %% The guard is `=<` while that rationale only demands `<`. At EXACTLY
+    %% 2 * ?MIN_IDLE_MS (2000ms) the pair would still be valid — (2000, 1000)
+    %% gives a real half-total lead — so the inclusive edge is a deliberately
+    %% conservative call, not a derivation: a total of two seconds is not a
+    %% budget anyone means, and treating the boundary as garbage keeps the
+    %% rule simple to state. It is pinned by
+    %% sub_second_total_resolves_to_the_constant_pair_test/0.
+    case Total0 =< 2 * ?MIN_IDLE_MS of
+        true ->
+            %% BOTH keys are garbage: a total mistyped in seconds implies an
+            %% idle value in the same wrong unit. Falling back on the total
+            %% alone would then clamp a 180 (seconds intent) up to the 1s
+            %% floor and hand the gateway a 1-second silence ceiling — every
+            %% stream killed after a second of quiet, a fresh incident
+            %% instead of a recovery. Discard the pair together.
+            Total = max(?DEFAULT_TOTAL_MS, Total0),
+            {Total, idle_lead(?DEFAULT_IDLE_MS, Total)};
+        false ->
+            resolve_pair(Total0, Idle0)
+    end.
+
+%% Only reached once the garbage-total `case` in resolve_stream_budgets/0
+%% has been ruled out, so this is the ordinary path: pick the total, then
+%% let the idle side yield to it. See resolve_total/2 and idle_lead/2 for
+%% why a lowered, inverted, or raised total is handled the way it is.
+resolve_pair(Total0, Idle0) ->
+    Total = resolve_total(Total0, Idle0),
+    Inactivity = idle_lead(Idle0, Total),
+    {Total, Inactivity}.
+
+%% The two ways a configured total is not intent, and therefore yields to
+%% the shipped constant:
+%%
+%%   - Garbage: at or below 2*MIN_IDLE_MS. A mistyped 600 (seconds entered
+%%     as ms) honoured literally would tear down every stream after ~1s and
+%%     drag the worker job timeout and the listener idle timeout down with
+%%     it — the teardown class the constant fallback exists to prevent.
+%%   - Inverted below the constant: `total =< inactivity` with a total
+%%     under ?DEFAULT_TOTAL_MS. This is the 2026-11-09-era incident shape (a
+%%     60s total cutting a healthy stream), and trusting the operator to
+%%     have meant a total that low is worse than ignoring it.
+%%
+%% An inversion where the total is already ABOVE the constant is kept: the
+%% operator raised that total deliberately and the idle cap restores the
+%% ordering without discarding it.
+resolve_total(Total0, Idle0) when Total0 =< Idle0, Total0 < ?DEFAULT_TOTAL_MS ->
+    ?DEFAULT_TOTAL_MS;
+resolve_total(Total0, _Idle0) ->
+    Total0.
+
+%% Keep a USABLE lead between the two deadlines, not merely a satisfied
+%% inequality. `Total - 1` passes the ordering on paper and still loses in
+%% practice: stream_drain restarts the inactivity deadline on every
+%% forwarded chunk, so once any chunk lands the idle deadline sits later
+%% than the total one and `deadline_remaining/2` picks the total every
+%% tick — the stall detector never speaks and the stream dies with the
+%% total-budget wording even though silence is what happened.
+%%
+%% EVERY idle value above half the total is capped to half, not only one
+%% above the total. Honouring a value in `(total/2, total)` would satisfy
+%% the ordering and still lose the lead: a chunk landing past `total - idle`
+%% re-arms the idle deadline beyond the total, total wins every tick from
+%% then on, and the stall path is silent for the rest of the stream. Above
+%% half the total a stall-first deadline is not expressible, so the cap is
+%% the honest resolution and `/stats.stream_budgets` reports what is in
+%% force.
+%%
+%% No log line: these readers sit on the per-request (and per-tick) hot
+%% path, so a warning here would flood. The ordinary path cannot reach a
+%% substitution — the dashboard PUT cross-checks the pair and refuses a
+%% violating one (the gateway stays the enforcement point for direct
+%% settings-row edits and ops scripts). Should a substitute happen anyway,
+%% `/stats.stream_budgets` reports the value actually in force, so it is
+%% discoverable without log noise.
+idle_lead(Idle0, Total) ->
+    %% Three bounds, innermost first:
+    %%   1. the configured value;
+    %%   2. ?MAX_IDLE_MS, the client-idle ceiling (defined with the other
+    %%      macros at the top of this module) — this is what keeps a stall
+    %%      reportable before the client's own timeout;
+    %%   3. the half-total lead — this is what keeps the stall path reachable
+    %%      within the stream.
+    Capped = min(Idle0, ?MAX_IDLE_MS),
+    max(?MIN_IDLE_MS, min(Capped, Total div 2)).
+
+total_budget_ms(Cfg) ->
+    setting_ms(Cfg, <<"stream_total_timeout_ms">>, ?DEFAULT_TOTAL_MS).
+
+%% Where the inactivity ceiling comes from, in precedence order:
+%%
+%%   1. JANUS_STREAM_INACTIVITY_TIMEOUT_MS, when set and parseable.
+%%   2. The hot `translate` settings row, `stream_inactivity_timeout_ms`.
+%%   3. The shipped 180_000 default.
+%%
+%% The env var outranks the row because it is an explicit operator/CI
+%% override, and the live verification drivers (run_matrix_b.sh,
+%% verify_stream_live.sh) shrink the window through it so a B6-style case
+%% does not idle out the real ceiling. Letting the row win would let the
+%% dashboard's materialized default shadow that override the moment
+%% anything wrote the row — silently reverting a driver run to the
+%% production ceiling and hanging the case for minutes. An override that
+%% can be shadowed is not an override.
+%%
+%% The row is the ordinary path, and it is what this change adds: the
+%% ceiling moved from env-only to a settings write plus a generation bump,
+%% so tuning it no longer needs a container restart — the behaviour every
+%% other knob in this repository already has.
+inactivity_budget_ms(Cfg) ->
+    %% positive_env/2 yields its Default when the var is absent or
+    %% malformed, so passing the row-resolved value as that default gives
+    %% the whole precedence chain in one call.
+    Hot = setting_ms(Cfg, <<"stream_inactivity_timeout_ms">>, ?DEFAULT_IDLE_MS),
+    case positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", undefined) of
+        undefined when Hot >= ?MIN_IDLE_MS ->
+            %% The row is the ordinary path and is honoured as written.
+            Hot;
+        undefined ->
+            %% A SUB-FLOOR row value is a unit typo (180 meant as seconds),
+            %% not a usable ceiling. Flooring it to ?MIN_IDLE_MS would
+            %% silently hand the fleet a one-second silence ceiling — every
+            %% stream killed after a second of quiet, before the first byte
+            %% included — which is the incident class the garbage-pair
+            %% branch exists to prevent, reachable here without a garbage
+            %% total. Fall back to the shipped default instead.
+            ?DEFAULT_IDLE_MS;
+        Env ->
+            %% An explicit override ARGUABLY wants a short window (the live
+            %% drivers shrink it on purpose), so floor it to the minimum
+            %% rather than discarding the operator's intent.
+            max(?MIN_IDLE_MS, Env)
     end.
 
 %% Same shape as janus_protocol_translate:tool_cap/1: absent or malformed
 %% falls back to the shipped default, so an unconfigured gateway behaves
 %% exactly as before. Zero, negatives and non-integers are malformed —
 %% none of them may mean "no ceiling".
-setting_ms(Key, Default) ->
-    case persistent_term:get({janus, translate_cfg}, undefined) of
-        Cfg when is_map(Cfg) ->
-            case maps:get(Key, Cfg, undefined) of
-                N when is_integer(N), N > 0 -> N;
-                _ -> Default
-            end;
-        _ ->
-            Default
-    end.
+setting_ms(Cfg, Key, Default) when is_map(Cfg) ->
+    case maps:get(Key, Cfg, undefined) of
+        N when is_integer(N), N > 0 -> N;
+        _ -> Default
+    end;
+setting_ms(_Cfg, _Key, Default) ->
+    Default.
 
 %% Mid-stream INACTIVITY ceiling (2026-10-29): stream_timeout_ms/0 is a
 %% TOTAL budget for the whole stream; producers that never die but
@@ -134,16 +353,19 @@ setting_ms(Key, Default) ->
 %% true silence trips it. Deliberately BELOW stream_timeout_ms/0.
 
 %% Overridable so the live verification driver can shrink the window
-%% instead of idling 180s, and so an operator can tune it per fleet.
-%% Floored at MIN_IDLE_MS: a tiny ceiling is not a useful config (it
-%% would tear down healthy streams instantly) and it breaks the
-%% keepalive invariant, which needs strictly ceiling > keepalive to
-%% give the keepalive any chance to fire. Flooring at the SOURCE is the
-%% only way to guarantee that for every input; clamping on the
-%% keepalive side cannot, since ceiling-1 == ceiling when ceiling == 1.
+%% instead of idling out the real ceiling, and so an operator can tune it
+%% per fleet — through the hot `translate` settings row (2026-11-09), with
+%% the env var still outranking it for the driver (see the precedence note
+%% on inactivity_budget_ms/1). Floored at MIN_IDLE_MS: a
+%% tiny ceiling is not a useful config (it would tear down healthy streams
+%% instantly) and it breaks the keepalive invariant, which needs strictly
+%% ceiling > keepalive to give the keepalive any chance to fire. Flooring
+%% at the SOURCE is the only way to guarantee that for every input;
+%% clamping on the keepalive side cannot, since ceiling-1 == ceiling when
+%% ceiling == 1.
 -spec stream_inactivity_timeout_ms() -> pos_integer().
 stream_inactivity_timeout_ms() ->
-    max(?MIN_IDLE_MS, positive_env("JANUS_STREAM_INACTIVITY_TIMEOUT_MS", 180_000)).
+    element(2, resolve_stream_budgets()).
 
 %% Client-facing SSE comment cadence. Lives here (not in janus_http) so
 %% janus_providers can use it without depending on the HTTP app — the
@@ -152,7 +374,16 @@ stream_inactivity_timeout_ms() ->
 %% reassured at least once before it is torn down.
 -spec stream_keepalive_ms() -> pos_integer().
 stream_keepalive_ms() ->
-    Ceiling = stream_inactivity_timeout_ms(),
+    keepalive_for(stream_inactivity_timeout_ms()).
+
+%% The cadence for a ceiling the caller ALREADY resolved. Callers that also
+%% report or anchor the ceilings use this so the derived cadence belongs to
+%% the same resolution: recomputing the ceiling here could straddle a config
+%% generation and yield a cadence that does not correspond to the reported
+%% inactivity_ms (possibly even keepalive >= inactivity, which the invariant
+%% forbids).
+-spec keepalive_for(pos_integer()) -> pos_integer().
+keepalive_for(Ceiling) ->
     case keepalive_setting() of
         V when is_integer(V), V > 0, V < Ceiling ->
             %% The floor applies to EXPLICIT values too: a 1ms cadence is

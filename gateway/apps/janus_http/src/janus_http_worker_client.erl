@@ -74,6 +74,10 @@
     deadline_remaining/1,
     deadline_remaining/2,
     classify_stream_timeout/2,
+    %% Both deadlines anchored from ONE resolution of the ceilings, so the
+    %% two instants at drain start belong to a single config generation.
+    %% Pure and exported so eunit can pin it.
+    stream_deadlines/0,
     stream_keepalive_ms/0,
     parse_affinity_node/1,
     affinity_opts_from_provider/1,
@@ -790,6 +794,19 @@ stream_deadline() ->
 stream_inactivity_deadline() ->
     erlang:monotonic_time(millisecond) + janus_worker_wire:stream_inactivity_timeout_ms().
 
+%% Both absolute deadlines anchored from a single read of the pair.
+%%
+%% This fixes the ANCHOR, not the whole stream: stream_drain re-anchors the
+%% inactivity deadline per chunk from a fresh read, so a reload mid-stream
+%% still moves it (that is intended — the ceiling is hot). What the anchor
+%% guarantees is that the two instants this drain STARTED with are mutually
+%% consistent; the per-tick fold through deadline_remaining/2 keeps the
+%% shorter one binding.
+stream_deadlines() ->
+    {TotalMs, IdleMs} = janus_worker_wire:stream_budgets(),
+    Now = erlang:monotonic_time(millisecond),
+    {Now + TotalMs, Now + IdleMs}.
+
 deadline_remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
 
@@ -1226,8 +1243,12 @@ stream_drain_start(
     %% restarted by a forwarded chunk; the total budget must measure
     %% stream age, so recomputing it per chunk would make it unbounded
     %% and leave the timeout classification unreachable.
-    Deadline = stream_deadline(),
-    Inactivity = stream_inactivity_deadline(),
+    %% Both anchors come from ONE resolution of the pair: reading them
+    %% through the separate accessors could straddle a config generation
+    %% swap and anchor this stream with a total from one generation and an
+    %% inactivity ceiling from the next, inverting `inactivity < total`
+    %% for the whole stream.
+    {Deadline, Inactivity} = stream_deadlines(),
     ok = flush_acks(JobRef),
     case Prefetch of
         {chunk, Seq, Plain} ->
@@ -1557,6 +1578,13 @@ stream_forward_plain(
         TtfbStart,
         TtfbSent1,
         Deadline,
+        %% Recomputed per chunk, which is correct: the ceiling is HOT now, so
+        %% a raise landing mid-stream should shorten the next wait for this
+        %% stream too. It cannot exceed the anchored total in effect, because
+        %% both consumers fold the pair through deadline_remaining/2, which
+        %% takes the min — a later idle instant simply loses to the total
+        %% there, so no extra clamp is needed (and a clamp here would be a
+        %% no-op).
         stream_inactivity_deadline()
     ).
 

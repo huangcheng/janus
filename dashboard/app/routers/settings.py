@@ -805,6 +805,20 @@ _TRANSLATE_CAP_LIMITS = {
     # first, and a total below it would tear down a healthy streaming task
     # and blame the budget. Ceiling one hour.
     "stream_total_timeout_ms": (240_000, 3_600_000),
+    # Silence allowance WITHIN a stream, raised to a setting 2026-11-09.
+    # It was env-only, so a fleet whose total budget had already been
+    # raised to 2400s still died at the 180s inactivity default, and
+    # moving it needed a container restart — the one shape this repo
+    # forbids. The gateway clamps this below the total budget at the read
+    # site, so a pair that violates "inactivity < total" still yields a
+    # working gateway and reports the value in force via
+    # /stats.stream_budgets. Floor keeps it above the 1s keepalive regime;
+    # ceiling sits below the total's 3600s so the ordering stays reachable.
+    # Upper bound sits BELOW the 300s HTTP idle timeout most clients default
+    # to: a ceiling above that detects a stall the client never lives to
+    # read (the 2026-10-29 incident shape). Raising it further means raising
+    # the client's own idle timeout first, which is a client change.
+    "stream_inactivity_timeout_ms": (60_000, 299_000),
 }
 _TRANSLATE_BOOL_KEYS = ("tools", "responses")
 
@@ -840,6 +854,7 @@ def _translate_defaults() -> dict:
         "tool_calls_per_stream_cap": 64,
         "tool_args_total_cap": 1024 * 1024,
         "stream_total_timeout_ms": 600_000,
+        "stream_inactivity_timeout_ms": 180_000,
     }
 
 
@@ -882,6 +897,31 @@ async def put_translate(request: Request, user: dict = Depends(require_auth)):
                 ):
                     current[k] = got
         cfg = {**current, **body}
+        # Per-key ranges cannot catch a pair that inverts the ordering the
+        # gateway's stall detector rests on: 240s total with a 3500s
+        # inactivity deadline passes both individual ranges, and the
+        # gateway would then silently substitute both values at its read
+        # site with no log and a 200 response echoing the operator's
+        # request. Refuse it here, where the operator can see why, and
+        # leave the gateway's clamp as the backstop for direct
+        # settings-row edits and ops scripts.
+        _total = cfg.get("stream_total_timeout_ms")
+        _idle = cfg.get("stream_inactivity_timeout_ms")
+        if isinstance(_total, int) and isinstance(_idle, int) and _idle > _total // 2:
+            # Half, not just "below": the gateway caps the idle deadline at
+            # half the total, because above it a chunk landing late re-arms
+            # the idle deadline past the total and the stall path goes
+            # silent. Accepting (total/2, total] here would save with a 200
+            # that echoes the entered value while the stream silently
+            # honours half — so refuse it and say what to enter instead.
+            raise _err(
+                400,
+                "invalid",
+                "stream_inactivity_timeout_ms must be at most half "
+                f"stream_total_timeout_ms (got {_idle} > {_total // 2}); above that the "
+                "inactivity deadline cannot reliably fire before the total one, so the "
+                "stall detector stops speaking",
+            )
         await tx.execute(
             "INSERT INTO settings (key, value) VALUES ('translate', $1) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",

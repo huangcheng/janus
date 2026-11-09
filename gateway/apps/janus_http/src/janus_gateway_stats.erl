@@ -761,12 +761,35 @@ stream_budgets() ->
     safe_stream_budgets().
 
 safe_stream_budgets() ->
+    %% The pair comes from ONE resolution: reading the two accessors
+    %% separately could straddle a config generation swap and report a total
+    %% from one generation beside an idle value from the next — an
+    %% `inactivity < total` report that is neither generation's. This
+    %% endpoint is the diagnostic an operator uses to confirm a hot write
+    %% landed, so it must show the pair actually in force.
+    {Total, Idle} = one_resolution(),
     #{
-        total_ms => safe_num(fun janus_worker_wire:stream_timeout_ms/0),
-        inactivity_ms => safe_num(fun janus_worker_wire:stream_inactivity_timeout_ms/0),
-        keepalive_ms => safe_num(fun janus_worker_wire:stream_keepalive_ms/0),
+        total_ms => Total,
+        inactivity_ms => Idle,
+        %% Derived from the Idle just resolved, not recomputed: this
+        %% endpoint exists to report one generation, and recomputing the
+        %% ceiling here could yield a cadence for a different generation
+        %% than inactivity_ms above.
+        keepalive_ms => safe_num(fun() -> janus_worker_wire:keepalive_for(Idle) end),
         http_idle_timeout_ms => listener_idle_timeout()
     }.
+
+%% Degrades to nulls like every other read here: /stats is polled
+%% continuously, so a raising pair must not turn the whole endpoint into a
+%% 500. keepalive_ms is derived from the ceiling anyway, so a null pair
+%% still leaves a reportable value.
+one_resolution() ->
+    try janus_worker_wire:stream_budgets() of
+        {T, I} when is_integer(T), is_integer(I) -> {T, I};
+        _ -> {null, null}
+    catch
+        _:_ -> {null, null}
+    end.
 
 %% The data-plane listener, named by janus_http_sup so this and the
 %% settings-reload refresh cannot drift apart.
