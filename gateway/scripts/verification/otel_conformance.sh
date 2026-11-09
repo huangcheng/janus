@@ -573,5 +573,72 @@ check "otlp logs encode severity, body and correlation" '
   end,
   halt().'
 
+# C14 -- a peer's `traceparent' is inherited, not replaced.
+#
+# The dashboard mints a header in the same W3C shape and the gateway must
+# continue THAT trace; if it started a new one, the two processes would never
+# appear in one view and the dashboard's CLIENT span would dangle. The header
+# below is the exact shape the dashboard's telemetry module produces.
+#
+# Two invariants: the upstream header continues the INHERITED trace id with a
+# NEW parent span id (that is how the gateway links its span into the peer's
+# trace), and a malformed header RESTARTS rather than reusing garbage ids.
+check "an inbound traceparent is inherited, not replaced" '
+  Hdr = <<"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01">>,
+  T = janus_trace:ensure(Hdr, undefined),
+  Id = janus_trace:trace_id(T),
+  Sampled = janus_trace:sampled(T),
+  {UpName, Up} = janus_trace:upstream_header(T),
+  UpBin = iolist_to_binary(Up),
+  Prefix = iolist_to_binary(["00-", Id, "-"]),
+  UpSize = byte_size(UpBin),
+  UpHead = binary:part(UpBin, 0, byte_size(Prefix)),
+  UpTail = binary:part(UpBin, UpSize - 3, 3),
+  %% 00-<32 tid>-<16 pid>-<2 flags>: the parent id starts after "00-" + tid + "-".
+  PidOffset = 3 + 32 + 1,
+  UpPid = binary:part(UpBin, PidOffset, 16),
+  UpOk = UpSize =:= 55 andalso UpHead =:= Prefix andalso UpTail =:= <<"-01">>,
+  NameOk = UpName =:= <<"traceparent">>,
+  NewPid = UpPid =/= <<"00f067aa0ba902b7">>,
+  %% An inbound `00` sampled flag must be PRESERVED: hardcoding 01 would
+  %% silently record traces a conformant peer asked us not to.
+  Uns = janus_trace:ensure(
+      <<"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00">>, undefined
+  ),
+  UnsUp = iolist_to_binary(element(2, janus_trace:upstream_header(Uns))),
+  UnsTail = binary:part(UnsUp, byte_size(UnsUp) - 3, 3),
+  UnsOk = UnsTail =:= <<"-00">> andalso janus_trace:sampled(Uns) =:= false,
+  Bad = janus_trace:ensure(<<"00-zzzz">>, undefined),
+  FreshOk = janus_trace:trace_id(Bad) =/= Id,
+  Embedded = <<"4bf92f3577b34da6a3ce929d0e0e4736">>,
+  BadIds = [<<"00-zzzz">>,
+            <<"00-00000000000000000000000000000000-0000000000000000-01">>,
+            <<"ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01">>,
+            <<"00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01">>,
+            <<"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra">>],
+  BadFresh = [janus_trace:trace_id(janus_trace:ensure(H, undefined)) =/= Embedded || H <- BadIds],
+  AllFresh = lists:all(fun(X) -> X end, BadFresh),
+  if
+    Id =/= <<"4bf92f3577b34da6a3ce929d0e0e4736">> ->
+      io:format("FAIL inherited trace id: ~s~n", [Id]);
+    Sampled =/= true ->
+      io:format("FAIL inherited sampled flag: ~p~n", [Sampled]);
+    not UpOk ->
+      io:format("FAIL upstream header does not continue the inherited trace: ~s~n", [Up]);
+    not NewPid ->
+      io:format("FAIL upstream header reuses the inbound parent span id~n");
+    not NameOk ->
+      io:format("FAIL upstream header name is not traceparent: ~p~n", [UpName]);
+    not FreshOk ->
+      io:format("FAIL a malformed traceparent did not restart the trace~n");
+    not UnsOk ->
+      io:format("FAIL an unsampled inbound decision was not preserved~n");
+    not AllFresh ->
+      io:format("FAIL a malformed traceparent was inherited: ~p~n", [BadFresh]);
+    true ->
+      io:format("PASS inbound traceparent is inherited and re-emitted correctly~n")
+  end,
+  halt().'
+
 echo "--- $pass passed, $fail failed ---"
 [ "$fail" -eq 0 ]
