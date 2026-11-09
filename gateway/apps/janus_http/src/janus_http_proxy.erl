@@ -19,7 +19,7 @@
 %% so its attribute set is asserted where it is built rather than mocked.
 -export([observe_http_server_duration/3, method_label/0, scheme_label/0]).
 %% Same seam for the GenAI duration producer.
--export([maybe_observe_genai_duration/1]).
+-export([maybe_observe_genai_duration/1, observe_genai_tokens/5]).
 %% Exported for eunit (usage capture helpers + Phase-2 knob).
 -export([
     maybe_trim/2,
@@ -3907,6 +3907,11 @@ do_track(Status, Route, Usage, Observe) ->
             %% the ledger row is written from, so a trace and the billing
             %% row can never disagree.
             ok = attach_usage_to_span(Usage1),
+            %% ADDITIVE semconv token counters, from the SAME map the
+            %% ledger row and the span attributes are built from, so the
+            %% three can never disagree about what was billed. Gated on
+            %% the export knob (design §13.4).
+            ok = observe_genai_tokens(Route, Prompt, Completion, CacheRead, CacheWrite),
             case {get(janus_quota_charge_id), maps:get(id, Agent, null)} of
                 {ChargeId, Aid} when is_binary(ChargeId), is_integer(Aid) ->
                     _ = janus_quota:charge_tokens(ChargeId, Aid, Prompt, Completion);
@@ -4436,6 +4441,79 @@ attach_usage_to_span(Usage) when is_map(Usage) ->
     end;
 attach_usage_to_span(_) ->
     ok.
+
+%% `gen_ai.client.inference.usage.*' token counters (semconv, unit
+%% `{token}').
+%%
+%% One counter per dimension, each carrying `gen_ai.token.modality'.
+%%
+%% That attribute is mandated `unknown', not inferred as `text'. Providers
+%% fold image and audio input into `prompt_tokens`, so after the cache
+%% split we know the token COUNT but not its modality mix; the semconv
+%% permits `unknown' for precisely this case. Inferring `text' would
+%% fabricate a dimension and silently report image/audio traffic as text.
+%%
+%% `reasoning.output_tokens' is NOT emitted, and it is the one counter that
+%% would not carry the modality attribute: it was removed from that
+%% instrument on 2026-11-05 because reasoning counts are not split by
+%% modality. The gateway does not account for reasoning tokens separately
+%% today, so there is nothing to emit — recorded here so a later reader
+%% does not add it with the attribute attached.
+observe_genai_tokens(Route, Prompt, Completion, CacheRead, CacheWrite) ->
+    case janus_telemetry:export_enabled() of
+        false ->
+            ok;
+        true ->
+            %% Built ONCE, not per counter: the label map is identical for
+            %% all four and rebuilding it four times per request is pure
+            %% allocation on the hot path.
+            Labels = #{
+                <<"gen_ai.operation.name">> => gen_ai_operation(Route),
+                <<"gen_ai.provider.name">> => gen_ai_provider(Route),
+                %% The model is the discriminator that makes a token series
+                %% answerable ("which model costs us the tokens?"). Bounded
+                %% by the serving catalog, the same justification the
+                %% existing `provider' label uses.
+                <<"gen_ai.request.model">> => model_label(),
+                %% Mandated `unknown', never inferred: providers fold image
+                %% and audio input into `prompt_tokens', so the COUNT is
+                %% known but not the mix.
+                <<"gen_ai.token.modality">> => <<"unknown">>
+            },
+            _ = bump_token(gen_ai_client_inference_usage_input_tokens_total, Labels, Prompt),
+            _ = bump_token(gen_ai_client_inference_usage_output_tokens_total, Labels, Completion),
+            %% Cache dimensions report only when non-zero: a provider
+            %% without caching must not emit a constant 0 series.
+            _ = bump_token(
+                gen_ai_client_inference_usage_cache_read_input_tokens_total, Labels, CacheRead
+            ),
+            _ = bump_token(
+                gen_ai_client_inference_usage_cache_write_input_tokens_total, Labels, CacheWrite
+            ),
+            ok
+    end.
+
+%% The served model for this request, for the token counters.
+%%
+%% Read from the pdict entry the proxy sets at resolution time (the same
+%% one usage rows record as `requested_model'). `_unknown' rather than
+%% omitted: the semconv wants the discriminator present, and a missing
+%% model must not silently collapse into another model's series.
+model_label() ->
+    case get(janus_req_model) of
+        M when is_binary(M), M =/= <<>> -> M;
+        _ -> <<"_unknown">>
+    end.
+
+%% Add a token count. `inc/3' ignores non-positive values, which is exactly
+%% the non-zero-only rule the cache dimensions need — so there is one
+%% helper, not two.
+bump_token(_Name, _Labels, null) -> ok;
+bump_token(_Name, _Labels, undefined) -> ok;
+bump_token(Name, Labels, N) when is_integer(N) ->
+    janus_metrics:inc(Name, Labels, N),
+    ok;
+bump_token(_, _, _) -> ok.
 
 %% The semconv says report a cache attribute only when non-zero, so a
 %% provider that does not do caching does not emit a constant 0.

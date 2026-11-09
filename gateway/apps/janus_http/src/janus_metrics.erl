@@ -23,7 +23,7 @@
 %%%-------------------------------------------------------------------
 -module(janus_metrics).
 
--export([init/0, inc/2, observe/3, snapshot/0]).
+-export([init/0, inc/2, inc/3, observe/3, snapshot/0]).
 -export([buckets/0, buckets/1, semconv_name/1, to_bin/1, norm_labels/1]).
 
 -define(TABLE, janus_metrics).
@@ -134,6 +134,14 @@ prom_label_ch(_) -> $_.
 -spec semconv_name(atom()) -> binary() | undefined.
 semconv_name(http_server_request_duration) -> <<"http.server.request.duration">>;
 semconv_name(gen_ai_client_inference_duration) -> <<"gen_ai.client.inference.duration">>;
+semconv_name(gen_ai_client_inference_usage_input_tokens_total) ->
+    <<"gen_ai.client.inference.usage.input_tokens">>;
+semconv_name(gen_ai_client_inference_usage_output_tokens_total) ->
+    <<"gen_ai.client.inference.usage.output_tokens">>;
+semconv_name(gen_ai_client_inference_usage_cache_read_input_tokens_total) ->
+    <<"gen_ai.client.inference.usage.cache_read.input_tokens">>;
+semconv_name(gen_ai_client_inference_usage_cache_write_input_tokens_total) ->
+    <<"gen_ai.client.inference.usage.cache_write.input_tokens">>;
 semconv_name(_) -> undefined.
 
 -spec init() -> ok.
@@ -170,6 +178,23 @@ inc(Name, Labels) when is_atom(Name), is_map(Labels) ->
         _:_ -> ok
     end;
 inc(_, _) ->
+    ok.
+
+%% @doc Add `N' to a counter.
+%%
+%% Separate from `inc/2' because that one is the "one more event" path and
+%% its arity is the contract every existing caller relies on. A token
+%% counter adds a COUNT though — 5000 tokens is one event with a magnitude,
+%% and calling `inc/2' five thousand times would be both wrong to read and
+%% needlessly expensive.
+-spec inc(atom(), map(), integer()) -> ok.
+inc(Name, Labels, N) when is_atom(Name), is_map(Labels), is_integer(N), N > 0 ->
+    try
+        bump(ets:whereis(?TABLE), {counter, Name, norm_labels(Labels)}, N)
+    catch
+        _:_ -> ok
+    end;
+inc(_, _, _) ->
     ok.
 
 %% observe(request_duration_seconds, #{protocol => ..., stream => 0|1}, Seconds)

@@ -369,5 +369,83 @@ check "genai operation follows the protocol" '
   end,
   halt().'
 
+# C11 -- the token counters carry the mandated labels and the mandated
+# exception, and report the actual counts.
+#
+# Required by the design: `gen_ai.token.modality' on all four token
+# counters, mandated `unknown' (providers fold image/audio into
+# prompt_tokens, so inferring `text' would fabricate a dimension);
+# `gen_ai.request.model' as a discriminator; and `reasoning.output_tokens'
+# must NOT appear (it dropped modality on 2026-11-05 and the gateway does
+# not account for it separately).
+check "token counters carry modality, model and counts" '
+  os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:14318"),
+  ok = janus_metrics:init(),
+  put(janus_upstream_proto, openai_chat),
+  put(janus_req_model, <<"mock-model">>),
+  %% cache_read = 0, cache_write = 11: the two directions of the
+  %% non-zero-only rule are then both observable.
+  janus_http_proxy:observe_genai_tokens(#{provider_id => 1}, 5298, 66, 0, 11),
+  Out = binary_to_list(janus_metrics_render:render(janus_metrics:snapshot(), [])),
+  os:unsetenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+  Series = [X || X <- string:split(Out, "\n", all),
+                 string:find(X, "gen_ai_client_inference_usage") =/= nomatch,
+                 not lists:prefix("#", X)],
+  Val = fun(Frag) ->
+          case [X || X <- Series, string:find(X, Frag) =/= nomatch] of
+            [Line | _] ->
+              [_M, V] = string:split(Line, "} "),
+              V;
+            [] ->
+              missing
+          end
+        end,
+  Has = fun(Frag) -> Val(Frag) =/= missing end,
+  IfNoMod = [X || X <- Series, string:find(X, "gen_ai_token_modality=\"unknown\"") =:= nomatch],
+  IfNoModel = [X || X <- Series, string:find(X, "gen_ai_request_model=\"mock-model\"") =:= nomatch],
+  Reasoning = lists:any(fun(X) ->
+                           string:find(X, "reasoning_output_tokens") =/= nomatch
+                         end, string:split(Out, "\n", all)),
+  %% An if-guard cannot call a fun, so each check is reduced to a boolean
+  %% first and the decision is a plain case expression.
+  NoSeries = Series =:= [],
+  BadMod = IfNoMod =/= [],
+  BadModel = IfNoModel =/= [],
+  HasIn = Has("usage_input_tokens_total{"),
+  HasOut = Has("usage_output_tokens_total{"),
+  HasCw = Has("cache_write_input_tokens_total{"),
+  HasCr = Has("cache_read_input_tokens_total{"),
+  InV = Val("usage_input_tokens_total{"),
+  OutV = Val("usage_output_tokens_total{"),
+  CwV = Val("cache_write_input_tokens_total{"),
+  case {NoSeries, BadMod, BadModel, Reasoning, HasIn, HasOut, HasCw, HasCr,
+        InV, OutV, CwV} of
+    {true, _, _, _, _, _, _, _, _, _, _} ->
+      io:format("FAIL token counters: nothing rendered~n");
+    {_, true, _, _, _, _, _, _, _, _, _} ->
+      io:format("FAIL token series without modality=unknown~n");
+    {_, _, true, _, _, _, _, _, _, _, _} ->
+      io:format("FAIL token series without gen_ai.request.model~n");
+    {_, _, _, true, _, _, _, _, _, _, _} ->
+      io:format("FAIL reasoning.output_tokens must not be emitted~n");
+    {_, _, _, _, false, _, _, _, _, _, _} ->
+      io:format("FAIL input_tokens counter absent~n");
+    {_, _, _, _, _, false, _, _, _, _, _} ->
+      io:format("FAIL output_tokens counter absent~n");
+    {_, _, _, _, _, _, false, _, _, _, _} ->
+      io:format("FAIL cache_write counter absent for a non-zero count~n");
+    {_, _, _, _, _, _, _, true, _, _, _} ->
+      io:format("FAIL cache_read emitted for a zero count~n");
+    {_, _, _, _, _, _, _, _, InV2, _, _} when InV2 =/= "5298" ->
+      io:format("FAIL input_tokens value ~p (want 5298)~n", [InV]);
+    {_, _, _, _, _, _, _, _, _, OutV2, _} when OutV2 =/= "66" ->
+      io:format("FAIL output_tokens value ~p (want 66)~n", [OutV]);
+    {_, _, _, _, _, _, _, _, _, _, CwV2} when CwV2 =/= "11" ->
+      io:format("FAIL cache_write value ~p (want 11)~n", [CwV]);
+    _ ->
+      io:format("PASS token counters carry modality+model and report counts; zero cache omitted~n")
+  end,
+  halt().'
+
 echo "--- $pass passed, $fail failed ---"
 [ "$fail" -eq 0 ]
