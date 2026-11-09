@@ -76,7 +76,14 @@ render(Req) ->
                     0
             end,
         {SchedRows, SchedGauges} = sched_series(),
-        Rows = janus_metrics:snapshot() ++ DropRows ++ LbRows ++ fleet_rows() ++ SchedRows,
+        %% OTLP exporter series. Same contract as the usage writer: when the
+        %% exporter is unavailable its series are OMITTED rather than
+        %% reported as a fabricated 0, because "exporter is dead" and "no
+        %% spans were exported" are different facts and a 0 conflates them.
+        {ExportRows, ExportGauges} = otel_export_series(),
+        Rows =
+            janus_metrics:snapshot() ++ DropRows ++ LbRows ++ fleet_rows() ++
+                SchedRows ++ ExportRows,
         Gauges =
             [
                 {catalog_generation, gauge_val(fun janus_config:generation/0, 0, catalog_generation), #{}},
@@ -87,7 +94,7 @@ render(Req) ->
                 {uptime_seconds, WallMs div 1000, #{}},
                 {workers_available, workers_available_gauge(), #{}},
                 {build_info, 1, #{<<"version">> => Version}}
-            ] ++ fleet_gauges() ++ SchedGauges,
+            ] ++ fleet_gauges() ++ SchedGauges ++ ExportGauges,
         Body = janus_metrics_render:render(Rows, Gauges),
         cowboy_req:reply(200, #{
             <<"content-type">> => <<"text/plain; version=0.0.4; charset=utf-8">>
@@ -442,6 +449,71 @@ fleet_rows() ->
             Base ++ Cmd;
         _ ->
             []
+    end.
+
+%% OTLP exporter observability.
+%%
+%% The exporter is a gen_server with its own counters; without these
+%% series a failing export is invisible until someone reads a rate-limited
+%% log line. Every value is OMITTED when the exporter cannot answer, so a
+%% dead exporter never renders as "healthy, zero spans".
+otel_export_series() ->
+    case catch janus_otel_export:stats() of
+        M when is_map(M), map_get(available, M) =:= true ->
+            Counters = [
+                {{counter, otel_export_spans_total, [{<<"result">>, <<"sent">>}]},
+                    maps:get(sent_total, M, 0)},
+                {{counter, otel_export_spans_total, [{<<"result">>, <<"failed">>}]},
+                    maps:get(failed_total, M, 0)},
+                {{counter, otel_export_spans_total, [{<<"result">>, <<"dropped_queue_full">>}]},
+                    maps:get(dropped_total, M, 0)},
+                {{counter, otel_export_batches_total, [{<<"result">>, <<"sent">>}]},
+                    maps:get(batches_sent_total, M, 0)},
+                {{counter, otel_export_batches_total, [{<<"result">>, <<"failed">>}]},
+                    maps:get(batches_failed_total, M, 0)}
+            ],
+            Gauges = [
+                {otel_export_queue_depth, maps:get(queued, M, 0), #{}},
+                %% 1 when telemetry export is switched on. A gauge so a
+                %% dashboard can show "collector configured" next to the
+                %% counters instead of leaving an empty panel ambiguous.
+                {otel_export_enabled,
+                    case maps:get(enabled, M, false) of
+                        true -> 1;
+                        _ -> 0
+                    end,
+                    #{}}
+            ],
+            %% `last_success_ms' is an absolute timestamp, not a duration;
+            %% rendering it as a gauge would be meaningless on a dashboard.
+            %% The useful derived value is "seconds since the last successful
+            %% export", and 0 means "never succeeded" so it must not be
+            %% reported as a very old age.
+            AgeGauges =
+                case maps:get(last_success_ms, M, 0) of
+                    0 ->
+                        [];
+                    Ms when is_integer(Ms), Ms > 0 ->
+                        Age = max(0, erlang:system_time(millisecond) - Ms),
+                        [{otel_export_last_success_age_seconds, Age div 1000, #{}}];
+                    _ ->
+                        []
+                end,
+            %% The last failure CLASS as its own series so an operator can
+            %% see WHY the collector is unhappy without grepping logs. Only
+            %% the class is emitted (never the collector's body).
+            ErrorGauges =
+                case maps:get(last_error, M, undefined) of
+                    undefined ->
+                        [];
+                    Class ->
+                        [{otel_export_last_error,
+                           1,
+                           #{<<"class">> => janus_metrics:to_bin(Class)}}]
+                end,
+            {Counters, Gauges ++ AgeGauges ++ ErrorGauges};
+        _ ->
+            {[], []}
     end.
 
 fleet_gauges() ->

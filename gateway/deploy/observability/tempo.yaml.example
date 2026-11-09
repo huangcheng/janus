@@ -1,0 +1,29 @@
+# Tempo single-binary: OTLP/HTTP in, local block storage, query frontend.
+stream_over_http_enabled: true
+
+server:
+  http_listen_address: 0.0.0.0
+  http_listen_port: 49673
+  grpc_listen_address: 0.0.0.0
+  grpc_listen_port: 49674
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:43210
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+
+compactor:
+  compaction:
+    # Local blocks are whole files; this is the real disk bound.
+    block_retention: 168h

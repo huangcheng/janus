@@ -1,0 +1,686 @@
+{
+ "uid": "janus-overview",
+ "title": "Janus Gateway",
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "type": "stat",
+   "title": "\u8bf7\u6c42 / 1h",
+   "targets": [
+    {
+     "expr": "sum(increase(janus_requests_total[1h])) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "5xx / 1h",
+   "targets": [
+    {
+     "expr": "sum(increase(janus_requests_total{status_class=\"5xx\"}[1h])) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "p95 \u5ef6\u8fdf",
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum(rate(janus_request_duration_seconds_bucket[5m])) by (le))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u5728\u7ebf\u6a21\u578b",
+   "targets": [
+    {
+     "expr": "sum(janus_models_serving)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u53ef\u7528 worker",
+   "targets": [
+    {
+     "expr": "sum(janus_workers_available)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u5df2\u5bfc\u51fa span",
+   "targets": [
+    {
+     "expr": "sum(janus_otel_export_spans_total{result=\"sent\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u8bf7\u6c42\u901f\u7387 / \u72b6\u6001\u7c7b",
+   "targets": [
+    {
+     "expr": "sum(rate(janus_requests_total[5m])) by (status_class)",
+     "legendFormat": "{{status_class}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u4e0a\u6e38\u8bf7\u6c42\u901f\u7387 / \u4f9b\u5e94\u5546",
+   "targets": [
+    {
+     "expr": "sum(rate(janus_upstream_requests_total[5m])) by (provider)",
+     "legendFormat": "{{provider}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "p50 / p95 / p99 \u5ef6\u8fdf",
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.5, sum(rate(janus_request_duration_seconds_bucket[5m])) by (le))",
+     "legendFormat": "p50",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum(rate(janus_request_duration_seconds_bucket[5m])) by (le))",
+     "legendFormat": "p95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    },
+    {
+     "expr": "histogram_quantile(0.99, sum(rate(janus_request_duration_seconds_bucket[5m])) by (le))",
+     "legendFormat": "p99",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     },
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 11,
+    "w": 16,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u51b7\u5374\u8def\u7531\u6570",
+   "targets": [
+    {
+     "expr": "sum(janus_lb_routes_cooling)",
+     "legendFormat": "cooling",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 11,
+    "w": 8,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u8c03\u5ea6\uff1a\u672c\u5730 vs worker",
+   "targets": [
+    {
+     "expr": "sum(rate(janus_sched_dispatch_local_total[5m]))",
+     "legendFormat": "local",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    },
+    {
+     "expr": "sum(rate(janus_sched_dispatch_worker_total[5m]))",
+     "legendFormat": "worker",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 12,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "worker RTT (ms)",
+   "targets": [
+    {
+     "expr": "janus_sched_rtt_ms",
+     "legendFormat": "{{node}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     },
+     "unit": "ms"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 18,
+    "w": 12,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u7528\u91cf\u5199\u5165\uff1a\u4e22\u5f03 / \u7f13\u51b2",
+   "targets": [
+    {
+     "expr": "sum(rate(janus_usage_writer_dropped_total[5m]))",
+     "legendFormat": "dropped/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    },
+    {
+     "expr": "janus_usage_writer_buffered_rows",
+     "legendFormat": "buffered",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 25,
+    "w": 12,
+    "h": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u7f13\u5b58 token \u541e\u5410",
+   "targets": [
+    {
+     "expr": "sum(rate(janus_requests_total[5m]))",
+     "legendFormat": "req/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 25,
+    "w": 12,
+    "h": 7
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u5bfc\u51fa\u961f\u5217\u6df1\u5ea6",
+   "targets": [
+    {
+     "expr": "janus_otel_export_queue_depth",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 32,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u5bfc\u51fa\u5931\u8d25\u6279\u6b21",
+   "targets": [
+    {
+     "expr": "sum(janus_otel_export_batches_total{result=\"failed\"}) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 32,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u961f\u5217\u6ee1\u4e22\u5f03",
+   "targets": [
+    {
+     "expr": "sum(janus_otel_export_spans_total{result=\"dropped_queue_full\"}) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 32,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u8ddd\u4e0a\u6b21\u6210\u529f\u5bfc\u51fa",
+   "targets": [
+    {
+     "expr": "janus_otel_export_last_success_age_seconds",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 32,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "stat",
+   "title": "\u5bfc\u51fa\u5f00\u5173",
+   "targets": [
+    {
+     "expr": "janus_otel_export_enabled",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     },
+     "instant": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none"
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 32,
+    "w": 4,
+    "h": 4
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "\u5bfc\u51fa\u541e\u5410 / \u7ed3\u679c",
+   "targets": [
+    {
+     "expr": "sum(rate(janus_otel_export_spans_total{result=\"sent\"}[5m]))",
+     "legendFormat": "sent/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    },
+    {
+     "expr": "sum(rate(janus_otel_export_spans_total{result=\"failed\"}[5m]))",
+     "legendFormat": "failed/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "PBFA97CFB590B2093"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 6
+     }
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 24,
+    "h": 7
+   }
+  }
+ ]
+}

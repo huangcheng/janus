@@ -62,6 +62,17 @@
     dropped = 0 :: non_neg_integer(),
     sent = 0 :: non_neg_integer(),
     failed = 0 :: non_neg_integer(),
+    %% Batch-level counters: a batch can carry many spans, so span counts
+    %% and request counts answer different questions ("are we losing
+    %% data?" vs "is the collector rejecting us?").
+    batches_sent = 0 :: non_neg_integer(),
+    batches_failed = 0 :: non_neg_integer(),
+    %% Wall-clock (unix ms) of the last successful export, so a scrape can
+    %% tell "never worked" from "worked 3 s ago then stopped".
+    last_success_ms = 0 :: integer(),
+    %% Last failure CLASS (never the collector's raw body: it can echo the
+    %% payload). Cleared on success.
+    last_error = undefined :: term(),
     last_fail_log = 0 :: integer()
 }).
 
@@ -113,13 +124,27 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call(stats, _From, State) ->
-    #state{queue = Q, dropped = D, sent = S, failed = F} = State,
+    #state{
+        queue = Q,
+        dropped = D,
+        sent = S,
+        failed = F,
+        batches_sent = BS,
+        batches_failed = BF,
+        last_success_ms = LS,
+        last_error = LE
+    } = State,
     {reply, #{
         available => true,
+        enabled => janus_telemetry:export_enabled(),
         queued => length(Q),
         dropped_total => D,
         sent_total => S,
-        failed_total => F
+        failed_total => F,
+        batches_sent_total => BS,
+        batches_failed_total => BF,
+        last_success_ms => LS,
+        last_error => LE
     }, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
@@ -163,7 +188,7 @@ enqueue(#state{queue = Q, dropped = D} = State, Span) ->
 
 do_flush(#state{queue = []} = State) ->
     State;
-do_flush(#state{queue = Q, sent = Sent, failed = Failed} = State) ->
+do_flush(#state{queue = Q} = State) ->
     All = lists:reverse(Q),
     {Batch, Rest} = split_batch(All),
     Remaining = lists:reverse(Rest),
@@ -171,13 +196,24 @@ do_flush(#state{queue = Q, sent = Sent, failed = Failed} = State) ->
         [] ->
             State#state{queue = Remaining};
         _ ->
+            N = length(Batch),
             case post(Batch) of
                 ok ->
-                    State#state{queue = Remaining, sent = Sent + length(Batch)};
+                    State#state{
+                        queue = Remaining,
+                        sent = State#state.sent + N,
+                        batches_sent = State#state.batches_sent + 1,
+                        last_success_ms = erlang:system_time(millisecond),
+                        %% A success clears the last failure: a stale error
+                        %% beside a fresh success reads as "still broken".
+                        last_error = undefined
+                    };
                 {error, Why} ->
                     State#state{
                         queue = Remaining,
-                        failed = Failed + length(Batch),
+                        failed = State#state.failed + N,
+                        batches_failed = State#state.batches_failed + 1,
+                        last_error = classify_failure(Why),
                         last_fail_log = maybe_log_failure(State#state.last_fail_log, Why)
                     }
             end

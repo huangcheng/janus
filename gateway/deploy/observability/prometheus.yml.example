@@ -1,0 +1,44 @@
+# Prometheus scrape config.
+#
+# The gateway's admin plane (/metrics, /stats) binds ONLY to docker bridge
+# addresses on its own host, never to a public interface. Rather than
+# opening a port and adding token auth across the public internet, the gateway host PUSHES a reverse SSH tunnel to this box:
+#
+#   127.0.0.1:38945  ->  (ssh)  ->  gateway-host:127.0.0.1:8090
+#
+# So the scrape target below is a localhost port that happens to be a
+# tunnel endpoint. Nothing about the gateway is reachable from the
+# internet, and no credential has to be stored here for scraping.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    monitor: janus-observability
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:47318"]
+
+  # The gateway, via the reverse SSH tunnel.
+  - job_name: janus-gateway
+    metrics_path: /metrics
+    # The admin plane requires a bearer token on EVERY route. It is read
+    # from a file rather than inlined so the secret is not in the config.
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/gateway_token
+    # `host.docker.internal` resolves to the HOST from inside the
+    # container; 127.0.0.1 here would be the container's own loopback and
+    # the tunnel lives on the host.
+    static_configs:
+      - targets: ["<docker-bridge-gateway>:38945"]
+        labels:
+          node: gateway
+          role: master
+
+  # Self-observability of the collector.
+  - job_name: tempo
+    static_configs:
+      - targets: ["obs-tempo:49673"]
