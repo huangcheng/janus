@@ -51,7 +51,7 @@ from typing import Any
 
 import httpx
 
-from . import database, egress
+from . import database, egress, telemetry
 from .config import config
 
 logger = logging.getLogger("janus.dashboard.ops_puller")
@@ -471,21 +471,82 @@ async def _apply_task_run(conn, node_key: str, boot_id: str, ts: datetime, paylo
 # ---------------------------------------------------------------------------
 
 
-async def _get_json(client: httpx.AsyncClient, url: str, token: str | None):
+async def _get_json(
+    client: httpx.AsyncClient, url: str, token: str | None, trace: telemetry.Trace | None = None
+):
     from . import nodes as nodes_mod
 
-    # Streamed with a hard byte cap (H4): a hostile/compromised node must
-    # not be able to make the dashboard buffer an unbounded body.
-    async with client.stream("GET", url, headers=nodes_mod._auth_headers(token)) as resp:
-        if resp.status_code in (404, 503):
-            return resp.status_code, None
-        if resp.status_code != 200:
-            raise RuntimeError(f"http {resp.status_code}")
-        body = await egress.read_body_capped(resp)
+    # ONE CLIENT span per poll request (design §11.1). This is the single
+    # funnel every poll endpoint goes through (/stats, /stats/sched,
+    # /stats/logs, /stats/health, /stats/ops-events), so instrumenting here
+    # covers the five without editing five call sites.
+    #
+    # The span is created and finished around the request and handed to the
+    # exporter afterwards: `record_span` only queues, so nothing here waits on
+    # a collector. The poll cadence is latency-coupled by contract and must
+    # never be delayed by telemetry.
+    span = trace.client_span(f"GET {_span_path(url)}") if trace is not None else None
+    if span is not None:
+        span.set("http.request.method", "GET")
+        span.set("url.full", url)
+        host = httpx.URL(url).host
+        if host:
+            span.set("server.address", host)
+        # Sent so the GATEWAY's spans join this trace instead of starting a
+        # new one; that join is the entire reason the dashboard instruments
+        # its poller.
+        headers = {**nodes_mod._auth_headers(token), "traceparent": trace.traceparent()}
+    else:
+        headers = nodes_mod._auth_headers(token)
+
+    status = 0
+
+    def finish(code: int) -> None:
+        """Close and export the span once, whichever way the request ends."""
+        if span is not None:
+            span.finish(code)
+            telemetry.record_span(span)
+
     try:
-        return 200, json.loads(body)
-    except ValueError as exc:
-        raise RuntimeError("non-JSON response body") from exc
+        # Streamed with a hard byte cap (H4): a hostile/compromised node must
+        # not be able to make the dashboard buffer an unbounded body.
+        async with client.stream("GET", url, headers=headers) as resp:
+            status = resp.status_code
+            if resp.status_code in (404, 503):
+                # A supported-but-absent endpoint is a SUCCESSFUL poll, not a
+                # failure: the caller handles `None` deliberately. The span is
+                # still exported, with the status code that explains it.
+                finish(resp.status_code)
+                return resp.status_code, None
+            if resp.status_code != 200:
+                raise RuntimeError(f"http {resp.status_code}")
+            body = await egress.read_body_capped(resp)
+        try:
+            parsed = json.loads(body)
+        except ValueError as exc:
+            raise RuntimeError("non-JSON response body") from exc
+    except BaseException as exc:
+        # A failed poll is exactly what an operator wants to see in the trace,
+        # so the span is closed with the failure and still exported.
+        if span is not None:
+            span.set("error.type", type(exc).__name__)
+        finish(status)
+        raise
+    # The success path returns from inside the try, so the span MUST be closed
+    # here rather than in an `else` clause: every `return` above bypasses it,
+    # which silently exported nothing on success — the exact opposite of what
+    # the instrumentation is for.
+    finish(status)
+    return 200, parsed
+
+
+def _span_path(url: str) -> str:
+    """The path only: a span name should not carry a query string, which can
+    be unbounded and would make every page a distinct series."""
+    try:
+        return httpx.URL(url).path or "/"
+    except Exception:  # noqa: BLE001
+        return "/"
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +634,7 @@ async def _drain(
     stats_port: int,
     token: str | None,
     boot: str,
+    trace: telemetry.Trace | None = None,
 ) -> dict:
     """Drain the ring page by page. Raises on any failure (the caller
     flags ops_lagging; committed pages stay committed — their
@@ -605,7 +667,7 @@ async def _drain(
             stats_port,
             f"/stats/ops-events?boot_id={boot}&after_idx={hw}&limit={DRAIN_PAGE_LIMIT}",
         )
-        status, page = await _get_json(client, url, token)
+        status, page = await _get_json(client, url, token, trace)
         if status != 200 or not isinstance(page, dict):
             raise RuntimeError(f"ops-events unavailable (http {status})")
         page_boot = _str_or_none(page.get("boot_id"))
@@ -818,6 +880,7 @@ async def pull_node(
 
     node_key = str(nid)
     _stats["pulls"] += 1
+    trace = telemetry.Trace()
     try:
         # alerts_debug holds alert_control.paused while it drives run_once
         # against a seeded health_snapshot (O.4b / O.10g). Skip the pull so
@@ -853,6 +916,7 @@ async def pull_node(
                             stats_host,
                             stats_port,
                             token,
+                            trace=trace,
                         )
                         run.ok()
                     finally:
@@ -882,6 +946,7 @@ async def _pull_locked(
     stats_host: str,
     stats_port: int,
     token: str | None,
+    trace: telemetry.Trace | None = None,
 ) -> None:
     row = await conn.fetchrow("SELECT ops_boot_id FROM gateway_nodes WHERE id = $1", nid)
     if row is None:
@@ -912,7 +977,10 @@ async def _pull_locked(
         snap: dict | None = None
         try:
             status, body = await _get_json(
-                client, nodes_mod.stats_url(stats_host, stats_port, "/stats/health"), token
+                client,
+                nodes_mod.stats_url(stats_host, stats_port, "/stats/health"),
+                token,
+                trace,
             )
             if status == 404:
                 # Old beam / worker without the ops tail: no snapshot, no

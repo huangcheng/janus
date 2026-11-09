@@ -46,6 +46,21 @@ for f in scripts/*.sh scripts/ci/*.sh; do
 done
 [ "$sh_fail" -eq 0 ] && ok "all scripts/*.sh + scripts/ci/*.sh parse"
 
+echo "== Telemetry contract (OTEL spans / traceparent / metrics) =="
+if [ -f scripts/verification_telemetry.py ]; then
+  tel_log=$(mktemp "${TMPDIR:-/tmp}/janus_telemetry_verify.XXXXXX")
+  if "$PY" scripts/verification_telemetry.py >"$tel_log" 2>&1; then
+    ok "telemetry contract ($(grep -c '^PASS' "$tel_log") checks)"
+    rm -f "$tel_log"
+  else
+    fail "telemetry contract"
+    tail -20 "$tel_log"
+    rm -f "$tel_log"
+  fi
+else
+  fail "scripts/verification_telemetry.py missing"
+fi
+
 echo "== Dockerfile (docker build --check) =="
 if docker build --check . >/dev/null 2>&1; then
   ok "docker build --check"

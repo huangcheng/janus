@@ -28,6 +28,7 @@ from .config import config
 from .config_backup_export import dashboard_version
 from .config_backup_schema import SchemaSelfCheckError, startup_schema_self_check
 from .telemetry_egress import exporter_egress_posture
+from . import telemetry
 from .routers import (
     alerts as alerts_router,
 )
@@ -44,6 +45,9 @@ from .routers import (
 )
 from .routers import (
     entitlements as entitlements_router,
+)
+from .routers import (
+    metrics as metrics_router,
 )
 from .routers import (
     logs as logs_router,
@@ -103,6 +107,10 @@ async def lifespan(app: FastAPI):
         "telemetry exporter egress posture: %s",
         exporter_egress_posture(),
     )
+    # Started inside the lifespan, so shutdown can flush what is queued; the
+    # mounted MCP sub-app's lifespan is driven by the host and must not be
+    # relied on for this.
+    telemetry.start()
     if not config.is_configured:
         missing = [
             name
@@ -177,6 +185,9 @@ async def lifespan(app: FastAPI):
     # manager (stateless HTTP still routes sessions through it).
     async with mcp_server.mcp.session_manager.run():
         yield
+        # Stop telemetry LAST, not first: the shutdown log lines below are the
+        # most useful ones to have in a trace, and stopping earlier would drop
+        # them. The flush happens inside `stop`.
         await maintenance.stop_sweeper()
         await alerts.stop_sender()
         await cascade.stop_background()
@@ -186,6 +197,7 @@ async def lifespan(app: FastAPI):
         await nodes.stop_monitor()
         await database.close_pool()
         await mcp_server.api.close()
+        await telemetry.stop()
         logger.info("dashboard stopped")
 
 
@@ -274,6 +286,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # API routes
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+# The dashboard's own scrape surface. Unprefixed like the gateway's `/metrics`,
+# so one collector config covers both processes.
+app.include_router(metrics_router.router)
 app.include_router(providers.router, prefix="/api/providers", tags=["providers"])
 # Decisions probe endpoints live under the same /api/providers prefix
 # (POST/GET /{id}/decisions-probe); paths are literal-suffixed so they
