@@ -13,7 +13,7 @@
 %%%-------------------------------------------------------------------
 -module(janus_metrics_render).
 
--export([render/2]).
+-export([render/2, unit/1, units/0, family_names/0]).
 
 %% Family registry: name => {type, help}. Drives TYPE/HELP lines.
 %% Unregistered counter families still render — a series must never
@@ -90,6 +90,87 @@
     auto_tier_name_failover_exhausted_total => {counter, <<"janus-auto next-name walk stopped (by tier and reason: all_cooling|no_eligible|budget|max_names).">>},
     auto_tier_name_skip_total => {counter, <<"janus-auto next-name candidates skipped (by tier and reason).">>}
 }).
+
+%% Unit metadata per family, as an OTel UCUM unit string.
+%%
+%% Kept SEPARATE from `?FAMILIES' on purpose: those tuples are consumed by
+%% the Prometheus renderer, whose contract is that existing series keep
+%% working, so they are not rewritten for metadata only the OTLP signal
+%% consumes.
+%%
+%% UCUM is what OTLP specifies: `s' not `seconds', `ms' not
+%% `milliseconds', `By' not `bytes'. The curly-braced form (`{request}')
+%% is UCUM's annotation syntax for a dimensionless count of a specific
+%% thing -- the honest unit for "how many requests", where `1' would say
+%% the number means nothing in particular.
+%%
+%% A family absent here declares no unit; the OTLP view then omits the
+%% field rather than inventing one.
+-define(UNITS, #{
+    requests_total => <<"{request}">>,
+    requests_with_images_total => <<"{request}">>,
+    upstream_requests_total => <<"{request}">>,
+    usage_writer_dropped_total => <<"{row}">>,
+    request_duration_seconds => <<"s">>,
+    catalog_generation => <<"1">>,
+    catalog_ready => <<"1">>,
+    models_serving => <<"{model}">>,
+    lb_routes_cooling => <<"{route}">>,
+    lb_stats_total => <<"{event}">>,
+    decisions_upstream_429_total => <<"{event}">>,
+    fleet_signals_tx_total => <<"{signal}">>,
+    fleet_signals_rx_total => <<"{signal}">>,
+    fleet_bad_ingress_total => <<"{signal}">>,
+    fleet_remote_cool_last_resort_total => <<"{pick}">>,
+    fleet_commands_total => <<"{command}">>,
+    fleet_lease_holder => <<"1">>,
+    fleet_mirror_rows => <<"{row}">>,
+    usage_writer_buffered_rows => <<"{row}">>,
+    otel_export_spans_total => <<"{span}">>,
+    otel_export_batches_total => <<"{batch}">>,
+    otel_export_queue_depth => <<"{span}">>,
+    otel_export_enabled => <<"1">>,
+    otel_export_last_success_age_seconds => <<"s">>,
+    otel_export_last_error => <<"1">>,
+    uptime_seconds => <<"s">>,
+    workers_available => <<"{worker}">>,
+    build_info => <<"1">>,
+    sched_geo_match_total => <<"{pick}">>,
+    sched_dispatch_local_total => <<"{dispatch}">>,
+    sched_dispatch_worker_total => <<"{dispatch}">>,
+    sched_dispatch_worker_overflow_total => <<"{dispatch}">>,
+    sched_capacity_exhausted_total => <<"{event}">>,
+    sched_health_demote_total => <<"{event}">>,
+    sched_probe_total => <<"{probe}">>,
+    sched_probe_skip_total => <<"{probe}">>,
+    sched_rtt_dropped_total => <<"{sample}">>,
+    sched_reserve_purged_total => <<"{entry}">>,
+    sched_note_inflight_deprecated_total => <<"{call}">>,
+    sched_release_barrier_timeout_total => <<"{event}">>,
+    sched_knobs_off_total => <<"{event}">>,
+    sched_dist_busy_events_total => <<"{event}">>,
+    sched_snapshot_gen => <<"1">>,
+    sched_workers_available => <<"{worker}">>,
+    sched_health_ewma_ms => <<"ms">>,
+    sched_rtt_ms => <<"ms">>,
+    sched_pool_message_queue_len => <<"{message}">>,
+    sched_knob_geo => <<"1">>,
+    sched_knob_rtt => <<"1">>,
+    sched_knob_health => <<"1">>,
+    sched_knob_probe => <<"1">>,
+    sched_dist_last_busy_age_ms => <<"ms">>,
+    wire_enc_chunks_total => <<"{chunk}">>,
+    wire_enc_bytes_total => <<"By">>,
+    wire_enc_deflate_time_us_total => <<"us">>,
+    wire_enc_inflate_time_us_total => <<"us">>,
+    wire_enc_inflate_fail_total => <<"{event}">>,
+    wire_enc_bad_config_total => <<"{event}">>,
+    upstream_enc_unsolicited_total => <<"{event}">>,
+    auto_tier_name_failover_total => <<"{event}">>,
+    auto_tier_name_failover_exhausted_total => <<"{event}">>,
+    auto_tier_name_skip_total => <<"{event}">>
+}).
+
 
 -spec render([{tuple(), integer()}], [{atom(), number(), map()}]) -> binary().
 render(Rows, Gauges) ->
@@ -267,8 +348,35 @@ fam_type(Name, Default) ->
 
 help_line(Name) ->
     case maps:get(Name, ?FAMILIES, undefined) of
-        undefined -> [];
-        {_, Text} -> <<"# HELP ", (name_bin(Name))/binary, " ", Text/binary, "\n">>
+        undefined ->
+            [];
+        {_, Text} ->
+            <<"# HELP ", (name_bin(Name))/binary, " ", (help_text(Name, Text))/binary, "\n">>
+    end.
+
+%% Prometheus has no unit field, so the unit can ride the HELP text.
+%%
+%% OPT-IN (`JANUS_METRICS_HELP_UNITS=1`) because HELP text is part of the
+%% existing /metrics contract: appending unconditionally would change what
+%% every scraper sees for a benefit that the OTLP signal already provides
+%% natively. With the knob off the output is byte-identical to before.
+help_text(Name, Text) ->
+    case help_units_enabled() of
+        false ->
+            Text;
+        true ->
+            case maps:get(Name, ?UNITS, undefined) of
+                undefined -> Text;
+                Unit -> <<Text/binary, " (unit: ", Unit/binary, ")">>
+            end
+    end.
+
+%% Read per call: this is a scrape-time path, and a boot-time cache would
+%% make the knob un-flippable without a restart.
+help_units_enabled() ->
+    case os:getenv("JANUS_METRICS_HELP_UNITS") of
+        false -> false;
+        V -> lists:member(string:lowercase(V), ["1", "true", "yes", "on"])
     end.
 
 type_line(Name, Type) ->
@@ -302,3 +410,19 @@ escape(V) ->
 
 num_bin(I) when is_integer(I) -> integer_to_binary(I);
 num_bin(F) when is_float(F) -> float_to_binary(F, [short]).
+
+%% @doc UCUM unit for a family, or `undefined' when none is declared.
+-spec unit(atom()) -> binary() | undefined.
+unit(Name) ->
+    maps:get(Name, ?UNITS, undefined).
+
+%% @doc Every registered family name. The conformance gate walks this so a
+%% newly added family cannot ship without a unit.
+-spec family_names() -> [atom()].
+family_names() ->
+    maps:keys(?FAMILIES).
+
+%% @doc The unit table (family => UCUM string).
+-spec units() -> #{atom() => binary()}.
+units() ->
+    ?UNITS.
