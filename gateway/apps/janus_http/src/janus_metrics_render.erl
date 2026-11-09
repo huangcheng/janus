@@ -13,7 +13,7 @@
 %%%-------------------------------------------------------------------
 -module(janus_metrics_render).
 
--export([render/2, unit/1, units/0, family_names/0]).
+-export([render/2, unit/1, units/0, family_names/0, help/1]).
 
 %% Family registry: name => {type, help}. Drives TYPE/HELP lines.
 %% Unregistered counter families still render — a series must never
@@ -468,3 +468,11 @@ family_names() ->
 -spec units() -> #{atom() => binary()}.
 units() ->
     ?UNITS.
+
+%% @doc The HELP text for a family, for the OTLP `description' field.
+-spec help(atom()) -> binary().
+help(Name) ->
+    case maps:get(Name, ?FAMILIES, undefined) of
+        {_, Text} -> Text;
+        undefined -> <<>>
+    end.

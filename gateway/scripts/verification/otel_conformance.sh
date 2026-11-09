@@ -447,5 +447,82 @@ check "token counters carry modality, model and counts" '
   end,
   halt().'
 
+# C12 -- the OTLP metrics view encodes the shape the data model requires.
+#
+# Three things a backend cannot recover from if wrong: CUMULATIVE
+# temporality on every counter (delta would double-count a lifetime total),
+# `isMonotonic' on sums (without it a rate is not computable), and
+# `explicitBounds' one shorter than `bucketCounts' (the last count is the
+# +Inf overflow). A histogram encoded as one metric per bucket would look
+# fine in JSON and be rejected by every consumer.
+check "otlp metrics encode the required shape" '
+  os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:14318"),
+  ok = janus_metrics:init(),
+  janus_metrics:inc(requests_total, #{endpoint => chat, protocol => openai_chat,
+                                      status_class => <<"2xx">>}),
+  janus_metrics:observe(http_server_request_duration,
+                        #{<<"http.request.method">> => <<"POST">>}, 0.042),
+  Rows = janus_metrics:snapshot(),
+  Enc = janus_otel_otlp:encode_metrics(Rows, [], #{<<"service.name">> => <<"janus">>},
+                                       1700000000000000000),
+  os:unsetenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+  Ms = maps:get(<<"metrics">>,
+                hd(maps:get(<<"scopeMetrics">>,
+                            hd(maps:get(<<"resourceMetrics">>, Enc))))),
+  Counter = [M || M <- Ms, maps:is_key(<<"sum">>, M),
+                  maps:get(<<"name">>, M) =:= <<"janus.requests_total">>],
+  Hist = [M || M <- Ms, maps:is_key(<<"histogram">>, M)],
+  SumOk = case Counter of
+            [C | _] ->
+              Sm = maps:get(<<"sum">>, C),
+              maps:get(<<"aggregationTemporality">>, Sm) =:= 2 andalso
+                  maps:get(<<"isMonotonic">>, Sm) =:= true andalso
+                  maps:get(<<"unit">>, C) =:= <<"{request}">>;
+            [] -> false
+          end,
+  Enc2 = janus_otel_otlp:encode_metrics(Rows, [], #{<<"service.name">> => <<"janus">>},
+                                        1700000000000000000),
+  DpOf = fun(E) ->
+           Ms2 = maps:get(<<"metrics">>,
+                          hd(maps:get(<<"scopeMetrics">>,
+                                      hd(maps:get(<<"resourceMetrics">>, E))))),
+           H2 = hd([M || M <- Ms2, maps:is_key(<<"histogram">>, M)]),
+           hd(maps:get(<<"dataPoints">>, maps:get(<<"histogram">>, H2)))
+         end,
+  StableStart = maps:get(<<"startTimeUnixNano">>, DpOf(Enc)) =:=
+                    maps:get(<<"startTimeUnixNano">>, DpOf(Enc2)),
+  HistOk = case Hist of
+             [H | _] ->
+               Dp = hd(maps:get(<<"dataPoints">>, maps:get(<<"histogram">>, H))),
+               Bounds = maps:get(<<"explicitBounds">>, Dp),
+               Counts = maps:get(<<"bucketCounts">>, Dp),
+               %% The wire spec requires sum(bucketCounts) == count. A
+               %% cumulative-copied set would exceed it by a growing
+               %% factor, and every consumer rejects the point.
+               Sum = lists:sum([binary_to_integer(C) || C <- Counts]),
+               PointCount = binary_to_integer(maps:get(<<"count">>, Dp)),
+               length(Bounds) + 1 =:= length(Counts) andalso
+                   Sum =:= PointCount andalso
+                   maps:get(<<"unit">>, H) =:= <<"s">>;
+             [] -> false
+           end,
+  %% The semconv family must use its semconv NAME, not the janus_ spelling:
+  %% the two views are distinguished by exactly that.
+  Names = [maps:get(<<"name">>, M) || M <- Ms],
+  SemconvNamed = lists:member(<<"http.server.request.duration">>, Names),
+  if
+    not SumOk ->
+      io:format("FAIL otlp counter: temporality/monotonic/unit wrong~n");
+    not HistOk ->
+      io:format("FAIL otlp histogram: bounds+1 ~= counts or unit wrong~n");
+    not StableStart ->
+      io:format("FAIL otlp metrics: startTimeUnixNano is not stable across encodings~n");
+    not SemconvNamed ->
+      io:format("FAIL otlp metrics do not use the semconv name: ~p~n", [Names]);
+    true ->
+      io:format("PASS otlp metrics carry cumulative+monotonic sums and a valid histogram~n")
+  end,
+  halt().'
+
 echo "--- $pass passed, $fail failed ---"
 [ "$fail" -eq 0 ]

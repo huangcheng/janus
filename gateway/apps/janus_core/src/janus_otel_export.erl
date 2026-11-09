@@ -122,6 +122,13 @@ flush() ->
 %%--------------------------------------------------------------------
 
 init([]) ->
+    %% Pin the OTLP measurement-period start for every CUMULATIVE
+    %% instrument. This MUST be written once at boot: a counter's
+    %% `startTimeUnixNano' is the instant its accumulated value began, so
+    %% reading it lazily would return "now" every flush and every batch
+    %% would look like a counter that just reset to its current value —
+    %% which a backend renders as a sawtooth of resets, not a rate.
+    persistent_term:put({janus, otel_start_ns}, erlang:system_time(nanosecond)),
     %% The timer is only started when export is enabled at boot; a config
     %% change that enables export later starts it lazily on the next cast.
     erlang:send_after(?FLUSH_MS, self(), tick),
@@ -191,6 +198,10 @@ enqueue(#state{queue = Q, dropped = D} = State, Span) ->
     end.
 
 do_flush(#state{queue = []} = State) ->
+    %% Spans are empty, but the metrics view is a SNAPSHOT of the live
+    %% registry — it must still be exported on this tick, or a quiet
+    %% gateway would publish no metrics at all.
+    _ = send_metrics(),
     State;
 do_flush(#state{queue = Q} = State) ->
     All = lists:reverse(Q),
@@ -203,6 +214,7 @@ do_flush(#state{queue = Q} = State) ->
             N = length(Batch),
             case post(Batch) of
                 ok ->
+                    _ = send_metrics(),
                     State#state{
                         queue = Remaining,
                         sent = State#state.sent + N,
@@ -213,6 +225,11 @@ do_flush(#state{queue = Q} = State) ->
                         last_error = undefined
                     };
                 {error, Why} ->
+                    %% Metrics ride their own POST and their own failure
+                    %% count: a span export failure must not suppress the
+                    %% metrics view, or a collector rejecting one signal
+                    %% would blank the other.
+                    _ = send_metrics(),
                     State#state{
                         queue = Remaining,
                         failed = State#state.failed + N,
@@ -342,5 +359,86 @@ export_url() ->
 %% producer: service name/version, a stable instance id derived from the
 %% node alias, and the node alias itself). Kept behind this thin wrapper
 %% so the exporter does not care where it comes from.
+%% Export the metrics VIEW of the same ETS registry (design §8.1).
+%%
+%% Unlike spans these are not queued: the registry already holds the
+%% cumulative totals, so each tick reads a snapshot and posts it. A dropped
+%% tick loses nothing — the next one carries the same totals plus whatever
+%% arrived — which is why there is no queue, no backpressure, and no
+%% drop counter for this signal.
+%%
+%% Failure is reported through the SAME `last_error' the span path uses, so
+%% a scrape cannot see "spans fine" while metrics silently never arrive.
+send_metrics() ->
+    try
+        case janus_telemetry:export_enabled() of
+            false ->
+                ok;
+            true ->
+                Rows = janus_metrics:snapshot(),
+                Body = janus_otel_otlp:encode_metrics(
+                    Rows, [], resource_attrs(), start_ns()
+                ),
+                Json = thoas:encode(Body),
+                Url = signal_url(<<"metrics">>),
+                Headers = [{"content-type", "application/json"}],
+                Request = {Url, Headers, "application/json", Json},
+                HttpOpts = [{timeout, ?HTTP_TIMEOUT_MS}, {connect_timeout, 5000}],
+                Opts = [{body_format, binary}],
+                inets:start(),
+                case httpc:request(post, Request, HttpOpts, Opts) of
+                    {ok, {{_, Status, _}, _H, _B}} when Status >= 200, Status < 300 ->
+                        ok;
+                    {ok, {{_, Status, _}, _H, _B}} ->
+                        {error, {collector_http, Status}};
+                    {error, Why} ->
+                        {error, Why}
+                end
+        end
+    catch
+        _:_ -> ok
+    end.
+
+%% The process-lifetime start instant for a CUMULATIVE instrument.
+%%
+%% Written once by `init/1'. The fallback computes boot-relative zero
+%% rather than "now": if this is ever reached it means init did not run, and
+%% a stable value keeps every batch in the same period instead of making
+%% each one look like a reset.
+start_ns() ->
+    persistent_term:get({janus, otel_start_ns}, boot_ns()).
+
+%% Wall-clock nanoseconds at VM start, derived from the monotonic clock so
+%% it is stable even if the system clock jumps after boot.
+boot_ns() ->
+    erlang:system_time(nanosecond) -
+        erlang:convert_time_unit(erlang:monotonic_time(), native, nanosecond).
+
+
+%% NO gauges in the OTLP metrics view, deliberately.
+%%
+%% The scrape-time gauges are assembled inside `janus_http_metrics:init/2'
+%% from five subsystems, interleaved with the scrape that renders them.
+%% Reading them from here would mean either duplicating that assembly (a
+%% second implementation that drifts the first time a gauge is added) or
+%% reaching into a subsystem this process does not own. Both are worse than
+%% the honest gap: the counters — which ARE the authoritative registry —
+%% export here, and the gauges stay on the Prometheus view, which is the
+%% only place they are computed from live scrape-time state.
+%%
+%% Recorded rather than silently omitted, so a later reader does not read
+%% "no gauges in OTLP" as an oversight to fix by fabricating zeros.
+
+%% `/v1/traces' for spans, `/v1/metrics' for metrics: the OTLP/HTTP
+%% specification puts each signal on its own path under the same base.
+signal_url(Signal) ->
+    Base = janus_telemetry:export_endpoint(),
+    Trimmed =
+        case binary:last(Base) of
+            $/ -> binary:part(Base, 0, byte_size(Base) - 1);
+            _ -> Base
+        end,
+    binary_to_list(<<Trimmed/binary, "/v1/", Signal/binary>>).
+
 resource_attrs() ->
     janus_otel_resource:get().

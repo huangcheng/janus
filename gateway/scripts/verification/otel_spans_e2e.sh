@@ -469,8 +469,13 @@ RESP=$(curl -s -D "$OUT/headers.txt" -o "$OUT/body.json" \
 if [ "$RESP" = "curl=0" ]; then ok "request served"; else bad "request served" "$RESP"; fi
 
 # The exporter flushes on a 2s timer; give it a couple of cycles.
-for _ in $(seq 1 12); do
-  [ -s "$COLLECT" ] && break
+#
+# Wait for a TRACES post specifically, not merely a non-empty file: the
+# exporter now sends metrics on the same tick, so "file is non-empty" can
+# be satisfied by the metrics body alone and this loop would break out
+# before any span arrived — which then reads as "no spans" downstream.
+for _ in $(seq 1 20); do
+  grep -q '/v1/traces' "$COLLECT" 2>/dev/null && break
   sleep 1
 done
 
@@ -478,6 +483,13 @@ if [ -s "$COLLECT" ]; then
   ok "collector received an OTLP export"
 else
   bad "collector received an OTLP export" "nothing in $COLLECT"
+fi
+
+# And prove the metrics signal arrived too, now that the exporter emits it.
+if grep -q '/v1/metrics' "$COLLECT" 2>/dev/null; then
+  ok "collector received the OTLP metrics view"
+else
+  bad "collector received the OTLP metrics view" "no /v1/metrics post"
 fi
 
 python3 - "$COLLECT" "$TRACE_ID" "$OUT" <<'PY'
@@ -491,9 +503,14 @@ if not os.path.exists(collect) or os.path.getsize(collect) == 0:
     print("FAIL spans: no export captured"); sys.exit(1)
 
 posts = [json.loads(l) for l in open(collect) if l.strip()]
-for p in posts:
-    if p.get("path") != "/v1/traces":
-        print(f"FAIL path: got {p.get('path')}"); sys.exit(1)
+# Each OTLP signal has its OWN path under the same base: spans go to
+# /v1/traces, metrics to /v1/metrics. Asserting every POST is /v1/traces
+# was correct only while the exporter sent one signal; it now sends two,
+# so the rule is "every POST uses a known signal path", not "one path".
+KNOWN = ("/v1/traces", "/v1/metrics", "/v1/logs")
+unknown = [p.get("path") for p in posts if p.get("path") not in KNOWN]
+if unknown:
+    print(f"FAIL path: unexpected signal path(s) {unknown}"); sys.exit(1)
 spans = load_spans(collect)
 
 json.dump(spans, open(os.path.join(out, "spans.json"), "w"), indent=2)
@@ -503,7 +520,8 @@ def check(name, cond, detail=""):
     return 0 if cond else 1
 
 bad = 0
-bad += check("export post path is /v1/traces", True)
+paths = {p.get("path") for p in posts}
+bad += check("spans export on /v1/traces", "/v1/traces" in paths, f"paths={paths}")
 
 mine = [s for s in spans if s.get("traceId") == tid]
 bad += check("spans carry the inbound trace id", len(mine) >= 2,
