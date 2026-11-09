@@ -37,6 +37,10 @@
 -define(PDICT_UPSTREAM_START, janus_worker_upstream_start).
 -define(PDICT_INTERNAL, janus_worker_internal).
 -define(PDICT_PROVIDER, janus_worker_provider).
+%% The worker-side CLIENT span for this job, if the trace is sampled.
+-define(PDICT_SPAN, janus_worker_span).
+%% The provider status this job reported, read by the span when closing.
+-define(PDICT_UPSTREAM_STATUS, janus_worker_upstream_status).
 %% Wire compression capability (identity | zlib) — captured at spawn
 %% time from the dispatcher's per-dist-session state; NEVER re-read
 %% mid-job (F1).
@@ -93,6 +97,16 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
             janus_trace:upstream_headers(Trace) ++
                 janus_trace:strip_trace_headers(maps:get(headers, Fields))
     },
+    %% Worker-side CLIENT span.
+    %%
+    %% The master also opens a CLIENT span around the whole dispatch, but
+    %% that one measures the master->worker round trip and is attributed
+    %% to the MASTER's Resource. This span is the only place the PROVIDER
+    %% call is attributed to the node that actually made it, and it is
+    %% what makes a worker's own telemetry visible at all: without it,
+    %% every worker-executed request is reported as if the master ran it.
+    %% A no-op when the trace is unsampled.
+    _ = open_job_span(Fields1),
     put(?PDICT_WIRE_ENC, WireEnc),
     put(?PDICT_CORRUPT_AFTER, janus_wire_enc:corrupt_after_from_env()),
     MasterSessionPid ! janus_worker_wire:job_ack(JobRef, self()),
@@ -136,6 +150,7 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
         erase(?PDICT_SEQ),
         erase(?PDICT_WORKER),
         erase(?PDICT_UPSTREAM_START),
+        _ = close_job_span(),
         erase(?PDICT_INTERNAL),
         erase(?PDICT_PROVIDER),
         erase(janus_trace),
@@ -143,6 +158,91 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
         erase(?PDICT_CORRUPT_AFTER)
     end,
     ok.
+
+%%%--------------------------------------------------------------------
+%%% Worker-side span
+%%%
+%%% Telemetry must never break the job it measures, so every entry point
+%%% here is total and a failure just means no span.
+%%%--------------------------------------------------------------------
+
+%% Open a CLIENT span for the provider call this job is about to make.
+%%
+%% The trace context arrived on the wire (trace_id + sampled), so this
+%% span joins the caller's trace. Its parent is `undefined' rather than
+%% the master's span id: that id does not cross the wire, and inventing
+%% one would be worse than a root span in the same trace.
+open_job_span(Fields) ->
+    try
+        Trace = get(janus_trace),
+        case janus_trace:sampled(Trace) of
+            false ->
+                ok;
+            true ->
+                Provider = provider_name(Fields),
+                %% `protocol' does NOT cross the wire, so it must not be
+                %% guessed here: defaulting it labelled every Anthropic
+                %% job as a chat completion. The wire carries
+                %% `provider_id', which is what identifies the upstream
+                %% anyway, so the span is named from that.
+                Op = <<"chat">>,
+                Span0 = janus_otel_span:start(
+                    client, janus_otel_attr:span_name(Op, Provider), undefined, janus_trace:trace_id(Trace)
+                ),
+                %% The executing node is NOT an attribute here: the
+                %% Resource already carries `janus.node.alias', and
+                %% restating it per span would duplicate the identity in
+                %% two places that could drift.
+                Span1 = janus_otel_span:set_attrs(Span0, #{
+                    <<"gen_ai.operation.name">> => Op,
+                    <<"gen_ai.provider.name">> => janus_otel_attr:provider_name(Provider)
+                }),
+                put(?PDICT_SPAN, Span1),
+                ok
+        end
+    catch
+        _:_ -> ok
+    end.
+
+%% Close and export the span. Called from the `after' block, so it runs
+%% on every exit path including a crash.
+close_job_span() ->
+    try
+        case get(?PDICT_SPAN) of
+            undefined ->
+                ok;
+            Span ->
+                EraseSpan = erase(?PDICT_SPAN),
+                _ = EraseSpan,
+                Finished = janus_otel_span:finish(Span, job_status()),
+                janus_otel_export:record(Finished),
+                ok
+        end
+    catch
+        _:_ -> ok
+    end.
+
+%% The status this job reported upstream. `done' carries the provider's
+%% HTTP status; a timeout/timeout-class abort has none, so UNSET is
+%% correct rather than a fabricated failure.
+job_status() ->
+    case get(?PDICT_UPSTREAM_STATUS) of
+        S when is_integer(S) -> S;
+        _ -> undefined
+    end.
+
+%% Provider name for the span attributes. The wire carries the numeric
+%% provider id; the catalog name is a master-side lookup this node does
+%% not have, so the id is used — bounded by the catalog and stable.
+provider_name(Fields) ->
+    case maps:get(provider_name, Fields, undefined) of
+        N when is_binary(N), N =/= <<>> -> N;
+        _ ->
+            case maps:get(provider_id, Fields, undefined) of
+                Id when is_integer(Id) -> integer_to_binary(Id);
+                _ -> undefined
+            end
+    end.
 
 %%%===================================================================
 %%% Unary (non-stream)
@@ -565,6 +665,7 @@ ensure_clear_control() ->
 %% exclusion, spec E.6). The worker's passive EWMA feed is SEPARATE:
 %% successful (status < 400) non-internal completions only.
 emit_done(Status, Body) ->
+    put(?PDICT_UPSTREAM_STATUS, Status),
     JobRef = get(?PDICT_JOB),
     Master = get(?PDICT_MASTER),
     Fields0 = #{
