@@ -490,12 +490,12 @@ prepare_unary_job(Route, PathSuffix, Body, Opts) ->
                 protocol_meta => #{}
             },
             Fields1 = wire_trace(Fields0),
-            Fields =
+            Fields2 =
                 case maps:get(provider_id, Route, undefined) of
                     undefined -> Fields1;
                     ProviderId -> Fields1#{provider_id => ProviderId}
                 end,
-            {ok, Fields}
+            {ok, with_provider_name(Fields2)}
     end.
 
 %%--------------------------------------------------------------------
