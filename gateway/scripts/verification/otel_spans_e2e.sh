@@ -811,6 +811,91 @@ ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM usage_events WHERE trace_id='$TRACE_I
 if [ "${ROWS:-0}" -ge 1 ]; then ok "usage row carries span_id and parent_span_id"
 else bad "usage row carries span_id and parent_span_id" "rows=$ROWS"; fi
 
+# Parent-span wire seam (P1 #14). The master publishes its CLIENT span id
+# while dispatching; the wire carries it as an OPTIONAL additive key; the
+# worker validates it and uses it as the parent of ITS OWN span, and names
+# that span in the upstream `traceparent'. Asserted against the real
+# implementations on both sides -- a copied reader in the test would let
+# the two drift and keep passing.
+#
+# Note: erl -eval has no line comments, so the assertions are labelled by
+# their check name rather than by inline `%%' notes.
+EBINS=(); for d in "$GW"/_build/default/lib/*/ebin; do EBINS+=(-pa "$d"); done
+PARENT_OUT=$(erl -noshell "${EBINS[@]}" -eval '
+  C = janus_http_worker_client,
+  S = janus_worker_session,
+  T = janus_trace,
+  Good = <<"00f067aa0ba902b7">>,
+  Tid = <<"0af7651916cd43dd8448eb211c80319c">>,
+  Id16 = fun(V) -> is_binary(V) andalso byte_size(V) =:= 16 end,
+  ok = C:put_attempt_span_for_test(undefined),
+  A = case maps:is_key(parent_span_id, C:with_parent_span_for_test(#{})) of
+        false -> ok;
+        true -> {fail, absent_added_a_key}
+      end,
+  Span = janus_otel_span:start(client, <<"chat mock">>, undefined, Tid),
+  Base = #{span_id => Good},
+  ok = C:put_attempt_span_for_test(Span),
+  WithKey = C:with_parent_span_for_test(Base),
+  B = case maps:get(parent_span_id, WithKey, undefined) of
+        V1 when is_binary(V1) -> case Id16(V1) of true -> ok; false -> {fail, {bad_id, V1}} end;
+        Bad1 -> {fail, {wrong_parent, Bad1}}
+      end,
+  C2 = ok,
+  NonSpan = ok,
+  ok = C:put_attempt_span_for_test(#{span_id => Good, decoy => true}),
+  Ck = case maps:is_key(parent_span_id, C:with_parent_span_for_test(#{span_id => Good})) of
+         false -> ok;
+         true -> {fail, non_span_accepted}
+       end,
+  ok = C:put_attempt_span_for_test(undefined),
+  D = case S:parent_span_id(#{parent_span_id => Good}) of
+        Good -> ok;
+        Bad2 -> {fail, {reader_rejected_good, Bad2}}
+      end,
+  M = fun(F) -> S:parent_span_id(F) end,
+  Rejects = [
+      {absent, M(#{})},
+      {not_binary, M(#{parent_span_id => 12345})},
+      {too_short, M(#{parent_span_id => <<"abc">>})},
+      {too_long, M(#{parent_span_id => <<"00f067aa0ba902b7ff">>})},
+      {empty, M(#{parent_span_id => <<>>})}
+  ],
+  E = case [K || {K, V} <- Rejects, V =/= undefined] of
+        [] -> ok;
+        Leaked -> {fail, {malformed_accepted, Leaked}}
+      end,
+  {_, Tp} = T:upstream_header(T:from_trace_id(Tid), Good),
+  Expect = <<"00-", Tid/binary, "-", Good/binary, "-01">>,
+  F0 = case Tp of
+         Expect -> ok;
+         Other -> {fail, {traceparent_not_anchored, Other}}
+       end,
+  Span2 = janus_otel_span:start(client, <<"chat mock">>, undefined, Tid),
+  OwnId = janus_otel_span:id(Span2),
+  put(janus_worker_span, Span2),
+  Hs = S:upstream_headers(T:from_trace_id(Tid)),
+  erase(janus_worker_span),
+  TpWire = proplists:get_value(<<"traceparent">>, Hs),
+  WantTp = <<"00-", Tid/binary, "-", OwnId/binary, "-01">>,
+  F = case TpWire of
+        WantTp -> F0;
+        Other2 -> {fail, {worker_traceparent_wrong_parent, Other2, OwnId}}
+      end,
+  case [A, B, C2, NonSpan, Ck, D, E, F] of
+    [ok, ok, ok, ok, ok, ok, ok, ok] ->
+      io:format("PASS parent span id round-trips, non-spans and malformed ids are rejected, traceparent is anchored~n");
+    Errs ->
+      io:format("FAIL ~p~n", [Errs])
+  end,
+  halt().' 2>&1)
+echo "$PARENT_OUT"
+if printf '%s' "$PARENT_OUT" | grep -q "^PASS parent span id round-trips"; then
+  pass=$((pass+1))
+else
+  fail=$((fail+1))
+fi
+
 echo "--- $pass passed, $fail failed ---"
 echo "artifacts: $OUT (server.log, collected.jsonl, spans.json)"
 [ "$fail" -eq 0 ]

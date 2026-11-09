@@ -50,7 +50,9 @@
     sampled/1,
     tracestate/1,
     upstream_header/1,
+    upstream_header/2,
     upstream_headers/1,
+    upstream_headers/2,
     response_headers/1,
     encode_tracestate/1,
     set_log_context/1,
@@ -211,13 +213,34 @@ upstream_header(#trace{tid = Tid, sampled = Sampled}) ->
     Pid = new_parent_id(),
     {<<"traceparent">>, <<"00-", Tid/binary, "-", Pid/binary, "-", (flags(Sampled))/binary>>}.
 
+%% @doc The upstream `traceparent' naming a SPECIFIC parent span.
+%%
+%% The caller mints its own span id (one provider call = one span) and
+%% uses it as the parent, so the outbound request is attributed to the span
+%% that represents it. With the one-argument form this module invents a
+%% fresh parent id, which is a DIFFERENT id from the caller's span: the
+%% trace then shows the provider call hanging off an id no span owns, and
+%% the chain is only correct by coincidence of the trace id.
+-spec upstream_header(t(), binary()) -> {binary(), binary()}.
+upstream_header(#trace{tid = Tid, sampled = Sampled}, Pid) when is_binary(Pid) ->
+    {<<"traceparent">>, <<"00-", Tid/binary, "-", Pid/binary, "-", (flags(Sampled))/binary>>}.
+
 %% @doc Both outbound trace headers for one attempt.
 -spec upstream_headers(t()) -> [{binary(), binary()}].
 upstream_headers(#trace{ts = Ts} = Trace) ->
-    case Ts of
-        [] -> [upstream_header(Trace)];
-        _ -> [upstream_header(Trace), {<<"tracestate">>, encode_ts(Ts)}]
-    end.
+    with_tracestate(Ts, [upstream_header(Trace)]).
+
+%% @doc Both outbound trace headers, naming a SPECIFIC parent span.
+-spec upstream_headers(t(), binary()) -> [{binary(), binary()}].
+upstream_headers(#trace{ts = Ts} = Trace, Pid) ->
+    with_tracestate(Ts, [upstream_header(Trace, Pid)]).
+
+%% One place assembles the pair, so a caller that supplies a parent id
+%% cannot forget the tracestate (or emit it twice).
+with_tracestate([], Headers) ->
+    Headers;
+with_tracestate(Ts, Headers) ->
+    Headers ++ [{<<"tracestate">>, encode_ts(Ts)}].
 
 %% @doc Downstream response headers: a W3C `traceparent' so a
 %% conformant client can continue the trace, ADDED alongside the

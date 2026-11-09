@@ -90,10 +90,22 @@
     %% decode, done-body decode).
     normalize_chunk/1,
     decode_chunk/2,
-    decode_done/1
+    decode_done/1,
+    %% Parent-span wire seam: the attach/read pair spans two modules and a
+    %% dist hop, so it is proven directly rather than only through a live
+    %% two-node trace.
+    publish_attempt_span/1,
+    clear_attempt_span/0,
+    with_parent_span_for_test/1,
+    parent_span_id_for_test/1,
+    put_attempt_span_for_test/1
 ]).
 
 -define(PT_UNARY_FALLBACK, {janus_http_worker_client, unary_fallback}).
+%% Shared with janus_http_proxy, which publishes the span around the
+%% dispatch. Both sides use this macro so a rename cannot silently orphan
+%% the parent link.
+-define(ATTEMPT_SPAN_KEY, janus_otel_attempt_span).
 
 %%--------------------------------------------------------------------
 %% Public: same result shapes as call_adapter / upstream_call
@@ -357,13 +369,62 @@ wire_trace(#{headers := Headers} = Fields) ->
             Fields1;
         TraceId ->
             Fields2 = Fields1#{trace_id => TraceId, sampled => janus_trace:sampled(Trace)},
-            case janus_trace:tracestate(Trace) of
-                [] ->
-                    Fields2;
-                Ts ->
-                    %% Opaque vendor state; the worker re-emits it on its
-                    %% own outbound attempt so the chain is unbroken.
-                    Fields2#{tracestate => janus_trace:encode_tracestate(Ts)}
+            Fields3 =
+                case janus_trace:tracestate(Trace) of
+                    [] ->
+                        Fields2;
+                    Ts ->
+                        %% Opaque vendor state; the worker re-emits it on
+                        %% its own outbound attempt so the chain is unbroken.
+                        Fields2#{tracestate => janus_trace:encode_tracestate(Ts)}
+                end,
+            with_parent_span(Fields3)
+    end.
+
+%% Attach OUR CLIENT span id as the parent the executing node should name.
+%%
+%% ADDITIVE and OPTIONAL, like `trace_id': an old worker ignores the key
+%% (wire validation only requires `JOB_REQUIRED'), and a new worker with an
+%% old master simply gets no parent and keeps emitting the span as a root,
+%% which is the previous behaviour. That keeps a rolling deploy harmless in
+%% both directions.
+%%
+%% Consequence for the worker: its span stops being a second root in the
+%% trace. Without this, a trace showed master CLIENT and worker CLIENT as
+%% siblings and the master -> worker -> provider chain was unreadable.
+%% @doc Publish the in-flight attempt's span for the dispatch that follows.
+%% Called by the proxy, which owns the span but must not know this key.
+publish_attempt_span(Span) ->
+    put(?ATTEMPT_SPAN_KEY, Span),
+    ok.
+
+%% @doc Drop it. Idempotent: the dispatch path clears it on every exit.
+clear_attempt_span() ->
+    erase(?ATTEMPT_SPAN_KEY),
+    ok.
+
+with_parent_span_for_test(Fields) -> with_parent_span(Fields).
+
+%% Exposed so the malformed-input guards are exercised against the SAME
+%% implementation the worker uses, not a copy that could drift from it.
+parent_span_id_for_test(Fields) -> janus_worker_session:parent_span_id(Fields).
+
+put_attempt_span_for_test(undefined) ->
+    clear_attempt_span();
+put_attempt_span_for_test(Span) ->
+    publish_attempt_span(Span).
+
+with_parent_span(Fields) ->
+    case get(?ATTEMPT_SPAN_KEY) of
+        Span ->
+            %% `is_span/1', not a loose "has a 16-hex id" check: only a real
+            %% span from this tree may become a parent. A map that merely
+            %% carries a `span_id' key would otherwise put an id in the
+            %% wire that no exported span owns, producing a trace whose
+            %% hierarchy points at nothing.
+            case janus_otel_span:is_span(Span) of
+                true -> Fields#{parent_span_id => janus_otel_span:id(Span)};
+                false -> Fields
             end
     end.
 

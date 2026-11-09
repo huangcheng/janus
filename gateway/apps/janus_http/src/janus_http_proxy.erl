@@ -1106,6 +1106,19 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
     AttemptSpan = open_attempt_span(ProviderProto, Route, Map, WantStream),
     Stream = janus_http_worker_client:normalize_want_stream(WantStream),
     Local = fun() -> call_adapter(ProviderProto, Route, Body, Map, #{stream => Stream}) end,
+    %% Publish THIS attempt's span id for the duration of the dispatch, so
+    %% the worker-side span can name it as its parent.
+    %%
+    %% The wire already carried `trace_id' and `sampled', which put the
+    %% worker's span in the same trace but left it parentless: the master
+    %% and worker spans rendered as siblings under one trace, so the chain
+    %% master -> worker -> provider was not recoverable from a trace view.
+    %% The id is published through the process dictionary because the span
+    %% is opened here while the wire fields are assembled deeper inside
+    %% `janus_http_worker_client:call/6' — same process, so the put is
+    %% visible there, and `after' keeps it from leaking into the next
+    %% attempt on a reused keep-alive connection.
+    ok = janus_http_worker_client:publish_attempt_span(AttemptSpan),
     Result =
         try
             %% Master→worker seam (W2.1): pick / ack / relay, else Local.
@@ -1119,6 +1132,8 @@ upstream_call(ProviderProto, Route, Body, Map, WantStream) ->
                     stack => janus_seed:redact_stack(Stack)
                 }),
                 {error, crashed}
+        after
+            ok = janus_http_worker_client:clear_attempt_span()
         end,
     %% Wall time of THIS attempt (connect + first byte for streams, plus
     %% body for unary); read by note_route_success/1 to feed the LB

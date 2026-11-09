@@ -23,6 +23,13 @@
 -module(janus_worker_session).
 
 -export([run/3, run/4]).
+%% The parent-id reader is public so a test can drive the SAME
+%% implementation the worker uses; a copy in the test module would let the
+%% two drift and the test would keep passing.
+-export([parent_span_id/1]).
+%% Exported so a test can assert the outbound `traceparent' names THIS
+%% node's span; reaching it otherwise needs a live upstream.
+-export([upstream_headers/1]).
 
 -define(PDICT_CREDITS, janus_worker_credits).
 -define(PDICT_SEQ, janus_worker_seq).
@@ -92,11 +99,6 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
     %% bump. The parent-id is minted HERE, once per job.
     Trace = janus_trace:from_wire(Fields),
     put(janus_trace, Trace),
-    Fields1 = Fields#{
-        headers =>
-            janus_trace:upstream_headers(Trace) ++
-                janus_trace:strip_trace_headers(maps:get(headers, Fields))
-    },
     %% Worker-side CLIENT span.
     %%
     %% The master also opens a CLIENT span around the whole dispatch, but
@@ -106,7 +108,17 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
     %% what makes a worker's own telemetry visible at all: without it,
     %% every worker-executed request is reported as if the master ran it.
     %% A no-op when the trace is unsampled.
-    _ = open_job_span(Fields1),
+    %%
+    %% Opened BEFORE the outbound headers are assembled because the span's
+    %% id becomes the `traceparent' parent-id: the upstream call must hang
+    %% off the span that represents it, or the provider's leg of the trace
+    %% dangles from an id no span owns.
+    _ = open_job_span(Fields),
+    Fields1 = Fields#{
+        headers =>
+            upstream_headers(Trace) ++
+                janus_trace:strip_trace_headers(maps:get(headers, Fields))
+    },
     put(?PDICT_WIRE_ENC, WireEnc),
     put(?PDICT_CORRUPT_AFTER, janus_wire_enc:corrupt_after_from_env()),
     MasterSessionPid ! janus_worker_wire:job_ack(JobRef, self()),
@@ -168,10 +180,11 @@ run(JobRef, MasterSessionPid, Fields, WireEnc) when
 
 %% Open a CLIENT span for the provider call this job is about to make.
 %%
-%% The trace context arrived on the wire (trace_id + sampled), so this
-%% span joins the caller's trace. Its parent is `undefined' rather than
-%% the master's span id: that id does not cross the wire, and inventing
-%% one would be worse than a root span in the same trace.
+%% The trace context arrived on the wire (trace_id + sampled + the
+%% master's span id as `parent_span_id'), so this span joins the caller's
+%% trace UNDER the master's CLIENT span. When the key is absent -- an old
+%% master, or a caller with no span -- the span is a root instead, which
+%% is the pre-existing behaviour and costs only the parent link.
 open_job_span(Fields) ->
     try
         case get(?PDICT_INTERNAL) of
@@ -200,7 +213,13 @@ open_job_span_1(Fields) ->
                 %% anyway, so the span is named from that.
                 Op = <<"chat">>,
                 Span0 = janus_otel_span:start(
-                    client, janus_otel_attr:span_name(Op, Provider), undefined, janus_trace:trace_id(Trace)
+                    client,
+                    janus_otel_attr:span_name(Op, Provider),
+                    %% The master's CLIENT span for this job, carried on
+                    %% the wire. Absent from an old master (additive key)
+                    %% => no parent, which is what every peer had before.
+                    parent_span_id(Fields),
+                    janus_trace:trace_id(Trace)
                 ),
                 %% The executing node is NOT an attribute here: the
                 %% Resource already carries `janus.node.alias', and
@@ -215,6 +234,37 @@ open_job_span_1(Fields) ->
         end
     catch
         _:_ -> ok
+    end.
+
+%% Outbound trace headers for the upstream call.
+%%
+%% The parent-id is THIS job's span id when one exists, so the provider's
+%% leg is attributed to the span representing it. Falling back to
+%% `janus_trace:upstream_headers/1' (which mints its own id) keeps an
+%% unsampled or probe job working exactly as before -- there is no span to
+%% point at, and the trace id alone still correlates the request.
+upstream_headers(Trace) ->
+    case get(?PDICT_SPAN) of
+        Span ->
+            case janus_otel_span:is_span(Span) of
+                true -> janus_trace:upstream_headers(Trace, janus_otel_span:id(Span));
+                false -> janus_trace:upstream_headers(Trace)
+            end
+    end.
+
+%% The parent span id the master sent, if it sent one of the right shape.
+%%
+%% This is a SHAPE check, not a trust boundary: it rejects a missing key, a
+%% non-binary, and the wrong length, which are what a mixed-version fleet
+%% can produce. It cannot verify that the id names a span that exists --
+%% that needs the master's span set, which this node does not have. A
+%% well-formed but stale id would therefore produce a parentless-looking
+%% span in the backend; the cost of that is a broken link, not a broken
+%% trace.
+parent_span_id(Fields) ->
+    case maps:get(parent_span_id, Fields, undefined) of
+        Id when is_binary(Id), byte_size(Id) =:= 16 -> Id;
+        _ -> undefined
     end.
 
 %% Close and export the span. Called from the `after' block, so it runs
