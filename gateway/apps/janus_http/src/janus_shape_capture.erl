@@ -37,7 +37,12 @@
 
 -export([
     upstream_reject/3,
-    translate_reject/3
+    translate_reject/3,
+    stream_translate_reject/3,
+    %% Pure frame sketch, exported so eunit can pin the content discipline
+    %% (values reduced to type labels) without running a logger handler.
+    stream_frame_shape/1,
+    typed_value/1
 ]).
 
 -define(DEDUP_TABLE, janus_shape_sentinel_dedup).
@@ -85,6 +90,115 @@ translate_reject(ClientProto, ClientMap, _Msg) ->
         log_once(translate_unsupported, Shape)
     end),
     ok.
+
+%% Called when the STREAM mapper rejected an upstream frame mid-flight
+%% ("upstream sent an unsupported stream construct"). Distinct from
+%% translate_reject/3 above: there the gw rejected the CLIENT's REQUEST shape,
+%% here it is the PROVIDER's in-band stream frame that could not be carried.
+%%
+%% This path used to be entirely silent. The client got the generic construct
+%% message, the usage row recorded it as a generic 502, and nothing anywhere
+%% said WHICH frame confused the mapper — so the only way to act on it was to
+%% reproduce the stream and guess. The fingerprint is the missing half.
+%%
+%% Content discipline (docs/design/shape-sentinel.md): the frame's KEYS and
+%% value TYPES only — never a value. An SSE frame can carry the whole answer.
+-spec stream_translate_reject(atom(), atom(), term()) -> ok.
+stream_translate_reject(ClientProto, ProviderProto, Frame) ->
+    safe(fun() ->
+        Shape = #{
+            proto => ClientProto,
+            provider_proto => ProviderProto,
+            frame => stream_frame_shape(Frame)
+        },
+        log_once(upstream_stream_construct, Shape)
+    end),
+    ok.
+
+%% Structural sketch of one upstream SSE frame: the event name, and the shape
+%% of its data map. Values never appear — only key names and types — so this
+%% is safe to log for any provider.
+stream_frame_shape(Frame) when is_map(Frame) ->
+    #{
+        %% The EVENT NAME is protocol vocabulary ("content_block_delta"), not
+        %% user content, and it is the single most useful field for diagnosing
+        %% "which frame confused the mapper" — so it is logged as its own
+        %% short binary rather than collapsed to a type label.
+        event => event_name(maps:get(type, Frame, undefined)),
+        keys => lists:sort([K || K <- maps:keys(Frame), is_binary(K)]),
+        data => stream_data_shape(maps:get(data, Frame, undefined))
+    };
+stream_frame_shape(Other) ->
+    typed_value(Other).
+
+stream_data_shape(D) when is_map(D) ->
+    #{
+        keys => lists:sort([K || K <- maps:keys(D), is_binary(K)]),
+        types => maps:from_list([
+            {K, typed_value(V)}
+         || {K, V} <- maps:to_list(D), is_binary(K)
+        ])
+    };
+stream_data_shape(Other) ->
+    typed_value(Other).
+
+%% SSE event names are a closed protocol vocabulary, so they are safe — and
+%% essential — to log verbatim. Anything long or non-binary degrades to a type
+%% label, since at that point it is no longer distinguishable from content.
+%% Allow-listed, because `type` is NOT a closed vocabulary at the point this
+%% runs: sse_event/2 copies the provider's raw `event:` line straight into the
+%% map, so an arbitrary (provider-controlled) binary can arrive here. Echoing
+%% any short binary would break this module's "structure only, never user
+%% bytes" invariant — 64 bytes of provider-controlled text is still content.
+%% Anything unrecognised is reported as `unknown_event`; the frame's KEYS and
+%% TYPES below still identify it.
+-define(KNOWN_EVENTS, [
+    <<"chunk">>,
+    <<"done">>,
+    <<"error">>,
+    <<"message_start">>,
+    <<"message_delta">>,
+    <<"message_stop">>,
+    <<"content_block_start">>,
+    <<"content_block_delta">>,
+    <<"content_block_stop">>,
+    <<"response.created">>,
+    <<"response.completed">>,
+    <<"response.failed">>,
+    <<"response.output_item.added">>,
+    <<"response.output_item.done">>,
+    <<"response.content_part.added">>,
+    <<"response.content_part.done">>,
+    <<"response.output_text.delta">>,
+    <<"response.output_text.done">>,
+    <<"response.reasoning_summary_text.delta">>,
+    <<"response.reasoning_summary_text.done">>,
+    <<"response.function_call_arguments.delta">>,
+    <<"response.function_call_arguments.done">>
+]).
+
+event_name(V) when is_atom(V) -> V;
+event_name(V) when is_binary(V) ->
+    case lists:member(V, ?KNOWN_EVENTS) of
+        true -> V;
+        false -> unknown_event
+    end;
+event_name(V) -> typed_value(V).
+
+%% A type label, never the value. Binaries report only whether they are empty.
+typed_value(undefined) -> undefined;
+typed_value(V) when is_binary(V) ->
+    case V of
+        <<>> -> empty;
+        _ -> binary
+    end;
+typed_value(V) when is_integer(V) -> integer;
+typed_value(V) when is_float(V) -> float;
+typed_value(V) when is_boolean(V) -> boolean;
+typed_value(V) when is_atom(V) -> atom;
+typed_value(V) when is_list(V) -> list;
+typed_value(V) when is_map(V) -> map;
+typed_value(_) -> other.
 
 %%%===================================================================
 %%% Classification (the learning surface — extend with every new

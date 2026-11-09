@@ -42,6 +42,10 @@
     failover_start/0,
     failover_classify/2
 ]).
+%% Exported for eunit: a tripped accumulator ceiling is a LIMIT, not an
+%% upstream failure, and that distinction decides whether a healthy provider
+%% gets benched. Pure so the contract is pinnable without a socket.
+-export([limit_terminal_accounting/0]).
 %% Exported for eunit (Decisions spec 2026-10-07): face eligibility
 %% gate + ordered pre-pick pipeline + forward-decision predicates.
 -export([
@@ -1294,6 +1298,26 @@ translate_chunk(ClientProto, ProviderProto, Chunk, Req2) ->
                                 StNext;
                             {error, translate_unsupported, StNext} ->
                                 put(janus_sse_state, StNext),
+                                %% Capture the offending frame's STRUCTURE
+                                %% (keys and types, never values) before the
+                                %% generic message goes out. Without this the
+                                %% only way to act on "unsupported stream
+                                %% construct" was to reproduce the stream and
+                                %% guess which frame confused the mapper.
+                                %%
+                                %% Only when the frame carried NO in-band error:
+                                %% if the provider named its own reason, that
+                                %% sentence is the actionable evidence and a
+                                %% structural fingerprint beside it just
+                                %% suggests a translate bug that did not exist.
+                                case Ev of
+                                    #{data := #{<<"error">> := _}} ->
+                                        ok;
+                                    _ ->
+                                        janus_shape_capture:stream_translate_reject(
+                                            ClientProto, ProviderProto, Ev
+                                        )
+                                end,
                                 %% Prefer the PROVIDER's own words when it
                                 %% reported the failure in band; fall back
                                 %% to the generic string only when it gave
@@ -1301,15 +1325,30 @@ translate_chunk(ClientProto, ProviderProto, Chunk, Req2) ->
                                 throw(
                                     {janus_translate, upstream, upstream_stream_error_msg()}
                                 );
-                            {error, tool_args_cap, StNext} ->
-                                %% C5 accumulator cap (args/calls/total or
-                                %% the 4MiB content budget): the C2 error
-                                %% path — target-format error event +
-                                %% terminator via finalize, not a crash.
+                            {error, CapKind, CapInfo, StNext} when
+                                CapKind =:= tool_args_cap; CapKind =:= content_budget
+                            ->
+                                %% One of OUR OWN accumulator ceilings tripped (a
+                                %% per-call/calls/total args cap, or the stream
+                                %% content budget): the C2 error path —
+                                %% target-format error event + terminator via
+                                %% finalize, not a crash.
+                                %%
+                                %% The kind is `limit`, not `upstream`: this is a
+                                %% configured limit being reached, not a provider
+                                %% fault and not a translation gap. Reporting it as
+                                %% `upstream` made it a 502 on the usage row and
+                                %% benched a healthy provider, and put it on the
+                                %% wire as an anonymous `api_error` the operator
+                                %% could not act on. `cap_error_text/2` names the
+                                %% setting, the limit in force, and the value that
+                                %% crossed it.
                                 put(janus_sse_state, StNext),
                                 throw(
-                                    {janus_translate, upstream,
-                                        <<"tool call accumulator cap exceeded">>}
+                                    {janus_translate, limit,
+                                        janus_protocol_translate:cap_error_text(
+                                            CapKind, CapInfo
+                                        )}
                                 )
                         end
                     end,
@@ -1400,6 +1439,31 @@ stream_client_frame(Data, Fin, Req2) ->
             throw(janus_client_disconnect)
     end.
 
+%% Failed-request counter for a tripped ceiling, guarded exactly like
+%% bump_failed_maybe/1: inner calls (failover attempts) never bump, and a
+%% request that already bumped cannot bump again. Without these a limit would
+%% inflate the counter once per attempt and once more on the central track path.
+limit_bump_failed() ->
+    case {get(janus_stats_inner), get(janus_stats_failed)} of
+        {true, _} ->
+            ok;
+        {_, true} ->
+            ok;
+        _ ->
+            janus_http_stats:inc_failed(),
+            put(janus_stats_failed, true)
+    end.
+
+%% How a tripped accumulator ceiling is accounted.
+%%
+%% The wire status was already committed as 200 by stream_reply/3 before the
+%% ceiling fired, so tracking 502 would contradict the status the client saw
+%% AND bench a provider that did nothing wrong — the cap is ours, the provider
+%% is healthy. Both halves are pinned by eunit.
+-spec limit_terminal_accounting() -> {200, boolean()}.
+limit_terminal_accounting() ->
+    {200, false}.
+
 finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
     St0 = get(janus_sse_state),
     WireReason = wire_reason(Reason),
@@ -1424,6 +1488,38 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
             %% with the status the client actually saw (review L2).
             TrackStatus = 200,
             note_usage_outcome(error);
+        {error, limit, Msg} ->
+            %% One of OUR ceilings tripped; the provider is healthy. The wire
+            %% status was already committed as 200 by stream_reply/3, so track
+            %% 200 for the same reason the invalid_request arm does — a 502
+            %% here would both contradict the status the client saw and bench a
+            %% provider that did nothing wrong.
+            {TrackStatus, BenchProvider} = limit_terminal_accounting(),
+            %% Consumed, not decorative: if this ever flips, the provider IS
+            %% benched here. Keeping the call site means the contract decides
+            %% behaviour instead of merely describing it.
+            case BenchProvider of
+                true -> _ = note_provider_failure(Route, sanitize_upstream_error(Msg));
+                false -> ok
+            end,
+            %% A cap is a failed request from the CLIENT's perspective, but it
+            %% is tracked 200 so the row agrees with the status the socket
+            %% already sent. That moved it out of every status-derived failure
+            %% signal (bump_failed_maybe and the status-class counters are
+            %% `Status >= 400` only), so a cap storm read as 100% 2xx traffic.
+            %% Bump here — with the SAME two guards bump_failed_maybe uses, so
+            %% an inner (failover) call never bumps and the later central
+            %% track path cannot double-count the same request.
+            _ = limit_bump_failed(),
+            note_usage_outcome(error),
+            %% The detail is what makes "which limit, and how close" answerable
+            %% after the fact: it names the setting, the cap in force, and the
+            %% value that crossed it.
+            _ =
+                case is_binary(Msg) of
+                    true -> put(janus_error_detail, Msg);
+                    false -> ok
+                end;
         {error, upstream, Msg} ->
             TrackStatus = 502,
             note_usage_outcome(error),
@@ -1472,7 +1568,7 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
 %% One line per finished translate stream when it came within 50% of any
 %% ceiling. Silent below that: a short exchange is the common case and does
 %% not need a log line.
-note_cap_headroom(#sse_st{tools = Tools, total_args = Total}) ->
+note_cap_headroom(#sse_st{tools = Tools, total_args = Total, content_bytes = ContentBytes}) ->
     Calls = map_size(Tools),
     %% Largest single call, in argument bytes.
     PerCall =
@@ -1484,7 +1580,11 @@ note_cap_headroom(#sse_st{tools = Tools, total_args = Total}) ->
     Caps = [
         {calls, Calls, janus_protocol_translate:tool_cap(calls)},
         {per_call, PerCall, janus_protocol_translate:tool_cap(per_call)},
-        {total, Total, janus_protocol_translate:tool_cap(total)}
+        {total, Total, janus_protocol_translate:tool_cap(total)},
+        %% The whole-stream text+args budget: without it, "how close were we?"
+        %% stayed unanswerable for the one ceiling that bounds BOTH, even
+        %% though the count is already sitting in the state.
+        {content, ContentBytes, janus_protocol_translate:content_cap()}
     ],
     Near = [
         {Kind, Used, Cap}
@@ -3952,8 +4052,16 @@ do_track(Status, Route, Usage, Observe) ->
                         %% past a failed attempt to a 200 must not
                         %% carry that attempt's message (observed live:
                         %% success rows with the dashscope reject).
+                        %%
+                        %% The 200s that DO carry it are the NON-OK
+                        %% outcomes — a mid-stream limit, and the other
+                        %% post-commit aborts like translate_abort. The wire
+                        %% status was already committed as 200 before those
+                        %% fired, so gating on Status alone dropped the only
+                        %% record of what went wrong, leaving the row
+                        %% indistinguishable from a clean stream.
                         error_detail =>
-                            case Status >= 400 of
+                            case Status >= 400 orelse outcome_non_ok(Outcome) of
                                 true -> error_detail_pd();
                                 false -> null
                             end,

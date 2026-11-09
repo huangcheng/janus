@@ -796,6 +796,12 @@ _TRANSLATE_CAP_LIMITS = {
     "tool_args_per_call_cap": (1024, 64 * 1024 * 1024),
     "tool_calls_per_stream_cap": (1, 4096),
     "tool_args_total_cap": (1024, 256 * 1024 * 1024),
+    # Whole-stream budget for text PLUS tool arguments on the ->responses
+    # face. It was a hardcoded 4MiB, which made raising
+    # tool_args_total_cap above 4MiB a no-op: resp_budget/2 stopped the
+    # stream at the constant regardless, with nothing logged. Two caps that
+    # bound the same bytes must be tunable together, so this is a setting.
+    "stream_content_cap": (1024, 256 * 1024 * 1024),
     # Total age of one stream. Raised to a setting after a reasoning-heavy
     # task streamed 600s of thinking and was torn down before the first
     # byte of the answer; the inactivity deadline is what tells a stuck
@@ -853,6 +859,7 @@ def _translate_defaults() -> dict:
         "tool_args_per_call_cap": 256 * 1024,
         "tool_calls_per_stream_cap": 64,
         "tool_args_total_cap": 1024 * 1024,
+        "stream_content_cap": 4 * 1024 * 1024,
         "stream_total_timeout_ms": 600_000,
         "stream_inactivity_timeout_ms": 180_000,
     }

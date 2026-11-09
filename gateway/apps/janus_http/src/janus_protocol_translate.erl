@@ -75,9 +75,14 @@
 %% release: a long agent task legitimately streams many calls with large
 %% arguments, and the shipped constants were sized for a short exchange.
 %%
+%% `content_cap/0` (the whole-stream text+args budget on the ->responses face)
+%% lives in the same row for the same reason. Keep the two in mind together: a
+%% generous tool_args_total_cap is unreachable if the content budget is smaller,
+%% which is exactly the trap the previous hardcoded 4MiB created.
+%%
 %% Absent / malformed entry => the shipped default. The defaults stay the
 %% conservative values, so an unconfigured gateway behaves exactly as before.
--export([tool_cap/1]).
+-export([tool_cap/1, content_cap/0, cap_info/2, cap_error_text/2]).
 
 -spec tool_cap(per_call | calls | total) -> pos_integer().
 tool_cap(Kind) ->
@@ -104,9 +109,102 @@ tool_cap(Kind) ->
     end.
 
 
+%% Human/operator-facing text for a tripped ceiling. Names the SETTING so the
+%% reader can act, quotes the limit in force (which may differ from the shipped
+%% default — the cap is hot-tunable), and reports what was observed.
+%%
+%% The rendering is derived from `cap` ALONE, not from the caller's kind
+%% argument. Those two could disagree (both constructors and this function are
+%% exported, so a future call site can pair them wrongly); keying on one field
+%% removes the possibility of a `case_clause` here, which would surface as a
+%% generic 502 on the very path that exists to explain limits.
+-spec cap_error_text(tool_args_cap | content_budget, cap_info()) -> binary().
+cap_error_text(_Kind, #{cap := content, limit := Limit, used := Used}) ->
+    iolist_to_binary(
+        io_lib:format(
+            "stream_content_cap exceeded: ~b bytes total for text plus tool "
+            "arguments across one stream; reached ~b. Raise it or split the "
+            "work across turns",
+            [Limit, Used]
+        )
+    );
+cap_error_text(_Kind, #{cap := Cap, limit := Limit, used := Used}) ->
+    Setting =
+        case Cap of
+            per_call -> <<"tool_args_per_call_cap">>;
+            calls -> <<"tool_calls_per_stream_cap">>;
+            total -> <<"tool_args_total_cap">>
+        end,
+    Unit =
+        case Cap of
+            calls -> <<"tool calls">>;
+            _ -> <<"argument bytes">>
+        end,
+    iolist_to_binary(
+        io_lib:format(
+            "tool call accumulator cap exceeded: ~s allows ~b ~s, this stream "
+            "reached ~b; raise that setting if the workload is legitimate",
+            [Setting, Limit, Unit, Used]
+        )
+    ).
+
+%% Which args ceiling tripped? Per-call wins the tie: it is the one an operator
+%% can act on by splitting the call, and naming it when both crossed is more
+%% useful than reporting the aggregate.
+args_cap_info(PerCall, Total) ->
+    %% tool_cap/1 is not guard-safe (it reads persistent_term), so this has to
+    %% be a body comparison.
+    case PerCall > tool_cap(per_call) of
+        true -> cap_info(per_call, PerCall);
+        false -> cap_info(total, Total)
+    end.
+
+%% Constructors: one per ceiling, so each site reports the value that actually
+%% crossed it rather than a shared "cap" with no numbers.
+cap_info(per_call, Used) -> #{cap => per_call, limit => tool_cap(per_call), used => Used};
+cap_info(calls, Used) -> #{cap => calls, limit => tool_cap(calls), used => Used};
+cap_info(total, Used) -> #{cap => total, limit => tool_cap(total), used => Used};
+cap_info(content, Used) -> #{cap => content, limit => content_cap(), used => Used}.
+
+%% The whole-stream content budget (text + tool arguments) on the ->responses
+%% face. Resolved from the `translate` settings row like tool_cap/1, because a
+%% hardcoded 4MiB was a silent ceiling: the dashboard lets an operator raise
+%% `tool_args_total_cap` to 256MB, and on this face that raise did nothing —
+%% resp_budget/2 stopped the stream at 4MiB regardless, with no log. Sizing the
+%% two independently is what made "I raised the cap and it still fails"
+%% possible.
+-spec content_cap() -> pos_integer().
+content_cap() ->
+    case persistent_term:get({janus, translate_cfg}, undefined) of
+        Cfg when is_map(Cfg) ->
+            case maps:get(<<"stream_content_cap">>, Cfg, undefined) of
+                N when is_integer(N), N > 0 -> N;
+                _ -> ?STREAM_CONTENT_CAP
+            end;
+        _ ->
+            ?STREAM_CONTENT_CAP
+    end.
+
+%% Pass-through guard for an inner fold's error result. The mapper returns error
+%% tuples of TWO shapes — {error, translate_unsupported, St} (3) and
+%% {error, Kind, CapInfo, St} (4) — so pattern-matching a fixed arity here made
+%% a tripped ceiling a function_clause instead of being forwarded to the caller
+%% that knows how to report it.
+-define(IS_ERR(E), (is_tuple(E) andalso tuple_size(E) >= 2 andalso element(1, E) =:= error)).
+
 -define(DEFAULT_MAX_TOKENS, 4096).
 
 -type proto() :: openai_chat | openai_responses | anthropic_messages | openai_decisions.
+
+%% A tripped accumulator ceiling: which one, the limit in force, and the value
+%% that crossed it. Carried on the error tuple so the client-visible message can
+%% name the setting to raise instead of saying "a cap" — the whole reason a
+%% 1MiB total-args cap was previously indistinguishable from a stalled upstream.
+-type cap_info() :: #{
+    cap := per_call | calls | total | content,
+    limit := pos_integer(),
+    used := non_neg_integer()
+}.
 
 %% openai_decisions (spec 2026-10-07 D2) is normalize-ONLY: it never
 %% appears in any translate_request/translate_response pair (D4 — the
@@ -2533,10 +2631,13 @@ created_now(_) ->
 %%  - translate_unsupported: an upstream construct the mapper cannot
 %%    carry (incl. tool arguments that fail the ONE decode-at-close
 %%    completeness check — truncated by an upstream cut or bug).
-%%  - tool_args_cap: a C5 accumulator cap tripped (256KiB args per call
-%%    id, 64 calls, 1MiB total args). Phase-1 contract: the caller
-%%    terminates the stream on this tuple; the 1.9 ship unit wires the
-%%    full C2 target-format error event.
+%%  - {tool_args_cap | content_budget, CapInfo}: one of THIS GATEWAY's own
+%%    accumulator ceilings tripped, with the limit and the observed value
+%%    that crossed it. These are operator-configured LIMITS, not upstream
+%%    faults and not translation gaps, so they carry a distinct kind on the
+%%    wire (see cap_error_text/2 and error_type/1) instead of arriving as an
+%%    anonymous `api_error` an operator cannot act on. Phase-1 contract: the
+%%    caller terminates the stream on this tuple.
 
 %%% --- upstream in-band error text -----------------------------------
 %% An upstream can report failure INSIDE the stream ("error" object on
@@ -2589,7 +2690,8 @@ take_upstream_stream_error() ->
 -spec translate_sse(atom(), atom(), map(), #sse_st{}) ->
     {ok, [iodata()], #sse_st{}}
     | {error, translate_unsupported, #sse_st{}}
-    | {error, tool_args_cap, #sse_st{}}.
+    | {error, tool_args_cap, cap_info(), #sse_st{}}
+    | {error, content_budget, cap_info(), #sse_st{}}.
 translate_sse(openai_chat, anthropic_messages, Event, St) ->
     anthro_to_chat(Event, St);
 translate_sse(anthropic_messages, openai_chat, Event, St) ->
@@ -2729,7 +2831,7 @@ anthro_tool_start(D, St) ->
                 _ ->
                     case map_size(St#sse_st.tools) >= tool_cap(calls) of
                         true ->
-                            {error, tool_args_cap, St};
+                            {error, tool_args_cap, cap_info(calls, map_size(St#sse_st.tools) + 1), St};
                         false ->
                             anthro_tool_start_validated(Idx, D, St)
                     end
@@ -2781,7 +2883,7 @@ anthro_tool_fragment_bytes(Idx, P, St) ->
                     Total > tool_cap(total)
             of
                 true ->
-                    {error, tool_args_cap, St};
+                    {error, tool_args_cap, args_cap_info(PerCall, Total), St};
                 false ->
                     %% The id/type/name ride the FIRST chunk of the call;
                     %% fragments carry index + arguments only.
@@ -2867,7 +2969,7 @@ chat_tool_call_frame(Entry, St) ->
 
 chat_to_anthropic(#{type := <<"done">>}, St) ->
     case chat_close_open_tool(St) of
-        {error, _, _} = Err ->
+        Err when ?IS_ERR(Err) ->
             Err;
         {ToolFrames, St1} ->
             {CloseFrames, St2} = close_open_block(St1),
@@ -3010,7 +3112,7 @@ chat_chunk_body(D, St, Acc) ->
     case maps:get(<<"tool_calls">>, Delta, undefined) of
         Entries when is_list(Entries), Entries =/= [] ->
             case chat_tool_entries(Entries, St, Acc) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {Frames, St1} ->
                     %% Text on a tool-bearing chunk defers while the call
@@ -3042,7 +3144,7 @@ chat_chunk_usage(D, Choice, Delta, St, Acc) ->
             {error, translate_unsupported, St1};
         FR when is_binary(FR), FR =/= <<>>, not St1#sse_st.finish_sent ->
             case chat_close_open_tool(St1) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {ToolFrames, St2} ->
                     {StopFrames, St3} = close_open_block(St2),
@@ -3070,7 +3172,7 @@ chat_tool_entries([], St, Acc) ->
     {Acc, St};
 chat_tool_entries([E | Rest], St, Acc) ->
     case chat_tool_entry(E, St, Acc) of
-        {error, _, _} = Err ->
+        Err when ?IS_ERR(Err) ->
             Err;
         {Frames, St1} ->
             chat_tool_entries(Rest, St1, Acc ++ Frames)
@@ -3086,15 +3188,15 @@ chat_tool_entry(#{<<"index">> := Idx} = E, St, _Acc) when is_integer(Idx), Idx >
             %% Different call (or none open): close the current one,
             %% then open for Idx — anthropic blocks are sequential.
             case chat_close_open_tool(St) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {CloseFrames, St1} ->
                     case chat_tool_open(Idx, E, St1) of
-                        {error, _, _} = Err ->
+                        Err when ?IS_ERR(Err) ->
                             Err;
                         {OpenFrames, St2} ->
                             case chat_tool_fragment(Idx, Fragment, St2) of
-                                {error, _, _} = Err ->
+                                Err when ?IS_ERR(Err) ->
                                     Err;
                                 {FragFrames, St3} ->
                                     {CloseFrames ++ OpenFrames ++ FragFrames, St3}
@@ -3115,7 +3217,7 @@ chat_tool_open(Idx, E, St) ->
         _ ->
             case map_size(St#sse_st.tools) >= tool_cap(calls) of
                 true ->
-                    {error, tool_args_cap, St};
+                    {error, tool_args_cap, cap_info(calls, map_size(St#sse_st.tools) + 1), St};
                 false ->
                     chat_tool_open_validated(Idx, E, St)
             end
@@ -3164,7 +3266,7 @@ chat_tool_fragment(Idx, Fragment, St) ->
                     Total > tool_cap(total)
             of
                 true ->
-                    {error, tool_args_cap, St};
+                    {error, tool_args_cap, args_cap_info(PerCall, Total), St};
                 false ->
                     Frame = anthropic_frame(
                         <<"content_block_delta">>,
@@ -3461,7 +3563,7 @@ chat_resp_chunk(D, St) ->
     case maps:get(<<"tool_calls">>, Delta, undefined) of
         Entries when is_list(Entries), Entries =/= [] ->
             case chat_resp_tool_entries(Entries, St, []) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {Frames, St1} ->
                     %% finish_reason may ride the same chunk as the last
@@ -3485,13 +3587,13 @@ chat_resp_finish(Choice, Delta, St, Acc) ->
     case maps:get(<<"finish_reason">>, Choice, undefined) of
         FR when is_binary(FR), FR =/= <<>>, not St#sse_st.finish_sent ->
             case resp_close_tool(St) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {ToolFrames, St1} ->
                     %% Content on the finish chunk still streams (mirrors
                     %% the chat face's flush-after-close order).
                     case resp_text_delta(Delta, St1) of
-                        {error, _, _} = Err ->
+                        Err when ?IS_ERR(Err) ->
                             Err;
                         {TextFrames, St2} ->
                             {ok, Acc ++ ToolFrames ++ TextFrames, St2#sse_st{
@@ -3501,7 +3603,7 @@ chat_resp_finish(Choice, Delta, St, Acc) ->
             end;
         _ ->
             case resp_text_delta(Delta, St) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {Frames, St1} ->
                     {ok, Acc ++ Frames, St1}
@@ -3520,7 +3622,7 @@ resp_text_delta(Delta, St) ->
     %% the empty-answer bug (a turn that only reasons streamed no text at
     %% all).
     case resp_reasoning_delta(Delta, St) of
-        {error, _, _} = Err ->
+        Err when ?IS_ERR(Err) ->
             Err;
         {ReasonFrames, St1} -> resp_text_delta_1(Delta, ReasonFrames, St1)
     end.
@@ -3542,7 +3644,8 @@ resp_reasoning_delta(Delta, St) ->
                                     content_bytes = St#sse_st.content_bytes + byte_size(R)
                                 }};
                         false ->
-                            {error, translate_unsupported, St}
+                            {error, content_budget,
+                                cap_info(content, St#sse_st.content_bytes + byte_size(R)), St}
                     end
             end;
         _ ->
@@ -3555,7 +3658,7 @@ resp_text_delta_1(Delta, Acc, St) ->
             case St#sse_st.open_tool of
                 undefined ->
                     case resp_emit_text(C, St) of
-                        {error, _, _} = Err -> Err;
+                        Err when ?IS_ERR(Err) -> Err;
                         {TextFrames, St2} -> {Acc ++ TextFrames, St2}
                     end;
                 _ ->
@@ -3567,7 +3670,8 @@ resp_text_delta_1(Delta, Acc, St) ->
                                     content_bytes = St#sse_st.content_bytes + byte_size(C)
                                 }};
                         false ->
-                            {error, translate_unsupported, St}
+                            {error, content_budget,
+                                cap_info(content, St#sse_st.content_bytes + byte_size(C)), St}
                     end
             end;
         _ ->
@@ -3578,7 +3682,7 @@ chat_resp_tool_entries([], St, Acc) ->
     {Acc, St};
 chat_resp_tool_entries([E | Rest], St, Acc) ->
     case chat_resp_tool_entry(E, St) of
-        {error, _, _} = Err ->
+        Err when ?IS_ERR(Err) ->
             Err;
         {Frames, St1} ->
             chat_resp_tool_entries(Rest, St1, Acc ++ Frames)
@@ -3596,15 +3700,15 @@ chat_resp_tool_entry(#{<<"index">> := Idx} = E, St) when is_integer(Idx), Idx >=
             %% Different call (or none open): close the current one,
             %% then open for Idx — output items are sequential.
             case resp_close_tool(St) of
-                {error, _, _} = Err ->
+                Err when ?IS_ERR(Err) ->
                     Err;
                 {CloseFrames, St1} ->
                     case resp_tool_open_chat(Idx, E, St1) of
-                        {error, _, _} = Err ->
+                        Err when ?IS_ERR(Err) ->
                             Err;
                         {OpenFrames, St2} ->
                             case resp_tool_fragment(Idx, Fragment, St2) of
-                                {error, _, _} = Err ->
+                                Err when ?IS_ERR(Err) ->
                                     Err;
                                 {FragFrames, St3} ->
                                     {CloseFrames ++ OpenFrames ++ FragFrames, St3}
@@ -3625,7 +3729,7 @@ resp_tool_open_chat(Idx, E, St) ->
         _ ->
             case map_size(St#sse_st.tools) >= tool_cap(calls) of
                 true ->
-                    {error, tool_args_cap, St};
+                    {error, tool_args_cap, cap_info(calls, map_size(St#sse_st.tools) + 1), St};
                 false ->
                     resp_tool_open_chat_validated(Idx, E, St)
             end
@@ -3731,7 +3835,7 @@ anthro_to_responses_stream(#{type := <<"content_block_stop">>, data := D}, St) w
             %% The ONLY close point: ONE decode of the full concat at
             %% close time (C5) gates output_item.done.
             case resp_close_tool(St) of
-                {error, _, _} = Err -> Err;
+                Err when ?IS_ERR(Err) -> Err;
                 {Frames, St1} -> {ok, Frames, St1}
             end;
         Idx when is_map_key(Idx, St#sse_st.tools) ->
@@ -3797,7 +3901,7 @@ anthro_resp_tool_start(D, St) ->
                 _ ->
                     case map_size(St#sse_st.tools) >= tool_cap(calls) of
                         true ->
-                            {error, tool_args_cap, St};
+                            {error, tool_args_cap, cap_info(calls, map_size(St#sse_st.tools) + 1), St};
                         false ->
                             anthro_resp_tool_start_validated(Idx, D, St)
                     end
@@ -3865,7 +3969,7 @@ resp_capture_usage(D, St) ->
 %% terminal response.output reconstruction reuses the accumulated
 %% bytes, so this bounds both).
 resp_budget(St, N) ->
-    St#sse_st.content_bytes + N =< ?STREAM_CONTENT_CAP.
+    St#sse_st.content_bytes + N =< content_cap().
 
 %% Lazy skeleton (C1): response.created exactly once, on the first
 %% content-bearing event. Usage ZEROED here (framing, not a count —
@@ -3907,7 +4011,7 @@ resp_ensure_created(St) ->
 resp_emit_reasoning(C, St) when is_binary(C), C =/= <<>> ->
     case resp_budget(St, byte_size(C)) of
         false ->
-            {error, translate_unsupported, St};
+            {error, content_budget, cap_info(content, St#sse_st.content_bytes + byte_size(C)), St};
         true ->
             resp_reasoning_frames(C, St#sse_st{
                 content_bytes = St#sse_st.content_bytes + byte_size(C)
@@ -3976,7 +4080,7 @@ resp_ensure_reason_item_1(St) ->
 resp_emit_text(C, St) ->
     case resp_budget(St, byte_size(C)) of
         false ->
-            {error, translate_unsupported, St};
+            {error, content_budget, cap_info(content, St#sse_st.content_bytes + byte_size(C)), St};
         true ->
             resp_text_frames(C, St#sse_st{
                 content_bytes = St#sse_st.content_bytes + byte_size(C)
@@ -4144,11 +4248,12 @@ resp_tool_fragment(Idx, Fragment, St) ->
                             Total > tool_cap(total)
                     of
                         true ->
-                            {error, tool_args_cap, St};
+                            {error, tool_args_cap, args_cap_info(PerCall, Total), St};
                         false ->
                             case resp_budget(St, byte_size(F)) of
                                 false ->
-                                    {error, translate_unsupported, St};
+                                    {error, content_budget,
+                                        cap_info(content, St#sse_st.content_bytes + byte_size(F)), St};
                                 true ->
                                     Delta = responses_frame(
                                         <<"response.function_call_arguments.delta">>,
@@ -4255,7 +4360,7 @@ responses_finish(#sse_st{terminal_sent = true} = St) ->
     {ok, [], St};
 responses_finish(St) ->
     case resp_close_tool(St) of
-        {error, _, _} = Err ->
+        Err when ?IS_ERR(Err) ->
             Err;
         {ToolFrames, St1} ->
             {Frames, St2} = responses_finish_tail(St1),
@@ -4330,8 +4435,13 @@ resp_total(_, _) -> null.
 %%% finalize_sse/3 — exactly one terminator
 %%%-------------------------------------------------------------------
 
+%% `limit` is a distinct kind, not sugar for `upstream`: a tripped accumulator
+%% ceiling is one of OUR configured caps, so it must be reported as a limit
+%% (see error_type/1) rather than as a server fault.
 -spec finalize_sse(
-    atom(), normal | disconnect | {error, invalid_request | upstream, binary()}, #sse_st{}
+    atom(),
+    normal | disconnect | {error, invalid_request | upstream | limit, binary()},
+    #sse_st{}
 ) ->
     {ok, [iodata()], #sse_st{}}.
 finalize_sse(_ClientProto, _Reason, #sse_st{terminal_sent = true} = St) ->
@@ -4456,7 +4566,15 @@ finalize_anthropic_normal(St) ->
     StopFrame = anthropic_frame(<<"message_stop">>, #{<<"type">> => <<"message_stop">>}),
     {StartIfMissing ++ ZeroFrames ++ CloseFrames ++ DeltaFrames ++ [StopFrame], St3}.
 
+%% Kind -> the client-visible `type`/`code`. The default is the generic
+%% `api_error`, which clients treat as a server fault; a tripped accumulator
+%% ceiling is neither a server fault nor an upstream failure but a configured
+%% LIMIT, so it gets its own name. Without that, `tool call accumulator cap
+%% exceeded` arrived as `api_error: ...` and was indistinguishable from a
+%% stalled stream — and unretryable where a limit is simply a signal to
+%% reshape the work.
 error_type(invalid_request) -> <<"invalid_request_error">>;
+error_type(limit) -> <<"limit_error">>;
 error_type(_) -> <<"api_error">>.
 
 %% Stop reason for the delayed message_delta: the mapped value when
