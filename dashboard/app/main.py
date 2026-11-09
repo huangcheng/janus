@@ -27,6 +27,7 @@ from .auth import require_auth
 from .config import config
 from .config_backup_export import dashboard_version
 from .config_backup_schema import SchemaSelfCheckError, startup_schema_self_check
+from .telemetry_egress import exporter_egress_posture
 from .routers import (
     alerts as alerts_router,
 )
@@ -94,6 +95,13 @@ async def lifespan(app: FastAPI):
     logger.info(
         "config-backup exporter ready (dashboard_version=%s)",
         dashboard_version(),
+    )
+    # Item 29 is a decision obligation and silence is not acceptable: record
+    # which egress posture the telemetry exporter runs under, once, so an
+    # operator can see it without reading the module (see app/telemetry_egress).
+    logger.info(
+        "telemetry exporter egress posture: %s",
+        exporter_egress_posture(),
     )
     if not config.is_configured:
         missing = [
