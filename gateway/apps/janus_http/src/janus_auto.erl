@@ -24,6 +24,9 @@
 %% The settings-entry point and its fallback record — exported so tests can
 %% drive the REAL parse instead of re-implementing it.
 -export([validate/1, default_cfg/0, decision_log/1]).
+%% The closed tier vocabulary: the metric label is derived from it, so it
+%% must not be restated there.
+-export([known_tiers/0]).
 %% The prompt surface (auto-router-prompt-only spec A) — exported so tests
 %% drive the real parse rather than re-reading the record layout.
 -export([judge_prompt_of/1, prompt_hash_of/1, builtin_judge_prompt/0]).
@@ -206,9 +209,19 @@ direct_walk(Name) when is_binary(Name) ->
 direct_walk(_) ->
     pass.
 
+%% @doc The tier vocabulary, in walk order.
+%%
+%% Single source for every consumer that needs the closed set: the router's
+%% walk, the config normaliser, and the metric label. Exported because the
+%% metric label is a closed enum by contract (design F13) and a copy of the
+%% list would drift the first time a tier is added.
+-spec known_tiers() -> [atom()].
+known_tiers() ->
+    [fast, big, flagship].
+
 %% {Tier, Names} for the tier containing Name, else error.
 tier_of_name(Cfg, Name) ->
-    tier_of_name(Cfg, Name, [fast, big, flagship]).
+    tier_of_name(Cfg, Name, known_tiers()).
 
 tier_of_name(_Cfg, _Name, []) ->
     error;

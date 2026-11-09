@@ -12,6 +12,9 @@
 -include("janus_protocol_translate.hrl").
 
 -export([handle/5, model_field/1, open_server_span/2, close_server_span/1]).
+%% Conformance seam (F13): drives the auto-tier bump so the closed-enum
+%% rule is asserted against the producer rather than trusted.
+-export([bump_auto_name_failover/0]).
 %% Exported for eunit (usage capture helpers + Phase-2 knob).
 -export([
     maybe_trim/2,
@@ -2844,12 +2847,69 @@ bump_auto_name_skip(Reason) ->
     }),
     ok.
 
+%% The `tier' label value, enum-validated at the PRODUCER.
+%%
+%% The router only ever emits `fast'/`big'/`flagship' (`janus_auto:atomize_tier_keys/1`
+%% drops every other key), so those are the only values that may become a
+%% label. Anything else -- an operator typo in a future code path, or a
+%% caller that derives a tier from request data -- collapses to the
+%% reserved `unknown' instead of creating a new series. The
+%% `?SCHED_FAMILY_CAP' (256) in `janus_http_metrics' would eventually bound
+%% the damage, but a label is supposed to be a closed enum by contract,
+%% not bounded by a safety net: rely on the producer's validation, not the
+%% consumer's cap.
+%%
+%% `unknown' is reserved for this purpose and is never a legitimate tier,
+%% so its presence in a dashboard MEANS a value escaped the enum.
 auto_tier_label() ->
-    case get(janus_auto_tier) of
-        T when is_atom(T) -> T;
-        T when is_binary(T) -> T;
-        _ -> unknown
+    Raw = get(janus_auto_tier),
+    case canonical_tier(Raw) of
+        unknown when Raw =/= undefined ->
+            %% Logged HERE, against the RAW value. Putting the warning on a
+            %% `canonical_tier/1' fall-through branch would make it
+            %% unreachable: that function only ever returns a member of the
+            %% vocabulary or `unknown', so the diagnostic would be dead
+            %% code and an off-enum caller would vanish silently.
+            logger:warning(#{
+                what => janus_metrics_unmapped_auto_tier,
+                tier => redact_bin(Raw)
+            }),
+            unknown;
+        Tier ->
+            Tier
     end.
+
+%% Map a stored tier onto the router's closed vocabulary.
+%%
+%% Atoms and the binary spellings the config decoder accepts both resolve
+%% here, so the label follows `janus_auto:known_tiers/0' instead of a copy
+%% that would drift the first time a tier is added.
+canonical_tier(V) when is_atom(V), V =/= undefined ->
+    case lists:member(V, janus_auto:known_tiers()) of
+        true -> V;
+        false -> unknown
+    end;
+canonical_tier(V) when is_binary(V) ->
+    Matches = [T || T <- janus_auto:known_tiers(),
+                    atom_to_binary(T, utf8) =:= V],
+    case Matches of
+        [Tier] -> Tier;
+        [] -> unknown
+    end;
+canonical_tier(_) ->
+    unknown.
+
+%% Bounded rendering of an unexpected value for the log line.
+%%
+%% Atoms are returned as-is: they come from a finite set and the operator
+%% needs to know WHICH one escaped to fix it. Anything that could carry
+%% arbitrary operator input (a binary or a list) is rendered as its type
+%% only.
+redact_bin(V) when is_atom(V) -> V;
+redact_bin(V) when is_binary(V) -> <<"<binary>">>;
+redact_bin(V) when is_list(V) -> <<"<list>">>;
+redact_bin(V) when is_integer(V) -> V;
+redact_bin(_) -> <<"<other>">>.
 
 exhaust_reason(all_cooling) -> all_cooling;
 exhaust_reason(no_eligible) -> no_eligible;

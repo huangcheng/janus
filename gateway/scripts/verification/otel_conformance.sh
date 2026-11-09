@@ -107,5 +107,52 @@ check "help text respects the knob" '
   end,
   halt().'
 
+# C4 -- the "tier" label vocabulary is closed.
+#
+# The design (F13) requires enum validation at the PRODUCER, not reliance
+# on the renderer series cap: a label is meant to be a closed enum by
+# contract, and a cap is only a safety net. This feeds known tiers and
+# deliberately bad ones to the real bump path and inspects what reached the
+# metric.
+check "metric labels are closed enums" '
+  ok = janus_metrics:init(),
+  Feed = fun(V) ->
+           put(janus_auto_tier, V),
+           janus_http_proxy:bump_auto_name_failover()
+         end,
+  TierOf = fun(L) ->
+            [_Before, After0] = string:split(L, "tier=\"", leading),
+            [V | _] = string:split(After0, "\""),
+            V
+          end,
+  Snapshot = fun() ->
+               Out = binary_to_list(janus_metrics_render:render(janus_metrics:snapshot(), [])),
+               Lines = [L || L <- string:split(Out, "\n", all), string:find(L, "tier=") =/= nomatch],
+               lists:usort([TierOf(L) || L <- Lines])
+             end,
+  [Feed(V) || V <- [fast, big, flagship]],
+  SeenIn = Snapshot(),
+  [Feed(V) || V <- [<<"fast">>, typo_tier, <<"free form">>, 42]],
+  SeenAll = Snapshot(),
+  InEnum = ["fast", "big", "flagship"],
+  Allowed = InEnum ++ ["unknown"],
+  MissingIn = [T || T <- InEnum, not lists:member(T, SeenIn)],
+  Escaped = [V || V <- SeenAll, not lists:member(V, Allowed)],
+  Mapped = lists:member("unknown", SeenAll),
+  if
+    SeenAll =:= [] ->
+      io:format("FAIL tier label: no series observed (vacuous pass)~n");
+    MissingIn =/= [] ->
+      io:format("FAIL tier label over-restricted: ~p missing from ~p~n", [MissingIn, SeenIn]);
+    Escaped =/= [] ->
+      io:format("FAIL tier label escaped the enum: ~p~n", [Escaped]);
+    not Mapped ->
+      io:format("FAIL off-enum values were dropped, not mapped: saw ~p~n", [SeenAll]);
+    true ->
+      io:format("PASS tier label keeps in-enum values and maps the rest (~p values)~n",
+                [length(SeenAll)])
+  end,
+  halt().'
+
 echo "--- $pass passed, $fail failed ---"
 [ "$fail" -eq 0 ]
