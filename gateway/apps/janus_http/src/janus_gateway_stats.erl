@@ -358,6 +358,15 @@ sched_json(Data) when is_map(Data) ->
         reserve_purged_total => Ctr(reserve_purged),
         reserve_inflight => reserve_inflight_json(maps:get(reserve_rows, Stats, [])),
         health_ewma_ms => health_ewma_json(maps:get(health_ewma, Stats, #{})),
+        %% ADDITIVE key. `health_ewma_ms` keeps its existing shape for
+        %% backward compatibility, but the value alone cannot say whether
+        %% it is current: the EWMA only advances when a job completes, so a
+        %% quiet node's number can be hours old. This map lets a consumer
+        %% tell. `null` means the age is unknown (recorded before
+        %% freshness tracking, or the node left without a stamp).
+        health_ewma_age_ms => health_ewma_age_json(
+            maps:get(health_ewma_age_ms, Stats, #{})
+        ),
         %% v2.1 A.3: the repo-side workers array (additive key).
         %% schema_version stays 1; NOTE (ocr): the rtt_ms map VALUE
         %% semantics changed in v2.1 from raw sample to the row's
@@ -495,6 +504,16 @@ health_ewma_json(Ewma) when is_map(Ewma) ->
         is_number(E)
     ]);
 health_ewma_json(_) ->
+    #{}.
+
+%% Age of each health-EWMA sample in ms; `null` when unknown.
+health_ewma_age_json(Ages) when is_map(Ages) ->
+    maps:from_list([
+        {to_bin(Node), Age}
+     || {Node, Age} <- maps:to_list(Ages),
+        is_integer(Age)
+    ]);
+health_ewma_age_json(_) ->
     #{}.
 
 %% v2.1 A.3 workers array: the pool's workers_view rows normalized to

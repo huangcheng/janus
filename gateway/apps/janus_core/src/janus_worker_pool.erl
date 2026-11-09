@@ -235,8 +235,20 @@
     %% accepted cold reset per spec Part 0.5). v2.1 B.1: the tracked-job
     %% set lives in the public `sched_tracked` table (caller-written);
     %% the gen_server reads it, never mirrors it.
-    %% Node => {Ewma, SampleCount} — TTFB health EWMA.
+    %% Node => {Ewma, SampleCount} — TTFB health EWMA. Consumed by the
+    %% scheduling logic (demotion, snapshot building), so its shape is
+    %% load-bearing.
     ewma = #{} :: map(),
+    %% Node => monotonic ms of the last EWMA update.
+    %%
+    %% Kept SEPARATE from `ewma` on purpose: only the scrape-time view
+    %% needs freshness. The EWMA is updated on job COMPLETION, so a node
+    %% that stops receiving jobs keeps its last value forever -- observed
+    %% live as a worker displaying a 31 s health EWMA while its measured
+    %% RTT was the fastest in the fleet. That stale value is worse than no
+    %% value: it accuses a healthy node. The scheduling logic keeps using
+    %% `ewma` unchanged, so this cannot alter a routing decision.
+    ewma_at = #{} :: #{node() => integer()},
     %% Node => divergence window state (advisory load mismatch).
     divergence = #{} :: map(),
     %% Node => last advisory load report (ops display only).
@@ -913,6 +925,12 @@ apply_nodedown(Pool, Node) when is_map(Pool), is_atom(Node) ->
     %% Draining nodedown is NOT sticky (spec §3.4).
     Pool#{members => maps:remove(Node, Members0)}.
 
+%% NOTE: `ewma_at` is deliberately NOT cleared on nodedown, matching the
+%% existing rule for `ewma` itself (spec clear-list: the value survives a
+%% nodedown and only an owner restart clears it). A departed node's stamp
+%% then simply ages past the scrape-time TTL and its series is omitted,
+%% which is the behaviour we want without touching scheduler state.
+
 -spec apply_undrain(map(), node()) -> map().
 apply_undrain(Pool, Node) when is_map(Pool), is_atom(Node) ->
     %% Clear sticky and drop any mid-drain member so the next hello
@@ -1297,6 +1315,15 @@ sort_key_rtt(ProviderId, Fallback, M, N) ->
 %%% Pure scheduler v2 math (spec A.3/A.4/0.3 — eunit seams)
 %%%===================================================================
 
+%% Age in ms of each recorded health EWMA sample. A node with a value but
+%% no timestamp is reported as `unknown' rather than assumed fresh: this
+%% map is new, so entries written before it existed must not be trusted.
+health_ewma_age_ms(EwmaAt) when is_map(EwmaAt) ->
+    Now = erlang:monotonic_time(millisecond),
+    maps:map(fun(_Node, At) when is_integer(At) -> max(0, Now - At); (_N, _) -> unknown end, EwmaAt);
+health_ewma_age_ms(_) ->
+    #{}.
+
 %% @doc EWMA step (alpha 0.25, SEEDS AT THE FIRST SAMPLE — `E1 = x1`;
 %% seeded-at-0 would make three identical 8000 ms samples read 4625 ms
 %% < the 5000 demotion floor, spec A.4).
@@ -1602,7 +1629,8 @@ handle_cast({sched, 2, {ttfb, JobRef, ElapsedMs}}, State) ->
                 ewma_step(maps:get(Node, State#state.ewma, none), ElapsedMs),
                 State#state.ewma
             ),
-            {noreply, mark_dirty(State#state{ewma = Ewma1})};
+            At1 = maps:put(Node, erlang:monotonic_time(millisecond), State#state.ewma_at),
+            {noreply, mark_dirty(State#state{ewma = Ewma1, ewma_at = At1})};
         _ ->
             {noreply, State}
     end;
@@ -3428,7 +3456,9 @@ trim_slashes(Bin, S) ->
 %% the v2.1 A.3 WORKERS ARRAY (the same single F7 snapshot — one
 %% gen_server call, no torn joins). The JSON rendering itself is pure
 %% and lives in the handler (janus_gateway_stats:sched_json/1).
-sched_stats_map(#state{pool = Pool, ewma = Ewma, wire_enc_relay = Relay, load = Load}) ->
+sched_stats_map(#state{
+    pool = Pool, ewma = Ewma, ewma_at = EwmaAt, wire_enc_relay = Relay, load = Load
+}) ->
     Counters =
         try
             maps:from_list(ets:tab2list(?COUNTERS))
@@ -3469,6 +3499,9 @@ sched_stats_map(#state{pool = Pool, ewma = Ewma, wire_enc_relay = Relay, load = 
          || {Node, {E, _Count}} <- maps:to_list(Ewma),
             is_number(E)
         ]),
+        %% Freshness of each `health_ewma` entry, so the scrape view can
+        %% suppress a frozen value instead of presenting it as current.
+        health_ewma_age_ms => health_ewma_age_ms(EwmaAt),
         rtt_rows => sched_rtt_rows(),
         reserve_rows => reserve_tab(),
         workers => workers_view(Pool, Ewma, Counters, health_enabled(), Load),

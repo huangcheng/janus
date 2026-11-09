@@ -363,9 +363,22 @@ overflow_metric(Metric) ->
         end,
     binary_to_atom(Out, utf8).
 
+%% How long an un-refreshed health EWMA may still be presented as current.
+%% Chosen well above the EWMA's own settling horizon: long enough that a
+%% quiet-but-healthy node does not flap out of the view, short enough that
+%% a genuinely stale value cannot masquerade as an accusation.
+-define(HEALTH_EWMA_MAX_AGE_MS, 600000).
+
+%% `undefined' age means the timestamp map is missing this node (it was
+%% recorded before freshness tracking existed, or the node went down and
+%% its stamp was cleared): treat as stale, never as fresh.
+ewma_fresh(Age) when is_integer(Age) -> Age =< ?HEALTH_EWMA_MAX_AGE_MS;
+ewma_fresh(_) -> false.
+
 pool_gauges(Pid, Stats) ->
     Knobs = maps:get(knobs, Stats, #{}),
     HealthEwma = maps:get(health_ewma, Stats, #{}),
+    HealthAge = maps:get(health_ewma_age_ms, Stats, #{}),
     RttRows = maps:get(rtt_rows, Stats, []),
     Workers = maps:get(workers, Stats, []),
     Now = erlang:monotonic_time(millisecond),
@@ -382,7 +395,15 @@ pool_gauges(Pid, Stats) ->
     ]
     ++ [
         {sched_health_ewma_ms, E * 1.0, #{<<"node">> => janus_metrics:to_bin(N)}}
-     || {N, E} <- maps:to_list(HealthEwma), is_number(E)
+     || {N, E} <- maps:to_list(HealthEwma),
+        is_number(E),
+        %% Same expiry discipline as the RTT rows below. The EWMA only
+        %% advances when a job COMPLETES on that node, so without this a
+        %% node that stops receiving traffic keeps rendering its last
+        %% value forever -- and a stale high value reads as "this node is
+        %% slow" when it may be the fastest in the fleet. Omitting the
+        %% series is honest: we do not know its current health.
+        ewma_fresh(maps:get(N, HealthAge, undefined))
     ]
     ++ [
         {sched_rtt_ms, Ewma * 1.0, #{
