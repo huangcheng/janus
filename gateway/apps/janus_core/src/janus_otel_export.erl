@@ -338,16 +338,9 @@ export_url() ->
 
 %% Resource attributes identify the EMITTING service; they ride once per
 %% request, not per span. `service.name' is required by the semconv.
+%% The Resource is owned by `janus_otel_resource' (identity of the
+%% producer: service name/version, a stable instance id derived from the
+%% node alias, and the node alias itself). Kept behind this thin wrapper
+%% so the exporter does not care where it comes from.
 resource_attrs() ->
-    #{
-        <<"service.name">> => <<"janus-gateway">>,
-        <<"service.version">> => service_version(),
-        <<"telemetry.sdk.name">> => <<"janus">>,
-        <<"telemetry.sdk.language">> => <<"erlang">>
-    }.
-
-service_version() ->
-    case application:get_key(janus_core, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary(Vsn);
-        _ -> <<"0.0.0">>
-    end.
+    janus_otel_resource:get().

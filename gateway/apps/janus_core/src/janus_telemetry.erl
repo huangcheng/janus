@@ -1,30 +1,34 @@
 %%%-------------------------------------------------------------------
 %%% @doc Telemetry configuration surface (OpenTelemetry alignment spec).
 %%%
-%%% One read seam for the `telemetry' settings key, following the
-%%% house convention: the dashboard writes a `settings' row, the master
-%%% distributes it via `janus_config:distribute_settings/1' into
-%%% `persistent_term', and consumers READ that term directly (never a
-%%% cast, never a SQL query on the hot path).
+%%% ## Two configuration channels, spec precedence
+%%%
+%%% Per the OTel SDK environment-variable specification, the ENVIRONMENT
+%%% wins over programmatic configuration. This module therefore resolves
+%%% in that order:
+%%%
+%%%   1. `OTEL_SDK_DISABLED' / `OTEL_EXPORTER_OTLP_*' / `OTEL_TRACES_SAMPLER*'
+%%%      — the standard variables, which is how an operator configures an
+%%%      OTel-emitting process without inventing app-specific settings
+%%%   2. the `telemetry' dashboard setting (distributed from Postgres on
+%%%      the master via `persistent_term')
+%%%   3. the built-in default (export OFF, 5 % sampling)
+%%%
+%%% ## Why the environment channel is not optional
+%%%
+%%% Only the MASTER runs `janus_config', so only the master ever receives
+%%% the dashboard setting. A worker has an exporter process, creates
+%%% CLIENT spans, and would otherwise read `export_enabled = false'
+%%% forever — its spans silently never leave the node. The environment is
+%%% the one channel every role reads, which makes it the correct place to
+%%% configure per-node export.
 %%%
 %%% ## Default OFF, fail closed to "off"
 %%%
-%%% An unset, absent, malformed or partially-applied config means
-%%% telemetry is OFF. `persistent_term:erase/1' is how
-%%% `janus_config:clear_telemetry/1' represents "row deleted", so a
-%%% read of a missing key must be the disabled state rather than a
-%%% crash. This is the same knob-off discipline as every other
-%%% capability family in the tree.
-%%%
-%%% ## What exists today vs what is planned
-%%%
-%%% Only `sampling_ratio/0' has a live effect: the trace sampler reads it
-%%% per root span. The export fields (`enabled', `endpoint', headers) are
-%%% parsed and validated now so operators can stage a configuration, but
-%%% nothing exports until the OTLP writer lands — `export_enabled/0'
-%%% returns false today regardless of the stored value, and that is
-%%% deliberate: claiming export is on when no exporter exists would be
-%%% worse than reporting off.
+%%% Unset, absent, malformed or partially-applied configuration all mean
+%%% telemetry is OFF. `persistent_term:erase/1' is how the config layer
+%%% represents "row deleted", so reading a missing key must yield the
+%%% disabled state rather than a crash.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(janus_telemetry).
@@ -35,13 +39,13 @@
     export_enabled/0,
     export_endpoint/0,
     sampling_ratio/0,
-    default_sampling_ratio/0
+    default_sampling_ratio/0,
+    sdk_disabled/0
 ]).
 
 -define(PT_KEY, {janus, telemetry_cfg}).
 -define(DEFAULT_RATIO, 0.05).
-%% Endpoint the OTLP exporter will target once it lands; matches the
-%% OTLP/HTTP default so an operator's collector "just works".
+%% OTLP/HTTP default, so a collector on the same host "just works".
 -define(DEFAULT_ENDPOINT, <<"http://localhost:4318">>).
 
 -spec config() -> map().
@@ -52,45 +56,106 @@ config() ->
         error:badarg -> #{}
     end.
 
-%% @doc Telemetry as a whole is enabled. OFF unless a config says
-%% otherwise. Nothing is emitted while this is false, which is today's
-%% behaviour and the shipped default.
+%% @doc Telemetry as a whole is enabled: not explicitly disabled, AND
+%% either a collector is configured or the dashboard setting says so.
 -spec enabled() -> boolean().
 enabled() ->
-    case config() of
-        #{<<"export">> := #{<<"enabled">> := true}} -> true;
-        _ -> false
+    case sdk_disabled() of
+        true -> false;
+        false -> export_enabled()
+    end.
+
+%% @doc The standard kill switch. `OTEL_SDK_DISABLED=true' MUST stop all
+%% telemetry regardless of any other configuration, so it is checked
+%% before anything else.
+-spec sdk_disabled() -> boolean().
+sdk_disabled() ->
+    case os:getenv("OTEL_SDK_DISABLED") of
+        false -> false;
+        V -> truthy(V)
     end.
 
 %% @doc Whether spans are actually exported right now.
 %%
-%% Requires BOTH the operator's flag and a usable endpoint: a config that
-%% says "export" while pointing nowhere would make the exporter fail on
-%% every batch, so the endpoint is part of the predicate.
+%% Enabled when EITHER channel configures it:
+%%   * the standard variables name an endpoint, or
+%%   * the dashboard setting has `export.enabled = true' with a usable
+%%     endpoint.
+%% An endpoint is part of the predicate because a config that says
+%% "export" while pointing nowhere would fail on every batch.
+%%
+%% `OTEL_SDK_DISABLED' is checked FIRST and wins over everything: the
+%% spec defines it as the kill switch for the whole SDK, so a deployment
+%% that flips it must stop exporting even if an endpoint is configured.
 -spec export_enabled() -> boolean().
 export_enabled() ->
-    case config() of
-        #{<<"export">> := #{<<"enabled">> := true} = E} ->
-            case maps:get(<<"endpoint">>, E, ?DEFAULT_ENDPOINT) of
-                Url when is_binary(Url), byte_size(Url) > 0 -> true;
-                _ -> false
-            end;
-        _ ->
-            false
+    case sdk_disabled() of
+        true -> false;
+        false -> export_enabled_1()
     end.
 
-%% @doc The OTLP endpoint to export to (a binary URL).
+export_enabled_1() ->
+    case env_endpoint() of
+        {ok, _} ->
+            true;
+        error ->
+            case config() of
+                #{<<"export">> := #{<<"enabled">> := true} = E} ->
+                    case maps:get(<<"endpoint">>, E, ?DEFAULT_ENDPOINT) of
+                        Url when is_binary(Url), byte_size(Url) > 0 -> true;
+                        _ -> false
+                    end;
+                _ ->
+                    false
+            end
+    end.
+
+%% @doc The OTLP endpoint to export to.
+%%
+%% Standard precedence: the traces-specific variable wins over the
+%% generic one (a deployment may send traces and metrics to different
+%% collectors).
 -spec export_endpoint() -> binary().
 export_endpoint() ->
-    case config() of
-        #{<<"export">> := #{<<"endpoint">> := E}} when is_binary(E) -> E;
-        _ -> ?DEFAULT_ENDPOINT
+    case env_endpoint() of
+        {ok, Url} ->
+            Url;
+        error ->
+            case config() of
+                #{<<"export">> := #{<<"endpoint">> := E}} when is_binary(E), byte_size(E) > 0 -> E;
+                _ -> ?DEFAULT_ENDPOINT
+            end
     end.
 
-%% @doc The root-trace sampling ratio. Precedence: the `sampling.ratio'
-%% setting, then `OTEL_TRACES_SAMPLER_ARG', then the built-in default.
-%% `janus_trace' caches the effective value on first read, so this is
-%% consulted once per boot in practice.
+%% `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT' > `OTEL_EXPORTER_OTLP_ENDPOINT'.
+%%
+%% The traces-specific value is a FULL url (it names the path too), while
+%% the generic one is a BASE (the exporter appends `/v1/traces'). Both are
+%% accepted and both end up as a base this module appends to, so a
+%% traces-endpoint that already carries `/v1/traces' is left alone.
+env_endpoint() ->
+    case nonempty(os:getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) of
+        {ok, Url} ->
+            {ok, strip_traces_suffix(Url)};
+        error ->
+            nonempty(os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+    end.
+
+%% The exporter appends `/v1/traces'; strip it from a traces-endpoint so
+%% the path is not doubled. `/v1/traces' -> base.
+strip_traces_suffix(Url) ->
+    Suffix = <<"/v1/traces">>,
+    Size = byte_size(Url) - byte_size(Suffix),
+    case Size >= 0 andalso binary:part(Url, Size, byte_size(Suffix)) =:= Suffix of
+        true -> binary:part(Url, 0, Size);
+        false -> Url
+    end.
+
+%% @doc The root-trace sampling ratio.
+%%
+%% Precedence: dashboard setting -> `OTEL_TRACES_SAMPLER_ARG' -> default.
+%% `OTEL_TRACES_SAMPLER' itself (`always_on' / `always_off' / `parentbased_*')
+%% is honoured in `janus_trace', which owns the sampler.
 -spec sampling_ratio() -> float().
 sampling_ratio() ->
     case config() of
@@ -106,3 +171,34 @@ sampling_ratio() ->
 -spec default_sampling_ratio() -> float().
 default_sampling_ratio() ->
     ?DEFAULT_RATIO.
+
+%% ------------------------------------------------------------------
+%% Internal
+%% ------------------------------------------------------------------
+
+truthy(V) when is_binary(V) -> truthy(binary_to_list(V));
+truthy(V) when is_list(V) ->
+    case string:lowercase(string:trim(V)) of
+        "true" -> true;
+        "1" -> true;
+        "yes" -> true;
+        _ -> false
+    end;
+truthy(_) ->
+    false.
+
+nonempty(undefined) ->
+    error;
+nonempty(false) ->
+    error;
+nonempty("") ->
+    error;
+nonempty(V) when is_list(V) ->
+    case string:trim(V) of
+        "" -> error;
+        S -> {ok, list_to_binary(S)}
+    end;
+nonempty(V) when is_binary(V), V =/= <<>> ->
+    {ok, V};
+nonempty(_) ->
+    error.
