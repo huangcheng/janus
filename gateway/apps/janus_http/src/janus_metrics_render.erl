@@ -24,6 +24,8 @@
     upstream_requests_total => {counter, <<"Terminal client outcomes by provider (failover inner attempts excluded).">>},
     usage_writer_dropped_total => {counter, <<"Usage events dropped by the writer.">>},
     request_duration_seconds => {histogram, <<"End-to-end request duration (streams include client drain).">>},
+    http_server_request_duration => {histogram, <<"http.server.request.duration (semconv). ADDITIVE to janus_request_duration_seconds, which keeps its own ladder.">>},
+    gen_ai_client_inference_duration => {histogram, <<"gen_ai.client.inference.duration (semconv). The provider call only, from the upstream attempt's wall time.">>},
     catalog_generation => {gauge, <<"Serving catalog generation.">>},
     catalog_ready => {gauge, <<"Serving catalog warm (1) or cold (0).">>},
     models_serving => {gauge, <<"Models in the serving catalog.">>},
@@ -112,6 +114,8 @@
     upstream_requests_total => <<"{request}">>,
     usage_writer_dropped_total => <<"{row}">>,
     request_duration_seconds => <<"s">>,
+    http_server_request_duration => <<"s">>,
+    gen_ai_client_inference_duration => <<"s">>,
     catalog_generation => <<"1">>,
     catalog_ready => <<"1">>,
     models_serving => <<"{model}">>,
@@ -176,10 +180,22 @@
 render(Rows, Gauges) ->
     Sums = maps:from_list([{K, V} || {{hist_sum_us, _, _} = K, V} <- Rows]),
     Counts = maps:from_list([{K, V} || {{hist_count, _, _} = K, V} <- Rows]),
-    CounterNames = name_sort(lists:usort([N || {{counter, N, _}, _} <- Rows])),
-    HistNames = name_sort(lists:usort([N || {{hist, N, _, _}, _} <- Rows] ++
-        [N || {{hist_sum_us, N, _}, _} <- Rows] ++ [N || {{hist_count, N, _}, _} <- Rows])),
-    GaugeNames = name_sort(lists:usort([N || {N, _, _} <- Gauges])),
+    %% The semconv families are gated on the export knob (design §13.4):
+    %% with it off they must not appear at all, even for a row that was
+    %% written before the knob was flipped or by a code path that does not
+    %% check it. Filtering at the RENDER boundary is what makes the
+    %% promise hold for the whole scrape, not just for well-behaved
+    %% producers.
+    Visible = fun(N) -> semconv_visible(N) end,
+    CounterNames = name_sort(lists:usort([N || {{counter, N, _}, _} <- Rows, Visible(N)])),
+    HistNames = name_sort(
+        lists:usort(
+            [N || {{hist, N, _, _}, _} <- Rows, Visible(N)] ++
+                [N || {{hist_sum_us, N, _}, _} <- Rows, Visible(N)] ++
+                [N || {{hist_count, N, _}, _} <- Rows, Visible(N)]
+        )
+    ),
+    GaugeNames = name_sort(lists:usort([N || {N, _, _} <- Gauges, Visible(N)])),
     iolist_to_binary([
         [render_counter_family(N, Rows) || N <- CounterNames],
         [render_hist_family(N, Rows, Sums, Counts) || N <- HistNames],
@@ -241,7 +257,7 @@ ensure_labels(L, Acc) ->
 
 render_hist_series(Name, L, BucketMap, Sums, Counts) ->
     NameB = name_bin(Name),
-    Canonical = [LeBin || {_Le, LeBin} <- janus_metrics:buckets()] ++ [<<"+Inf">>],
+    Canonical = [LeBin || {_Le, LeBin} <- janus_metrics:buckets(Name)] ++ [<<"+Inf">>],
     All = lists:usort(Canonical ++ maps:keys(BucketMap)),
     %% +Inf never parses as a float — whitelist it BEFORE the validity
     %% partition. Unparseable non-canonical bounds (hand-crafted rows,
@@ -352,6 +368,24 @@ help_line(Name) ->
             [];
         {_, Text} ->
             <<"# HELP ", (name_bin(Name))/binary, " ", (help_text(Name, Text))/binary, "\n">>
+    end.
+
+%% Whether a semconv-named family may appear in the Prometheus view.
+%%
+%% Legacy `janus_*' families are always visible: they ARE the contract.
+%% Only the semconv additions are gated, and a family without a semconv
+%% mapping is by definition legacy.
+semconv_visible(Name) ->
+    case janus_metrics:semconv_name(Name) of
+        undefined -> true;
+        %% ONE authority. Re-deriving the predicate here would let the
+        %% render gate disagree with the WRITE gate: a producer would skip
+        %% the observation while the renderer displayed a stale row, or —
+        %% worse — the reverse, so /metrics would claim data the exporter
+        %% is not actually sending. `janus_telemetry' already resolves the
+        %% whole environment precedence chain, `OTEL_SDK_DISABLED' kill
+        %% switch included.
+        _ -> janus_telemetry:export_enabled()
     end.
 
 %% Prometheus has no unit field, so the unit can ride the HELP text.

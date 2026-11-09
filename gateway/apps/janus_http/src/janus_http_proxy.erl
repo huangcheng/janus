@@ -15,6 +15,11 @@
 %% Conformance seam (F13): drives the auto-tier bump so the closed-enum
 %% rule is asserted against the producer rather than trusted.
 -export([bump_auto_name_failover/0]).
+%% Conformance seam: drives the REAL producer of the semconv HTTP family,
+%% so its attribute set is asserted where it is built rather than mocked.
+-export([observe_http_server_duration/3, method_label/0, scheme_label/0]).
+%% Same seam for the GenAI duration producer.
+-export([maybe_observe_genai_duration/1]).
 %% Exported for eunit (usage capture helpers + Phase-2 knob).
 -export([
     maybe_trim/2,
@@ -97,6 +102,7 @@ handle(ClientProto, Agent, Body, Req, State) ->
     %% upstream, and must never be inherited by a later keep-alive
     %% request (maybe_note_latency/1 feeds it into the LB EWMA).
     erase(janus_upstream_ms),
+    erase(janus_upstream_proto),
     erase(janus_req_model),
     %% Resolution accounting: the client's ORIGINAL model name (before
     %% janus-auto tier routing replaced it); rides usage rows as
@@ -145,6 +151,11 @@ handle(ClientProto, Agent, Body, Req, State) ->
     %% the retry-path calls below become harmless no-ops.
     failover_start(),
     put(janus_req_path, cowboy_req:path(Req)),
+    %% Published AFTER the erase block above, alongside `janus_req_path',
+    %% so the ordering cannot silently invert. Reading it in the preamble
+    %% instead would be wiped on arrival here, and every HTTP-duration
+    %% sample would carry the `_OTHER' fallback.
+    put(janus_req_method, cowboy_req:method(Req)),
     put(janus_usage_ctx, #{
         started => erlang:monotonic_time(microsecond),
         agent => Agent,
@@ -3682,12 +3693,110 @@ reason_class_atom(Reason) ->
     Bin = janus_cool_view:reason_class(Reason),
     janus_rate_view:normalize_class(Bin).
 
+%% `http.server.request.duration' (semconv, unit `s').
+%%
+%% Required attributes only: `http.request.method' and `url.scheme',
+%% written with their OTel spelling. The registry transliterates label
+%% names for the Prometheus view (dots are not legal there), so the same
+%% key serves both encodings.
+%%
+%% The route is deliberately NOT an attribute -- `http.route' would be the
+%% semconv name and the gateway's route set is catalog-bounded, but adding
+%% a label here that the legacy series does not have would make the two
+%% views incomparable for no benefit.
+observe_http_server_duration(Status, _Stream, LatencyMs) ->
+    janus_metrics:observe(
+        http_server_request_duration,
+        #{
+            <<"http.request.method">> => method_label(),
+            <<"url.scheme">> => scheme_label(),
+            <<"http.response.status_code">> => Status
+        },
+        LatencyMs / 1000
+    ).
+
+%% The request method as cowboy received it (already the uppercase
+%% original the semconv wants).
+%%
+%% An absent value reports `_OTHER', the semconv convention for an unknown
+%% method. Guessing `POST' would turn a missing value into a
+%% plausible-looking lie: a GET would be reported as a POST with no way to
+%% tell them apart downstream.
+method_label() ->
+    case method_class(get(janus_req_method)) of
+        unknown -> <<"_OTHER">>;
+        M -> M
+    end.
+
+%% The method comes from the CLIENT, and cowboy's parser accepts ANY HTTP
+%% token, so a caller can put an arbitrary string in this label and create
+%% a new time series per request. Collapse to the registered method set:
+%% it is what a dashboard actually filters on, and it is the semconv
+%% `_OTHER' convention for anything else.
+method_class(M) when is_binary(M) ->
+    case lists:member(M, [
+        <<"GET">>, <<"HEAD">>, <<"POST">>, <<"PUT">>, <<"DELETE">>,
+        <<"CONNECT">>, <<"OPTIONS">>, <<"TRACE">>, <<"PATCH">>
+    ]) of
+        true -> M;
+        false -> unknown
+    end;
+method_class(_) ->
+    unknown.
+
+%% The scheme of the connection the gateway ITSELF accepted.
+%%
+%% That is `http': the cowboy listener is `start_clear', and TLS is
+%% terminated upstream (the proxy in front of the fleet). Reporting
+%% `https' would describe the client's leg, which the gateway cannot see —
+%% it never reads `x-forwarded-proto', and honouring that header would mean
+%% trusting any client that can reach the listener to rewrite it. This
+%% instrument measures the gateway's own server work, so it reports the
+%% scheme the gateway actually served.
+scheme_label() ->
+    <<"http">>.
+
+%% `gen_ai.client.inference.duration' (semconv, unit `s').
+%%
+%% Measured from the upstream attempt's own wall time, not the request
+%% total: this instrument is about the PROVIDER call. Fed from the same
+%% `janus_upstream_ms' value the LB EWMA uses, so the two cannot disagree
+%% about how long the upstream took.
+maybe_observe_genai_duration(Route) ->
+    case {get(janus_upstream_ms), janus_telemetry:export_enabled()} of
+        {Ms, true} when is_integer(Ms), Ms >= 0 ->
+            janus_metrics:observe(
+                gen_ai_client_inference_duration,
+                #{
+                    <<"gen_ai.operation.name">> => gen_ai_operation(Route),
+                    <<"gen_ai.provider.name">> => gen_ai_provider(Route)
+                },
+                Ms / 1000
+            );
+        _ ->
+            ok
+    end.
+
+%% The operation comes from the provider PROTOCOL published by
+%% upstream_call/5. Hardcoding `chat' mislabelled every non-chat face
+%% (image, TTS, ASR, decisions) in a way no dashboard could detect,
+%% because the label was always `chat'.
+gen_ai_operation(_Route) ->
+    case get(janus_upstream_proto) of
+        undefined -> <<"chat">>;
+        Proto -> janus_otel_attr:operation_name(Proto)
+    end.
+
+gen_ai_provider(Route) ->
+    janus_otel_attr:provider_name(route_provider_name(Route)).
+
 %% Feed the LB latency EWMA from the last upstream_call's wall time
 %% (pdict). Absent on paths that never reached upstream_call — those
 %% must not invent a sample.
 maybe_note_latency(Route) ->
     case get(janus_upstream_ms) of
         Ms when is_integer(Ms), Ms >= 0 ->
+            _ = maybe_observe_genai_duration(Route),
             janus_lb:note_latency(route_target(Route), Ms);
         _ ->
             ok
@@ -3763,7 +3872,16 @@ do_track(Status, Route, Usage, Observe) ->
                             stream => usage_bool_int(Stream)
                         },
                         LatencyMs / 1000
-                    );
+                    ),
+                    %% ADDITIVE semconv instrument over the same
+                    %% measurement (design §8.1: one registry, two views).
+                    %% Gated on the export knob so a knob-off deployment
+                    %% registers no new family and its /metrics output is
+                    %% unchanged in content (§13.4).
+                    case janus_telemetry:export_enabled() of
+                        true -> observe_http_server_duration(Status, Stream, LatencyMs);
+                        false -> ok
+                    end;
                 false ->
                     ok
             end,
