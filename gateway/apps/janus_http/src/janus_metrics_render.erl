@@ -46,6 +46,7 @@
     usage_writer_buffered_rows => {gauge, <<"Usage writer buffered rows.">>},
     otel_export_spans_total => {counter, <<"Spans handed to the OTLP exporter, by result. `dropped_queue_full` is the exporter's own backpressure drop (the oldest span is evicted).">>},
     otel_export_batches_total => {counter, <<"OTLP export HTTP attempts (one batch = one POST), by result.">>},
+    otel_export_metrics_batches_total => {counter, <<"Failed OTLP metric-view POSTs (one per snapshot batch; this signal has no queue, so this is its only loss signal).">>},
     otel_export_queue_depth => {gauge, <<"Spans waiting in the exporter queue.">>},
     otel_export_enabled => {gauge, <<"1 when OTLP export is configured and switched on, else 0.">>},
     otel_export_last_success_age_seconds => {gauge, <<"Seconds since the last successful OTLP export. Absent until the first success.">>},
@@ -140,6 +141,7 @@
     usage_writer_buffered_rows => <<"{row}">>,
     otel_export_spans_total => <<"{span}">>,
     otel_export_batches_total => <<"{batch}">>,
+    otel_export_metrics_batches_total => <<"{batch}">>,
     otel_export_queue_depth => <<"{span}">>,
     otel_export_enabled => <<"1">>,
     otel_export_last_success_age_seconds => <<"s">>,
@@ -386,13 +388,13 @@ help_line(Name) ->
 semconv_visible(Name) ->
     case janus_metrics:semconv_name(Name) of
         undefined -> true;
-        %% ONE authority. Re-deriving the predicate here would let the
-        %% render gate disagree with the WRITE gate: a producer would skip
-        %% the observation while the renderer displayed a stale row, or —
-        %% worse — the reverse, so /metrics would claim data the exporter
-        %% is not actually sending. `janus_telemetry' already resolves the
-        %% whole environment precedence chain, `OTEL_SDK_DISABLED' kill
-        %% switch included.
+        %% ONE authority, byte-for-byte the WRITE gates' predicate
+        %% (`export_enabled()' — the GenAI producers and
+        %% `observe_http_server_duration' in janus_http_proxy). The
+        %% Prometheus view follows the EXPORT knob, not the per-signal
+        %% selection (design §13.4: export on = superset); only the OTLP
+        %% POST follows the signal. `janus_telemetry' resolves the whole
+        %% precedence chain, `OTEL_SDK_DISABLED' kill switch included.
         _ -> janus_telemetry:export_enabled()
     end.
 

@@ -44,6 +44,9 @@
     enabled/0,
     export_enabled/0,
     export_endpoint/0,
+    signal_url/1,
+    signal_enabled/1,
+    export_headers/1,
     sampling_ratio/0,
     default_sampling_ratio/0,
     sdk_disabled/0
@@ -81,14 +84,17 @@ sdk_disabled() ->
         V -> truthy(V)
     end.
 
-%% @doc Whether spans are actually exported right now.
+%% @doc Whether the OTLP export subsystem is on at all.
 %%
-%% Enabled when EITHER channel configures it:
-%%   * the standard variables name an endpoint, or
-%%   * the dashboard setting has `export.enabled = true' with a usable
-%%     endpoint.
-%% An endpoint is part of the predicate because a config that says
-%% "export" while pointing nowhere would fail on every batch.
+%% True when at least one signal is actually exportable (`signal_enabled/1'
+%% for any signal): that requires BOTH a selection and an endpoint source
+%% for it. An endpoint var for one signal no longer switches the whole
+%% subsystem on — the earlier predicate did exactly that and, combined
+%% with the traces-only default, made a logs-only endpoint send TRACES to
+%% the never-configured `localhost:4318' default on every flush.
+%%
+%% Per-SIGNAL selection is a separate predicate (`signal_enabled/1'):
+%% this being true does not mean every signal is exported.
 %%
 %% `OTEL_SDK_DISABLED' is checked FIRST and wins over everything: the
 %% spec defines it as the kill switch for the whole SDK, so a deployment
@@ -101,29 +107,21 @@ export_enabled() ->
     end.
 
 export_enabled_1() ->
-    case env_endpoint() of
-        {ok, _} ->
-            true;
-        error ->
-            case config() of
-                #{<<"export">> := #{<<"enabled">> := true} = E} ->
-                    case maps:get(<<"endpoint">>, E, ?DEFAULT_ENDPOINT) of
-                        Url when is_binary(Url), byte_size(Url) > 0 -> true;
-                        _ -> false
-                    end;
-                _ ->
-                    false
-            end
-    end.
+    lists:any(
+        fun(S) -> signal_enabled(S) end,
+        [traces, metrics, logs]
+    ).
 
-%% @doc The OTLP endpoint to export to.
+%% @doc The OTLP BASE endpoint (no signal path).
 %%
-%% Standard precedence: the traces-specific variable wins over the
-%% generic one (a deployment may send traces and metrics to different
-%% collectors).
+%% Only the generic `OTEL_EXPORTER_OTLP_ENDPOINT' and the dashboard
+%% setting feed this; per-signal variables never become another signal's
+%% base (pointing traces at one collector must not send metrics there
+%% too). `signal_url/1' is what callers should use — this is the base it
+%% appends to.
 -spec export_endpoint() -> binary().
 export_endpoint() ->
-    case env_endpoint() of
+    case nonempty(os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) of
         {ok, Url} ->
             Url;
         error ->
@@ -133,31 +131,210 @@ export_endpoint() ->
             end
     end.
 
-%% `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT' > `OTEL_EXPORTER_OTLP_ENDPOINT'.
+%% Whether ANY endpoint source names the GENERIC base (the generic
+%% variable or the dashboard setting). A per-signal variable does NOT:
+%% it is a source for its own signal only (see signal_source/1) and must
+%% not make the other signals fall back to the unconfigured default.
+generic_endpoint_env() ->
+    nonempty(os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) =/= error.
+
+dashboard_export_on() ->
+    case config() of
+        #{<<"export">> := #{<<"enabled">> := true} = E} ->
+            case maps:get(<<"endpoint">>, E, ?DEFAULT_ENDPOINT) of
+                Url when is_binary(Url), byte_size(Url) > 0 -> true;
+                _ -> false
+            end;
+        _ ->
+            false
+    end.
+
+%% @doc The FULL URL one signal POSTs to.
 %%
-%% The traces-specific value is a FULL url (it names the path too), while
-%% the generic one is a BASE (the exporter appends `/v1/traces'). Both are
-%% accepted and both end up as a base this module appends to, so a
-%% traces-endpoint that already carries `/v1/traces' is left alone.
-env_endpoint() ->
-    case nonempty(os:getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) of
+%% Exporter spec: a per-signal variable "MUST be used as-is without any
+%% modification" — so `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT' is returned
+%% verbatim, path and all, and an operator pointing at a non-default path
+%% gets exactly that. Only the generic base gets `/v1/<signal>' appended
+%% (tolerating a trailing slash so `http://c:4318/' does not become
+%% `//v1/traces').
+-spec signal_url(traces | metrics | logs) -> binary().
+signal_url(Signal) when Signal =:= traces; Signal =:= metrics; Signal =:= logs ->
+    case nonempty(os:getenv(signal_env_var(Signal, "ENDPOINT"))) of
         {ok, Url} ->
-            {ok, strip_traces_suffix(Url)};
+            Url;
         error ->
-            case nonempty(os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) of
-                {ok, Url} -> {ok, strip_traces_suffix(Url)};
-                error -> error
+            append_signal(export_endpoint(), Signal)
+    end.
+
+signal_env_var(Signal, Suffix) ->
+    Name = string:uppercase(atom_to_list(Signal)),
+    "OTEL_EXPORTER_OTLP_" ++ Name ++ "_" ++ Suffix.
+
+append_signal(Base, Signal) ->
+    Trimmed =
+        case binary:last(Base) of
+            $/ -> binary:part(Base, 0, byte_size(Base) - 1);
+            _ -> Base
+        end,
+    <<Trimmed/binary, "/v1/", (atom_to_binary(Signal, utf8))/binary>>.
+
+%% @doc Whether one signal is actually exported.
+%%
+%% Two conditions, both required:
+%%
+%%   1. SELECTION. Resolution per signal, first match wins:
+%%      a. `OTEL_{TRACES,METRICS,LOGS}_EXPORTER', normalized (trimmed,
+%%         lowercased). `otlp' selects; `none' and every other present
+%%         value — `console', `zipkin', a typo, a spec-legal comma list —
+%%         mean "not the OTLP exporter for this signal". Falling through
+%%         on those instead would let the lower-priority dashboard setting
+%%         re-enable OTLP the operator explicitly did not select.
+%%      b. The dashboard setting `telemetry.export.signals' (a list of
+%%         signal-name binaries).
+%%      c. Default: `traces' only — the design's deliberate default,
+%%         because the common backend is a traces-only collector and a
+%%         metrics/logs POST against it is a guaranteed 404 loop
+%%         (observed in production).
+%%   2. AN ENDPOINT SOURCE for that signal: its per-signal variable, the
+%%      generic variable, or the dashboard export setting. An EXPLICIT
+%%      `otlp' selection in the environment is its own source (the spec's
+%%      default endpoint then applies, by operator intent); the implicit
+%%      traces-only default is NOT — otherwise a logs-only endpoint
+%%      variable would send traces to the unconfigured `localhost:4318'.
+-spec signal_enabled(traces | metrics | logs) -> boolean().
+signal_enabled(Signal) when Signal =:= traces; Signal =:= metrics; Signal =:= logs ->
+    %% The kill switch wins over EVERYTHING, this predicate included —
+    %% `export_enabled/0' checks it too, but a caller that gates on the
+    %% signal directly must not be able to route around it.
+    case sdk_disabled() of
+        true -> false;
+        false -> signal_enabled_1(Signal)
+    end.
+
+signal_enabled_1(Signal) ->
+    case exporter_env(Signal) of
+        {ok, Value} ->
+            %% The spec defines this variable as a comma-separated LIST of
+            %% exporters: `otlp,console' is legal and DOES select OTLP.
+            %% Split and test membership rather than matching the whole
+            %% string, and treat `none'/anything-else as no OTLP here.
+            lists:member(<<"otlp">>, [
+                trim(P) || P <- binary:split(Value, <<",">>, [global])
+            ]);
+        unset ->
+            setting_signal(Signal) andalso signal_source(Signal)
+    end.
+
+%% The normalized `OTEL_<SIGNAL>_EXPORTER' value, or `unset'. An empty or
+%% whitespace value counts as unset — an env line like `OTLP=\n' is not a
+%% selection.
+exporter_env(Signal) ->
+    case os:getenv("OTEL_" ++ string:uppercase(atom_to_list(Signal)) ++ "_EXPORTER") of
+        false ->
+            unset;
+        V when is_list(V) ->
+            case trim(list_to_binary(V)) of
+                <<>> -> unset;
+                B -> {ok, string:lowercase(B)}
             end
     end.
 
-%% The exporter appends `/v1/traces'; strip it from a traces-endpoint so
-%% the path is not doubled. `/v1/traces' -> base.
-strip_traces_suffix(Url) ->
-    Suffix = <<"/v1/traces">>,
-    Size = byte_size(Url) - byte_size(Suffix),
-    case Size >= 0 andalso binary:part(Url, Size, byte_size(Suffix)) =:= Suffix of
-        true -> binary:part(Url, 0, Size);
-        false -> Url
+%% Whether an explicit endpoint source exists for this signal.
+signal_source(Signal) ->
+    nonempty(os:getenv(signal_env_var(Signal, "ENDPOINT"))) =/= error
+        orelse generic_endpoint_env()
+        orelse dashboard_export_on().
+
+setting_signal(Signal) ->
+    Name = atom_to_binary(Signal, utf8),
+    case config() of
+        #{<<"export">> := #{<<"signals">> := List}} when is_list(List) ->
+            lists:member(Name, [L || L <- List, is_binary(L)]);
+        _ ->
+            Signal =:= traces
+    end.
+
+%% @doc Extra request headers for one signal's POSTs (collector auth).
+%%
+%% `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS' overrides the
+%% generic `OTEL_EXPORTER_OTLP_HEADERS'. Values are `k=v,k2=v2' per the
+%% exporter spec; a malformed pair is skipped, not fatal — but an
+%% empty key or value is dropped whole, because sending
+%% `Authorization: ' is worse than not sending the header.
+%%
+%% A per-signal variable set but EMPTY means "no headers for THIS
+%% signal" — distinct from unset, which falls back to the generic value.
+%% Collapsing the two would attach the traces collector's bearer token to
+%% a metrics POST against a different collector, and these values are
+%% SECRETS by assumption: nothing may log them, consumers only forward.
+-spec export_headers(traces | metrics | logs) -> [{binary(), binary()}].
+export_headers(Signal) when Signal =:= traces; Signal =:= metrics; Signal =:= logs ->
+    %% `Raw' is always a binary; an explicit per-signal empty value and a
+    %% fully absent configuration both arrive as `<<>>' and yield no
+    %% headers — the difference is only whether the GENERIC value was
+    %% consulted, which the resolution below already encodes.
+    Raw =
+        case os:getenv(signal_env_var(Signal, "HEADERS")) of
+            false ->
+                generic_headers();
+            V when is_list(V) ->
+                trim(list_to_binary(V))
+        end,
+    case Raw of
+        <<>> ->
+            [];
+        _ ->
+            [Pair || Pair <- [header_pair(P) || P <- binary:split(Raw, <<",">>, [global])], Pair =/= skip]
+    end.
+
+generic_headers() ->
+    case os:getenv("OTEL_EXPORTER_OTLP_HEADERS") of
+        false -> <<>>;
+        V when is_list(V) -> list_to_binary(V)
+    end.
+
+header_pair(P) ->
+    case binary:split(trim(P), <<"=">>) of
+        [K0, V0] ->
+            %% Trim both halves: `k = v' is one syntax, `k=v ' another,
+            %% and a stray space in a header VALUE is an auth failure on
+            %% a collector that no log line will ever explain. CR/LF and
+            %% other control bytes drop the pair whole — forwarded, they
+            %% would split or corrupt the HTTP request headers.
+            K = trim(K0),
+            V = trim(V0),
+            case
+                byte_size(K) > 0 andalso byte_size(V) > 0 andalso
+                    printable(K) andalso printable(V)
+            of
+                true -> {K, V};
+                false -> skip
+            end;
+        _ ->
+            skip
+    end.
+
+%% Printable ASCII only (no DEL): the shape an HTTP header value may
+%% legally carry. Anything else cannot be forwarded safely.
+printable(B) ->
+    lists:all(fun(C) -> C >= 16#20 andalso C =< 16#7E end, binary_to_list(B)).
+
+%% Byte-level trim: `string:trim/3' decodes as Unicode and raises on
+%% malformed sequences — env bytes must never crash the config read.
+trim(B) when is_binary(B) ->
+    trim_r(trim_l(B)).
+
+trim_l(<<C, Rest/binary>>) when C =:= $\s; C =:= $\t -> trim_l(Rest);
+trim_l(B) -> B.
+
+trim_r(B) ->
+    case byte_size(B) of
+        0 -> B;
+        Sz ->
+            case binary:at(B, Sz - 1) of
+                C when C =:= $\s; C =:= $\t -> trim_r(binary:part(B, 0, Sz - 1));
+                _ -> B
+            end
     end.
 
 %% @doc The root-trace sampling ratio.
@@ -208,7 +385,7 @@ nonempty(V) when is_list(V) ->
         S -> {ok, list_to_binary(S)}
     end;
 nonempty(V) when is_binary(V), V =/= <<>> ->
-    case string:trim(V, both, " \t") of
+    case trim(V) of
         <<>> -> error;
         B -> {ok, B}
     end;

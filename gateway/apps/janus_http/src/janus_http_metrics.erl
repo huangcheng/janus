@@ -499,7 +499,15 @@ otel_export_series() ->
                 {{counter, otel_export_batches_total, [{<<"result">>, <<"sent">>}]},
                     int_or_zero(maps:get(batches_sent_total, M, 0), otel_export_batches_sent)},
                 {{counter, otel_export_batches_total, [{<<"result">>, <<"failed">>}]},
-                    int_or_zero(maps:get(batches_failed_total, M, 0), otel_export_batches_failed)}
+                    int_or_zero(maps:get(batches_failed_total, M, 0), otel_export_batches_failed)},
+                %% The metrics view POSTs snapshots with no queue of its
+                %% own; this is its only failure signal, so "traces fine,
+                %% metrics never arrive" (a traces-only collector) is
+                %% visible on a scrape instead of only in logs.
+                {{counter, otel_export_metrics_batches_total, [{<<"result">>, <<"failed">>}]},
+                    int_or_zero(
+                        maps:get(metrics_batches_failed_total, M, 0), otel_export_metrics_failed
+                    )}
             ],
             Gauges = [
                 {otel_export_queue_depth,

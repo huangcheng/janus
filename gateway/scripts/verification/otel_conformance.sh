@@ -344,6 +344,9 @@ check "http method label is bounded" '
 # mapping from a hardcoded string.
 check "genai operation follows the protocol" '
   os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:14318"),
+  %% The GenAI producers gate on the metrics SIGNAL (default traces-only);
+  %% selecting it here is what an operator exporting metrics would do.
+  os:putenv("OTEL_METRICS_EXPORTER", "otlp"),
   ok = janus_metrics:init(),
   [begin
      put(janus_upstream_proto, P),
@@ -380,6 +383,8 @@ check "genai operation follows the protocol" '
 # not account for it separately).
 check "token counters carry modality, model and counts" '
   os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:14318"),
+  %% See the genai-operation check: the producers gate on the metrics signal.
+  os:putenv("OTEL_METRICS_EXPORTER", "otlp"),
   ok = janus_metrics:init(),
   put(janus_upstream_proto, openai_chat),
   put(janus_req_model, <<"mock-model">>),

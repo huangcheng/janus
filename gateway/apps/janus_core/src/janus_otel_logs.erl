@@ -41,7 +41,10 @@
 %% call down with it, and telemetry must not be able to fail a request.
 log(Event, _Config) ->
     try
-        case janus_telemetry:export_enabled() of
+        %% signal_enabled alone: it already folds in the kill switch,
+        %% and export_enabled() is any(signal_enabled) — the conjunction
+        %% only added env lookups to every log event.
+        case janus_telemetry:signal_enabled(logs) of
             true -> janus_otel_export:record_log(Event);
             false -> ok
         end

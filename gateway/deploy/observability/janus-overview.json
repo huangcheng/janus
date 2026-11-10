@@ -516,7 +516,7 @@
    "title": "\u5bfc\u51fa\u5931\u8d25\u6279\u6b21",
    "targets": [
     {
-     "expr": "sum(janus_otel_export_batches_total{result=\"failed\"}) or vector(0)",
+     "expr": "sum({__name__=~\"janus_otel_export_(batches|metrics_batches)_total\", result=\"failed\"}) or vector(0)",
      "datasource": {
       "type": "prometheus",
       "uid": "PBFA97CFB590B2093"

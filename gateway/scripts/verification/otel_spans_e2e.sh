@@ -262,6 +262,13 @@ sleep 1
 # ---------------------------------------------------------------- seed
 # A master role is required: the agent listener lives there.
 unset JANUS_DB_URL JANUS_DB_HOST
+# The seeded `telemetry.export' setting is only the SECOND-priority source:
+# any inherited OTEL_* endpoint/exporter variable would defeat it and turn
+# the assertions below into a false FAIL that looks like a gateway defect.
+unset OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT OTEL_EXPORTER_OTLP_LOGS_ENDPOINT \
+      OTEL_EXPORTER_OTLP_HEADERS OTEL_TRACES_EXPORTER \
+      OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER OTEL_SDK_DISABLED
 # `JANUS_SQLITE_PATH' is the documented SQLite knob (JANUS_DB_URL selects
 # a Postgres backend, so pointing it at a file is a boot failure).
 export JANUS_SQLITE_PATH="$DB"
@@ -326,7 +333,11 @@ cat > "$OUT/seed.json" <<JSON
   ],
   "settings": {
     "telemetry": {
-      "export": {"enabled": true, "endpoint": "http://127.0.0.1:__COLLECTOR_PORT__"},
+      "export": {
+        "enabled": true,
+        "endpoint": "http://127.0.0.1:__COLLECTOR_PORT__",
+        "signals": ["traces", "metrics"]
+      },
       "sampling": {"ratio": 1.0}
     }
   }
