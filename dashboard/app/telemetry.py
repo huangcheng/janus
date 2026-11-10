@@ -62,7 +62,9 @@ MAX_BATCH = 128
 FLUSH_INTERVAL_SEC = 2.0
 HTTP_TIMEOUT_SEC = 5.0
 
-# OTel SpanKind: 2 = SERVER, 3 = CLIENT. The poller only makes CLIENT calls.
+# OTel SpanKind: 1 = INTERNAL, 2 = SERVER, 3 = CLIENT. The poller's calls are
+# CLIENT spans; the cycle root that parents them is INTERNAL.
+SPAN_KIND_INTERNAL = 1
 SPAN_KIND_CLIENT = 3
 
 _state: "TelemetryState | None" = None
@@ -102,6 +104,7 @@ class Span:
         "end_ns",
         "attrs",
         "status",
+        "_status_is_error",
     )
 
     def __init__(self, *, trace_id: str, parent_id: str | None, name: str, kind: int) -> None:
@@ -114,18 +117,28 @@ class Span:
         self.end_ns: int | None = None
         self.attrs: dict[str, Any] = {}
         self.status: int | None = None
+        self._status_is_error: bool = False
 
     def set(self, key: str, value: Any) -> None:
         """Attach an attribute. Values are encoded by `_encode_attr`."""
         self.attrs[key] = value
 
-    def finish(self, status_code: int | None = None) -> None:
-        """Close the span. Idempotent: a double-close keeps the first time."""
+    def finish(self, status_code: int | None = None, *, error: bool | None = None) -> None:
+        """Close the span. Idempotent: a double-close keeps the first time.
+
+        `error` lets the caller override the derived status: the poller
+        treats some 4xx/5xx answers (404/503 — supported-but-absent
+        endpoint) as SUCCESSFUL polls, and the semconv permits exactly
+        that ("unless the instrumentation has a reason to believe the
+        response is not an error"). Leaving it None derives from the
+        code: >= 400 is ERROR for these CLIENT spans.
+        """
         if self.end_ns is None:
             self.end_ns = time.time_ns()
         if status_code is not None:
             self.status = status_code
             self.set("http.response.status_code", status_code)
+            self._status_is_error = error if error is not None else status_code >= 400
 
     def as_otlp(self) -> dict[str, Any]:
         span: dict[str, Any] = {
@@ -139,9 +152,13 @@ class Span:
         }
         if self.parent_id:
             span["parentSpanId"] = self.parent_id
-        # OTLP status: 2 = ERROR only for a real failure. An unset status is
-        # correct for a successful span; writing 0 explicitly is noise.
-        if self.status is not None and self.status >= 500:
+        # OTLP status: 2 = ERROR for a failed call. These are CLIENT spans,
+        # and the semconv's client rule is >= 400 (a 401 from the gateway is
+        # the dashboard's failed request, not the gateway's) unless the
+        # caller classified the answer otherwise (the accepted 404/503
+        # polls). An unset status is correct for a successful span; writing
+        # 0 explicitly is noise.
+        if self._status_is_error:
             span["status"] = {"code": 2}
         return span
 
@@ -163,12 +180,28 @@ class Trace:
             kind=SPAN_KIND_CLIENT,
         )
 
+    def root_span(self, name: str) -> Span:
+        """The cycle's own INTERNAL span, carrying the advertised root id.
+
+        `traceparent()` names `root_span_id` as the parent of everything in
+        the cycle — including the gateway's own spans, which join via that
+        header. Without a recorded span owning that id, every child in the
+        backend hangs off a parent that does not exist: the phantom-parent
+        defect the gateway fixed on its response leg. The span id is forced
+        to the advertised one, so the recorded root IS the named root.
+        """
+        span = Span(trace_id=self.trace_id, parent_id=None, name=name, kind=SPAN_KIND_INTERNAL)
+        span.span_id = self.root_span_id
+        return span
+
     def traceparent(self) -> str:
         """The W3C header the gateway accepts, so its spans join this trace.
 
         Sampled flag is 01: the dashboard only mints a trace when it intends to
         record it, and a downstream service that sees 00 would drop the very
-        spans this exists to collect.
+        spans this exists to collect. The parent id this advertises belongs
+        to the cycle's root span — open it via `root_span` so the id names a
+        span that is actually recorded.
         """
         return f"00-{self.trace_id}-{self.root_span_id}-01"
 
@@ -179,10 +212,14 @@ class TelemetryState:
     Everything is non-blocking. `submit` appends and returns; the drain task
     owns the HTTP call. A collector that is slow, dead or misconfigured costs
     dropped spans and one throttled log line, never a delayed poll.
+
+    `traces_url` is the FULL URL to POST to: the caller resolves the
+    exporter-spec precedence (per-signal variable used as-is, generic base
+    with `/v1/traces` appended) so this class never guesses a path.
     """
 
-    def __init__(self, endpoint: str) -> None:
-        self._endpoint = endpoint.rstrip("/")
+    def __init__(self, traces_url: str) -> None:
+        self._url = traces_url
         self._queue: list[Span] = []
         self._task: asyncio.Task[None] | None = None
         self._dropped = 0
@@ -285,7 +322,7 @@ class TelemetryState:
         }
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SEC, trust_env=False) as client:
             resp = await client.post(
-                f"{self._endpoint}/v1/traces",
+                self._url,
                 content=json.dumps(body).encode(),
                 headers={"content-type": "application/json"},
             )
@@ -339,8 +376,16 @@ def _version() -> str:
 # -------------------------------------------------------------------- public
 def enabled() -> bool:
     """Telemetry is on when an endpoint is configured, matching the gateway's
-    precedence: the environment decides, and no endpoint means no telemetry."""
-    return bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip())
+    precedence: the environment decides, and no endpoint means no telemetry.
+
+    Honors both endpoint variables (the per-signal traces one counts too —
+    the gateway resolves them the same way) and `OTEL_SDK_DISABLED`, the
+    spec's kill switch, which must win over any endpoint."""
+    if os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    traces_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "").strip()
+    return bool(endpoint or traces_endpoint)
 
 
 def start() -> None:
@@ -350,7 +395,12 @@ def start() -> None:
         return
     if _state is not None:
         return
-    _state = TelemetryState(os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"])
+    # Exporter-spec URL resolution: a per-signal variable is a FULL url used
+    # as-is; the generic one is a base the exporter suffixes.
+    generic = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    traces = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "").strip()
+    url = traces if traces else f"{generic.rstrip('/')}/v1/traces"
+    _state = TelemetryState(url)
     _state.start()
     logger.info("telemetry export enabled (posture: %s)", exporter_egress_posture())
 

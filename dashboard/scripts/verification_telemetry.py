@@ -107,6 +107,24 @@ async def poll_records_spans_on_success_and_failure() -> None:
                 inner, "http://node1:8090/stats/sched", None, telemetry.Trace()
             )
         check("a 404 poll records its span", len(recorded) == 1, str(len(recorded)))
+        if recorded:
+            # The poller ACCEPTS 404/503 (supported-but-absent endpoint) as a
+            # successful poll and closes the span with error=False: the span
+            # status must agree with the task-runs view, not contradict it.
+            check(
+                "an accepted 404 poll span is not ERROR",
+                recorded[0].as_otlp().get("status") is None,
+                repr(recorded[0].as_otlp().get("status")),
+            )
+            # And the DERIVED rule still holds for a plain 4xx the poller
+            # does not accept: >= 400 is this side's failed request.
+            probe = telemetry.Span(trace_id="00" * 16, parent_id=None, name="p", kind=3)
+            probe.finish(401)
+            check(
+                "an unaccepted 4xx client span is ERROR",
+                probe.as_otlp().get("status", {}).get("code") == 2,
+                repr(probe.as_otlp().get("status")),
+            )
 
         # --- failure ---
         recorded.clear()
@@ -144,6 +162,15 @@ async def span_shape_and_export() -> None:
     root_otlp = trace.root_span_id
     check("CLIENT spans share the cycle trace", a.trace_id == b.trace_id == trace.trace_id)
     check("CLIENT spans hang off the cycle root", a.parent_id == b.parent_id == root_otlp)
+
+    # The root the traceparent advertises must be a span that IS recorded —
+    # otherwise every child in a backend hangs off a nonexistent parent
+    # (the phantom-parent defect, on the poller's leg).
+    root = trace.root_span("ops pull")
+    check("root span owns the advertised id", root.span_id == trace.root_span_id)
+    check("root span is parentless", root.parent_id is None)
+    root.finish()
+    check("root span encodes as INTERNAL (1)", root.as_otlp()["kind"] == 1)
     check(
         "span ids are 16 hex",
         len(a.span_id) == 16 and all(c in "0123456789abcdef" for c in a.span_id),
@@ -169,9 +196,13 @@ async def span_shape_and_export() -> None:
     # not a mock: `_post` does `import httpx` inside the function, so patching
     # an attribute on the module object is invisible to it — and a real socket
     # proves the wire format end to end, which a mock cannot.
+    #
+    # `TelemetryState` takes the FULL URL (exporter spec: a per-signal
+    # endpoint is used as-is); constructing it with the suffixed form here
+    # also pins that the exporter never re-appends a path of its own.
     got: list[dict] = []
     with _collector(got) as endpoint:
-        st = telemetry.TelemetryState(endpoint)
+        st = telemetry.TelemetryState(f"{endpoint}/v1/traces")
         await st._post([a])
         await asyncio.sleep(0.05)
 

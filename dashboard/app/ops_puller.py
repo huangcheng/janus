@@ -501,10 +501,14 @@ async def _get_json(
 
     status = 0
 
-    def finish(code: int) -> None:
-        """Close and export the span once, whichever way the request ends."""
+    def finish(code: int, *, error: bool | None = None) -> None:
+        """Close and export the span once, whichever way the request ends.
+
+        `error` forwards the caller's classification of the answer (see
+        the accepted 404/503 branch below).
+        """
         if span is not None:
-            span.finish(code)
+            span.finish(code, error=error)
             telemetry.record_span(span)
 
     try:
@@ -515,8 +519,11 @@ async def _get_json(
             if resp.status_code in (404, 503):
                 # A supported-but-absent endpoint is a SUCCESSFUL poll, not a
                 # failure: the caller handles `None` deliberately. The span is
-                # still exported, with the status code that explains it.
-                finish(resp.status_code)
+                # still exported with the status code that explains it, and
+                # `error=False` keeps the span status consistent with the
+                # run/task-runs view — a span ERROR here would make an
+                # error-rate panel count every booting node as failing.
+                finish(resp.status_code, error=False)
                 return resp.status_code, None
             if resp.status_code != 200:
                 raise RuntimeError(f"http {resp.status_code}")
@@ -881,6 +888,18 @@ async def pull_node(
     node_key = str(nid)
     _stats["pulls"] += 1
     trace = telemetry.Trace()
+    # The cycle's root span OWNS the id `traceparent()` advertises, so the
+    # gateway's spans and this poller's CLIENT spans all hang off a span
+    # that exists instead of a phantom parent. INTERNAL per the design's
+    # span inventory (§11.1: one per poll cycle). `record_span` only
+    # queues, so closing it here never delays the cycle.
+    root = trace.root_span("ops pull")
+    # PEER alias, not `janus.node.alias': that key is the RESOURCE identity
+    # (the dashboard's own alias) everywhere else, and overloading it with
+    # the polled node would make one trace carry three meanings for the
+    # same attribute — a backend filter on it could no longer scope to a
+    # node's own telemetry.
+    root.set("janus.peer.alias", name)
     try:
         # alerts_debug holds alert_control.paused while it drives run_once
         # against a seeded health_snapshot (O.4b / O.10g). Skip the pull so
@@ -933,8 +952,13 @@ async def pull_node(
                 logger.exception("ops pull task failed for %s", name)
     finally:
         # Outer finally: record_run.__aenter__ can raise BaseException
-        # (CancelledError) before the inner finally runs — never strand nid.
+        # (CancelledError) before the inner finally runs. Discard FIRST —
+        # the invariant is "never strand nid", and a future edit that made
+        # the span calls raise must not be able to wedge polling for the
+        # node (spawn skips any nid still in _in_flight).
         _in_flight.discard(nid)
+        root.finish()
+        telemetry.record_span(root)
 
 
 async def _pull_locked(
