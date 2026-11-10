@@ -815,6 +815,13 @@ silently misreport image/audio traffic as text.
 - Downstream responses get a W3C `traceparent` **in addition to** the existing
   `x-trace-id`. Keeping `x-trace-id` preserves the current client contract; the
   additive header is what makes Janus a conformant link in a client's trace.
+  *As built (2026-11-10 amendment):* the response `traceparent` names the
+  SERVER span and is emitted **only when that span was recorded** (a sampled
+  trace). An unsampled response — and the uninstrumented faces (modality,
+  the pre-preamble 405) — echo `x-trace-id` only: a `traceparent` naming a
+  span nobody recorded is the phantom-parent defect this design set out to
+  remove. Reject paths (401/413/429) close and export the span before
+  replying, so their `traceparent` names a span the collector receives.
 
 Three W3C mutation rules constrain the injector, and each is easy to violate:
 

@@ -54,6 +54,7 @@
     upstream_headers/1,
     upstream_headers/2,
     response_headers/1,
+    response_headers/2,
     encode_tracestate/1,
     set_log_context/1,
     set_log_span/1,
@@ -79,16 +80,18 @@
 %% Once-per-boot flag for the malformed wire-map trace-id warning.
 -define(PT_WARNED, {?MODULE, malformed_wire_trace_id_warned}).
 
-%% W3C Trace Context §3.3.1.5 limits. 32 list members; Janus keeps a
-%% little headroom under the "at least 512 characters" guidance by
-%% bounding entries rather than total bytes (a 256-char key plus a
-%% 256-char value per entry would blow any byte budget immediately).
+%% W3C Trace Context §3.3.1 limits. The ABNF bounds key and value
+%% INDEPENDENTLY: `key = lcalpha 0*255( ... )' and
+%% `value = 0*255( chr ) nval-chr' — so a spec-valid member may be up to
+%% ~513 characters, and a whole-member cap would silently drop exactly
+%% the per-tenant vendor hints (long keys, long values) this module
+%% exists to preserve. Per-field caps it is.
 -define(TS_MAX_ENTRIES, 32).
+-define(TS_MAX_KEY, 256).
+-define(TS_MAX_VALUE, 256).
 %% Hard cap on the bytes we will even look at: a caller cannot make us
 %% split an arbitrarily large header on the request path.
 -define(TS_MAX_BYTES, 8192).
--define(TS_MAX_KEY, 256).
--define(TS_MAX_VALUE, 256).
 
 %% 2^56 — the randomness space of a TraceIdRatioBased threshold.
 -define(TWO_POW_56, 72057594037927936).
@@ -243,25 +246,57 @@ with_tracestate([], Headers) ->
 with_tracestate(Ts, Headers) ->
     Headers ++ [{<<"tracestate">>, encode_ts(Ts)}].
 
-%% @doc Downstream response headers: a W3C `traceparent' so a
-%% conformant client can continue the trace, ADDED alongside the
-%% existing non-standard `x-trace-id' (which is preserved so current
-%% clients keep working). The span-id here is a fresh one: the gateway
-%% is answering the request, so this is its own span.
+%% @doc Downstream response headers. The one-argument form serves
+%% callers that have no SERVER span (see `/2' for the normal case).
 -spec response_headers(t() | undefined) -> [{binary(), binary()}].
 response_headers(undefined) ->
     %% No context (non-handler caller): answer with nothing rather than
     %% minting a trace the caller never used.
     [];
-response_headers(#trace{tid = Tid, sampled = Sampled, ts = Ts}) ->
-    Base = [
-        {<<"traceparent">>,
-            <<"00-", Tid/binary, "-", (new_parent_id())/binary, "-", (flags(Sampled))/binary>>},
-        {<<"x-trace-id">>, Tid}
-    ],
-    case Ts of
-        [] -> Base;
-        _ -> Base ++ [{<<"tracestate">>, encode_ts(Ts)}]
+response_headers(Trace) ->
+    response_headers(Trace, undefined).
+
+%% @doc Downstream response headers naming the SERVER span that answered.
+%%
+%% W3C semantics: a response `traceparent' identifies the server-side
+%% span handling this request. When that span exists (the trace is
+%% sampled and the handler opened it), its REAL id goes on the wire —
+%% a client that links to the header lands on a span that exists. The
+%% first implementation minted a fresh id here, which re-created the
+%% exact phantom-parent defect this module's history fixed upstream: an
+%% id that no recorded span owns, indistinguishable from span loss.
+%%
+%% When NO span was recorded (unsampled trace, or a handler that takes
+%% no part in tracing), the honest response is `x-trace-id' ONLY: the
+%% legacy id still correlates, while a `traceparent' naming a span
+%% nobody recorded would be a second phantom. `tracestate' rides along
+%% only with a `traceparent', per W3C.
+-spec response_headers(t() | undefined, term()) -> [{binary(), binary()}].
+response_headers(undefined, _) ->
+    [];
+response_headers(#trace{tid = Tid, sampled = Sampled, ts = Ts}, ServerSpanId) ->
+    %% Shape-check the id, not just its length: an all-zero, non-hex or
+    %% uppercase id would be serialized verbatim and produce a header a
+    %% conformant client rejects — breaking the continuation this header
+    %% exists to provide. Today's only caller derives the id from
+    %% `janus_otel_span', which already guarantees the shape; the check
+    %% keeps that guarantee true at the API boundary for any future one.
+    case is_binary(ServerSpanId) andalso byte_size(ServerSpanId) =:= 16 andalso
+        is_lc_hex(ServerSpanId, 16) andalso ServerSpanId =/= zero(16)
+    of
+        true ->
+            Base = [
+                {<<"traceparent">>,
+                    <<"00-", Tid/binary, "-", ServerSpanId/binary, "-",
+                        (flags(Sampled))/binary>>},
+                {<<"x-trace-id">>, Tid}
+            ],
+            case Ts of
+                [] -> Base;
+                _ -> Base ++ [{<<"tracestate">>, encode_ts(Ts)}]
+            end;
+        false ->
+            [{<<"x-trace-id">>, Tid}]
     end.
 
 %% @doc Publish the trace ids as `logger' PROCESS METADATA so every
@@ -534,10 +569,12 @@ sampled_flag(F) ->
 %% tracestate parsing / encoding
 %%
 %% Carried opaquely: Janus does not interpret vendor entries, it
-%% preserves them. Bounded per W3C (32 members) with per-entry key and
-%% value length caps; over-long or unprintable entries are DROPPED
-%% rather than forwarded, because emitting a header an upstream rejects
-%% is worse than losing one vendor's hint.
+%% preserves them. Bounded per the W3C ABNF: 32 members, key and value
+%% each at most 256 characters (bounded independently — the grammar
+%% allows a ~513-char member, and dropping those would lose long vendor
+%% hints). Over-long or unprintable entries are DROPPED rather than
+%% forwarded, because emitting a header an upstream rejects is worse
+%% than losing one vendor's hint.
 %%--------------------------------------------------------------------
 
 parse_ts(undefined) ->
@@ -574,7 +611,9 @@ parse_ts_member(Member0) ->
     Member = trim(Member0),
     case binary:split(Member, <<"=">>) of
         [Key, Value] ->
-            case valid_ts_token(Key, ?TS_MAX_KEY) andalso valid_ts_value(Value) of
+            KeyOk = byte_size(Key) =< ?TS_MAX_KEY,
+            ValOk = byte_size(Value) =< ?TS_MAX_VALUE,
+            case KeyOk andalso ValOk andalso valid_ts_token(Key) andalso valid_ts_value(Value) of
                 true -> {true, {Key, Value}};
                 false -> false
             end;
@@ -591,12 +630,19 @@ parse_ts_member(Member0) ->
 %% per-customer state, and silently dropping those entries would break
 %% exactly the tenants the header exists to serve. Every segment is
 %% validated; a malformed segment drops the whole entry (never forwarded
-%% half-formed).
-valid_ts_token(K, Max) ->
-    byte_size(K) >= 1 andalso byte_size(K) =< Max andalso
+%% half-formed). Length is bounded by the per-field caps in
+%% `parse_ts_member/1', matching the grammar's own 0*255 bounds.
+valid_ts_token(K) ->
+    byte_size(K) >= 1 andalso
         case binary:split(K, <<"@">>, [global]) of
-            [One] -> valid_ts_segment(One);
-            [Tenant, System] -> valid_ts_segment(Tenant) andalso valid_ts_segment(System);
+            [One] ->
+                valid_ts_segment(One) andalso byte_size(One) =< ?TS_MAX_KEY;
+            [Tenant, System] ->
+                %% The ABNF bounds the segments INDEPENDENTLY:
+                %% tenant-id at 241 chars, system-id at 256 — a joined-key
+                %% cap would drop spec-valid ~498-char multi-tenant keys.
+                valid_ts_segment(Tenant) andalso byte_size(Tenant) =< 241 andalso
+                    valid_ts_segment(System) andalso byte_size(System) =< ?TS_MAX_KEY;
             _ -> false
         end.
 
@@ -614,9 +660,10 @@ valid_ts_segment(Seg) ->
             binary_to_list(Rest)
         ).
 
-%% Value: printable ASCII excluding comma and `='.
+%% Value: printable ASCII excluding comma and `='. Non-empty; length is
+%% bounded by the per-field cap in `parse_ts_member/1', not here.
 valid_ts_value(V) ->
-    byte_size(V) >= 1 andalso byte_size(V) =< ?TS_MAX_VALUE andalso
+    byte_size(V) >= 1 andalso
         lists:all(
             fun(C) -> C >= 16#20 andalso C =< 16#7E andalso C =/= $, andalso C =/= $= end,
             binary_to_list(V)

@@ -76,8 +76,6 @@ encode(Spans, Resource) when is_list(Spans), is_map(Resource) ->
         ]
     }.
 
-%% @doc One span in OTLP JSON shape. Assumes the span was finished;
-%% an unfinished span has no `end_wall_ns' and is skipped by the caller.
 %%%-------------------------------------------------------------------
 %%% Metrics (design §8.1: a second VIEW over the same ETS rows)
 %%%
@@ -239,10 +237,13 @@ encode_hist_point(L, BucketMap, SumUs, Count, StartNs) ->
         <<"startTimeUnixNano">> => integer_to_binary(StartNs),
         <<"timeUnixNano">> => integer_to_binary(now_ns()),
         <<"count">> => integer_to_binary(Count),
-        %% OTLP `sum' is in the instrument's unit (seconds), while the
-        %% registry stores integer microseconds to keep ETS counters
-        %% integral. Converting here keeps the wire value honest.
-        <<"sum">> => float_to_binary(SumUs / 1_000_000, [short]),
+        %% OTLP `sum' is a proto DOUBLE: in OTLP/JSON that is a JSON
+        %% NUMBER, not a decimal string — strings are reserved for the
+        %% 64-bit INTEGER fields (`count', `bucketCounts', `asInt'), and
+        %% a strict protobuf-JSON parser rejects a string where a double
+        %% belongs. The registry stores integer microseconds to keep ETS
+        %% counters integral; converting here keeps the wire value honest.
+        <<"sum">> => SumUs / 1_000_000,
         <<"bucketCounts">> => [integer_to_binary(V) || V <- CountsOut],
         <<"explicitBounds">> => Bounds
     }.
@@ -364,6 +365,8 @@ le_num(Le) when is_integer(Le) ->
 le_num(_) ->
     0.0.
 
+%% @doc One span in OTLP JSON shape. Assumes the span was finished;
+%% an unfinished span has no `end_wall_ns' and is skipped by the caller.
 -spec encode_span(map()) -> map().
 encode_span(Span) ->
     Base = #{

@@ -60,7 +60,11 @@ run(Plugin, Req0, State) ->
     %% modality path would have no TTFC source.
     put(janus_req_started, erlang:monotonic_time(microsecond)),
     ok = janus_trace:set_log_context(Trace),
-    Req1 = janus_request_id:set_trace_response_headers(Req0, Trace),
+    %% No SERVER span on the modality faces (they take no part in span
+    %% recording), so the response carries the legacy `x-trace-id' echo
+    %% and no `traceparent': naming a span nobody recorded would be a
+    %% phantom parent, the exact defect the chat faces fixed.
+    Req1 = janus_request_id:set_trace_response_headers(Req0, Trace, undefined),
     %% Cowboy keep-alive hygiene for modality ACL / plugin process dict.
     erase(janus_req_started),
     erase(janus_req_model),

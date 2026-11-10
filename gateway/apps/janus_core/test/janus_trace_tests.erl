@@ -152,17 +152,59 @@ tracestate_drops_malformed_members_test() ->
 %% Response headers
 %%--------------------------------------------------------------------
 
-response_headers_carry_traceparent_and_legacy_id_test() ->
+response_headers_name_the_server_span_test() ->
+    %% W3C semantics: the response `traceparent' identifies the
+    %% server-side span. The id on the wire must be the span's REAL id —
+    %% the first implementation minted a fresh one, so a client linking
+    %% to the header landed on a span nobody recorded (the phantom-
+    %% parent defect, on the response leg).
     T = janus_trace:ensure(tp(?TID, ?PID, <<"01">>)),
-    Hs = janus_trace:response_headers(T),
+    ServerSpanId = <<"0af7651916cd43dd">>,
+    Hs = janus_trace:response_headers(T, ServerSpanId),
     ?assertEqual(?TID, proplists:get_value(<<"x-trace-id">>, Hs)),
     {<<"traceparent">>, TP} = lists:keyfind(<<"traceparent">>, 1, Hs),
-    ?assertEqual(?TID, span_trace_id(TP)).
+    ?assertEqual(<<"00-", ?TID/binary, "-", ServerSpanId/binary, "-01">>, TP).
+
+response_headers_no_span_omit_traceparent_test() ->
+    %% Without a recorded span there is nothing honest to name: the
+    %% legacy `x-trace-id' still correlates, a minted-id `traceparent'
+    %% would be a phantom parent. `tracestate' rides only with a
+    %% `traceparent', so it is omitted too.
+    T = janus_trace:ensure(tp(?TID, ?PID, <<"01">>), <<"v=1">>),
+    ?assertEqual(
+        [{<<"x-trace-id">>, ?TID}], janus_trace:response_headers(T, undefined)
+    ),
+    ?assertEqual([{<<"x-trace-id">>, ?TID}], janus_trace:response_headers(T)).
 
 response_headers_respect_unsampled_test() ->
+    %% An unsampled trace opens no span, so its response carries the
+    %% legacy id only — but WHEN a caller has a span id (recorded spans
+    %% can exist unsampled in principle), the flag byte still tells the
+    %% truth. A regression to a hardcoded `01' here would tell every
+    %% downstream client to record a trace we are not sampling.
     T = janus_trace:ensure(tp(?TID, ?PID, <<"00">>)),
-    {<<"traceparent">>, TP} = lists:keyfind(<<"traceparent">>, 1, janus_trace:response_headers(T)),
+    ?assertEqual(false, janus_trace:sampled(T)),
+    ?assertEqual([{<<"x-trace-id">>, ?TID}], janus_trace:response_headers(T)),
+    {<<"traceparent">>, TP} =
+        lists:keyfind(<<"traceparent">>, 1, janus_trace:response_headers(T, <<"0af7651916cd43dd">>)),
     ?assertEqual(<<"-00">>, trailing_flag(TP)).
+
+response_headers_rejects_malformed_span_ids_test() ->
+    %% Length, charset and the all-zero id: anything a conformant client
+    %% would reject must not reach the wire — the header is omitted and
+    %% the legacy id still answers.
+    T = janus_trace:ensure(tp(?TID, ?PID, <<"01">>)),
+    Expected = [{<<"x-trace-id">>, ?TID}],
+    ?assertEqual(Expected, janus_trace:response_headers(T, <<"0af7651916cd43d">>)),
+    ?assertEqual(Expected, janus_trace:response_headers(T, <<"0AF7651916CD43DD">>)),
+    ?assertEqual(Expected, janus_trace:response_headers(T, binary:copy(<<"0">>, 16))),
+    ?assertEqual(Expected, janus_trace:response_headers(T, <<"zzzzzzzzzzzzzzzz">>)),
+    ?assertEqual(Expected, janus_trace:response_headers(T, 42)).
+
+response_headers_tracestate_rides_with_traceparent_test() ->
+    T = janus_trace:ensure(tp(?TID, ?PID, <<"01">>), <<"foo=bar">>),
+    Hs = janus_trace:response_headers(T, <<"0af7651916cd43dd">>),
+    ?assertEqual(<<"foo=bar">>, proplists:get_value(<<"tracestate">>, Hs)).
 
 %%--------------------------------------------------------------------
 %% Wire constructors (rolling-deploy shapes)
@@ -330,6 +372,24 @@ tracestate_duplicate_keys_keep_first_test() ->
     %% W3C requires unique keys; leftmost wins (closest to the caller).
     T = janus_trace:ensure(tp(?TID, ?PID, <<"01">>), <<"k=first,k=second">>),
     ?assertEqual([{<<"k">>, <<"first">>}], janus_trace:tracestate(T)).
+
+tracestate_per_field_caps_test() ->
+    %% W3C bounds key and value INDEPENDENTLY (ABNF `0*255' quantifiers):
+    %% a spec-valid member may reach ~513 chars. A whole-member cap at
+    %% 256 would drop exactly the long per-tenant vendor hints the header
+    %% exists to carry — this test pins the per-field rule both ways.
+    LongVal = binary:copy(<<"a">>, 260),
+    T1 = janus_trace:ensure(tp(?TID, ?PID, <<"01">>), <<"k=", LongVal/binary>>),
+    ?assertEqual([], janus_trace:tracestate(T1)),
+    LongKey = binary:copy(<<"k">>, 260),
+    T2 = janus_trace:ensure(tp(?TID, ?PID, <<"01">>), <<LongKey/binary, "=v">>),
+    ?assertEqual([], janus_trace:tracestate(T2)),
+    %% A ~511-char member with BOTH halves in bounds is spec-valid and
+    %% must survive (this is the case a whole-member cap would break).
+    OkKey = binary:copy(<<"k">>, 255),
+    OkVal = binary:copy(<<"v">>, 255),
+    T3 = janus_trace:ensure(tp(?TID, ?PID, <<"01">>), <<OkKey/binary, "=", OkVal/binary>>),
+    ?assertEqual([{OkKey, OkVal}], janus_trace:tracestate(T3)).
 
 parse_ts_non_utf8_does_not_crash_test() ->
     %% Client bytes are not guaranteed UTF-8. Byte-level trimming means a

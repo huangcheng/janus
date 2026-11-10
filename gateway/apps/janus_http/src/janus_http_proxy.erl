@@ -11,7 +11,7 @@
 
 -include("janus_protocol_translate.hrl").
 
--export([handle/5, model_field/1, open_server_span/2, close_server_span/1]).
+-export([handle/5, model_field/1, open_server_span/2, close_server_span/1, export_request_spans/0]).
 %% Conformance seam (F13): drives the auto-tier bump so the closed-enum
 %% rule is asserted against the producer rather than trusted.
 -export([bump_auto_name_failover/0]).
@@ -3975,9 +3975,11 @@ do_track(Status, Route, Usage, Observe) ->
                     ),
                     %% ADDITIVE semconv instrument over the same
                     %% measurement (design §8.1: one registry, two views).
-                    %% Gated on the export knob so a knob-off deployment
+                    %% Gated on the EXPORT knob so a knob-off deployment
                     %% registers no new family and its /metrics output is
-                    %% unchanged in content (§13.4).
+                    %% unchanged in content (§13.4: export on = superset —
+                    %% the Prometheus view must NOT follow the per-signal
+                    %% selection; only the OTLP POST does).
                     case janus_telemetry:export_enabled() of
                         true -> observe_http_server_duration(Status, Stream, LatencyMs);
                         false -> ok
@@ -4077,7 +4079,15 @@ do_track(Status, Route, Usage, Observe) ->
                     %% NEVER written — local pre-pick rejects stay
                     %% unwritten (the metrics above still fire; only
                     %% the usage row is suppressed).
-                    ok
+                    %%
+                    %% The span still closes and exports: these are the
+                    %% pre-pick rejects (invalid_json, wrong_modality,
+                    %% no_route, ...) and their responses already carry a
+                    %% `traceparent' naming the SERVER span — leaving it
+                    %% unexported moves the phantom-parent defect from a
+                    %% minted id to an opened-but-never-sent span.
+                    ok = close_server_span(Status),
+                    ok = export_request_spans()
             end;
         _ ->
             ok
@@ -4358,7 +4368,20 @@ close_server_span(Status) ->
             undefined ->
                 ok;
             Span ->
-                Finished = janus_otel_span:finish(Span, Status),
+                %% `http.response.status_code' is Cond. Required on an HTTP
+                %% SERVER span and was never stamped anywhere (only the
+                %% metric label carried it) — a backend could not tell a
+                %% 401 reject span from a 413 without this.
+                Span1 =
+                    case is_integer(Status) of
+                        true ->
+                            janus_otel_span:set_attr(
+                                Span, <<"http.response.status_code">>, Status
+                            );
+                        false ->
+                            Span
+                    end,
+                Finished = janus_otel_span:finish(Span1, Status),
                 put(janus_otel_server_span, Finished),
                 _ = janus_trace:set_log_span(undefined),
                 ok
@@ -4572,6 +4595,9 @@ attach_usage_to_span(_) ->
 %% today, so there is nothing to emit — recorded here so a later reader
 %% does not add it with the attribute attached.
 observe_genai_tokens(Route, Prompt, Completion, CacheRead, CacheWrite) ->
+    %% export_enabled, not signal_enabled(metrics): same §13.4 reasoning
+    %% as maybe_observe_genai_duration — the Prometheus families are a
+    %% superset when export is on, regardless of signal selection.
     case janus_telemetry:export_enabled() of
         false ->
             ok;

@@ -7,7 +7,7 @@
 %%%-------------------------------------------------------------------
 -module(janus_request_id).
 
--export([resolve/1, set_trace_response_headers/2]).
+-export([resolve/1, set_trace_response_headers/3]).
 
 -define(MAX_LEN, 128).
 
@@ -48,18 +48,20 @@ generate() ->
             <<"req_", FallbackHex/binary>>
     end.
 
-%% @doc Apply the W3C trace response headers (`traceparent', legacy
-%% `x-trace-id', and `tracestate' when present) to a Cowboy request.
+%% @doc Apply the W3C trace response headers (`traceparent' naming the
+%% SERVER span when there is one, legacy `x-trace-id' always) to a
+%% Cowboy request.
 %%
 %% Lives in the HTTP app, not in `janus_trace', because it is the only
 %% trace helper that needs `cowboy': `janus_core' does not list cowboy as
 %% an application dependency and must not start depending on it. One
 %% call site shape for every handler means the W3C header and the legacy
 %% id can never drift apart.
--spec set_trace_response_headers(cowboy_req:req(), janus_trace:t()) -> cowboy_req:req().
-set_trace_response_headers(Req0, Trace) ->
+-spec set_trace_response_headers(cowboy_req:req(), janus_trace:t(), binary() | undefined) ->
+    cowboy_req:req().
+set_trace_response_headers(Req0, Trace, ServerSpanId) ->
     lists:foldl(
         fun({Name, Value}, Req) -> cowboy_req:set_resp_header(Name, Value, Req) end,
         Req0,
-        janus_trace:response_headers(Trace)
+        janus_trace:response_headers(Trace, ServerSpanId)
     ).

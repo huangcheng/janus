@@ -55,7 +55,10 @@ method_not_allowed(Req0) ->
     ok = janus_trace:set_log_context(Trace),
     Req1 = janus_request_id:set_trace_response_headers(
         cowboy_req:set_resp_header(<<"x-request-id">>, ReqId, Req0),
-        Trace
+        Trace,
+        %% Pre-preamble 405 branch: no SERVER span exists, so no
+        %% `traceparent' — only the legacy `x-trace-id' echo.
+        undefined
     ),
     put(janus_request_id, ReqId),
     logger:warning(#{

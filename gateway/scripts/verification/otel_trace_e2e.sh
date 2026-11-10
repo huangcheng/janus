@@ -29,6 +29,20 @@ unset JANUS_DB_HOST
 
 EBINS=()
 for d in "$GW"/_build/default/lib/*/ebin; do EBINS+=(-pa "$d"); done
+# The response `traceparent' now names the SERVER span and is emitted only
+# when one was recorded (a sampled trace); an unsampled response echoes the
+# legacy `x-trace-id' only, because a minted-id traceparent would name a
+# span nobody recorded. Sampling is forced on for this server so the A1/A5
+# root-trace checks exercise the sampled path deterministically.
+# (Set BEFORE the launch: the VM reads the environment at start.)
+export OTEL_TRACES_SAMPLER=always_on
+# A persistent data/janus.db may carry a `telemetry.sampling.ratio' dashboard
+# setting, which takes precedence over the env var (janus_trace:resolve_ratio)
+# and would silently defeat the forced sampler — and the run would write
+# into the working tree. Pin the DB into the scratch dir.
+rm -f "$OUT/janus.db"
+export JANUS_SQLITE_PATH="$OUT/janus.db"
+
 erl -noshell "${EBINS[@]}" \
   -eval "
     application:set_env(janus, http_port, $PORT),
@@ -67,6 +81,18 @@ present "A1 traceparent emitted" "$TP"
 present "A1 x-trace-id emitted" "$XT"
 check "A1 traceparent shape" "55" "${#TP}"
 check "A1 ids agree" "$XT" "$(printf '%s' "$TP" | cut -d- -f2)"
+# The response parent id must be the REAL SERVER span, not a minted phantom:
+# cross-check field 3 against the span id the server logged for this trace.
+# (set_log_span publishes it at span open, so the request's own log lines
+# carry span_id=<server span>.) An implementation that reverts to minting a
+# fresh id — the original phantom-parent defect — fails here.
+A1SID=$(printf '%s' "$TP" | cut -d- -f3)
+if [ -n "$XT" ] && [ -n "$A1SID" ] && \
+   grep "trace_id=$XT" "$OUT/server.log" | grep -q "span_id=$A1SID"; then
+  echo "PASS A1 traceparent names the server span"; pass=$((pass+1))
+else
+  echo "FAIL A1 traceparent names the server span: parent=$A1SID not logged for trace $XT"; fail=$((fail+1))
+fi
 
 # A2: inbound traceparent continues the trace id
 IN="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
@@ -74,11 +100,16 @@ H2=$(curl -D - -o /dev/null "${CHAT[@]}" -H "traceparent: $IN" "$BASE/v1/chat/co
 TP2=$(printf '%s' "$H2" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
 check "A2 inbound trace continued" "4bf92f3577b34da6a3ce929d0e0e4736" "$(printf '%s' "$TP2" | cut -d- -f2)"
 
-# A3: unsampled inbound is honoured on the response
+# A3: unsampled inbound is honoured — no span is recorded, so the honest
+# response is the legacy `x-trace-id' echo (continuing the inbound trace)
+# and NO traceparent: an id naming a span nobody recorded is a phantom
+# parent, the defect class this contract exists to prevent.
 IN0="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
 H3=$(curl -D - -o /dev/null "${CHAT[@]}" -H "traceparent: $IN0" "$BASE/v1/chat/completions")
 TP3=$(printf '%s' "$H3" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
-check "A3 unsampled bit preserved" "00" "$(printf '%s' "$TP3" | cut -d- -f4)"
+XT3=$(printf '%s' "$H3" | tr -d '\r' | awk 'tolower($1)=="x-trace-id:"{print $2}')
+check "A3 unsampled: no traceparent" "" "$TP3"
+check "A3 unsampled: legacy id continues trace" "4bf92f3577b34da6a3ce929d0e0e4736" "$XT3"
 
 # A4: tracestate round-trips
 H4=$(curl -D - -o /dev/null "${CHAT[@]}" -H "traceparent: $IN" -H "tracestate: vend=keep" "$BASE/v1/chat/completions")
@@ -125,6 +156,21 @@ fi
 H7=$(curl -D - -o /dev/null "${CHAT[@]}" -H "tracestate: orphan=1" "$BASE/v1/chat/completions")
 TS7=$(printf '%s' "$H7" | tr -d '\r' | awk 'tolower($1)=="tracestate:"{print $2}')
 check "A7 orphan tracestate dropped" "" "$TS7"
+
+# A10: reject path — a 401 must close and export the SERVER span its
+# traceparent names (the preamble reject-export contract); the unsampled
+# 401 omits the traceparent entirely (no span was recorded).
+H10=$(curl -s -D - -o /dev/null --max-time 10 -X POST -H "content-type: application/json" \
+  -H "authorization: Bearer no-such-key" -H "traceparent: $IN" \
+  -d '{"model":"m","messages":[]}' "$BASE/v1/chat/completions")
+TP10=$(printf '%s' "$H10" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
+check "A10 reject traceparent continues the trace" \
+  "4bf92f3577b34da6a3ce929d0e0e4736" "$(printf '%s' "$TP10" | cut -d- -f2)"
+H10b=$(curl -s -D - -o /dev/null --max-time 10 -X POST -H "content-type: application/json" \
+  -H "authorization: Bearer no-such-key" -H "traceparent: $IN0" \
+  -d '{"model":"m","messages":[]}' "$BASE/v1/chat/completions")
+TP10b=$(printf '%s' "$H10b" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
+check "A10 unsampled reject omits traceparent" "" "$TP10b"
 
 printf '%s\n' "--- $pass passed, $fail failed ---" | tee "$OUT/summary.txt"
 echo "$pass passed, $fail failed" > "$OUT/result.txt"
