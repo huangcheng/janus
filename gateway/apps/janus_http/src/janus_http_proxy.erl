@@ -6,6 +6,17 @@
 -module(janus_http_proxy).
 
 -define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
+%% Shared by BOTH renderers (stream_failure_text/1 on the native path and
+%% sanitize_stream_reason/1 on the translate path). A macro rather than two
+%% literals so the agreement is structural: the whole point of the
+%% reason-text tests is that these two cannot drift, and every other shared
+%% sentence is already centralized.
+-define(UNEXPECTED_FRAME_MSG, <<"upstream sent an unexpected stream frame">>).
+%% An internal-hop inflate failure is OUR wire, not the provider's. Written
+%% from two exits (the committed native path and the uncommitted reply), so
+%% it is a macro: two literals are exactly how "one cause, one sentence"
+%% silently breaks.
+-define(INTERNAL_INFLATE_FAIL_MSG, <<"internal wire inflate failed">>).
 -define(STREAM_TIMEOUT_MSG, <<"upstream stream exceeded the total time budget">>).
 
 
@@ -46,6 +57,14 @@
 %% upstream failure, and that distinction decides whether a healthy provider
 %% gets benched. Pure so the contract is pinnable without a socket.
 -export([limit_terminal_accounting/0]).
+%% Exported for eunit: the two renderers of a mid-stream drain reason. They
+%% had drifted apart (the native one knew {body,_}, the translate one did
+%% not, so the client read `api_error: body`), and a test that compares them
+%% is the only thing that keeps them in step.
+-export([
+    sanitize_stream_reason/1, stream_failure_text/1, drain_detail_text/3,
+    body_failure_text/1
+]).
 %% Exported for eunit (Decisions spec 2026-10-07): face eligibility
 %% gate + ordered pre-pick pipeline + forward-decision predicates.
 -export([
@@ -2011,6 +2030,17 @@ native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
             _ -> {502, error}
         end,
     note_usage_outcome(OutcomeKind),
+    %% Stash BEFORE the row is written. This exit is the COMMITTED native
+    %% passthrough stream, and it stashed nothing: every such 502 was written
+    %% with error_detail NULL, so a body-side stall here was indistinguishable
+    %% from any other upstream failure after the fact — the same loss the
+    %% local execution path had. A client disconnect (499/cancelled) is not an
+    %% upstream fault and keeps a clean row.
+    _ =
+        case Reason of
+            closed -> ok;
+            _ -> put(janus_error_detail, drain_detail_text(TrackStatus, Reason, stream_failure_text(Reason)))
+        end,
     _ = track_proxied(TrackStatus, Route, stream_usage(ClientProto)),
     SafeReason = sanitize_upstream_error(Reason),
     case Reason of
@@ -2044,6 +2074,55 @@ native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
     catch cowboy_req:stream_body(<<"\n">>, fin, Req2),
     {ok, Req2, State}.
 
+%% Usage-row detail for a local-path upstream failure: the DRAIN reason when it
+%% is specific enough to be useful, else the client-facing text. Kept a binary
+%% because the row reader guards on is_binary.
+drain_detail_text(Status, Reason, Fallback) ->
+    Detailed =
+        case {Status, Reason} of
+            %% A 504 is the FIRST-BYTE budget and the client text already says
+            %% so. Every 504-shaped reason maps here, including
+            %% {await, timeout} — error_http_status/1 turns that tuple into 504
+            %% unconditionally, so there is no 502/await-timeout state to
+            %% distinguish and no need for a branch for one.
+            {504, _} ->
+                undefined;
+            %% timeout is a STALL, not a generic body error — the same
+            %% distinction both renderers make, so the row matches the client.
+            {_, {body, timeout}} ->
+                ?UPSTREAM_STALLED_MSG;
+            {_, {body, R}} ->
+                body_failure_text(R);
+            {_, {await, no_progress}} ->
+                ?UPSTREAM_STALLED_MSG;
+            %% Internal-hop inflate failure is OUR wire, not the provider's
+            %% (native_stream_fail skips benching for exactly this reason).
+            %% Without this clause the row falls back to a provider-blaming
+            %% sentence, and the sibling uncommitted branch already records
+            %% the honest "internal wire inflate failed" for the same
+            %% condition — one cause must not produce two different rows.
+            {_, R} when ?IS_WIRE_ENC_ABORT(R) ->
+                ?INTERNAL_INFLATE_FAIL_MSG;
+            %% Delegated, never re-worded: one condition, one sentence. The
+            %% guard keeps an UNKNOWN shape out of stream_failure_text/1 (whose
+            %% catch-all is the vague "upstream error") so an unrecognised
+            %% reason still falls back to the status-derived client text.
+            %% Only the shapes not already handled above: `body` has its two
+            %% clauses, so listing it here would be dead.
+            {_, R} when
+                is_tuple(R) andalso tuple_size(R) >= 1 andalso
+                    (element(1, R) =:= content_encoding orelse
+                        element(1, R) =:= unexpected_body)
+            ->
+                stream_failure_text(R);
+            _ ->
+                undefined
+        end,
+    case Detailed of
+        undefined -> Fallback;
+        Bin -> Bin
+    end.
+
 %% Human-readable, single-line, SSE-safe reason for a mid-stream close.
 sse_failure_notice(closed) ->
     <<>>;
@@ -2052,8 +2131,13 @@ sse_failure_notice(Reason) ->
     iolist_to_binary([<<": janus stream failed - ">>, Text, <<"\n\n">>]).
 
 stream_failure_text({body, timeout}) -> ?UPSTREAM_STALLED_MSG;
+stream_failure_text({body, Reason}) -> body_failure_text(Reason);
 stream_failure_text({await, timeout}) -> ?STREAM_TIMEOUT_MSG;
 stream_failure_text({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
+stream_failure_text({unexpected_body, _}) -> ?UNEXPECTED_FRAME_MSG;
+%% Top-level shape: janus_providers_http surfaces a decode failure on the
+%% decoded drain as {content_encoding, _} rather than nesting it under body.
+stream_failure_text({content_encoding, _}) -> body_failure_text({content_encoding, x});
 stream_failure_text(closed) -> <<"client disconnected">>;
 stream_failure_text(_) -> <<"upstream error">>.
 
@@ -2208,7 +2292,7 @@ handle_upstream(
     %% and stashed the distinguishing `wire_enc_inflate_fail` usage
     %% outcome (first-write-wins — note_usage_outcome stays inert).
     note_usage_outcome(error),
-    _ = put(janus_error_detail, <<"internal wire inflate failed">>),
+    _ = put(janus_error_detail, ?INTERNAL_INFLATE_FAIL_MSG),
     _ = track_proxied(502, Route, #{}),
     _ = release_route_inflight(Route),
     logger:error(#{
@@ -2243,6 +2327,17 @@ handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate,
             {_, {worker_error, _}} -> {<<"worker_upstream_error">>, <<"upstream worker error">>};
             _ -> {<<"upstream_error">>, upstream_detail_msg()}
         end,
+    %% Stash the reason BEFORE reply_err writes the row. This branch is the
+    %% LOCAL execution path's failure exit (the worker was unavailable, so
+    %% the master drained the provider itself) and it computed `Msg` without
+    %% ever recording it: every such 502 was written with error_detail NULL,
+    %% so a body-side stall was indistinguishable from any other upstream
+    %% failure after the fact — the live 2026-11-11 case where a 147s stream
+    %% produced `api_error: body` and no row said why.
+    %%
+    %% The drain reason is the useful part and it is richer than the generic
+    %% client text, so record the sanitized reason when there is one.
+    _ = put(janus_error_detail, drain_detail_text(Status, Reason, Msg)),
     reply_err(ClientProto, Req, State, Status, Code, Msg).
 
 %% Error fidelity (2026-10-27): failover exhaustion used to collapse
@@ -2372,7 +2467,47 @@ sanitize_stream_reason({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
 %% The sibling budget: without this clause the tuple falls through to
 %% wire_reason's ~w rendering and the client reads an Erlang term.
 sanitize_stream_reason({await, timeout}) -> ?STREAM_TIMEOUT_MSG;
+%% Body-side failures, same words as stream_failure_text/1. This clause was
+%% MISSING and it was the live 2026-11-11 bug: the local execution path
+%% (janus_providers_http drains the provider directly when no worker is
+%% available) reports a silent body as {body, timeout}, which fell through to
+%% sanitize_upstream_error/1 — whose {Tag, _} -> Tag clause returns the bare
+%% atom `body`, so the client was told `api_error: body` after a 147s stream.
+sanitize_stream_reason({body, timeout}) -> ?UPSTREAM_STALLED_MSG;
+sanitize_stream_reason({body, Reason}) -> body_failure_text(Reason);
+%% The sibling drain shape: a frame arrived where none was expected. Named
+%% like the two above so it cannot fall through to sanitize_upstream_error/1
+%% and reach the client as the bare atom `unexpected_body`.
+sanitize_stream_reason({unexpected_body, _}) -> ?UNEXPECTED_FRAME_MSG;
+%% Top-level decode failure (janus_providers_http's decoded drain). Without
+%% this clause it fell through to sanitize_upstream_error/1, which returns the
+%% bare atom `content_encoding` — the same leak as `body`, one shape over.
+sanitize_stream_reason({content_encoding, _}) ->
+    body_failure_text({content_encoding, x});
 sanitize_stream_reason(Other) -> sanitize_upstream_error(Other).
+
+%% A body that stopped for a reason other than silence. Still names the body
+%% (that is where it broke and it is what an operator greps for) but never
+%% echoes an Erlang term.
+%% Reasons that mean the connection ENDED, in gun's vocabulary. Grouped so
+%% an operator sees "closed" for a reset rather than a vaguer "error".
+body_failure_text(closed) -> <<"upstream body closed">>;
+body_failure_text(econnreset) -> <<"upstream body closed">>;
+body_failure_text(closed_by_peer) -> <<"upstream body closed">>;
+%% A HEADERS-level contract violation (janus_wire_enc:classify_content_encoding/1
+%% rejected the provider's Content-Encoding) is not a decompression failure —
+%% nothing was ever decompressed. "Unsupported encoding" is the honest
+%% sentence, and this text now reaches both the SSE comment and the usage row,
+%% so the distinction is worth a clause.
+body_failure_text({content_encoding, {violation, _}}) ->
+    <<"upstream sent an unsupported content-encoding">>;
+body_failure_text({content_encoding, _}) -> <<"upstream body decompression error">>;
+%% A size cap is a distinct, greppable cause (janus_providers_http:
+%% collect_body/5 crosses ?MAX_BODY_BYTES) and the decisions face already has
+%% its own sentence for it. Reported as a generic body error it reads like a
+%% transport fault and sends an operator looking in the wrong place.
+body_failure_text(too_large) -> <<"upstream response body exceeds size limit">>;
+body_failure_text(_) -> <<"upstream body error">>.
 
 wire_msg(Msg) when is_atom(Msg) -> atom_to_binary(Msg, utf8);
 wire_msg(Msg) -> unicode:characters_to_binary(io_lib:format("~w", [Msg])).
