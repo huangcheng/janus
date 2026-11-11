@@ -1,13 +1,5 @@
 import { useEffect, useState } from "react"
-import {
-  ArrowLeftRight,
-  Database,
-  Gauge,
-  GitBranch,
-  KeyRound,
-  Layers,
-  RefreshCw,
-} from "lucide-react"
+import { RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { Bar, BarChart, XAxis } from "recharts"
 import { api } from "../api"
@@ -19,6 +11,7 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart"
 import { Button } from "@/components/ui/button"
+import { GatewayOverview, GatewayOverviewSkeleton } from "@/components/gateway-overview"
 import {
   Card,
   CardContent,
@@ -27,7 +20,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { StatCard, StatCardSkeleton } from "@/components/stat-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Table,
@@ -245,21 +237,6 @@ export function Dashboard() {
     }
   }
 
-  const stats = data
-    ? [
-        { label: "Generation", value: data.generation, icon: Gauge },
-        {
-          label: "DB backend",
-          value: String(data.backend).replace(/^\S/, (c: string) => c.toUpperCase()),
-          icon: Database,
-        },
-        { label: "Providers", value: data.counts.providers, icon: ArrowLeftRight },
-        { label: "Listings", value: data.counts.listings ?? data.counts.models ?? 0, icon: Layers },
-        { label: "Bindings", value: data.counts.routes, icon: GitBranch },
-        { label: "Agent keys", value: data.counts.agent_keys, icon: KeyRound },
-      ]
-    : []
-
   return (
     <Layout
       title="Dashboard"
@@ -293,25 +270,20 @@ export function Dashboard() {
       }
     >
       {error && <ErrorFlash message={error} />}
-      {!data && !error ? (
-        <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <StatCardSkeleton key={i} />
-          ))}
-        </div>
-      ) : null}
+      {!data && !error ? <GatewayOverviewSkeleton /> : null}
       {data && (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
-            {stats.map((s) => (
-              <StatCard
-                key={s.label}
-                label={s.label}
-                value={s.value}
-                icon={s.icon}
-              />
-            ))}
-          </div>
+          <GatewayOverview
+            generation={data.generation}
+            backend={data.backend}
+            ready={data.ready}
+            counts={{
+              providers: data.counts.providers,
+              listings: data.counts.listings ?? data.counts.models ?? 0,
+              bindings: data.counts.routes,
+              agentKeys: data.counts.agent_keys,
+            }}
+          />
 
           <div className="grid items-stretch gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
             <Card>

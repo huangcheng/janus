@@ -9,21 +9,23 @@
 
 :root {
   color-scheme: light;
-  --radius: 0.625rem;
-  --background: oklch(0.978 0.004 258);
-  --foreground: oklch(0.21 0.012 258);
-  --card: oklch(0.996 0.002 258);
-  --card-foreground: oklch(0.21 0.012 258);
-  --popover: oklch(0.996 0.002 258);
-  --popover-foreground: oklch(0.21 0.012 258);
-  --primary: oklch(0.48 0.12 258);
-  --primary-foreground: oklch(0.985 0.004 258);
-  --secondary: oklch(0.955 0.007 258);
-  --secondary-foreground: oklch(0.28 0.016 258);
-  --muted: oklch(0.955 0.007 258);
-  --muted-foreground: oklch(0.50 0.018 258);
-  --accent: oklch(0.945 0.014 258);
-  --accent-foreground: oklch(0.35 0.055 258);
+  --radius: 0.75rem;
+  --background: oklch(0.975 0.004 220);
+  --foreground: oklch(0.235 0.025 265);
+  --card: oklch(0.997 0.002 220);
+  --card-foreground: oklch(0.235 0.025 265);
+  --popover: oklch(0.997 0.002 220);
+  --popover-foreground: oklch(0.235 0.025 265);
+  --primary: oklch(0.89 0.18 120);
+  --primary-foreground: oklch(0.22 0.035 265);
+  --link: oklch(0.45 0.13 120);
+  --control-border: oklch(0.45 0.13 120);
+  --secondary: oklch(0.925 0.012 265);
+  --secondary-foreground: oklch(0.35 0.025 265);
+  --muted: oklch(0.945 0.006 220);
+  --muted-foreground: oklch(0.43 0.02 265);
+  --accent: oklch(0.91 0.035 265);
+  --accent-foreground: oklch(0.30 0.04 265);
   /* Darkened from oklch(0.577 0.245) so the ONE destructive color clears AA on
      every surface it appears on: solid button label (5.61:1), plain danger
      text (5.49:1), the Badge "danger" /10 tint (4.91:1) and the highest tint
@@ -33,14 +35,14 @@
   --destructive-foreground: oklch(0.985 0.004 258);
   --success: oklch(0.48 0.115 168);
   --warning: oklch(0.46 0.13 70);
-  --border: oklch(0.89 0.009 258);
+  --border: oklch(0.865 0.015 265);
   /* Input borders are a WCAG 1.4.11 boundary, not decoration: a form field
      has to be findable without relying on its shadow, so this is deliberately
      darker than --border (3.3:1 against --card vs 1.4:1 for card edges). */
   --input: oklch(0.64 0.012 258);
-  --ring: oklch(0.62 0.09 258);
-  --chart-1: oklch(0.56 0.13 258);
-  --chart-2: oklch(0.62 0.10 190);
+  --ring: oklch(0.58 0.13 120);
+  --chart-1: oklch(0.58 0.14 120);
+  --chart-2: oklch(0.50 0.08 265);
   --chart-3: oklch(0.60 0.13 70);
   --chart-4: oklch(0.55 0.12 310);
   --chart-5: oklch(0.58 0.16 25);
@@ -55,32 +57,36 @@
      token always resolves even if a future call site forgets dark:. */
   --field-fill: transparent;
   --field-fill-hover: transparent;
-  --sidebar: oklch(0.988 0.003 258);
-  --sidebar-foreground: oklch(0.25 0.014 258);
-  --sidebar-primary: oklch(0.48 0.12 258);
-  --sidebar-primary-foreground: oklch(0.985 0.004 258);
-  --sidebar-accent: oklch(0.95 0.012 258);
-  --sidebar-accent-foreground: oklch(0.30 0.035 258);
-  --sidebar-border: oklch(0.90 0.008 258);
-  --sidebar-ring: oklch(0.62 0.09 258);
+  --sidebar: oklch(0.205 0.025 265);
+  --sidebar-foreground: oklch(0.94 0.01 265);
+  --sidebar-primary: oklch(0.89 0.18 120);
+  --sidebar-primary-foreground: oklch(0.22 0.035 265);
+  --sidebar-accent: oklch(0.28 0.035 265);
+  --sidebar-accent-foreground: oklch(0.98 0.01 120);
+  --sidebar-border: oklch(0.34 0.025 265);
+  --sidebar-ring: oklch(0.75 0.15 120);
+  --sidebar-warning: oklch(0.79 0.12 80);
+  --sidebar-success: oklch(0.72 0.12 168);
 }
 
 .dark {
   color-scheme: dark;
-  --background: oklch(0.155 0.009 258);
-  --foreground: oklch(0.95 0.005 258);
-  --card: oklch(0.205 0.011 258);
-  --card-foreground: oklch(0.95 0.005 258);
-  --popover: oklch(0.215 0.011 258);
-  --popover-foreground: oklch(0.95 0.005 258);
-  --primary: oklch(0.72 0.105 258);
-  --primary-foreground: oklch(0.18 0.02 258);
-  --secondary: oklch(0.265 0.012 258);
-  --secondary-foreground: oklch(0.95 0.005 258);
-  --muted: oklch(0.265 0.012 258);
-  --muted-foreground: oklch(0.76 0.015 258);
-  --accent: oklch(0.285 0.022 258);
-  --accent-foreground: oklch(0.90 0.025 258);
+  --background: oklch(0.155 0.015 265);
+  --foreground: oklch(0.94 0.01 265);
+  --card: oklch(0.205 0.02 265);
+  --card-foreground: oklch(0.94 0.01 265);
+  --popover: oklch(0.215 0.02 265);
+  --popover-foreground: oklch(0.94 0.01 265);
+  --primary: oklch(0.82 0.17 120);
+  --primary-foreground: oklch(0.18 0.025 265);
+  --link: oklch(0.82 0.17 120);
+  --control-border: oklch(0.94 0.01 265);
+  --secondary: oklch(0.265 0.02 265);
+  --secondary-foreground: oklch(0.90 0.01 265);
+  --muted: oklch(0.255 0.018 265);
+  --muted-foreground: oklch(0.74 0.015 265);
+  --accent: oklch(0.285 0.025 265);
+  --accent-foreground: oklch(0.92 0.01 120);
   --destructive: oklch(0.70 0.18 24);
   /* Dark destructive is a LIGHT red, so its button label is near-black — the
      same pairing shadcn uses for dark --primary. Hardcoded white text only
@@ -89,7 +95,7 @@
   --destructive-foreground: oklch(0.18 0.02 258);
   --success: oklch(0.72 0.12 168);
   --warning: oklch(0.79 0.12 80);
-  --border: oklch(1 0.005 258 / 10%);
+  --border: oklch(1 0.005 258 / 12%);
   /* Same 1.4.11 reasoning as the light theme: this is the input's border
      color, raised to ~3.2:1 against --card. Historically the primitives also
      derived the dark field FILL from this token (bg-input/30 over the old
@@ -102,20 +108,22 @@
      brighten every dark field. */
   --field-fill: oklch(1 0.005 258 / 4.2%);
   --field-fill-hover: oklch(1 0.005 258 / 7%);
-  --ring: oklch(0.72 0.105 258);
-  --chart-1: oklch(0.72 0.105 258);
-  --chart-2: oklch(0.70 0.12 190);
+  --ring: oklch(0.75 0.15 120);
+  --chart-1: oklch(0.78 0.15 120);
+  --chart-2: oklch(0.70 0.08 265);
   --chart-3: oklch(0.77 0.16 70);
   --chart-4: oklch(0.72 0.12 310);
   --chart-5: oklch(0.68 0.16 25);
-  --sidebar: oklch(0.18 0.01 258);
-  --sidebar-foreground: oklch(0.90 0.008 258);
-  --sidebar-primary: oklch(0.72 0.105 258);
-  --sidebar-primary-foreground: oklch(0.18 0.02 258);
-  --sidebar-accent: oklch(0.25 0.016 258);
-  --sidebar-accent-foreground: oklch(0.94 0.01 258);
-  --sidebar-border: oklch(1 0.005 258 / 9%);
-  --sidebar-ring: oklch(0.72 0.105 258);
+  --sidebar: oklch(0.175 0.025 265);
+  --sidebar-foreground: oklch(0.94 0.01 265);
+  --sidebar-primary: oklch(0.82 0.17 120);
+  --sidebar-primary-foreground: oklch(0.18 0.025 265);
+  --sidebar-accent: oklch(0.26 0.03 265);
+  --sidebar-accent-foreground: oklch(0.96 0.01 120);
+  --sidebar-border: oklch(0.34 0.025 265);
+  --sidebar-ring: oklch(0.75 0.15 120);
+  --sidebar-warning: oklch(0.79 0.12 80);
+  --sidebar-success: oklch(0.72 0.12 168);
 }
 
 @theme inline {
@@ -131,6 +139,8 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-link: var(--link);
+  --color-control-border: var(--control-border);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -161,6 +171,8 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-warning: var(--sidebar-warning);
+  --color-sidebar-success: var(--sidebar-success);
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, monospace;
 }
@@ -223,7 +235,7 @@
   a,
   button {
     touch-action: manipulation;
-    -webkit-tap-highlight-color: color-mix(in oklch, var(--primary) 18%, transparent);
+    -webkit-tap-highlight-color: color-mix(in oklch, var(--primary) 45%, transparent);
   }
   h1,
   h2,
@@ -235,7 +247,8 @@
     text-wrap: pretty;
   }
   ::selection {
-    background: color-mix(in oklch, var(--primary) 22%, transparent);
+    background: color-mix(in oklch, var(--primary) 65%, transparent);
+    color: var(--primary-foreground);
   }
 }
 

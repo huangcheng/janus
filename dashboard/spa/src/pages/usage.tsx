@@ -189,7 +189,7 @@ function BreakdownCard({ title, rows }: { title: string; rows: UsageSummary["by_
                   <TableCell>
                     <div className="h-1.5 w-full rounded bg-muted" aria-hidden>
                       <div
-                        className="h-1.5 w-full origin-left rounded bg-primary/60 transition-transform duration-200 ease-out"
+                        className="h-1.5 w-full origin-left rounded bg-link/60 transition-transform duration-200 ease-out"
                         style={{ transform: `scaleX(${r.requests / maxReq})` }}
                       />
                   </div>

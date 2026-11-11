@@ -265,14 +265,6 @@ export function EventTime({ ts }: { ts?: string }) {
   )
 }
 
-/** Human-friendly protocol labels (wire format stays openai_chat etc.). */
-export const PROTOCOL_LABELS: Record<string, string> = {
-  openai_chat: "OpenAI Chat",
-  openai_responses: "OpenAI Responses",
-  anthropic_messages: "Anthropic Messages",
-  openai_decisions: "OpenAI Decisions",
-}
-
 /** OpenAI Decisions probe state (GET /api/providers/{id}/decisions-probe). */
 export type DecisionsProbeResult = {
   outcome: "ok" | "bad_key" | "inconclusive"
@@ -295,9 +287,7 @@ export type DecisionsProbeState = {
   last_result: DecisionsProbeResult | null
 }
 
-export function protocolLabel(protocol: string): string {
-  return PROTOCOL_LABELS[protocol] ?? protocol
-}
+export { PROTOCOL_LABELS, protocolLabel } from "@/lib/protocols"
 
 export function StateBadge({ enabled }: { enabled: boolean }) {
   if (enabled) {
@@ -547,7 +537,7 @@ export function TraceLink({
         }}
         title={`Open the timeline for trace ${traceId}`}
         aria-label={`Open the timeline for trace ${traceId}`}
-        className="truncate font-mono text-xs text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="truncate font-mono text-xs text-link underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {traceId}
       </button>
@@ -722,7 +712,7 @@ export function TimelineDialog({
                 <button
                   type="button"
                   onClick={() => setPivot(null)}
-                  className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-link underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   Back to this request
                 </button>

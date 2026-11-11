@@ -1161,7 +1161,7 @@ function BindModal({
             </FieldDescription>
           </Field>
           {publicName.trim() && choice && (
-            <p className="rounded-md border border-primary/25 bg-primary/[0.06] px-3 py-2 font-mono text-xs">
+            <p className="rounded-md border border-link/25 bg-link/[0.06] px-3 py-2 font-mono text-xs">
               model=&quot;{publicName.trim()}&quot; → {choice.provider.name} /{" "}
               {choice.listing.name}
             </p>

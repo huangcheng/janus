@@ -882,7 +882,7 @@ export function Providers() {
                                         key={w.node}
                                         className={cn(
                                           "flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-xs",
-                                          w.node === p.affinity_node && "bg-primary/5",
+                                          w.node === p.affinity_node && "bg-link/5",
                                         )}
                                       >
                                         <span className="font-mono">{w.node}</span>
@@ -1213,7 +1213,7 @@ function AddProviderModal({
                       href={keysUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-0.5 font-medium text-primary hover:underline"
+                      className="inline-flex items-center gap-0.5 font-medium text-link hover:underline"
                     >
                       Get a key
                       <ExternalLink className="size-3" />
@@ -1336,7 +1336,7 @@ function AddProviderModal({
                       href={keysUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-0.5 font-medium text-primary hover:underline"
+                      className="inline-flex items-center gap-0.5 font-medium text-link hover:underline"
                     >
                       Get a key
                       <ExternalLink className="size-3" />

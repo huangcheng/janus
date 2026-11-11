@@ -60,6 +60,11 @@ import { copyText } from "@/lib/clipboard"
 
 type Theme = "light" | "dark"
 
+const THEME_COLORS: Record<Theme, string> = {
+  light: "#f3f5f7",
+  dark: "#090c13",
+}
+
 const ThemeContext = createContext<{ theme: Theme; toggle: () => void } | null>(null)
 
 /** Owns the light/dark class for the whole console. One provider at the
@@ -75,6 +80,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     // which StrictMode would invoke twice and so flip the class back.
     const next: Theme = document.documentElement.classList.contains("dark") ? "light" : "dark"
     document.documentElement.classList.toggle("dark", next === "dark")
+    document.getElementById("theme-color")?.setAttribute("content", THEME_COLORS[next])
     try {
       localStorage.setItem("janus-theme", next)
     } catch {}
@@ -204,7 +210,7 @@ function EndpointRow({ label, url }: { label: string; url: string }) {
       type="button"
       onClick={copy}
       title={`Copy ${url}`}
-      className="group flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-sidebar-accent"
+      className="group flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
     >
       <span className="min-w-0">
         <span className="block text-xs">{label}</span>
@@ -229,6 +235,24 @@ function EndpointRow({ label, url }: { label: string; url: string }) {
         />
       </span>
     </button>
+  )
+}
+
+export function BrandMark({ subtitle = "Gateway console" }: { subtitle?: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <img
+        src={`${import.meta.env.BASE_URL}icon.png`}
+        alt=""
+        width={44}
+        height={44}
+        className="size-11 rounded-[14px] shadow-sm ring-1 ring-sidebar-border"
+      />
+      <div className="flex flex-col gap-1">
+        <span className="text-[21px] leading-none font-semibold tracking-[-0.045em]">Janus</span>
+        <span className="font-mono text-[9px] tracking-[0.12em] text-sidebar-foreground/55 uppercase">{subtitle}</span>
+      </div>
+    </div>
   )
 }
 
@@ -261,26 +285,14 @@ function AppSidebar() {
   }
 
   return (
-    <Sidebar>
-      <SidebarHeader className="border-b border-sidebar-border/70 px-4 py-4">
-        <div className="flex items-center gap-3">
-          <img
-            src={`${import.meta.env.BASE_URL}icon.png`}
-            alt="Janus"
-            width={36}
-            height={36}
-            className="size-9 rounded-xl shadow-sm ring-1 ring-border"
-          />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[15px] leading-none font-semibold tracking-[-0.02em]">Janus</span>
-            <span className="text-[11px] tracking-wide text-muted-foreground uppercase">Gateway console</span>
-          </div>
-        </div>
+    <Sidebar className="border-sidebar-border">
+      <SidebarHeader className="border-b border-sidebar-border px-5 py-6">
+        <BrandMark />
       </SidebarHeader>
-      <SidebarContent className="gap-1 py-2">
+      <SidebarContent className="gap-2 py-4">
         {NAV_GROUPS.map((group) => (
           <SidebarGroup key={group} className="px-3 py-1">
-            <SidebarGroupLabel className="h-7 px-2 text-[10px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+            <SidebarGroupLabel className="h-7 px-2 font-mono text-[9px] font-medium tracking-[0.13em] text-sidebar-foreground/55 uppercase">
               {group}
             </SidebarGroupLabel>
             <SidebarGroupContent>
@@ -303,10 +315,10 @@ function AppSidebar() {
           </SidebarGroup>
         ))}
       </SidebarContent>
-      <SidebarFooter className="border-t border-sidebar-border/70 p-3">
+      <SidebarFooter className="border-t border-sidebar-border p-4">
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="w-full justify-between">
+            <Button variant="outline" size="sm" className="h-9 w-full justify-between border-sidebar-border bg-sidebar-accent/50 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:border-sidebar-border dark:bg-sidebar-accent/50 dark:text-sidebar-foreground dark:hover:bg-sidebar-accent dark:hover:text-sidebar-accent-foreground">
               <span className="flex items-center gap-2">
                 <Terminal />
                 API endpoints
@@ -334,7 +346,7 @@ function AppSidebar() {
             )}
           </PopoverContent>
         </Popover>
-        <Button variant="ghost" size="sm" className="justify-start text-muted-foreground" style={{ justifyContent: "flex-start" }} onClick={signOut}>
+        <Button variant="ghost" size="sm" className="justify-start text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-foreground" onClick={signOut}>
           <LogOut />
           Sign out
         </Button>
@@ -364,21 +376,13 @@ export function Layout({
       </a>
       <AppSidebar />
       <SidebarInset>
-        <header className="sticky top-0 z-20 flex min-h-16 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/80 bg-background/90 px-4 py-3 backdrop-blur-md md:px-7">
+        <header className="sticky top-0 z-20 flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/70 bg-background/95 px-4 py-2.5 backdrop-blur-md md:px-8">
           <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="hidden data-[orientation=vertical]:h-5 sm:block" />
-          <div className="flex min-w-24 flex-1 flex-col gap-1.5">
-            <h1 className="truncate text-xl leading-7 font-semibold tracking-[-0.025em] text-pretty">
-              {title}
-            </h1>
-            {description && (
-              <p
-                className="hidden max-w-3xl text-[13px] leading-5 text-muted-foreground sm:block"
-                title={description}
-              >
-                {description}
-              </p>
-            )}
+          <Separator orientation="vertical" className="hidden data-[orientation=vertical]:h-4 sm:block" />
+          <div className="flex min-w-0 flex-1 items-center gap-2 font-mono text-[10px] text-muted-foreground">
+            <span>Janus</span>
+            <span aria-hidden className="text-border">/</span>
+            <strong className="truncate font-medium text-foreground">{title}</strong>
           </div>
           <div className="ml-auto flex max-w-full items-center gap-2 [&>span]:hidden sm:[&>span]:inline-flex">{actions}</div>
           <div>
@@ -388,8 +392,24 @@ export function Layout({
         <div
           id="main-content"
           tabIndex={-1}
-          className="mx-auto flex w-full max-w-[88rem] min-w-0 scroll-mt-24 flex-none flex-col gap-6 p-4 pb-12 md:p-7 md:pb-16"
+          className="mx-auto flex w-full max-w-[90rem] min-w-0 scroll-mt-24 flex-none flex-col gap-7 p-4 pb-12 md:p-8 md:pb-16"
         >
+          <section className="flex flex-col gap-3 pt-1 pb-2" aria-labelledby="page-title">
+            <div className="flex items-center gap-2.5 font-mono text-[9px] font-medium tracking-[0.13em] text-muted-foreground uppercase">
+              <span className="h-0.5 w-5 bg-foreground" aria-hidden />
+              Control plane
+            </div>
+            <div>
+              <h1 id="page-title" className="max-w-[20ch] text-[clamp(2.25rem,3.4vw,3rem)] leading-[1.03] font-semibold tracking-[-0.057em] text-balance">
+                {title}
+              </h1>
+              {description && (
+                <p className="mt-3 max-w-[62ch] text-sm leading-6 text-muted-foreground">
+                  {description}
+                </p>
+              )}
+            </div>
+          </section>
           {children}
         </div>
       </SidebarInset>

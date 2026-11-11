@@ -63,7 +63,7 @@ export function Setup() {
 
   if (alreadyConfigured) {
     return (
-      <AuthShell footer={<span>After setup: enable 2FA and register a passkey on Account</span>}>
+      <AuthShell title="Already set up" footer={<span>After setup: enable 2FA and register a passkey on Account</span>}>
         <Card className="w-full max-w-sm shadow-sm">
           <CardHeader className="text-center">
             <CardTitle className="text-xl">Already set up</CardTitle>
@@ -80,7 +80,7 @@ export function Setup() {
   }
 
   return (
-    <AuthShell footer={<span>After setup: enable 2FA and register a passkey on Account</span>}>
+    <AuthShell title="Create the operator account" footer={<span>After setup: enable 2FA and register a passkey on Account</span>}>
       <Card className="shadow-sm">
         <CardHeader className="text-center">
           <CardTitle className="text-xl">Create the operator account</CardTitle>

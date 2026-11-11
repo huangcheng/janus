@@ -11,11 +11,9 @@
  * region select is the single place variants are chosen.
  */
 
-export type JanusProtocol =
-  | "openai_chat"
-  | "anthropic_messages"
-  | "openai_responses"
-  | "openai_decisions"
+import type { JanusProtocol } from "./protocols"
+
+export type { JanusProtocol } from "./protocols"
 
 export const PROTOCOLS: JanusProtocol[] = [
   "openai_chat",

@@ -423,7 +423,7 @@ function NodeChip({
           dead
             ? "fill-card stroke-destructive/60"
             : master
-              ? "fill-primary/[0.06] stroke-primary/45 group-hover:stroke-primary/80"
+              ? "fill-link/[0.06] stroke-link/45 group-hover:stroke-link/80"
               : "fill-card stroke-border group-hover:stroke-foreground/60",
         )}
       />

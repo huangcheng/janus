@@ -233,13 +233,14 @@ export function Login() {
   }
 
   const hasPasskey = status?.has_passkey ?? false
+  const heading = challengeToken ? "Two-factor verification" : "Sign in"
 
   return (
-    <AuthShell footer={<span>Operator accounts are managed in Account settings</span>}>
+    <AuthShell title={heading} footer={<span>Operator accounts are managed in Account settings</span>}>
       <Card className="shadow-sm">
         <CardHeader className="text-center">
           <CardTitle className="text-xl">
-            {challengeToken ? "Two-factor verification" : "Sign in"}
+            {heading}
           </CardTitle>
           <CardDescription>
             {challengeToken

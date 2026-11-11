@@ -545,7 +545,7 @@ function LogFields({ fields }: { fields: Record<string, unknown> }) {
         >
           <dt className="px-3 pt-2.5 text-muted-foreground sm:pb-2.5">{key}</dt>
           <dd className="min-w-0 whitespace-pre-wrap break-words px-3 pb-2.5 [overflow-wrap:anywhere] sm:pt-2.5">
-            <span className={value === null || typeof value !== "object" ? "text-primary" : undefined}>
+            <span className={value === null || typeof value !== "object" ? "text-link" : undefined}>
               {formatValue(value)}
             </span>
           </dd>

@@ -30,10 +30,10 @@ export function StatCard({
   return (
     <Card className={cn("gap-2 overflow-hidden py-4", className)}>
       <div className="flex items-center justify-between gap-2 px-4">
-        <span className="truncate text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+        <span className="truncate font-mono text-[10px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
           {label}
         </span>
-        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/8 text-primary">
+        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground">
           <Icon className="size-3.5" />
         </span>
       </div>

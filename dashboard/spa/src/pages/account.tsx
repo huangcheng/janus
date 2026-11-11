@@ -310,7 +310,7 @@ export function Account() {
               className={cn(
                 "flex min-h-9 items-center gap-2 whitespace-nowrap rounded-lg px-3 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:flex-none",
                 section === id
-                  ? "bg-primary/10 text-primary"
+                  ? "bg-link/10 text-link"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
             >
@@ -875,7 +875,7 @@ function RecoveryCard({
                     key={i}
                     className={cn(
                       "h-1.5 w-3 rounded-full",
-                      i < remaining ? "bg-primary/65" : "bg-muted-foreground/20",
+                      i < remaining ? "bg-link/65" : "bg-muted-foreground/20",
                     )}
                   />
                 ))}
@@ -1082,7 +1082,7 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
           </div>
           {passkeys.length === 0 ? (
             <div className="flex items-center gap-4 px-5 py-7">
-              <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/8 text-primary">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-link/8 text-link">
                 <Fingerprint className="size-5" />
               </div>
               <div>
