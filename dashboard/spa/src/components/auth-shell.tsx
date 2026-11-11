@@ -6,10 +6,11 @@ import { protocolLabel, type JanusProtocol } from "@/lib/protocols"
 const FEATURED_PROTOCOLS = (["openai_chat", "openai_responses", "anthropic_messages"] as const satisfies readonly JanusProtocol[]).map(
   (protocol) => ({ id: protocol, label: protocolLabel(protocol) }),
 )
+const TAGLINE_LINES = ["Every model.", "One front door."] as const
 
 export function AuthShell({ children, footer, title }: { children: ReactNode; footer?: ReactNode; title: string }) {
   return (
-    <div className="grid min-h-svh bg-background lg:grid-cols-[minmax(380px,0.9fr)_minmax(0,1.1fr)]">
+    <div className="grid min-h-svh grid-rows-[auto_1fr] bg-background lg:grid-cols-[minmax(380px,0.9fr)_minmax(0,1.1fr)] lg:grid-rows-none">
       <section
         data-slot="auth-brand-panel"
         aria-label="Janus gateway"
@@ -22,6 +23,9 @@ export function AuthShell({ children, footer, title }: { children: ReactNode; fo
         <a href={import.meta.env.BASE_URL} className="relative z-10 w-fit font-medium">
           <BrandMark subtitle="LLM gateway console" />
         </a>
+        <p className="relative z-10 mt-5 text-[15px] leading-6 font-medium tracking-[-0.02em] text-sidebar-foreground/80 lg:hidden">
+          {TAGLINE_LINES.join(" ")}
+        </p>
 
         <div className="relative z-10 my-auto hidden py-8 lg:block lg:py-16" aria-hidden>
           <p className="mb-5 flex items-center gap-2.5 font-mono text-[9px] tracking-[0.14em] text-primary uppercase">
@@ -29,7 +33,7 @@ export function AuthShell({ children, footer, title }: { children: ReactNode; fo
             Protocol translation plane
           </p>
           <p className="text-[clamp(2.75rem,5vw,4.5rem)] leading-[0.98] font-medium tracking-[-0.062em]">
-            Every model.<br />One front door.
+            {TAGLINE_LINES[0]}<br />{TAGLINE_LINES[1]}
           </p>
           <p className="mt-6 max-w-[38ch] text-[13px] leading-6 text-sidebar-foreground/70">
             Connect OpenAI and Anthropic clients through one dependable gateway. Configuration stays hot, explicit, and under your control.
