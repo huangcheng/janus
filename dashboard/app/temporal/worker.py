@@ -6,7 +6,6 @@ import asyncio
 import logging
 import sys
 
-from temporalio.client import Client
 from temporalio.worker import Worker
 
 from app import database
@@ -14,6 +13,7 @@ from app.temporal.activities import geoip_mmdb as geo_acts
 from app.temporal.activities import model_sync as sync_acts
 from app.temporal.client import ensure_all_schedules
 from app.temporal.settings import temporal_host, temporal_namespace, temporal_task_queue
+from app.temporal.telemetry import connect_client
 from app.temporal.workflows.geoip_mmdb import GeoIpMmdbRefreshWorkflow
 from app.temporal.workflows.model_sync import ModelSyncWorkflow
 
@@ -26,7 +26,11 @@ async def run() -> None:
         log.error("TEMPORAL_HOST is required")
         sys.exit(2)
     await database.init_pool()
-    client = await Client.connect(host, namespace=temporal_namespace())
+    client = await connect_client(
+        host=host,
+        namespace=temporal_namespace(),
+        service_name="janus-worker",
+    )
     try:
         await ensure_all_schedules()
     except Exception:  # noqa: BLE001

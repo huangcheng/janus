@@ -26,9 +26,13 @@ GEOIP_MMDB_WORKFLOW_ID = "geoip-mmdb-scheduled"
 async def _client():
     if not temporal_enabled():
         return None
-    from temporalio.client import Client
+    from app.temporal.telemetry import connect_client
 
-    return await Client.connect(temporal_host(), namespace=temporal_namespace())
+    return await connect_client(
+        host=temporal_host(),
+        namespace=temporal_namespace(),
+        service_name="janus-dashboard",
+    )
 
 
 async def temporal_status() -> dict[str, Any]:

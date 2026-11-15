@@ -73,6 +73,13 @@ services:
       TEMPORAL_HOST: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-janus-control}
+      # Same OTLP collector as the gateway; export is no-op when unset.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME_WORKER:-janus-worker}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-}
+      # Tempo-style collectors are often traces-only.
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
     volumes:
       # Shared geo volume with the dashboard / master gateway (rw).
       - ${JANUS_GEO_HOST_PATH:-./geo}:/var/lib/janus/geo

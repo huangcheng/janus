@@ -31,6 +31,9 @@ pulls `temporalio/*` from Docker Hub.
 - `TEMPORAL_HOST=temporal:7233`
 - optional: `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE` (default `janus-control`)
 - optional: `JANUS_GEOIP_MMDB_INTERVAL_SEC`
+- optional OTEL (same collector as the gateway): `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_RESOURCE_ATTRIBUTES`; worker defaults `OTEL_SERVICE_NAME=janus-worker`
+  (dashboard client uses `janus-dashboard`). `OTEL_SDK_DISABLED=true` skips export.
 
 3. Recreate the dashboard so lifespan ensures Schedules and **skips** the asyncio model-sync loop.
 
