@@ -10,10 +10,14 @@
 # JANUS_MMDB_PATH (default /var/lib/janus/geo) so GeoIpMmdbRefresh can
 # write GeoLite2-City.mmdb.
 
+# Image defaults are Docker Hub. For CN fleets, mirror to Huawei SWR
+# (operator: ~/.janus/deploy/mirror_temporal.sh) and override:
+#   TEMPORAL_AUTO_SETUP_IMAGE / TEMPORAL_UI_IMAGE / TEMPORAL_POSTGRES_IMAGE
+#   JANUS_DASHBOARD_IMAGE
 services:
   temporal-postgres:
     profiles: [temporal]
-    image: postgres:16-alpine
+    image: ${TEMPORAL_POSTGRES_IMAGE:-postgres:16-alpine}
     restart: unless-stopped
     environment:
       POSTGRES_USER: temporal
@@ -24,7 +28,7 @@ services:
 
   temporal:
     profiles: [temporal]
-    image: temporalio/auto-setup:1.25.2
+    image: ${TEMPORAL_AUTO_SETUP_IMAGE:-temporalio/auto-setup:1.25.2}
     restart: unless-stopped
     depends_on: [temporal-postgres]
     environment:
@@ -38,7 +42,7 @@ services:
 
   temporal-ui:
     profiles: [temporal]
-    image: temporalio/ui:2.31.2
+    image: ${TEMPORAL_UI_IMAGE:-temporalio/ui:2.31.2}
     restart: unless-stopped
     depends_on: [temporal]
     environment:
@@ -72,6 +76,9 @@ services:
     volumes:
       # Shared geo volume with the dashboard / master gateway (rw).
       - ${JANUS_GEO_HOST_PATH:-./geo}:/var/lib/janus/geo
+    # Dashboard image HEALTHCHECK probes :8091; worker is not an HTTP server.
+    healthcheck:
+      disable: true
 
 volumes:
   temporal_pgdata:

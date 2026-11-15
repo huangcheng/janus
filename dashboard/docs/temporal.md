@@ -20,6 +20,12 @@ Next candidate (scaffold only): entitlement healing (`app.entitlements._healing_
 docker compose -f docker-compose.yml -f deploy/docker-compose.temporal.yml --profile temporal up -d
 ```
 
+CN fleets: mirror Temporal images to Huawei SWR first (operator
+`mirror_temporal.sh`), then override image refs via env — e.g.
+`TEMPORAL_AUTO_SETUP_IMAGE`, `TEMPORAL_UI_IMAGE`,
+`TEMPORAL_POSTGRES_IMAGE`, `JANUS_DASHBOARD_IMAGE` — so compose never
+pulls `temporalio/*` from Docker Hub.
+
 2. Set on the **dashboard** service (and keep the same DB / secrets / geo volume on `janus-worker`):
 
 - `TEMPORAL_HOST=temporal:7233`
