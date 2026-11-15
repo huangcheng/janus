@@ -273,7 +273,8 @@ export function Workflows() {
                   {items.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={6} className="text-muted-foreground">
-                        No workflows on this queue yet
+                        No workflow runs yet. Click Sync models (or wait for the
+                        model-sync / geoip-mmdb schedule) — runs appear here.
                       </TableCell>
                     </TableRow>
                   ) : (

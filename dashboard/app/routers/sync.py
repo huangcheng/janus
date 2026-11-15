@@ -400,7 +400,40 @@ async def stop_sync_scheduler():
 
 @router.post("")
 async def sync_now(user: dict = Depends(require_auth)):
-    """POST /api/sync — run a manual sync (single-flight)."""
+    """POST /api/sync — run a manual sync (single-flight).
+
+    When TEMPORAL_HOST is set, starts ModelSyncWorkflow and waits for the
+    result so the Workflows console records the run. Otherwise falls back
+    to the in-process path.
+    """
+    from ..temporal.settings import temporal_enabled
+
+    if temporal_enabled():
+        try:
+            from ..temporal.client import start_model_sync
+
+            result = await start_model_sync(source="manual", wait=True)
+            audit.log(
+                "model.sync",
+                None,
+                f"added={result.get('models_added')} errors={result.get('errors')} "
+                f"via=temporal wid={result.get('workflow_id')}",
+            )
+            return result
+        except Exception as e:
+            logger.exception("Temporal model sync failed; falling back in-process")
+            # Soft fallback keeps the button useful if the worker is down.
+            if _sync_lock.locked():
+                raise HTTPException(
+                    409,
+                    detail={
+                        "error": {
+                            "code": "already_running",
+                            "message": f"temporal sync failed ({e}); in-process sync busy",
+                        }
+                    },
+                ) from e
+
     if _sync_lock.locked():
         raise HTTPException(
             409,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import timedelta
 from typing import Any
 
@@ -167,6 +168,50 @@ async def describe_workflow(
     }
 
 
+async def start_model_sync(*, source: str = "manual", wait: bool = True) -> dict[str, Any]:
+    """Start ModelSyncWorkflow. When wait=True, return the activity result dict."""
+    client = await _client()
+    if client is None:
+        raise RuntimeError("TEMPORAL_HOST is not configured")
+    from .workflows.model_sync import ModelSyncWorkflow
+
+    wid = f"model-sync:{source}:{uuid.uuid4().hex[:12]}"
+    handle = await client.start_workflow(
+        ModelSyncWorkflow.run,
+        args=[source],
+        id=wid,
+        task_queue=temporal_task_queue(),
+    )
+    if not wait:
+        return {"workflow_id": wid, "run_id": handle.result_run_id}
+    result = await handle.result()
+    if isinstance(result, dict):
+        result = {**result, "workflow_id": wid}
+    return result if isinstance(result, dict) else {"workflow_id": wid, "result": result}
+
+
+async def start_geoip_mmdb_refresh(*, source: str = "manual", wait: bool = True) -> dict[str, Any]:
+    """Start GeoIpMmdbRefreshWorkflow (optional wait for result)."""
+    client = await _client()
+    if client is None:
+        raise RuntimeError("TEMPORAL_HOST is not configured")
+    from .workflows.geoip_mmdb import GeoIpMmdbRefreshWorkflow
+
+    wid = f"geoip-mmdb:{source}:{uuid.uuid4().hex[:12]}"
+    handle = await client.start_workflow(
+        GeoIpMmdbRefreshWorkflow.run,
+        args=[source],
+        id=wid,
+        task_queue=temporal_task_queue(),
+    )
+    if not wait:
+        return {"workflow_id": wid, "run_id": handle.result_run_id}
+    result = await handle.result()
+    if isinstance(result, dict):
+        result = {**result, "workflow_id": wid}
+    return result if isinstance(result, dict) else {"workflow_id": wid, "result": result}
+
+
 async def _read_model_sync_interval_sec() -> int:
     """Prefer settings.model_sync; fall back to env/default."""
     from app import database
@@ -228,8 +273,8 @@ async def ensure_model_sync_schedule(*, interval_sec: int | None = None) -> None
     schedule = Schedule(action=action, spec=spec, state=ScheduleState(paused=False))
 
     try:
-        await client.create_schedule(schedule_id, schedule)
-        log.info("created Temporal schedule %s every=%ss", schedule_id, sec)
+        await client.create_schedule(schedule_id, schedule, trigger_immediately=True)
+        log.info("created Temporal schedule %s every=%ss (triggered)", schedule_id, sec)
         return
     except Exception:  # noqa: BLE001 — already exists
         log.debug("model-sync schedule create race; updating", exc_info=True)
@@ -244,6 +289,7 @@ async def ensure_model_sync_schedule(*, interval_sec: int | None = None) -> None
         log.info("updated Temporal schedule %s every=%ss", schedule_id, sec)
     except Exception:  # noqa: BLE001
         log.warning("model-sync schedule update failed", exc_info=True)
+    await _trigger_if_never_ran(handle, schedule_id)
 
 
 async def ensure_geoip_mmdb_schedule(*, interval_sec: int | None = None) -> None:
@@ -290,8 +336,8 @@ async def ensure_geoip_mmdb_schedule(*, interval_sec: int | None = None) -> None
     schedule = Schedule(action=action, spec=spec, state=ScheduleState(paused=False))
 
     try:
-        await client.create_schedule(schedule_id, schedule)
-        log.info("created Temporal schedule %s every=%ss", schedule_id, sec)
+        await client.create_schedule(schedule_id, schedule, trigger_immediately=True)
+        log.info("created Temporal schedule %s every=%ss (triggered)", schedule_id, sec)
         return
     except Exception:  # noqa: BLE001
         log.debug("geoip-mmdb schedule create race; updating", exc_info=True)
@@ -306,6 +352,23 @@ async def ensure_geoip_mmdb_schedule(*, interval_sec: int | None = None) -> None
         log.info("updated Temporal schedule %s every=%ss", schedule_id, sec)
     except Exception:  # noqa: BLE001
         log.warning("geoip-mmdb schedule update failed", exc_info=True)
+    await _trigger_if_never_ran(handle, schedule_id)
+
+
+async def _trigger_if_never_ran(handle: Any, schedule_id: str) -> None:
+    """Fire once when a Schedule exists but has never produced an action.
+
+    Fresh installs otherwise sit empty until the first interval elapses
+    (e.g. 6h for model-sync), which makes the Workflows page look broken.
+    """
+    try:
+        desc = await handle.describe()
+        if int(getattr(desc.info, "num_actions", 0) or 0) > 0:
+            return
+        await handle.trigger()
+        log.info("triggered Temporal schedule %s (never ran)", schedule_id)
+    except Exception:  # noqa: BLE001
+        log.debug("schedule trigger skipped for %s", schedule_id, exc_info=True)
 
 
 async def ensure_all_schedules() -> None:
