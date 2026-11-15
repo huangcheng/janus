@@ -51,6 +51,10 @@ python -m app.temporal.worker
 
 The worker must reach Postgres and, for geoip, write `JANUS_MMDB_PATH` then call the master’s `/stats/mmdb/reload`.
 
+If the dashboard uses `extra_hosts` (or another alias) so `stats_host`
+resolves to the gateway, give the worker the **same** mapping — the
+worker does not share the dashboard container’s `/etc/hosts`.
+
 ## Operator UI
 
 - SPA: **Workflows** (`/workflows`)

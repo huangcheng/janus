@@ -503,7 +503,13 @@ def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
 
 
 async def _master_stats_target() -> tuple[str, int, str | None]:
-    """Pick the lowest-id healthy master from gateway_nodes + health cache."""
+    """Pick the lowest-id healthy master from gateway_nodes + health cache.
+
+    The Temporal worker process does not run ``nodes.start_monitor``, so
+    ``_health`` is empty there — live-probe ``/stats`` when the cache
+    misses. Name fallback covers cold cache + unreachable polls only for
+    nodes literally named master/leader.
+    """
     from . import nodes as nodes_mod
 
     rows = await database.fetch(
@@ -512,30 +518,50 @@ async def _master_stats_target() -> tuple[str, int, str | None]:
     )
     health = getattr(nodes_mod, "_health", {}) or {}
     policy_on = await egress.egress_policy_on()
+
+    def _token(row: dict) -> str | None:
+        return egress.stats_token_for(
+            row["stats_host"],
+            row["stats_token_ciphertext"],
+            config.stats_token,
+            policy_on=policy_on,
+        )
+
+    def _is_healthy_master(h: dict) -> bool:
+        return (
+            str(h.get("role") or "").lower() == "master" and str(h.get("status") or "") == "healthy"
+        )
+
     for row in rows:
         h = health.get(row["id"]) or {}
-        role = str(h.get("role") or "").lower()
-        status = str(h.get("status") or "")
-        if role == "master" and status == "healthy":
-            token = egress.stats_token_for(
+        if _is_healthy_master(h):
+            return row["stats_host"], int(row["stats_port"] or 8090), _token(row)
+
+    # Cold cache (worker / post-recreate): probe each enabled node once.
+    for row in rows:
+        token = _token(row)
+        try:
+            probed = await nodes_mod.poll_node(
+                int(row["id"]),
                 row["stats_host"],
-                row["stats_token_ciphertext"],
-                config.stats_token,
-                policy_on=policy_on,
+                int(row["stats_port"] or 8090),
+                token,
             )
+        except Exception:
+            logger.debug(
+                "mmdb master probe failed for node %s",
+                row.get("name"),
+                exc_info=True,
+            )
+            continue
+        if _is_healthy_master(probed):
             return row["stats_host"], int(row["stats_port"] or 8090), token
-    # Soft fallback: first enabled node named master/leader,
-    # even if the health cache is cold right after dashboard recreate.
+
+    # Soft fallback: first enabled node named master/leader.
     for row in rows:
         name = str(row["name"] or "").lower()
         if name in ("master", "leader"):
-            token = egress.stats_token_for(
-                row["stats_host"],
-                row["stats_token_ciphertext"],
-                config.stats_token,
-                policy_on=policy_on,
-            )
-            return row["stats_host"], int(row["stats_port"] or 8090), token
+            return row["stats_host"], int(row["stats_port"] or 8090), _token(row)
     raise MmdbRefreshError(
         "no_master",
         "no healthy master gateway to reload mmdb",

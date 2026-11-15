@@ -58,6 +58,8 @@ services:
     command: ["python", "-m", "app.temporal.worker"]
     restart: unless-stopped
     depends_on: [temporal]
+    # Host overlays: copy any dashboard extra_hosts that make gateway
+    # stats_host resolvable (MMDB reload posts to /stats/mmdb/reload).
     environment:
       JANUS_DB_HOST: ${JANUS_DB_HOST}
       JANUS_DB_PORT: ${JANUS_DB_PORT:-5432}
