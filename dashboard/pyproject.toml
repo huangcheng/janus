@@ -20,7 +20,14 @@ dependencies = [
     # on (FastMCP/streamable_http_app); letting it float would break the MCP
     # mount on a routine `uv pip install` upgrade.
     "mcp>=1.30,<2",
+    # Temporal control-plane worker (optional at runtime: no-op when
+    # TEMPORAL_HOST unset). Soft-fail import paths keep the dashboard
+    # bootable if the wheel is missing in a stripped image.
+    "temporalio>=1.7.0",
 ]
+
+[project.scripts]
+janus-worker = "app.temporal.worker:main"
 
 [project.optional-dependencies]
 dev = [
@@ -28,6 +35,8 @@ dev = [
     # unpinned install makes `ruff format --check` pass locally and fail in CI
     # (or the reverse) on the same tree. Bump deliberately, with the reformat.
     "ruff==0.7.4",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
 ]
 
 # Fresh installs (CI runners) hit setuptools' flat-layout auto-discovery:

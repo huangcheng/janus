@@ -1747,6 +1747,23 @@ async def put_model_sync(request: Request, user: dict = Depends(require_auth)):
         )
         gen = await database.bump_generation(tx)
     audit.log("settings.model_sync", "model_sync", f"gen={gen} interval_sec={sec}")
+    # Keep the Temporal Schedule in lock-step with the knob when the
+    # control plane is enabled (no-op when TEMPORAL_HOST unset).
+    try:
+        from ..temporal.client import ensure_model_sync_schedule
+        from ..temporal.settings import temporal_enabled
+
+        if temporal_enabled():
+            await ensure_model_sync_schedule(interval_sec=sec)
+    except Exception:
+        # Settings write already committed; schedule drift is recoverable
+        # on the next dashboard/worker boot ensure.
+        import logging
+
+        logging.getLogger("janus.dashboard.settings").warning(
+            "Temporal model-sync schedule update failed",
+            exc_info=True,
+        )
     return {"config": cfg, "generation": gen}
 
 
@@ -1842,6 +1859,21 @@ async def put_maxmind(request: Request, user: dict = Depends(require_auth)):
         # No generation bump — MaxMind creds are dashboard-only (refresh
         # path); gateways do not read this settings key.
     audit.log("settings.maxmind", _MAXMIND_KEY, f"account_id={account_id} license_set=true")
+    # Creating MaxMind creds should unlock the geoip-mmdb Schedule when
+    # Temporal is enabled (previously skipped while unconfigured).
+    try:
+        from ..temporal.client import ensure_geoip_mmdb_schedule
+        from ..temporal.settings import temporal_enabled
+
+        if temporal_enabled():
+            await ensure_geoip_mmdb_schedule()
+    except Exception:
+        import logging
+
+        logging.getLogger("janus.dashboard.settings").warning(
+            "Temporal geoip-mmdb schedule update failed",
+            exc_info=True,
+        )
     return {"config": {"account_id": account_id, "license_key_set": True}}
 
 

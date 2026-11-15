@@ -319,11 +319,25 @@ async def post_prune(user: dict = Depends(require_auth)):
 _MAXMIND_URL = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz"
 
 
-async def _resolve_maxmind_creds() -> tuple[str, str]:
-    """Prefer settings.maxmind (encrypted license); fall back to env.
+class MmdbRefreshError(Exception):
+    """Typed MMDB refresh failure (HTTP router maps to HTTPException)."""
 
-    Never logs credential values.
-    """
+    def __init__(self, code: str, message: str, http_status: int = 502):
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+        super().__init__(message)
+
+
+def _mmdb_http(exc: MmdbRefreshError) -> HTTPException:
+    return HTTPException(
+        exc.http_status,
+        detail={"error": {"code": exc.code, "message": exc.message}},
+    )
+
+
+async def _peek_maxmind_creds() -> tuple[str, str]:
+    """Account + license without raising; empty strings when unset."""
     from .crypto import decrypt
 
     row = await database.fetchrow("SELECT value FROM settings WHERE key = 'maxmind'")
@@ -347,15 +361,26 @@ async def _resolve_maxmind_creds() -> tuple[str, str]:
         account = (config.maxmind_account_id or "").strip()
     if not license_key:
         license_key = (config.maxmind_license_key or "").strip()
+    return account, license_key
+
+
+async def maxmind_configured() -> bool:
+    """True when MaxMind creds are present (settings or env)."""
+    account, license_key = await _peek_maxmind_creds()
+    return bool(account and license_key)
+
+
+async def _resolve_maxmind_creds() -> tuple[str, str]:
+    """Prefer settings.maxmind (encrypted license); fall back to env.
+
+    Never logs credential values.
+    """
+    account, license_key = await _peek_maxmind_creds()
     if not account or not license_key:
-        raise HTTPException(
-            503,
-            detail={
-                "error": {
-                    "code": "maxmind_unconfigured",
-                    "message": "Save MaxMind Account ID + License Key on Maintenance, or set JANUS_MAXMIND_* env",
-                }
-            },
+        raise MmdbRefreshError(
+            "maxmind_unconfigured",
+            "Save MaxMind Account ID + License Key on Maintenance, or set JANUS_MAXMIND_* env",
+            http_status=503,
         )
     return account, license_key
 
@@ -405,14 +430,10 @@ def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
     existing dest untouched.
     """
     if not account or not license_key:
-        raise HTTPException(
-            503,
-            detail={
-                "error": {
-                    "code": "maxmind_unconfigured",
-                    "message": "MaxMind Account ID / License Key not set",
-                }
-            },
+        raise MmdbRefreshError(
+            "maxmind_unconfigured",
+            "MaxMind Account ID / License Key not set",
+            http_status=503,
         )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -437,24 +458,14 @@ def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
             with _open_following_one_redirect(req, timeout=180) as resp:
                 tgz.write_bytes(resp.read())
         except urllib.error.HTTPError as e:
-            raise HTTPException(
-                502,
-                detail={
-                    "error": {
-                        "code": "maxmind_download_failed",
-                        "message": f"MaxMind HTTP {e.code}",
-                    }
-                },
+            raise MmdbRefreshError(
+                "maxmind_download_failed",
+                f"MaxMind HTTP {e.code}",
             ) from e
         except Exception as e:
-            raise HTTPException(
-                502,
-                detail={
-                    "error": {
-                        "code": "maxmind_download_failed",
-                        "message": str(e)[:200],
-                    }
-                },
+            raise MmdbRefreshError(
+                "maxmind_download_failed",
+                str(e)[:200],
             ) from e
 
         with tarfile.open(tgz, "r:gz") as tf:
@@ -463,39 +474,24 @@ def _download_geolite2_city(dest: Path, account: str, license_key: str) -> int:
                 None,
             )
             if member is None:
-                raise HTTPException(
-                    502,
-                    detail={
-                        "error": {
-                            "code": "maxmind_bad_archive",
-                            "message": "tar.gz has no GeoLite2-City.mmdb",
-                        }
-                    },
+                raise MmdbRefreshError(
+                    "maxmind_bad_archive",
+                    "tar.gz has no GeoLite2-City.mmdb",
                 )
             # Path-traversal guard (Python 3.11 has no tarfile filter=).
             name = os.path.normpath(member.name)
             if os.path.isabs(name) or name.startswith("..") or ".." in name.split(os.sep):
-                raise HTTPException(
-                    502,
-                    detail={
-                        "error": {
-                            "code": "maxmind_bad_archive",
-                            "message": "tar member has unsafe path",
-                        }
-                    },
+                raise MmdbRefreshError(
+                    "maxmind_bad_archive",
+                    "tar member has unsafe path",
                 )
             tf.extract(member, path=work)
             src = work / member.name
         size = src.stat().st_size
         if size < 1_000_000:
-            raise HTTPException(
-                502,
-                detail={
-                    "error": {
-                        "code": "maxmind_bad_archive",
-                        "message": f"mmdb too small ({size} bytes)",
-                    }
-                },
+            raise MmdbRefreshError(
+                "maxmind_bad_archive",
+                f"mmdb too small ({size} bytes)",
             )
         new = dest.with_suffix(dest.suffix + f".new.{os.getpid()}")
         shutil.copyfile(src, new)
@@ -540,46 +536,36 @@ async def _master_stats_target() -> tuple[str, int, str | None]:
                 policy_on=policy_on,
             )
             return row["stats_host"], int(row["stats_port"] or 8090), token
-    raise HTTPException(
-        503,
-        detail={
-            "error": {
-                "code": "no_master",
-                "message": "no healthy master gateway to reload mmdb",
-            }
-        },
+    raise MmdbRefreshError(
+        "no_master",
+        "no healthy master gateway to reload mmdb",
+        http_status=503,
     )
 
 
-@router.post("/mmdb/refresh")
-async def post_mmdb_refresh(user: dict = Depends(require_auth)):
-    """Download a fresh GeoLite2-City.mmdb onto the shared geo volume,
-    then ask the master gateway to reload locus (POST /stats/mmdb/reload).
+async def refresh_mmdb() -> dict:
+    """Download GeoLite2-City.mmdb and ask the master to reload locus.
 
-    Requires MaxMind creds (settings.maxmind or JANUS_MAXMIND_* env) and a
-    rw mount of JANUS_MMDB_PATH (same host path the master reads).
+    Shared by the Maintenance button and the Temporal activity. Raises
+    ``MmdbRefreshError`` (never HTTPException) so activities stay free of
+    FastAPI types.
     """
     account, license_key = await _resolve_maxmind_creds()
     dest = Path(config.mmdb_path)
-    # Fail with a CLEAR 4xx when the geo volume is not mounted/rw in
-    # this container (live 2026-10-28: unmounted dashboard -> raw 500
-    # PermissionError on the button).
+    # Fail with a CLEAR error when the geo volume is not mounted/rw
+    # (live 2026-10-28: unmounted dashboard -> raw 500 PermissionError).
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not os.access(dest.parent, os.W_OK):
             raise OSError(f"{dest.parent} is not writable")
     except OSError as e:
-        raise HTTPException(
-            503,
-            detail={
-                "error": {
-                    "code": "mmdb_volume_unavailable",
-                    "message": (
-                        f"mmdb path {dest.parent} missing or read-only in the dashboard "
-                        f"container - mount the shared geo volume rw ({e})"
-                    )[:240],
-                }
-            },
+        raise MmdbRefreshError(
+            "mmdb_volume_unavailable",
+            (
+                f"mmdb path {dest.parent} missing or read-only in the dashboard "
+                f"container - mount the shared geo volume rw ({e})"
+            )[:240],
+            http_status=503,
         ) from e
     size = await asyncio.to_thread(_download_geolite2_city, dest, account, license_key)
 
@@ -592,14 +578,9 @@ async def post_mmdb_refresh(user: dict = Depends(require_auth)):
         async with httpx.AsyncClient(timeout=90.0) as client:
             resp = await client.post(url, headers=headers)
     except Exception as e:
-        raise HTTPException(
-            502,
-            detail={
-                "error": {
-                    "code": "mmdb_reload_unreachable",
-                    "message": f"downloaded ({size} bytes) but reload failed: {e!s}"[:240],
-                }
-            },
+        raise MmdbRefreshError(
+            "mmdb_reload_unreachable",
+            f"downloaded ({size} bytes) but reload failed: {e!s}"[:240],
         ) from e
 
     if resp.status_code != 200:
@@ -608,14 +589,9 @@ async def post_mmdb_refresh(user: dict = Depends(require_auth)):
             resp.status_code,
             (resp.text or "")[:500],
         )
-        raise HTTPException(
-            502,
-            detail={
-                "error": {
-                    "code": "mmdb_reload_failed",
-                    "message": f"downloaded ({size} bytes); master reload HTTP {resp.status_code}",
-                }
-            },
+        raise MmdbRefreshError(
+            "mmdb_reload_failed",
+            f"downloaded ({size} bytes); master reload HTTP {resp.status_code}",
         )
 
     try:
@@ -633,3 +609,17 @@ async def post_mmdb_refresh(user: dict = Depends(require_auth)):
         "path": str(dest),
         "reload": body,
     }
+
+
+@router.post("/mmdb/refresh")
+async def post_mmdb_refresh(user: dict = Depends(require_auth)):
+    """Download a fresh GeoLite2-City.mmdb onto the shared geo volume,
+    then ask the master gateway to reload locus (POST /stats/mmdb/reload).
+
+    Requires MaxMind creds (settings.maxmind or JANUS_MAXMIND_* env) and a
+    rw mount of JANUS_MMDB_PATH (same host path the master reads).
+    """
+    try:
+        return await refresh_mmdb()
+    except MmdbRefreshError as e:
+        raise _mmdb_http(e) from e

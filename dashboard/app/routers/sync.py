@@ -309,12 +309,12 @@ async def _run_sync() -> dict:
     }
 
 
-async def _sync_locked(source: str) -> dict:
+async def run_model_sync(source: str) -> dict:
     """One pass under the single-flight lock, with durable bookkeeping.
 
-    The manual POST, the scheduled tick and the boot catch-up all run through
-    here, so they can never overlap and the persisted stamps always describe
-    the same sequence.
+    The manual POST, the scheduled tick, the boot catch-up, and the Temporal
+    activity all run through here, so they can never overlap and the
+    persisted stamps always describe the same sequence.
     """
     async with _sync_lock:
         global _last_run
@@ -334,6 +334,10 @@ async def _sync_locked(source: str) -> dict:
             models_dev.get("note"),
         )
         return result
+
+
+# Back-compat alias for callers that still name the private helper.
+_sync_locked = run_model_sync
 
 
 async def _scheduled_sync_loop():
@@ -359,7 +363,7 @@ async def _scheduled_sync_loop():
                 logger.info("model sync (catch_up) skipped: another sync is in progress")
             else:
                 logger.info("model sync (catch_up) starting: %s", detail)
-                await _sync_locked("catch_up")
+                await run_model_sync("catch_up")
         else:
             logger.info("model sync (catch_up) not needed: %s", detail)
     except Exception:
@@ -370,7 +374,7 @@ async def _scheduled_sync_loop():
             if _sync_lock.locked():
                 logger.info("model sync (scheduled) skipped: another sync is in progress")
                 continue
-            await _sync_locked("scheduled")
+            await run_model_sync("scheduled")
         except Exception:
             logger.exception("scheduled model sync failed; retried at the next interval")
 
@@ -402,7 +406,7 @@ async def sync_now(user: dict = Depends(require_auth)):
             409,
             detail={"error": {"code": "already_running", "message": "sync is already in progress"}},
         )
-    result = await _sync_locked("manual")
+    result = await run_model_sync("manual")
     audit.log("model.sync", None, f"added={result['models_added']} errors={result['errors']}")
     return result
 

@@ -25,6 +25,7 @@ import {
   Sun,
   Terminal,
   Server,
+  Workflow,
   Wrench,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -177,6 +178,7 @@ const NAV = [
   { to: "/router", icon: GitBranch, label: "Router", group: "Configure" },
   { to: "/nodes", icon: Server, label: "Nodes", group: "Configure" },
   { to: "/maintenance", icon: Wrench, label: "Maintenance", group: "System" },
+  { to: "/workflows", icon: Workflow, label: "Workflows", group: "System" },
   { to: "/usage", icon: Activity, label: "Usage", group: "Observe" },
   { to: "/failures", icon: OctagonX, label: "Failures", group: "Observe" },
   { to: "/logs", icon: Terminal, label: "Logs", group: "Observe" },

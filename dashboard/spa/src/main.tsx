@@ -27,6 +27,9 @@ const Nodes = lazy(() => import('./pages/nodes').then((m) => ({ default: m.Nodes
 const Maintenance = lazy(() =>
   import('./pages/maintenance').then((m) => ({ default: m.Maintenance })),
 )
+const Workflows = lazy(() =>
+  import('./pages/workflows').then((m) => ({ default: m.Workflows })),
+)
 const Usage = lazy(() => import('./pages/usage').then((m) => ({ default: m.Usage })))
 const Failures = lazy(() => import('./pages/failures').then((m) => ({ default: m.Failures })))
 
@@ -94,6 +97,11 @@ const maintenanceRoute = createRoute({
   path: '/maintenance',
   component: Maintenance,
 })
+const workflowsRoute = createRoute({
+  getParentRoute: () => authLayout,
+  path: '/workflows',
+  component: Workflows,
+})
 const auditRoute = createRoute({ getParentRoute: () => authLayout, path: '/audit', component: Audit })
 
 const routeTree = rootRoute.addChildren([
@@ -110,6 +118,7 @@ const routeTree = rootRoute.addChildren([
     failuresRoute,
     nodesRoute,
     maintenanceRoute,
+    workflowsRoute,
     logsRoute,
     auditRoute,
   ]),

@@ -64,7 +64,10 @@ disables auth.
 | `JANUS_LOGIN_MAX_FAILS` / `JANUS_LOGIN_LOCKOUT_SEC` | `5` / `900` | Per-IP login lockout (see `JANUS_TRUSTED_PROXIES`) |
 | `JANUS_DASHBOARD_HOST` / `JANUS_DASHBOARD_PORT` | `0.0.0.0` / `8091` | uvicorn bind |
 | `JANUS_NODE_HEALTH_INTERVAL_SEC` | `10` | Node health + sched scrape + log-pull interval |
-| `JANUS_MODEL_SYNC_INTERVAL_SEC` | `21600` (6 h) | Background provider `/models` refresh |
+| `JANUS_MODEL_SYNC_INTERVAL_SEC` | `21600` (6 h) | Background provider `/models` refresh (skipped when `TEMPORAL_HOST` is set — Temporal Schedule owns the tick) |
+| `TEMPORAL_HOST` | unset | Optional Temporal control plane (`docs/temporal.md`); enables Schedules for model sync + GeoLite2 MMDB refresh |
+| `TEMPORAL_NAMESPACE` / `TEMPORAL_TASK_QUEUE` | `default` / `janus-control` | Temporal namespace and task queue |
+| `JANUS_GEOIP_MMDB_INTERVAL_SEC` | `604800` (7 d) | Temporal GeoLite2 refresh interval when MaxMind creds are set |
 | `JANUS_UPSTREAM_TLS_VERIFY` | `peer` | TLS verification for provider calls the dashboard itself makes (`none` disables — never in prod) |
 | `JANUS_DASH_EGRESS_POLICY` | unset (off) | `on` = egress-token policy: stats polling to non-loopback hosts must use that node's own encrypted `stats_token`, not the global one |
 | `JANUS_TRUSTED_PROXIES` | unset | Comma list of proxy IPs trusted for `X-Forwarded-For`; unset keys the login lockout on the direct peer (behind caddy every operator shares one bucket — `main.py` warns at startup) |

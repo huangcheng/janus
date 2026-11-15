@@ -1,0 +1,77 @@
+# Overlay: Temporal control plane + janus-worker.
+# Usage (with the main dashboard compose env already loaded):
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.temporal.yml --profile temporal up -d
+#
+# Set TEMPORAL_HOST=temporal:7233 on the dashboard service so lifespan
+# skips the asyncio model-sync loop and ensures Schedules instead.
+# The worker uses the same dashboard image with a different command.
+#
+# Geo volume: mount the same rw path the dashboard uses for
+# JANUS_MMDB_PATH (default /var/lib/janus/geo) so GeoIpMmdbRefresh can
+# write GeoLite2-City.mmdb.
+
+services:
+  temporal-postgres:
+    profiles: [temporal]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pgdata:/var/lib/postgresql/data
+
+  temporal:
+    profiles: [temporal]
+    image: temporalio/auto-setup:1.25.2
+    restart: unless-stopped
+    depends_on: [temporal-postgres]
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "127.0.0.1:7233:7233"
+
+  temporal-ui:
+    profiles: [temporal]
+    image: temporalio/ui:2.31.2
+    restart: unless-stopped
+    depends_on: [temporal]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:8088:8080"
+
+  janus-worker:
+    # Same image as the dashboard service; override in the host compose
+    # if the local tag differs (e.g. image: janus-dashboard:local).
+    image: ${JANUS_DASHBOARD_IMAGE:-janus-dashboard:local}
+    profiles: [temporal]
+    command: ["python", "-m", "app.temporal.worker"]
+    restart: unless-stopped
+    depends_on: [temporal]
+    environment:
+      JANUS_DB_HOST: ${JANUS_DB_HOST}
+      JANUS_DB_PORT: ${JANUS_DB_PORT:-5432}
+      JANUS_DB_USER: ${JANUS_DB_USER}
+      JANUS_DB_PASSWORD: ${JANUS_DB_PASSWORD}
+      JANUS_DB_NAME: ${JANUS_DB_NAME}
+      JANUS_SECRETS_KEY: ${JANUS_SECRETS_KEY}
+      JANUS_STATS_TOKEN: ${JANUS_STATS_TOKEN:-}
+      JANUS_MMDB_PATH: ${JANUS_MMDB_PATH:-/var/lib/janus/geo/GeoLite2-City.mmdb}
+      JANUS_MAXMIND_ACCOUNT_ID: ${JANUS_MAXMIND_ACCOUNT_ID:-}
+      JANUS_MAXMIND_LICENSE_KEY: ${JANUS_MAXMIND_LICENSE_KEY:-}
+      JANUS_GEOIP_MMDB_INTERVAL_SEC: ${JANUS_GEOIP_MMDB_INTERVAL_SEC:-604800}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-janus-control}
+    volumes:
+      # Shared geo volume with the dashboard / master gateway (rw).
+      - ${JANUS_GEO_HOST_PATH:-./geo}:/var/lib/janus/geo
+
+volumes:
+  temporal_pgdata:

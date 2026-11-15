@@ -60,6 +60,9 @@ from .routers import (
     settings as settings_router,
 )
 from .routers import (
+    temporal as temporal_router,
+)
+from .routers import (
     tokens as tokens_router,
 )
 from .routers import (
@@ -112,7 +115,26 @@ async def lifespan(app: FastAPI):
     else:
         await database.init_pool()
         await nodes.start_monitor()
-        await sync.start_sync_scheduler()
+        # Temporal owns the model-sync Schedule when TEMPORAL_HOST is set;
+        # otherwise keep the legacy asyncio loop. Erlang janus_model_sync
+        # is independent and untouched.
+        from .temporal.settings import temporal_enabled
+
+        if temporal_enabled():
+            try:
+                from .temporal.client import ensure_all_schedules
+
+                await ensure_all_schedules()
+                logger.info(
+                    "Temporal control plane enabled; dashboard asyncio model-sync loop skipped"
+                )
+            except Exception:
+                logger.exception(
+                    "Temporal schedule ensure failed; falling back to asyncio model-sync loop"
+                )
+                await sync.start_sync_scheduler()
+        else:
+            await sync.start_sync_scheduler()
         await entitlements.start_background()
         await auto_reorder.start_background()
         await cascade.start_background()
@@ -267,6 +289,7 @@ app.include_router(config_backup.router, prefix="/api/config", tags=["config"])
 app.include_router(entitlements_router.router, prefix="/api/entitlements", tags=["entitlements"])
 app.include_router(alerts_router.router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(maintenance.router, prefix="/api/maintenance", tags=["maintenance"])
+app.include_router(temporal_router.router, prefix="/api/temporal", tags=["temporal"])
 
 # --- MCP server (Streamable HTTP; knob-gated, default off — see app/mcp) ---
 # Registered here, before the SPA catch-all below, so /mcp/* never falls
