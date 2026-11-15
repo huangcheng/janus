@@ -56,6 +56,129 @@ def _dt(value: Any) -> str | None:
         return str(value)
 
 
+def _jsonable(value: Any) -> Any:
+    """Best-effort JSON-serializable form for drawer payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return bytes(value).hex()
+    return str(value)
+
+
+def _event_type_label(et: Any) -> str:
+    """Human label for a Temporal history event_type (protobuf int or enum)."""
+    raw: str | None = None
+    if et is None:
+        return "Unknown"
+    name = getattr(et, "name", None)
+    if isinstance(name, str) and name:
+        raw = name
+    else:
+        try:
+            from temporalio.api.enums.v1 import EventType
+
+            raw = EventType.Name(int(et))
+        except Exception:  # noqa: BLE001
+            raw = str(et)
+    if raw.startswith("EVENT_TYPE_"):
+        raw = raw[len("EVENT_TYPE_") :]
+    if "_" in raw and raw.upper() == raw:
+        return "".join(part.title() for part in raw.split("_"))
+    return raw
+
+
+def _decode_payloads(converter: Any, payloads: Any) -> Any:
+    if not payloads:
+        return None
+    try:
+        seq = list(payloads) if not isinstance(payloads, (list, tuple)) else payloads
+        # Some attrs expose `.payloads` wrapper.
+        if hasattr(payloads, "payloads"):
+            seq = list(payloads.payloads)
+        if not seq:
+            return None
+        decoded = converter.decode(seq)
+        if len(decoded) == 1:
+            return _jsonable(decoded[0])
+        return _jsonable(decoded)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _failure_message(converter: Any, failure: Any) -> str | None:
+    if failure is None:
+        return None
+    try:
+        decoded = converter.decode_failure(failure)
+        msg = getattr(decoded, "message", None) or str(decoded)
+        return str(msg)[:800] if msg else None
+    except Exception:  # noqa: BLE001
+        msg = getattr(failure, "message", None)
+        return str(msg)[:800] if msg else None
+
+
+def _event_summary(event: Any, label: str, converter: Any) -> str | None:
+    """Short secondary line: activity name, signal, result snippet, failure."""
+    compact = label.lower().replace("_", "")
+    try:
+        if "signaled" in compact:
+            attrs = getattr(event, "workflow_execution_signaled_event_attributes", None)
+            name = getattr(attrs, "signal_name", None) if attrs else None
+            return f"signal {name}" if name else None
+        if "activitytaskscheduled" in compact:
+            attrs = getattr(event, "activity_task_scheduled_event_attributes", None)
+            at = getattr(attrs, "activity_type", None) if attrs else None
+            name = getattr(at, "name", None) if at else None
+            args = _decode_payloads(converter, getattr(attrs, "input", None) if attrs else None)
+            if name and args is not None:
+                return f"{name}({args!r})"[:200]
+            return name
+        if "activitytaskcompleted" in compact:
+            attrs = getattr(event, "activity_task_completed_event_attributes", None)
+            result = _decode_payloads(converter, getattr(attrs, "result", None) if attrs else None)
+            if result is None:
+                return "ok"
+            text = repr(result) if not isinstance(result, dict) else str(result)
+            return f"result {text}"[:220]
+        if "activitytaskfailed" in compact or "activitytasktimedout" in compact:
+            attrs = getattr(event, "activity_task_failed_event_attributes", None) or getattr(
+                event, "activity_task_timed_out_event_attributes", None
+            )
+            return _failure_message(converter, getattr(attrs, "failure", None) if attrs else None)
+        if "workflowexecutioncompleted" in compact:
+            attrs = getattr(event, "workflow_execution_completed_event_attributes", None)
+            result = _decode_payloads(converter, getattr(attrs, "result", None) if attrs else None)
+            if result is None:
+                return "completed"
+            text = repr(result) if not isinstance(result, dict) else str(result)
+            return f"result {text}"[:220]
+        if "workflowexecutionfailed" in compact:
+            attrs = getattr(event, "workflow_execution_failed_event_attributes", None)
+            return _failure_message(converter, getattr(attrs, "failure", None) if attrs else None)
+        if "workflowexecutionstarted" in compact:
+            attrs = getattr(event, "workflow_execution_started_event_attributes", None)
+            wt = getattr(attrs, "workflow_type", None) if attrs else None
+            name = getattr(wt, "name", None) if wt else None
+            args = _decode_payloads(converter, getattr(attrs, "input", None) if attrs else None)
+            if name and args is not None:
+                return f"{name}({args!r})"[:200]
+            return name
+        if "timerstarted" in compact:
+            attrs = getattr(event, "timer_started_event_attributes", None)
+            tid = getattr(attrs, "timer_id", None) if attrs else None
+            return f"timer {tid}" if tid else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _workflow_summary(exec: Any) -> dict[str, Any]:
     status = getattr(exec, "status", None)
     status_name = getattr(status, "name", None) or (str(status) if status is not None else None)
@@ -116,12 +239,17 @@ async def describe_workflow(
     run_id: str | None = None,
     history_limit: int = 80,
 ) -> dict[str, Any]:
+    """Describe one workflow with decoded input/result and annotated history."""
     client = await _client()
     if client is None:
         raise RuntimeError("TEMPORAL_HOST is not configured")
+    from temporalio.converter import DataConverter
+
     handle = client.get_workflow_handle(workflow_id, run_id=run_id)
     desc = await handle.describe()
     summary = _workflow_summary(desc)
+    converter = getattr(client, "data_converter", None) or DataConverter.default
+
     query_status: str | None = None
     try:
         query_status = await handle.query("status")
@@ -130,15 +258,41 @@ async def describe_workflow(
     except Exception:  # noqa: BLE001
         query_status = None
 
+    input_args: Any = None
+    result: Any = None
+    failure: str | None = None
     events: list[dict[str, Any]] = []
     try:
         count = 0
         async for event in handle.fetch_history_events():
             et = getattr(event, "event_type", None)
+            label = _event_type_label(et)
+            compact = label.lower().replace("_", "")
+            summary_line = _event_summary(event, label, converter)
+            if "workflowexecutionstarted" in compact and input_args is None:
+                attrs = getattr(event, "workflow_execution_started_event_attributes", None)
+                input_args = _decode_payloads(
+                    converter, getattr(attrs, "input", None) if attrs else None
+                )
+            if "workflowexecutioncompleted" in compact and result is None:
+                attrs = getattr(event, "workflow_execution_completed_event_attributes", None)
+                result = _decode_payloads(
+                    converter, getattr(attrs, "result", None) if attrs else None
+                )
+            if "workflowexecutionfailed" in compact and failure is None:
+                attrs = getattr(event, "workflow_execution_failed_event_attributes", None)
+                failure = _failure_message(
+                    converter, getattr(attrs, "failure", None) if attrs else None
+                )
+            if (
+                "activitytaskfailed" in compact or "activitytasktimedout" in compact
+            ) and failure is None:
+                failure = summary_line
             events.append(
                 {
                     "event_id": getattr(event, "event_id", None),
-                    "event_type": getattr(et, "name", None) or str(et),
+                    "event_type": label,
+                    "summary": summary_line,
                     "event_time": _dt(getattr(event, "event_time", None)),
                 }
             )
@@ -150,19 +304,29 @@ async def describe_workflow(
             "enabled": True,
             "workflow": summary,
             "query_status": query_status,
+            "input": input_args,
+            "result": result,
             "events": events,
             "error": str(e),
+            "failure": failure,
         }
 
-    failure: str | None = None
-    close_status = summary.get("status")
-    if close_status and "FAILED" in str(close_status).upper():
+    # Prefer live result() for completed runs when history decode missed it.
+    close_status = str(summary.get("status") or "")
+    if result is None and "COMPLETED" in close_status.upper():
+        try:
+            result = _jsonable(await handle.result())
+        except Exception:  # noqa: BLE001
+            pass
+    if failure is None and "FAILED" in close_status.upper():
         failure = "Workflow failed — see history events"
 
     return {
         "enabled": True,
         "workflow": summary,
         "query_status": query_status,
+        "input": input_args,
+        "result": result,
         "events": events,
         "failure": failure,
     }

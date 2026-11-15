@@ -46,12 +46,14 @@ type TemporalWorkflowSummary = {
   status?: string | null
   start_time?: string | null
   close_time?: string | null
+  execution_time?: string | null
   history_length?: number | null
 }
 
 type TemporalWorkflowEvent = {
   event_id?: number | null
   event_type?: string | null
+  summary?: string | null
   event_time?: string | null
 }
 
@@ -59,9 +61,21 @@ type TemporalWorkflowDetail = {
   enabled: boolean
   workflow: TemporalWorkflowSummary
   query_status?: string | null
+  input?: unknown
+  result?: unknown
   events: TemporalWorkflowEvent[]
   failure?: string | null
   error?: string | null
+}
+
+function fmtJson(value: unknown): string {
+  if (value === undefined || value === null) return "—"
+  if (typeof value === "string") return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
 }
 
 function statusLabel(status: string | null | undefined): string {
@@ -316,7 +330,7 @@ export function Workflows() {
           if (!open) setSelected(null)
         }}
       >
-        <SheetContent className="flex w-[520px] max-w-[92vw] flex-col gap-0 overflow-y-auto sm:max-w-[520px]">
+        <SheetContent className="flex w-[640px] max-w-[94vw] flex-col gap-0 overflow-y-auto sm:max-w-[640px]">
           <SheetHeader className="pr-10">
             <SheetTitle className="font-mono text-sm break-all">
               {detailBusy ? "Loading…" : selected?.workflow.workflow_id ?? "Workflow"}
@@ -339,8 +353,8 @@ export function Workflows() {
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-muted-foreground">Query status</dt>
-                    <dd className="font-mono text-xs">{selected.query_status ?? "—"}</dd>
+                    <dt className="text-muted-foreground">Task queue</dt>
+                    <dd className="font-mono text-xs">{selected.workflow.task_queue ?? "—"}</dd>
                   </div>
                   <div className="sm:col-span-2">
                     <dt className="text-muted-foreground">Run ID</dt>
@@ -359,17 +373,40 @@ export function Workflows() {
                 {selected.error ? <ErrorFlash message={selected.error} /> : null}
                 <div>
                   <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Input
+                  </p>
+                  <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-[11px] whitespace-pre-wrap">
+                    {fmtJson(selected.input)}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Result
+                  </p>
+                  <pre className="max-h-56 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-[11px] whitespace-pre-wrap">
+                    {fmtJson(selected.result)}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     History
                   </p>
-                  <ol className="space-y-2 text-xs">
+                  <ol className="space-y-3 text-xs">
                     {selected.events.length === 0 ? (
                       <li className="text-muted-foreground">No events</li>
                     ) : (
                       selected.events.map((ev) => (
-                        <li key={String(ev.event_id)} className="flex flex-wrap gap-x-3 gap-y-1">
-                          <span className="font-mono text-muted-foreground">{ev.event_id}</span>
-                          <span className="font-mono">{ev.event_type}</span>
-                          <span className="text-muted-foreground">{fmtTs(ev.event_time)}</span>
+                        <li key={String(ev.event_id)} className="rounded-md border px-3 py-2">
+                          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                            <span className="font-mono text-muted-foreground">{ev.event_id}</span>
+                            <span className="font-mono font-medium">{ev.event_type}</span>
+                            <span className="ml-auto text-muted-foreground">{fmtTs(ev.event_time)}</span>
+                          </div>
+                          {ev.summary ? (
+                            <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
+                              {ev.summary}
+                            </p>
+                          ) : null}
                         </li>
                       ))
                     )}
