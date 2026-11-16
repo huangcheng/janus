@@ -1234,7 +1234,12 @@ fetch_master_sched() {
   if is_bare "$LEADER"; then
     body="$(ssh "$LEADER" 'STATS=$(sed -n "s/^JANUS_STATS_TOKEN=//p" '"$BARE_PREFIX"'/env/janus-gw.env 2>/dev/null); printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:'"$BARE_ADMIN_PORT"'/stats/sched' 2>/dev/null || true)"
   else
-  body="$(ssh "$LEADER" 'STATS=$(grep ^JANUS_STATS_TOKEN= /opt/stacks/janus/.env | cut -d= -f2- | tr -d "\"'\''"); printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:48090/stats/sched' 2>/dev/null || true)"
+    # Prefer the docker-published 48090->8090 face when present; fall back
+    # to host-loopback :8090 (this fleet's compose) then in-container curl
+    # — same ladder as the node_stats helper above. A hard-coded 48090-only
+    # probe false-failed the geo/mmdb gate on leaders that never published
+    # 48090.
+    body="$(ssh "$LEADER" 'STATS=$(grep ^JANUS_STATS_TOKEN= /opt/stacks/janus/.env | cut -d= -f2- | tr -d "\"'\''"); printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:48090/stats/sched 2>/dev/null || printf "Authorization: Bearer %s\n" "$STATS" | curl -s -m 5 -H @- http://127.0.0.1:8090/stats/sched 2>/dev/null || printf "Authorization: Bearer %s\n" "$STATS" | docker exec -i janus curl -s -m 5 -H @- http://127.0.0.1:8090/stats/sched' 2>/dev/null || true)"
   fi
   [ -n "$body" ] || return 1
   printf '%s' "$body"
