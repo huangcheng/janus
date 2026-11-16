@@ -198,6 +198,14 @@ fi
 if [ -z "$GW_SRC" ]; then
   GW_SRC="$(dirname "$(pwd)")/janus"
 fi
+# Fail closed on a typo / stale JANUS_GW_SRC: must be a real directory
+# that looks like a gateway tree (Dockerfile + apps/).
+if [ ! -d "$GW_SRC" ] || [ ! -f "$GW_SRC/Dockerfile" ] || [ ! -d "$GW_SRC/apps" ]; then
+  echo "FAIL: GW_SRC='$GW_SRC' is not a usable gateway tree (need dir + Dockerfile + apps/)." >&2
+  echo "      Set JANUS_GW_SRC to the gateway checkout, or run from dashboard/ beside gateway/ or janus/." >&2
+  exit 1
+fi
+GW_SRC="$(cd "$GW_SRC" && pwd)"
 
 # ---- v2.1 C.3 build provenance: refuse a dirty gateway tree, stamp
 # the git SHA into the image (build-arg -> LABEL + ENV -> /stats/sched
@@ -205,6 +213,9 @@ fi
 # UNCOMMITTED code that passed `git diff --quiet` — `git status
 # --porcelain` (empty REQUIRED) is the gate; JANUS_DEPLOY_ALLOW_DIRTY=1
 # is the loud, deliberate emergency escape.
+#
+# Monorepo note: when GW_SRC is gateway/ inside janus-open, git walks
+# up to the monorepo root — dirty checks cover the whole worktree.
 GW_SHA="$(git -C "$GW_SRC" rev-parse HEAD 2>/dev/null || true)"
 if [ -z "$GW_SHA" ]; then
   echo "WARNING: cannot resolve gateway HEAD (not a git tree?) — stamping JANUS_GIT_SHA=unknown" >&2
