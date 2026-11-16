@@ -9,7 +9,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import audit, database, entitlements, modelsdev, probe_urls
+from .. import audit, dashscope_models, database, entitlements, modelsdev, probe_urls
 from ..auth import require_auth
 from ..config import config
 from ..crypto import decrypt
@@ -181,6 +181,48 @@ def normalize_meta(item: dict) -> str | None:
     return json.dumps(meta, ensure_ascii=False) if meta else None
 
 
+async def _fetch_listing_items(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    protocol: str,
+    secret: str,
+) -> tuple[list[dict], str]:
+    """Return (OpenAI-shaped listing items, source) for one provider.
+
+    DashScope / Model Studio: prefer the native paginated catalog
+    (``/api/v1/models``), which includes callable ids the OpenAI-compatible
+    ``/models`` list still omits. On native failure, fall back to the
+    OpenAI-shaped list so a Bailian outage on one face cannot blank the
+    whole provider. Every other vendor stays on ``models_request``.
+    """
+    url, headers = probe_urls.models_request(base_url, protocol, secret)
+    if dashscope_models.is_dashscope_base(base_url):
+        try:
+            items = await dashscope_models.fetch_native_listings(client, base_url, headers)
+            if items:
+                return items, "dashscope_native"
+            logger.warning(
+                "dashscope native catalog empty for %s; falling back to OpenAI /models",
+                base_url,
+            )
+        except Exception as e:
+            logger.warning(
+                "dashscope native catalog failed for %s (%s); falling back to OpenAI /models",
+                base_url,
+                e,
+            )
+
+    resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        raise RuntimeError(f"http_{resp.status_code}")
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("bad_json")
+    items = [item for item in data.get("data", []) if isinstance(item, dict) and item.get("id")]
+    return items, "openai_models"
+
+
 async def _run_sync() -> dict:
     """Sync model lists from all enabled providers."""
     started = time.time()
@@ -213,22 +255,20 @@ async def _run_sync() -> dict:
             ciphertext = bytes(key_row["secret_ciphertext"])
             plaintext_key = decrypt(ciphertext).decode()
 
-            # Fetch /models through the shared URL helper: the version
-            # segment lives in base_url (gateway convention), Anthropic
-            # authenticates with x-api-key, and an already-versioned
-            # base cannot double-stack /v1 (review 2026-10-17 H1).
-            url, headers = probe_urls.models_request(p["base_url"], p["protocol"], plaintext_key)
+            # Fetch listings through the shared URL helper (OpenAI-shaped)
+            # or, for DashScope, the native paginated catalog — see
+            # `_fetch_listing_items`. Version segment lives in base_url
+            # (gateway convention); Anthropic uses x-api-key (review
+            # 2026-10-17 H1).
             verify = probe_urls.tls_verify()
 
-            async with httpx.AsyncClient(timeout=15.0, verify=verify) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code != 200:
-                    results[p["name"]] = {"error": f"http_{resp.status_code}", "added": 0}
-                    total_errors += 1
-                    continue
-
-                data = resp.json()
-                items = [item for item in data.get("data", []) if item.get("id")]
+            async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+                items, catalog_source = await _fetch_listing_items(
+                    client,
+                    base_url=p["base_url"],
+                    protocol=p["protocol"],
+                    secret=plaintext_key,
+                )
 
             # Upsert names + capability metadata as inventory listings
             # (provider_models). meta is re-captured on every sync so
@@ -280,6 +320,7 @@ async def _run_sync() -> dict:
                 "added": added,
                 "seen": len(items),
                 "error": None,
+                "catalog": catalog_source,
                 "entitlement": entitlement_result,
             }
             total_added += added

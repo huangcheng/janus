@@ -48,6 +48,9 @@
 %% One re-check when init/1 finds the catalog snapshot still cold
 %% (janus_config publishes right after this child starts).
 -define(CATCHUP_RECHECK_MS, 5_000).
+%% DashScope native ``/api/v1/models`` pagination (control-plane catalog).
+-define(DASHSCOPE_PAGE_SIZE, 100).
+-define(DASHSCOPE_MAX_PAGES, 50).
 
 -record(state, {
     timer_ref :: reference() | undefined,
@@ -70,8 +73,10 @@ sync_now() ->
 
 -spec status() -> map().
 status() ->
-    try gen_server:call(?SERVER, status)
-    catch exit:{noproc, _} -> #{enabled => false}
+    try
+        gen_server:call(?SERVER, status)
+    catch
+        exit:{noproc, _} -> #{enabled => false}
     end.
 
 %% Runtime interval change (seconds); 0 = manual-only. The os env value
@@ -212,7 +217,8 @@ do_sync_providers(Started, Providers) ->
         ),
     Result = #{
         ran_at => unicode:characters_to_binary(
-            calendar:system_time_to_rfc3339(Started, [{unit, millisecond}, {offset, "Z"}])),
+            calendar:system_time_to_rfc3339(Started, [{unit, millisecond}, {offset, "Z"}])
+        ),
         elapsed_ms => erlang:system_time(millisecond) - Started,
         providers => maps:from_list(PerProvider)
     },
@@ -242,13 +248,12 @@ do_sync_providers(Started, Providers) ->
         providers_skipped => Skipped,
         errors => Errs
     }),
-    {ok,
-        Result#{
-            models_added => Total,
-            models_seen => Seen,
-            providers_skipped => Skipped,
-            errors => Errs
-        }}.
+    {ok, Result#{
+        models_added => Total,
+        models_seen => Seen,
+        providers_skipped => Skipped,
+        errors => Errs
+    }}.
 
 %% Fetches GET {base}/models for one provider and upserts unseen names.
 %% A provider that is disabled or absent from the config snapshot is a
@@ -299,13 +304,18 @@ fetch_provider_models(ProviderId, Name, RetryUntil) ->
         case janus_catalog:lookup_provider(ProviderId) of
             {ok, #{base_url := Base0, enabled := true}} ->
                 Ctx = #{provider => Name, provider_id => ProviderId, host => Base0},
-                case [K || K <- janus_catalog:provider_keys(ProviderId), maps:get(enabled, K, true)] of
+                case
+                    [K || K <- janus_catalog:provider_keys(ProviderId), maps:get(enabled, K, true)]
+                of
                     [#{secret_ref := Ref} | _] ->
                         {ok, Token} = janus_secrets:decrypt(
-                            case Ref of {_, Cipher} -> Cipher; C -> C end),
+                            case Ref of
+                                {_, Cipher} -> Cipher;
+                                C -> C
+                            end
+                        ),
                         Base = binary_to_list(Base0),
-                        Url = lists:flatten(rtrim(Base, $/) ++ "/models"),
-                        case http_get_json(Url, Token, RetryUntil) of
+                        case fetch_model_names(Base, Token, RetryUntil) of
                             {ok, Models} -> {ok, Ctx, Models};
                             {error, Detail} -> {error, provider_failure(Ctx, Detail)}
                         end;
@@ -399,7 +409,191 @@ http_get_json(Url, Token, RetryUntil) ->
             Ok
     end.
 
+%% Prefer DashScope's native paginated catalog when the provider base is a
+%% Bailian / Model Studio host: the OpenAI-compatible ``/models`` list is a
+%% lagging subset (qwen4-max was callable + listed natively while absent from
+%% compatible-mode /models). Non-DashScope providers keep the OpenAI path.
+fetch_model_names(Base, Token, RetryUntil) ->
+    OpenAIUrl = lists:flatten(rtrim(Base, $/) ++ "/models"),
+    case is_dashscope_base(Base) of
+        true ->
+            case http_get_json_dashscope_native(Base, Token, RetryUntil) of
+                {ok, Names} when Names =/= [] ->
+                    {ok, Names};
+                {ok, []} ->
+                    logger:warning(#{
+                        what => janus_model_sync_dashscope_native_empty,
+                        host => host_of(OpenAIUrl)
+                    }),
+                    http_get_json(OpenAIUrl, Token, RetryUntil);
+                {error, NativeDetail} ->
+                    logger:warning(#{
+                        what => janus_model_sync_dashscope_native_failed,
+                        host => host_of(OpenAIUrl),
+                        reason => NativeDetail
+                    }),
+                    http_get_json(OpenAIUrl, Token, RetryUntil)
+            end;
+        false ->
+            http_get_json(OpenAIUrl, Token, RetryUntil)
+    end.
+
+is_dashscope_base(Base) when is_list(Base) ->
+    case uri_string:parse(Base) of
+        #{host := Host} ->
+            is_dashscope_host(string:lowercase(uri_host_list(Host)));
+        _ ->
+            false
+    end;
+is_dashscope_base(_) ->
+    false.
+
+uri_host_list(Host) when is_list(Host) -> Host;
+uri_host_list(Host) when is_binary(Host) -> binary_to_list(Host).
+
+is_dashscope_host(Host) ->
+    lists:suffix(".maas.aliyuncs.com", Host) orelse Host =:= "maas.aliyuncs.com" orelse
+        (string:find(Host, "dashscope") =/= nomatch andalso
+            lists:suffix(".aliyuncs.com", Host)).
+
+dashscope_native_url(Base) ->
+    case uri_string:parse(Base) of
+        #{scheme := Scheme, host := Host} = Uri ->
+            SchemeL = uri_scheme_list(Scheme),
+            HostL = uri_host_list(Host),
+            PortSuffix =
+                case maps:get(port, Uri, undefined) of
+                    undefined -> "";
+                    443 when SchemeL =:= "https" -> "";
+                    80 when SchemeL =:= "http" -> "";
+                    P when is_integer(P), P > 0 -> ":" ++ integer_to_list(P);
+                    _ -> ""
+                end,
+            SchemeL ++ "://" ++ HostL ++ PortSuffix ++ "/api/v1/models";
+        _ ->
+            undefined
+    end.
+
+uri_scheme_list(https) -> "https";
+uri_scheme_list(http) -> "http";
+uri_scheme_list(S) when is_atom(S) -> atom_to_list(S);
+uri_scheme_list(S) when is_list(S) -> S;
+uri_scheme_list(S) when is_binary(S) -> binary_to_list(S).
+
+http_get_json_dashscope_native(Base, Token, RetryUntil) ->
+    case dashscope_native_url(Base) of
+        undefined ->
+            {error, {bad_json, no_host}};
+        Root ->
+            http_get_dashscope_pages(Root, Token, RetryUntil, 1, [], 0)
+    end.
+
+http_get_dashscope_pages(_Root, _Token, _RetryUntil, Page, Acc, _Total) when
+    Page > ?DASHSCOPE_MAX_PAGES
+->
+    {ok, lists:usort(Acc)};
+http_get_dashscope_pages(Root, Token, RetryUntil, Page, Acc, Total0) ->
+    Url =
+        lists:flatten(
+            io_lib:format("~s?page_no=~B&page_size=~B", [
+                Root, Page, ?DASHSCOPE_PAGE_SIZE
+            ])
+        ),
+    case http_get_json_raw(Url, Token, RetryUntil) of
+        {ok, Body} ->
+            case decode_dashscope_native_page(Body) of
+                {ok, Names, Total, PageCount} ->
+                    Acc1 = Names ++ Acc,
+                    Total1 =
+                        case Total of
+                            undefined -> Total0;
+                            T -> T
+                        end,
+                    Done =
+                        Names =:= [] orelse
+                            (Total1 > 0 andalso length(lists:usort(Acc1)) >= Total1) orelse
+                            PageCount < ?DASHSCOPE_PAGE_SIZE,
+                    case Done of
+                        true ->
+                            {ok, lists:usort(Acc1)};
+                        false ->
+                            http_get_dashscope_pages(
+                                Root, Token, RetryUntil, Page + 1, Acc1, Total1
+                            )
+                    end;
+                {error, Reason} ->
+                    {error, {bad_json, Reason}}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+decode_dashscope_native_page(Body) ->
+    try
+        case thoas:decode(Body) of
+            {ok, #{<<"success">> := true, <<"output">> := Output}} when is_map(Output) ->
+                Models = maps:get(<<"models">>, Output, []),
+                Total =
+                    case maps:get(<<"total">>, Output, undefined) of
+                        T when is_integer(T) -> T;
+                        _ -> undefined
+                    end,
+                case is_list(Models) of
+                    true ->
+                        Names = [
+                            Id
+                         || #{<<"model">> := Id} <- Models,
+                            is_binary(Id),
+                            Id =/= <<>>
+                        ],
+                        {ok, Names, Total, length(Models)};
+                    false ->
+                        {error, unexpected_shape}
+                end;
+            {ok, _} ->
+                {error, unexpected_shape};
+            {error, _} = E ->
+                E
+        end
+    catch
+        _:_ -> {error, decode_crashed}
+    end.
+
 http_get_models(Url, Token) ->
+    case http_get_body(Url, Token) of
+        {ok, Body} ->
+            case decode_model_names(Body) of
+                {ok, _} = Ok -> Ok;
+                {error, Reason} -> {error, {bad_json, Reason}}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% Like http_get_json/3 but returns the raw body for a secondary decoder.
+http_get_json_raw(Url, Token, RetryUntil) ->
+    case http_get_body(Url, Token) of
+        {error, Detail} = Err ->
+            Retry =
+                retryable(Detail) andalso erlang:system_time(millisecond) < RetryUntil,
+            case Retry of
+                true ->
+                    logger:info(#{
+                        what => janus_model_sync_retry,
+                        class => failure_class(Detail),
+                        host => host_of(Url),
+                        reason => detail_of(Detail)
+                    }),
+                    timer:sleep(?RETRY_BACKOFF_MS),
+                    http_get_body(Url, Token);
+                false ->
+                    Err
+            end;
+        Ok ->
+            Ok
+    end.
+
+http_get_body(Url, Token) ->
     _ = application:ensure_all_started(inets),
     _ = application:ensure_all_started(ssl),
     %% Task 3 exclusion: background catalog sync is not request-scoped
@@ -413,10 +607,7 @@ http_get_models(Url, Token) ->
     Opts = [{body_format, binary}],
     case httpc:request(get, Req, HTTPOpts, Opts) of
         {ok, {{_V, 200, _}, _H, Body}} ->
-            case decode_model_names(Body) of
-                {ok, _} = Ok -> Ok;
-                {error, Reason} -> {error, {bad_json, Reason}}
-            end;
+            {ok, Body};
         {ok, {{_V, Code, _}, _H, _B}} ->
             {error, {http_status, Code}};
         {error, Reason} ->
@@ -556,8 +747,8 @@ interval_sec() ->
     end.
 
 sync_on_start() ->
-    truthy(os:getenv("JANUS_MODEL_SYNC_ON_START"))
-        orelse truthy(application:get_env(janus, model_sync_on_start, undefined)).
+    truthy(os:getenv("JANUS_MODEL_SYNC_ON_START")) orelse
+        truthy(application:get_env(janus, model_sync_on_start, undefined)).
 
 %% Boot cadence (2026-10-23): init/1 used to reset the 6 h timer without
 %% ever running, so a gateway that restarts more often than the interval
@@ -603,12 +794,11 @@ catch_up_due() ->
                     Attempted = AnyAge =/= none andalso AnyAge < Interval,
                     case Stale andalso not Attempted of
                         true ->
-                            {true,
-                                #{
-                                    reason => stale_success,
-                                    ok_age_sec => OkAge,
-                                    last_attempt_age_sec => AnyAge
-                                }};
+                            {true, #{
+                                reason => stale_success,
+                                ok_age_sec => OkAge,
+                                last_attempt_age_sec => AnyAge
+                            }};
                         false ->
                             {false, fresh}
                     end;
@@ -633,8 +823,10 @@ last_run_ages() ->
         {error, Reason} -> {error, Reason}
     end.
 
-age_sec(null) -> none;
-age_sec(undefined) -> none;
+age_sec(null) ->
+    none;
+age_sec(undefined) ->
+    none;
 age_sec(V) when is_integer(V), V >= 0 -> V;
 age_sec(V) when is_binary(V) ->
     try binary_to_integer(V) of
@@ -643,7 +835,8 @@ age_sec(V) when is_binary(V) ->
     catch
         _:_ -> none
     end;
-age_sec(_) -> none.
+age_sec(_) ->
+    none.
 
 maybe_start_timer(State) ->
     cancel_timer(State#state.timer_ref),
@@ -656,7 +849,8 @@ maybe_start_timer(State) ->
             State#state{timer_ref = undefined}
     end.
 
-cancel_timer(undefined) -> ok;
+cancel_timer(undefined) ->
+    ok;
 cancel_timer(Ref) when is_reference(Ref) ->
     _ = erlang:cancel_timer(Ref),
     ok.
