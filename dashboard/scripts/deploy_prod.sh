@@ -185,8 +185,19 @@ case "$WAIT_DEADLINE" in ''|*[!0-9]*) WAIT_DEADLINE=300 ;; esac
 [ "$POLL_SEC" -ge 1 ] 2>/dev/null || POLL_SEC=2
 [ "$WAIT_DEADLINE" -ge 1 ] 2>/dev/null || WAIT_DEADLINE=300
 
-GW_SRC="$(cd ../janus 2>/dev/null && pwd || true)"
-if [ -z "$GW_SRC" ]; then GW_SRC="$(dirname "$(pwd)")/janus"; fi
+# Gateway source tree: explicit override, then sibling `janus` checkout
+# (legacy split-repo layout), then monorepo `gateway/` next to this
+# dashboard/ directory (janus-open).
+GW_SRC="${JANUS_GW_SRC:-}"
+if [ -z "$GW_SRC" ]; then
+  GW_SRC="$(cd ../janus 2>/dev/null && pwd || true)"
+fi
+if [ -z "$GW_SRC" ]; then
+  GW_SRC="$(cd ../gateway 2>/dev/null && pwd || true)"
+fi
+if [ -z "$GW_SRC" ]; then
+  GW_SRC="$(dirname "$(pwd)")/janus"
+fi
 
 # ---- v2.1 C.3 build provenance: refuse a dirty gateway tree, stamp
 # the git SHA into the image (build-arg -> LABEL + ENV -> /stats/sched

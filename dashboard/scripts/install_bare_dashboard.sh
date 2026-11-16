@@ -157,7 +157,11 @@ if [ -z "$INV" ]; then
   # Canonical file FIRST (Task 3 consolidation): the janus repo's
   # deploy/inventory.env is the ONE file both repos resolve; this
   # repo's deploy/inventory.env is a LEGACY fallback only.
-  for cand in "$ROOT/../janus/deploy/inventory.env" "$ROOT/deploy/inventory.env"; do
+  for cand in \
+    ${JANUS_INVENTORY:+"$JANUS_INVENTORY"} \
+    "$ROOT/../gateway/deploy/inventory.env" \
+    "$ROOT/../janus/deploy/inventory.env" \
+    "$ROOT/deploy/inventory.env"; do
     [ -f "$cand" ] && INV="$cand" && break
   done
 fi

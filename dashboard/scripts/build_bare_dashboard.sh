@@ -117,7 +117,11 @@ done
 # ------------------------------------------------------------ inventory ---
 INV="${INV_OVERRIDE:-${JANUS_INVENTORY:-}}"
 if [ -z "$INV" ]; then
-  for cand in "$ROOT/../janus/deploy/inventory.env" "$ROOT/deploy/inventory.env"; do
+  for cand in \
+    ${JANUS_INVENTORY:+"$JANUS_INVENTORY"} \
+    "$ROOT/../gateway/deploy/inventory.env" \
+    "$ROOT/../janus/deploy/inventory.env" \
+    "$ROOT/deploy/inventory.env"; do
     [ -f "$cand" ] && INV="$cand" && break
   done
 fi
