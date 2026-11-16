@@ -37,7 +37,10 @@ reasons() ->
             <<"upstream sent an unsupported content-encoding">>},
         {{body, econnreset}, <<"upstream body closed">>},
         {{body, too_large}, <<"upstream response body exceeds size limit">>},
-        {{unexpected_body, closed}, <<"upstream sent an unexpected stream frame">>}
+        {{unexpected_body, closed}, <<"upstream sent an unexpected stream frame">>},
+        %% Internal-hop inflate: must be prose, never the bare atom.
+        {{wire_enc_inflate_fail, x}, <<"internal wire inflate failed">>},
+        {wire_enc_inflate_fail, <<"internal wire inflate failed">>}
     ].
 
 %% The translate path must yield a BINARY for every reason, because it fills
@@ -151,7 +154,8 @@ row_agrees_with_wire_for_every_named_shape_test() ->
         {body, {content_encoding, inflate_incomplete}},
         {content_encoding, {violation, <<"br">>}},
         {unexpected_body, closed},
-        {await, no_progress}
+        {await, no_progress},
+        {wire_enc_inflate_fail, x}
     ],
     lists:foreach(
         fun(Reason) ->

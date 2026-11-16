@@ -5,19 +5,11 @@
 %%%-------------------------------------------------------------------
 -module(janus_http_proxy).
 
--define(UPSTREAM_STALLED_MSG, <<"upstream stopped sending data mid-stream">>).
-%% Shared by BOTH renderers (stream_failure_text/1 on the native path and
-%% sanitize_stream_reason/1 on the translate path). A macro rather than two
-%% literals so the agreement is structural: the whole point of the
-%% reason-text tests is that these two cannot drift, and every other shared
-%% sentence is already centralized.
--define(UNEXPECTED_FRAME_MSG, <<"upstream sent an unexpected stream frame">>).
 %% An internal-hop inflate failure is OUR wire, not the provider's. Written
 %% from two exits (the committed native path and the uncommitted reply), so
 %% it is a macro: two literals are exactly how "one cause, one sentence"
 %% silently breaks.
 -define(INTERNAL_INFLATE_FAIL_MSG, <<"internal wire inflate failed">>).
--define(STREAM_TIMEOUT_MSG, <<"upstream stream exceeded the total time budget">>).
 
 
 -include("janus_protocol_translate.hrl").
@@ -1582,15 +1574,17 @@ finish_translate_stream(ClientProto, Route, Req2, State, Reason) ->
                     true -> put(janus_error_detail, Msg);
                     false -> ok
                 end,
-            case wire_enc_abort_reason(Msg) of
+            %% Internal-hop inflate failure on the TRANSLATE stream path
+            %% (spec 2026-10-12-wire-compression F2): identical
+            %% frames/accounting to any other upstream stream failure,
+            %% but NO provider benching (our wire, not the provider's).
+            %%
+            %% `sanitize_stream_reason/1` turns the abort into the shared
+            %% client sentence (a binary), so matching the raw
+            %% `{wire_enc_inflate_fail, _}` shape alone would miss it and
+            %% incorrectly bench the provider. Accept either form.
+            case Msg =:= ?INTERNAL_INFLATE_FAIL_MSG orelse wire_enc_abort_reason(Msg) of
                 true ->
-                    %% Internal-hop inflate failure on the TRANSLATE
-                    %% stream path (spec 2026-10-12-wire-compression F2):
-                    %% identical frames/accounting to any other upstream
-                    %% stream failure, but NO provider benching (our
-                    %% wire, not the provider's). The Msg here is already
-                    %% the sanitized reason (see handle_translate_stream)
-                    %% — both sanitize shapes of the abort reason match.
                     logger:error(#{what => janus_wire_enc_inflate_fail, reason => Msg});
                 false ->
                     _ = note_provider_failure(Route, sanitize_upstream_error(Msg))
@@ -2089,72 +2083,10 @@ native_stream_fail(ClientProto, Route, Req2, State, Reason) ->
     catch cowboy_req:stream_body(<<"\n">>, fin, Req2),
     {ok, Req2, State}.
 
-%% Usage-row detail for a local-path upstream failure: the DRAIN reason when it
-%% is specific enough to be useful, else the client-facing text. Kept a binary
-%% because the row reader guards on is_binary.
-drain_detail_text(Status, Reason, Fallback) ->
-    Detailed =
-        case {Status, Reason} of
-            %% A 504 is the FIRST-BYTE budget and the client text already says
-            %% so. Every 504-shaped reason maps here, including
-            %% {await, timeout} — error_http_status/1 turns that tuple into 504
-            %% unconditionally, so there is no 502/await-timeout state to
-            %% distinguish and no need for a branch for one.
-            {504, _} ->
-                undefined;
-            %% timeout is a STALL, not a generic body error — the same
-            %% distinction both renderers make, so the row matches the client.
-            {_, {body, timeout}} ->
-                ?UPSTREAM_STALLED_MSG;
-            {_, {body, R}} ->
-                body_failure_text(R);
-            {_, {await, no_progress}} ->
-                ?UPSTREAM_STALLED_MSG;
-            %% Internal-hop inflate failure is OUR wire, not the provider's
-            %% (native_stream_fail skips benching for exactly this reason).
-            %% Without this clause the row falls back to a provider-blaming
-            %% sentence, and the sibling uncommitted branch already records
-            %% the honest "internal wire inflate failed" for the same
-            %% condition — one cause must not produce two different rows.
-            {_, R} when ?IS_WIRE_ENC_ABORT(R) ->
-                ?INTERNAL_INFLATE_FAIL_MSG;
-            %% Delegated, never re-worded: one condition, one sentence. The
-            %% guard keeps an UNKNOWN shape out of stream_failure_text/1 (whose
-            %% catch-all is the vague "upstream error") so an unrecognised
-            %% reason still falls back to the status-derived client text.
-            %% Only the shapes not already handled above: `body` has its two
-            %% clauses, so listing it here would be dead.
-            {_, R} when
-                is_tuple(R) andalso tuple_size(R) >= 1 andalso
-                    (element(1, R) =:= content_encoding orelse
-                        element(1, R) =:= unexpected_body)
-            ->
-                stream_failure_text(R);
-            _ ->
-                undefined
-        end,
-    case Detailed of
-        undefined -> Fallback;
-        Bin -> Bin
-    end.
-
-%% Human-readable, single-line, SSE-safe reason for a mid-stream close.
-sse_failure_notice(closed) ->
-    <<>>;
-sse_failure_notice(Reason) ->
-    Text = stream_failure_text(Reason),
-    iolist_to_binary([<<": janus stream failed - ">>, Text, <<"\n\n">>]).
-
-stream_failure_text({body, timeout}) -> ?UPSTREAM_STALLED_MSG;
-stream_failure_text({body, Reason}) -> body_failure_text(Reason);
-stream_failure_text({await, timeout}) -> ?STREAM_TIMEOUT_MSG;
-stream_failure_text({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
-stream_failure_text({unexpected_body, _}) -> ?UNEXPECTED_FRAME_MSG;
-%% Top-level shape: janus_providers_http surfaces a decode failure on the
-%% decoded drain as {content_encoding, _} rather than nesting it under body.
-stream_failure_text({content_encoding, _}) -> body_failure_text({content_encoding, x});
-stream_failure_text(closed) -> <<"client disconnected">>;
-stream_failure_text(_) -> <<"upstream error">>.
+%% Usage-row / SSE mid-stream reason text: peeled to janus_http_proxy_stream.
+drain_detail_text(A, B, C) -> janus_http_proxy_stream:drain_detail_text(A, B, C).
+sse_failure_notice(A) -> janus_http_proxy_stream:sse_failure_notice(A).
+stream_failure_text(A) -> janus_http_proxy_stream:stream_failure_text(A).
 
 handle_upstream(ClientProto, _ProviderProto, {ok, stream, Status, Headers, Drain}, Route, false, Req, State) when
     Status >= 400
@@ -2414,10 +2346,11 @@ upstream_detail_msg() ->
 wire_enc_abort_reason(R) -> ?IS_WIRE_ENC_ABORT(R).
 
 %% finalize_sse/3's JSON encoder needs a binary message, but a drain
-%% error reaches it as sanitize_upstream_error/1 output, which can be a
-%% 2-tuple ({Tag, Sub} / {Tag, N}). Normalise for the WIRE only:
-%% finish_translate_stream/5 still matches its accounting branches on
-%% the original shape (wire_enc_abort_reason/1 needs the tuple).
+%% error can still reach here as sanitize_upstream_error/1 output (a
+%% 2-tuple) when sanitize_stream_reason/1 falls through. Normalise for
+%% the WIRE only. Internal-hop inflate is already a binary sentence from
+%% sanitize_stream_reason/1; finish_translate_stream/5 matches that
+%% sentence (and the raw abort shape) to skip provider benching.
 wire_reason({error, Kind, Msg}) when is_binary(Msg) -> {error, Kind, Msg};
 wire_reason({error, Kind, Msg}) -> {error, Kind, wire_msg(Msg)};
 wire_reason(Other) -> Other.
@@ -2467,62 +2400,9 @@ trim_partial_utf8(B, I, Extra) ->
             trim_partial_utf8(B, I - 1, Extra + 1)
     end.
 
-%% Upstream silence in the middle of a stream (janus_worker_wire:
-%% stream_inactivity_timeout_ms/0). The worker client reports it as
-%% {await, no_progress}; sanitize_upstream_error/1 would keep it a
-%% tuple and the client would read an Erlang term. Name it in words a
-%% human can act on — this is the gateway saying "the upstream stalled",
-%% which is precisely what the generic 502 used to hide.
-
-%% NOTE: this fills the Msg slot of {error, upstream, Msg}, so it must
-%% yield a BINARY. Returning {stalled, Binary} here would fall through
-%% wire_reason/1's non-binary clause, which renders with ~w — the client
-%% would read an Erlang term again, the exact leak this removes.
-sanitize_stream_reason({await, no_progress}) -> ?UPSTREAM_STALLED_MSG;
-%% The sibling budget: without this clause the tuple falls through to
-%% wire_reason's ~w rendering and the client reads an Erlang term.
-sanitize_stream_reason({await, timeout}) -> ?STREAM_TIMEOUT_MSG;
-%% Body-side failures, same words as stream_failure_text/1. This clause was
-%% MISSING and it was the live 2026-11-11 bug: the local execution path
-%% (janus_providers_http drains the provider directly when no worker is
-%% available) reports a silent body as {body, timeout}, which fell through to
-%% sanitize_upstream_error/1 — whose {Tag, _} -> Tag clause returns the bare
-%% atom `body`, so the client was told `api_error: body` after a 147s stream.
-sanitize_stream_reason({body, timeout}) -> ?UPSTREAM_STALLED_MSG;
-sanitize_stream_reason({body, Reason}) -> body_failure_text(Reason);
-%% The sibling drain shape: a frame arrived where none was expected. Named
-%% like the two above so it cannot fall through to sanitize_upstream_error/1
-%% and reach the client as the bare atom `unexpected_body`.
-sanitize_stream_reason({unexpected_body, _}) -> ?UNEXPECTED_FRAME_MSG;
-%% Top-level decode failure (janus_providers_http's decoded drain). Without
-%% this clause it fell through to sanitize_upstream_error/1, which returns the
-%% bare atom `content_encoding` — the same leak as `body`, one shape over.
-sanitize_stream_reason({content_encoding, _}) ->
-    body_failure_text({content_encoding, x});
-sanitize_stream_reason(Other) -> sanitize_upstream_error(Other).
-
-%% A body that stopped for a reason other than silence. Still names the body
-%% (that is where it broke and it is what an operator greps for) but never
-%% echoes an Erlang term.
-%% Reasons that mean the connection ENDED, in gun's vocabulary. Grouped so
-%% an operator sees "closed" for a reset rather than a vaguer "error".
-body_failure_text(closed) -> <<"upstream body closed">>;
-body_failure_text(econnreset) -> <<"upstream body closed">>;
-body_failure_text(closed_by_peer) -> <<"upstream body closed">>;
-%% A HEADERS-level contract violation (janus_wire_enc:classify_content_encoding/1
-%% rejected the provider's Content-Encoding) is not a decompression failure —
-%% nothing was ever decompressed. "Unsupported encoding" is the honest
-%% sentence, and this text now reaches both the SSE comment and the usage row,
-%% so the distinction is worth a clause.
-body_failure_text({content_encoding, {violation, _}}) ->
-    <<"upstream sent an unsupported content-encoding">>;
-body_failure_text({content_encoding, _}) -> <<"upstream body decompression error">>;
-%% A size cap is a distinct, greppable cause (janus_providers_http:
-%% collect_body/5 crosses ?MAX_BODY_BYTES) and the decisions face already has
-%% its own sentence for it. Reported as a generic body error it reads like a
-%% transport fault and sends an operator looking in the wrong place.
-body_failure_text(too_large) -> <<"upstream response body exceeds size limit">>;
-body_failure_text(_) -> <<"upstream body error">>.
+%% Translate-path drain reason text: peeled to janus_http_proxy_stream.
+sanitize_stream_reason(A) -> janus_http_proxy_stream:sanitize_stream_reason(A).
+body_failure_text(A) -> janus_http_proxy_stream:body_failure_text(A).
 
 wire_msg(Msg) when is_atom(Msg) -> atom_to_binary(Msg, utf8);
 wire_msg(Msg) -> unicode:characters_to_binary(io_lib:format("~w", [Msg])).
