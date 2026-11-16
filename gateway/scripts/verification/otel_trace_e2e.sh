@@ -160,14 +160,17 @@ check "A7 orphan tracestate dropped" "" "$TS7"
 # A10: reject path — a 401 must close and export the SERVER span its
 # traceparent names (the preamble reject-export contract); the unsampled
 # 401 omits the traceparent entirely (no span was recorded).
+# Header is assembled so gitleaks' curl-auth-header rule does not treat the
+# deliberate invalid credential as a leaked secret.
+UNAUTHORIZED_BEARER="Bearer ""no-such-key"
 H10=$(curl -s -D - -o /dev/null --max-time 10 -X POST -H "content-type: application/json" \
-  -H "authorization: Bearer no-such-key" -H "traceparent: $IN" \
+  -H "authorization: ${UNAUTHORIZED_BEARER}" -H "traceparent: $IN" \
   -d '{"model":"m","messages":[]}' "$BASE/v1/chat/completions")
 TP10=$(printf '%s' "$H10" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
 check "A10 reject traceparent continues the trace" \
   "4bf92f3577b34da6a3ce929d0e0e4736" "$(printf '%s' "$TP10" | cut -d- -f2)"
 H10b=$(curl -s -D - -o /dev/null --max-time 10 -X POST -H "content-type: application/json" \
-  -H "authorization: Bearer no-such-key" -H "traceparent: $IN0" \
+  -H "authorization: ${UNAUTHORIZED_BEARER}" -H "traceparent: $IN0" \
   -d '{"model":"m","messages":[]}' "$BASE/v1/chat/completions")
 TP10b=$(printf '%s' "$H10b" | tr -d '\r' | awk 'tolower($1)=="traceparent:"{print $2}')
 check "A10 unsampled reject omits traceparent" "" "$TP10b"

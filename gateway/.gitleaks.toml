@@ -105,6 +105,9 @@ regexes = [
     # in spec/audit docs — a ${VAR} placeholder can never be a secret
     # erlang-cookie rule fires on ${JANUS_ERLANG_COOKIE} variable SYNTAX
     # (a ${VAR} placeholder can never be a secret)
-    '''-setcookie ["`]?\$\{?JANUS_ERLANG_COOKIE'''
+    '''-setcookie ["`]?\$\{?JANUS_ERLANG_COOKIE''',
+    # Deliberate invalid credential in otel_trace_e2e reject-path curls —
+    # curl-auth-header must not treat it as a leaked secret.
+    '''Bearer no-such-key''',
 ]
 
