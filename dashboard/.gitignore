@@ -40,3 +40,4 @@ graphify-out/
 scripts/swr_ci_janus.sh
 scripts/swr_worker_flip.sh
 .zcode/
+uv.lock
