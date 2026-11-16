@@ -12,12 +12,12 @@ never gated — that is the kill switch. A break-glass override
 """
 
 import asyncio
+import json
 import time
 
-import httpx
 from fastapi import HTTPException, Request
 
-from . import audit, database, nodes, probe_urls
+from . import audit, database, egress, nodes, probe_urls
 
 DECISIONS_PROTOCOL = "openai_decisions"
 # Registry heartbeat freshness window (spec §4.3) and per-node readyz
@@ -30,12 +30,28 @@ def _gate_err(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status, detail={"error": {"code": code, "message": message}})
 
 
-async def _check_node_readyz(client: httpx.AsyncClient, name: str, url: str) -> dict:
+async def _check_node_readyz(name: str, data_host: str, url: str, *, verify: bool) -> dict:
     """One node's readyz verdict: ok only on HTTP 200 + JSON protocols
     list containing openai_decisions. Every failure carries a reason
     for the block message / audit row."""
+    client = egress.pinned_async_client(data_host, timeout=READYZ_TIMEOUT_SEC, verify=verify)
+    if client is None:
+        return {
+            "node": name,
+            "url": url,
+            "ok": False,
+            "reason": "readyz egress: data_host failed connect-time classification",
+        }
     try:
-        resp = await client.get(url)
+        async with client, client.stream("GET", url) as resp:
+            if resp.status_code != 200:
+                return {
+                    "node": name,
+                    "url": url,
+                    "ok": False,
+                    "reason": f"readyz HTTP {resp.status_code}",
+                }
+            raw = await egress.read_body_capped(resp)
     except Exception as e:
         return {
             "node": name,
@@ -43,10 +59,8 @@ async def _check_node_readyz(client: httpx.AsyncClient, name: str, url: str) -> 
             "ok": False,
             "reason": f"readyz unreachable: {type(e).__name__}",
         }
-    if resp.status_code != 200:
-        return {"node": name, "url": url, "ok": False, "reason": f"readyz HTTP {resp.status_code}"}
     try:
-        data = resp.json()
+        data = json.loads(raw)
     except Exception:
         return {"node": name, "url": url, "ok": False, "reason": "readyz returned non-JSON"}
     protocols = data.get("protocols") if isinstance(data, dict) else None
@@ -123,10 +137,12 @@ async def evaluate_write_gate() -> dict:
             to_probe.append((row, url))
 
     verify = probe_urls.tls_verify()
-    async with httpx.AsyncClient(timeout=READYZ_TIMEOUT_SEC, verify=verify) as client:
-        probed = await asyncio.gather(
-            *(_check_node_readyz(client, row["name"], url) for row, url in to_probe)
+    probed = await asyncio.gather(
+        *(
+            _check_node_readyz(row["name"], row["data_host"], url, verify=verify)
+            for row, url in to_probe
         )
+    )
 
     verdicts = stale + list(probed)
     return {"ok": all(v["ok"] for v in verdicts), "nodes": verdicts}

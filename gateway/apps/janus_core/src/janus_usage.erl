@@ -710,13 +710,18 @@ chunk_test() ->
 
 -endif.
 
-%% error_detail: keep the upstream's own sentence, clamp at 512 bytes
-%% (cut on a byte boundary; usage rows are bulk-written, the Failures
-%% page needs a headline, not the body).
-err_detail_bin(B) when is_binary(B), byte_size(B) > 512 ->
-    binary:part(B, 0, 512);
-err_detail_bin(B) when is_binary(B) -> B;
-err_detail_bin(_) -> null.
+%% error_detail: keep the upstream's own sentence, scrub credential
+%% shapes (security audit run-2), clamp at 512 bytes (cut on a byte
+%% boundary; usage rows are bulk-written, the Failures page needs a
+%% headline, not the body).
+err_detail_bin(B) when is_binary(B) ->
+    Scrubbed = janus_task_run:scrub(B),
+    case byte_size(Scrubbed) > 512 of
+        true -> binary:part(Scrubbed, 0, 512);
+        false -> Scrubbed
+    end;
+err_detail_bin(_) ->
+    null.
 
 %% Modality tag from the event; anything unexpected reads as chat.
 modality_bin(M) when is_binary(M) -> M;

@@ -6,7 +6,6 @@ import logging
 import time
 
 import asyncpg
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import (
@@ -364,24 +363,28 @@ async def test_provider_key(request: Request, user: dict = Depends(require_auth)
     # segment of its own.
     url, headers = probe_urls.models_request(base_url, protocol, secret)
     verify = probe_urls.tls_verify()
+    client = egress.pinned_async_client(base_url, timeout=10.0, verify=verify)
+    if client is None:
+        return {"ok": False, "error": "egress_refused", "detail": "connect-time classification"}
     try:
-        async with httpx.AsyncClient(timeout=10.0, verify=verify) as client:
-            resp = await client.get(url, headers=headers)
+        async with client, client.stream("GET", url, headers=headers) as resp:
+            status = resp.status_code
+            raw = await egress.read_body_capped(resp)
     except Exception as e:
         return {"ok": False, "error": "unreachable", "detail": type(e).__name__}
 
-    if resp.status_code in (401, 403):
-        return {"ok": False, "error": "invalid_key", "detail": f"HTTP {resp.status_code}"}
-    if resp.status_code in (404, 405):
+    if status in (401, 403):
+        return {"ok": False, "error": "invalid_key", "detail": f"HTTP {status}"}
+    if status in (404, 405):
         return {
             "ok": False,
             "error": "unverifiable",
-            "detail": f"endpoint serves no model list (HTTP {resp.status_code})",
+            "detail": f"endpoint serves no model list (HTTP {status})",
         }
-    if resp.status_code != 200:
-        return {"ok": False, "error": "upstream_error", "detail": f"HTTP {resp.status_code}"}
+    if status != 200:
+        return {"ok": False, "error": "upstream_error", "detail": f"HTTP {status}"}
     try:
-        data = resp.json()
+        data = json.loads(raw)
         count = len(data.get("data", [])) if isinstance(data, dict) else 0
     except Exception:
         return {"ok": False, "error": "unverifiable", "detail": "non-JSON response"}
@@ -831,10 +834,8 @@ async def test_provider_listing(
     codes = await entitlements.load_codes()
     verify = probe_urls.tls_verify()
     started = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=20.0, verify=verify) as client:
-            resp = await client.post(url, headers=headers, json=body)
-    except httpx.TimeoutException:
+    client = egress.pinned_async_client(provider["base_url"], timeout=20.0, verify=verify)
+    if client is None:
         return {
             "ok": False,
             "kind": "error",
@@ -842,11 +843,21 @@ async def test_provider_listing(
             "latency_ms": int((time.monotonic() - started) * 1000),
             "key_label": key_label,
             "listing": listing["name"],
-            "error_code": "timeout",
-            "error_message": "upstream did not answer in 20s",
+            "error_code": "egress_refused",
+            "error_message": "connect-time classification refused the base_url",
             "snippet": "",
         }
+    try:
+        async with client, client.stream("POST", url, headers=headers, json=body) as resp:
+            status = resp.status_code
+            raw = await egress.read_body_capped(resp)
     except Exception as e:
+        code = "timeout" if "Timeout" in type(e).__name__ else "transport"
+        message = (
+            "upstream did not answer in 20s"
+            if code == "timeout"
+            else str(e)[:200]
+        )
         return {
             "ok": False,
             "kind": "error",
@@ -854,37 +865,41 @@ async def test_provider_listing(
             "latency_ms": int((time.monotonic() - started) * 1000),
             "key_label": key_label,
             "listing": listing["name"],
-            "error_code": "transport",
-            "error_message": str(e)[:200],
+            "error_code": code,
+            "error_message": message,
             "snippet": "",
         }
 
     latency_ms = int((time.monotonic() - started) * 1000)
     payload = {"latency_ms": latency_ms, "key_label": key_label, "listing": listing["name"]}
-    if 200 <= resp.status_code < 300:
-        snippet = _test_snippet(provider["protocol"], entitlements._safe_json(resp))
+    try:
+        parsed = json.loads(raw) if raw else None
+    except Exception:
+        parsed = None
+    if 200 <= status < 300:
+        snippet = _test_snippet(provider["protocol"], parsed if isinstance(parsed, dict) else {})
         return {
             **payload,
             "ok": True,
             "kind": "ok",
-            "http_status": resp.status_code,
+            "http_status": status,
             "error_code": None,
             "error_message": None,
             "snippet": snippet[:120],
         }
-    code, message = entitlements.extract_error_fields(entitlements._safe_json(resp))
+    code, message = entitlements.extract_error_fields(parsed if isinstance(parsed, dict) else {})
     message = (message or "")[:200]
-    if resp.status_code in (401, 403):
+    if status in (401, 403):
         kind = "broken"
-    elif resp.status_code >= 500:
+    elif status >= 500:
         kind = "error"
     else:
-        kind = entitlements.classify(provider["name"], resp.status_code, code, message, codes)
+        kind = entitlements.classify(provider["name"], status, code, message, codes)
     return {
         **payload,
         "ok": False,
         "kind": kind,
-        "http_status": resp.status_code,
+        "http_status": status,
         "error_code": code,
         "error_message": message,
         "snippet": "",

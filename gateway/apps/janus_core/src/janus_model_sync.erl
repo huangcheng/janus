@@ -593,6 +593,11 @@ http_get_json_raw(Url, Token, RetryUntil) ->
             Ok
     end.
 
+%% Same upstream body budget as gun collect_body (security audit run-2).
+-define(MAX_MODELS_BODY_BYTES, 32 * 1024 * 1024).
+%% Align with DashScope native page budget; refuse uncapped OpenAI lists.
+-define(MAX_MODELS_PER_PROVIDER, 5000).
+
 http_get_body(Url, Token) ->
     _ = application:ensure_all_started(inets),
     _ = application:ensure_all_started(ssl),
@@ -607,10 +612,16 @@ http_get_body(Url, Token) ->
     %% provider-controlled 3xx can otherwise replay the Bearer token
     %% to an attacker-controlled Location (ocr security high).
     HTTPOpts = [{timeout, 15_000}, {autoredirect, false}, {ssl, janus_ssl_opts()}],
+    %% httpc has no request-time body cap in our OTP (max_body_size is
+    %% not a request option and is silently ignored). Cap after receive
+    %% and refuse oversize before decode (security audit run-2).
     Opts = [{body_format, binary}],
     case httpc:request(get, Req, HTTPOpts, Opts) of
-        {ok, {{_V, 200, _}, _H, Body}} ->
-            {ok, Body};
+        {ok, {{_V, 200, _}, _H, Body}} when is_binary(Body) ->
+            case byte_size(Body) > ?MAX_MODELS_BODY_BYTES of
+                true -> {error, {bad_json, body_too_large}};
+                false -> {ok, Body}
+            end;
         {ok, {{_V, Code, _}, _H, _B}} ->
             {error, {http_status, Code}};
         {error, Reason} ->
@@ -642,7 +653,13 @@ decode_model_names(Body) ->
         case thoas:decode(Body) of
             {ok, #{<<"data">> := Items}} when is_list(Items) ->
                 Names = [Id || #{<<"id">> := Id} <- Items, is_binary(Id), Id =/= <<>>],
-                {ok, lists:usort(Names)};
+                Unique = lists:usort(Names),
+                case length(Unique) > ?MAX_MODELS_PER_PROVIDER of
+                    true ->
+                        {error, {bad_json, too_many_models}};
+                    false ->
+                        {ok, Unique}
+                end;
             {ok, _Other} ->
                 {error, unexpected_shape};
             {error, _} = E ->

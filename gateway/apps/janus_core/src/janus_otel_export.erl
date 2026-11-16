@@ -859,29 +859,33 @@ loggable(trace_id) -> false;
 loggable(span_id) -> false;
 loggable(_) -> true.
 
-attr_value(V) when is_binary(V) -> V;
+%% Scrub credential shapes before OTLP encode (security audit run-2):
+%% Bearer/sk-/PEM must not leave the gateway trust boundary.
+attr_value(V) when is_binary(V) -> janus_task_run:scrub(V);
 attr_value(V) when is_integer(V) -> V;
 attr_value(V) when is_float(V) -> V;
 attr_value(V) when is_boolean(V) -> V;
 attr_value(V) when is_atom(V) -> atom_to_binary(V, utf8);
-attr_value(V) -> iolist_to_binary(io_lib:format("~0p", [V])).
+attr_value(V) -> janus_task_run:scrub(iolist_to_binary(io_lib:format("~0p", [V]))).
 
 %% `msg' arrives in several shapes; every one must render as the text a
 %% human would have seen, never as a quoted Erlang term.
 render_body({string, Chardata}) ->
-    unicode:characters_to_binary(Chardata);
+    janus_task_run:scrub(unicode:characters_to_binary(Chardata));
 render_body({report, Report}) when is_map(Report) ->
-    iolist_to_binary(io_lib:format("~0p", [Report]));
+    janus_task_run:scrub(iolist_to_binary(io_lib:format("~0p", [Report])));
 render_body({Format, Args}) when is_list(Args) ->
-    try
-        iolist_to_binary(io_lib:format(Format, Args))
-    catch
-        _:_ -> iolist_to_binary(io_lib:format("~0p", [{Format, Args}]))
-    end;
+    Text =
+        try
+            iolist_to_binary(io_lib:format(Format, Args))
+        catch
+            _:_ -> iolist_to_binary(io_lib:format("~0p", [{Format, Args}]))
+        end,
+    janus_task_run:scrub(Text);
 render_body(B) when is_binary(B) ->
-    B;
+    janus_task_run:scrub(B);
 render_body(Other) ->
-    iolist_to_binary(io_lib:format("~0p", [Other])).
+    janus_task_run:scrub(iolist_to_binary(io_lib:format("~0p", [Other]))).
 
 post_logs([]) ->
     ok;

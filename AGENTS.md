@@ -65,6 +65,32 @@ database, not in git.
   them). Fleet specifics live ONLY in `gateway/deploy/inventory.env`
   (gitignored; see the `.example`).
 
+### Module size and peels (OCR-scannable granularity)
+
+Keep application modules small enough for OCR full-file review, and
+do not compensate by exploding the tree into tiny one-helper files.
+
+- **Soft target ≤ ~1500 lines** for new or actively edited `.erl` /
+  dashboard `.py` modules. Prefer staying under **2500** (CI soft
+  warn). **Hard fail at 4000** — OCR skips as `too_large`
+  (`scripts/verification/assert_source_line_budget.sh`).
+- **One cohesive responsibility per module**, peeled at natural
+  seams already marked in-file (e.g. stream reason text, vision
+  shape detection, failover, otel) — not one export per file, not
+  a shallow `*_utils` dumping ground.
+- **Do not explode files.** Prefer extending an existing sibling
+  module over adding a new file for a handful of helpers. A peel
+  that only moves <~100 lines usually belongs in the caller or an
+  existing neighbor. New modules need a clear ownership sentence in
+  the `-moduledoc` / `@doc`.
+- When splitting a giant: characterization EUnit on the exported
+  seam **before** the peel; thin re-exports from the old module are
+  OK for one transition; **one peel per commit** so OCR reviews each
+  extraction; remove allowlist entries once under the hard budget.
+- Later peels (same budget): `janus_protocol_translate`,
+  `janus_worker_pool`, `janus_auto`, and oversized dashboard modules
+  listed in `scripts/verification/line_budget_allowlist.txt`.
+
 ## Verification
 
 - Numeric gates, all run by CI on every `main` push:

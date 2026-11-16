@@ -15,10 +15,10 @@ node_unreachable alert (the puller logs + counts, never feeds alerts).
 """
 
 import asyncio
+import json
 import logging
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import database, egress
@@ -170,10 +170,14 @@ async def _live_logs(limit: int, level: str, node: str = "") -> dict:
             f"/stats/logs?limit={max(1, min(limit, 2000))}",
         )
         try:
-            async with httpx.AsyncClient(timeout=5.0, verify=_tls_verify()) as client:
-                resp = await client.get(url, headers=headers)
+            client = egress.pinned_async_client(
+                node_row["stats_host"], timeout=5.0, verify=_tls_verify(), trust_env=False
+            )
+            if client is None:
+                raise RuntimeError("egress: stats_host failed the connect-time classification")
+            async with client, client.stream("GET", url, headers=headers) as resp:
                 resp.raise_for_status()
-                data = resp.json()
+                data = json.loads(await egress.read_body_capped(resp))
         except Exception as e:
             logger.warning("log fetch failed for %s: %s", node_row["name"], e)
             return [

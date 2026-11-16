@@ -37,7 +37,6 @@ import time
 from datetime import UTC, datetime
 
 import asyncpg
-import httpx
 
 from . import audit, database, egress, nodes, probe_urls
 from . import auto_router_rules as rules
@@ -241,10 +240,17 @@ async def _node_get(path: str, cache: dict, max_age: float = 5.0) -> dict | None
                 url = nodes.stats_url(node["stats_host"], node["stats_port"], path)
                 headers = {"authorization": f"Bearer {token}"} if token else {}
                 verify = probe_urls.tls_verify()
-                async with httpx.AsyncClient(timeout=5.0, verify=verify) as client:
-                    resp = await client.get(url, headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
+                # Connect-time pin + capped body (security audit run-2):
+                # same H1/H4 contract as nodes.poll_node.
+                client = egress.pinned_async_client(
+                    node["stats_host"], timeout=5.0, verify=verify
+                )
+                if client is None:
+                    egress.note_skipped_no_token(node["name"], node["stats_host"])
+                else:
+                    async with client, client.stream("GET", url, headers=headers) as resp:
+                        if resp.status_code == 200:
+                            data = json.loads(await egress.read_body_capped(resp))
     except Exception:
         logger.warning("reorder leader %s poll failed", path, exc_info=True)
         data = None

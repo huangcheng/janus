@@ -145,8 +145,8 @@ async def enable_listing(listing_id: int, user: dict = Depends(require_auth)):
     async with database.transaction() as tx:
         await tx.execute("UPDATE provider_models SET enabled = 1 WHERE id = $1", listing_id)
         # D2: re-enabling a listing brings back the bindings the cascade took
-        # off for it. restore_for_provider refuses while the provider itself
-        # is disabled, so this can never re-enable a route into a 503.
+        # off for it. restore_for_provider is listing-aware (skips still-
+        # disabled listing_* events) so enabling B cannot revive A's routes.
         restore_out = await cascade.restore_for_provider(
             tx, provider_id=owner[0], provider_name=owner[1]
         )

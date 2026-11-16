@@ -288,6 +288,10 @@ janus_vm_write_vm_args() {
   _jva_cookie_arg="$3"
   _jva_extra="$4"
   for _jva_f in "$_jva_rel_dir"/releases/*/vm.args; do
+    # Same secret as .erlang.cookie (-setcookie): force 0600. A plain
+    # redirect inherits umask 022 and left the cookie world-readable
+    # while the sibling cookie file was locked to 0600 (security audit
+    # run-2).
     {
       echo "-name $_jva_node_name"
       echo "$_jva_cookie_arg"
@@ -297,6 +301,7 @@ janus_vm_write_vm_args() {
         printf '%s\n' "$_jva_extra"
       fi
     } > "$_jva_f"
+    chmod 600 "$_jva_f" 2>/dev/null || true
   done
 }
 

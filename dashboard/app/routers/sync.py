@@ -9,7 +9,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import audit, dashscope_models, database, entitlements, modelsdev, probe_urls
+from .. import audit, dashscope_models, database, egress, entitlements, modelsdev, probe_urls
 from ..auth import require_auth
 from ..config import config
 from ..crypto import decrypt
@@ -213,10 +213,14 @@ async def _fetch_listing_items(
                 e,
             )
 
-    resp = await client.get(url, headers=headers)
-    if resp.status_code != 200:
-        raise RuntimeError(f"http_{resp.status_code}")
-    data = resp.json()
+    async with client.stream("GET", url, headers=headers) as resp:
+        if resp.status_code != 200:
+            raise RuntimeError(f"http_{resp.status_code}")
+        raw = await egress.read_body_capped(resp)
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError("bad_json") from e
     if not isinstance(data, dict):
         raise RuntimeError("bad_json")
     items = [item for item in data.get("data", []) if isinstance(item, dict) and item.get("id")]
@@ -261,8 +265,14 @@ async def _run_sync() -> dict:
             # (gateway convention); Anthropic uses x-api-key (review
             # 2026-10-17 H1).
             verify = probe_urls.tls_verify()
-
-            async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+            # Connect-time pin (security audit run-2): secret-bearing
+            # catalog fetch must refuse DNS rebind to never-gateway.
+            client = egress.pinned_async_client(p["base_url"], timeout=30.0, verify=verify)
+            if client is None:
+                results[p["name"]] = {"error": "egress_refused", "added": 0}
+                total_errors += 1
+                continue
+            async with client:
                 items, catalog_source = await _fetch_listing_items(
                     client,
                     base_url=p["base_url"],

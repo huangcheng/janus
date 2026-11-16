@@ -158,7 +158,11 @@ async def auth_setup(request: Request):
 
     from ..database import execute
 
-    await execute(
+    # Status tag must show a real insert. ON CONFLICT DO NOTHING returns
+    # INSERT 0 0 for the race loser; minting a JWT from the request body
+    # in that case issued a full session for an account that was never
+    # written (security audit run-2).
+    result = await execute(
         """
         INSERT INTO operator_account (id, username, password_hash)
         VALUES (1, $1, $2)
@@ -167,6 +171,8 @@ async def auth_setup(request: Request):
         username,
         hash_password(password),
     )
+    if result == "INSERT 0 0":
+        raise _err(409, "already_configured", "the operator account already exists")
     audit.log("auth.setup", username, "operator account created")
     await record_auth_event("setup", True, _client_ip(request), username)
     token = create_token(username)
@@ -444,8 +450,21 @@ async def totp_confirm(request: Request, user: dict = Depends(require_auth)):
     body = await _json(request)
     secret = body.get("secret")
     code = body.get("code")
+    password = body.get("password")
     if not isinstance(secret, str) or not isinstance(code, str):
         raise _invalid("secret and code must be strings")
+    acct = await get_account()
+    if acct is None:
+        raise _err(409, "setup_required", "no operator account")
+    # Always password-gate confirm — including first enrollment. A stolen
+    # session JWT otherwise plants a second factor with no password proof
+    # (security audit run-2 / OCR high). Match totp_disable / totp_qr /
+    # recovery_regenerate.
+    if not isinstance(password, str):
+        raise _invalid("password must be a string")
+    if acct["password_hash"] is not None and not verify_password(acct["password_hash"], password):
+        await record_auth_event("totp_confirm", False, _client_ip(request), user.get("sub", "?"))
+        raise _err(401, "invalid_credentials", "wrong password")
     if totp_verify_at(secret, code.strip(), None) is None:
         raise _err(401, "invalid_code", "wrong authenticator code")
 
@@ -588,10 +607,23 @@ async def passkey_register_verify(request: Request, user: dict = Depends(require
     name = body.get("name")
     challenge = body.get("challenge")
     resp = body.get("response")
+    password = body.get("password")
     if not isinstance(name, str) or not (1 <= len(name.strip()) <= 64):
         raise _invalid("name must be a string of 1..64 chars")
     if not isinstance(challenge, str) or not isinstance(resp, dict):
         raise _invalid("expected {name, challenge, response}")
+    if not isinstance(password, str):
+        raise _invalid("password must be a string")
+    acct = await get_account()
+    if acct is None:
+        raise _err(409, "setup_required", "no operator account")
+    # Password step-up before planting a durable login factor that
+    # bypasses password+TOTP (security audit run-2).
+    if acct["password_hash"] is not None and not verify_password(acct["password_hash"], password):
+        await record_auth_event(
+            "passkey_register", False, _client_ip(request), user.get("sub", "?")
+        )
+        raise _err(401, "invalid_credentials", "wrong password")
     try:
         expected = pk.consume_challenge("create", challenge)
         cred_id, pub_hex = pk.verify_registration(
@@ -649,7 +681,21 @@ async def list_passkeys(user: dict = Depends(require_auth)):
 
 
 @router.delete("/passkeys/{credential_id}")
-async def delete_passkey(credential_id: str, user: dict = Depends(require_auth)):
+async def delete_passkey(
+    credential_id: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await _json(request)
+    password = body.get("password")
+    if not isinstance(password, str):
+        raise _invalid("password must be a string")
+    acct = await get_account()
+    if acct is None:
+        raise _err(409, "setup_required", "no operator account")
+    if acct["password_hash"] is not None and not verify_password(acct["password_hash"], password):
+        await record_auth_event(
+            "passkey_delete", False, _client_ip(request), user.get("sub", "?")
+        )
+        raise _err(401, "invalid_credentials", "wrong password")
     from ..database import execute
 
     n = await execute("DELETE FROM passkey_credentials WHERE credential_id = $1", credential_id)

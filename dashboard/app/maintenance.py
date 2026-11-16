@@ -54,7 +54,6 @@ import urllib.request
 from pathlib import Path
 
 import asyncpg
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from . import audit, database, egress
@@ -600,28 +599,35 @@ async def refresh_mmdb() -> dict:
     headers = {}
     if token:
         headers["authorization"] = f"Bearer {token}"
+    client = egress.pinned_async_client(host, timeout=90.0)
+    if client is None:
+        raise MmdbRefreshError(
+            "mmdb_reload_egress",
+            "stats_host failed connect-time classification",
+        )
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            resp = await client.post(url, headers=headers)
+        async with client, client.stream("POST", url, headers=headers) as resp:
+            raw = await egress.read_body_capped(resp)
+            status = resp.status_code
     except Exception as e:
         raise MmdbRefreshError(
             "mmdb_reload_unreachable",
             f"downloaded ({size} bytes) but reload failed: {e!s}"[:240],
         ) from e
 
-    if resp.status_code != 200:
+    if status != 200:
         logger.warning(
             "mmdb reload HTTP %s body=%s",
-            resp.status_code,
-            (resp.text or "")[:500],
+            status,
+            (raw or b"")[:500],
         )
         raise MmdbRefreshError(
             "mmdb_reload_failed",
-            f"downloaded ({size} bytes); master reload HTTP {resp.status_code}",
+            f"downloaded ({size} bytes); master reload HTTP {status}",
         )
 
     try:
-        body = resp.json() if resp.content else {}
+        body = json.loads(raw) if raw else {}
     except Exception:
         body = {}
     audit.log(

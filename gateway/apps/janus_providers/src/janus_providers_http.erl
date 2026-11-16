@@ -24,7 +24,10 @@
     post/3,
     post/6,
     post_stream/3,
-    get/3
+    get/3,
+    %% Shared with janus_http_proxy:collect_drain/1 so both accumulation
+    %% paths share one cap (security audit run-2).
+    max_body_bytes/0
 ]).
 
 -define(UA, <<"opencode/2.0.15">>).
@@ -75,6 +78,9 @@ ttfb_ms() ->
 %% memory. The gzip path is additionally capped post-decode by
 %% janus_wire_enc; this bound covers the identity path and the raw body.
 -define(MAX_BODY_BYTES, 32 * 1024 * 1024).
+
+-spec max_body_bytes() -> pos_integer().
+max_body_bytes() -> ?MAX_BODY_BYTES.
 
 -spec user_agent() -> binary().
 user_agent() ->

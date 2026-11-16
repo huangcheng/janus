@@ -2170,17 +2170,19 @@ handle_upstream(ClientProto, _ProviderProto, {error, Reason}, Route, _Translate,
 stash_upstream_error_detail({ok, Status, _Headers, Body}) when
     Status >= 400, is_binary(Body), byte_size(Body) > 0
 ->
+    BodySnippet = janus_task_run:scrub(binary:part(Body, 0, min(byte_size(Body), 600))),
     _ = logger:warning(#{
         what => janus_upstream_error_detail,
         status => Status,
-        body => binary:part(Body, 0, min(byte_size(Body), 600))
+        body => BodySnippet
     }),
     UpMsg = upstream_err_msg(Body),
     put(janus_last_upstream_error, {Status, UpMsg}),
     %% Terminal usage-row detail: stash AT ARRIVAL — reply_err's own
     %% stash runs after track on the dispatch reject paths, too late
     %% for the row. Same binary, independent keep-alive key (erased
-    %% in the preamble).
+    %% in the preamble). Scrub credential shapes before persistence
+    %% (security audit run-2).
     case UpMsg of
         <<>> -> ok;
         _ -> put(janus_error_detail, UpMsg)
@@ -2201,8 +2203,13 @@ upstream_err_msg(Body) ->
             _:_ -> <<>>
         end,
     case Msg of
-        <<"upstream request failed">> -> <<>>;
-        M -> binary:part(M, 0, min(byte_size(M), 400))
+        <<"upstream request failed">> ->
+            <<>>;
+        M ->
+            %% Clamp BEFORE scrub so a multi-MiB provider sentence cannot
+            %% drive five regexes over the whole body (OCR high).
+            Clamped = binary:part(M, 0, min(byte_size(M), 400)),
+            janus_task_run:scrub(Clamped)
     end.
 
 upstream_detail_msg() ->
@@ -2374,14 +2381,27 @@ extract_error_message(#{<<"error">> := M}) when is_binary(M), M =/= <<>> ->
 extract_error_message(_) ->
     <<"upstream request failed">>.
 
+%% Cap mirrors collect_body's ?MAX_BODY_BYTES. drain_stream discards the
+%% ChunkFun return, so the only in-band abort is throw (security audit run-2).
 collect_drain(Drain) ->
+    collect_drain(Drain, janus_providers_http:max_body_bytes()).
+
+collect_drain(Drain, MaxBytes) ->
     Acc = ets:new(janus_stream_acc, [private]),
+    Size = counters:new(1, []),
     try
         case
             Drain(
                 fun(Chunk) ->
-                    ets:insert(Acc, {erlang:unique_integer([monotonic]), Chunk}),
-                    ok
+                    New = counters:get(Size, 1) + byte_size(Chunk),
+                    case New > MaxBytes of
+                        true ->
+                            throw(collect_drain_too_large);
+                        false ->
+                            counters:put(Size, 1, New),
+                            ets:insert(Acc, {erlang:unique_integer([monotonic]), Chunk}),
+                            ok
+                    end
                 end,
                 undefined
             )
@@ -2392,6 +2412,9 @@ collect_drain(Drain) ->
             {error, _} = Err ->
                 Err
         end
+    catch
+        throw:collect_drain_too_large ->
+            {error, {body, too_large}}
     after
         ets:delete(Acc)
     end.

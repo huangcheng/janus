@@ -17,7 +17,7 @@ import {
   Trash2,
   Webhook,
 } from "lucide-react"
-import { api, apiFetch } from "../api"
+import { api } from "../api"
 import { EmptyState, ErrorFlash, IconAction, Layout, Loading } from "../components"
 import { StateBadge } from "./shared"
 import { fmtIsoLocalCompact, fmtIsoLocalMonthDayHm, parseBackendInstant } from "../lib/time-format"
@@ -565,6 +565,7 @@ function TotpWizardDialog({
   const [secret, setSecret] = useState("")
   const [uri, setUri] = useState("")
   const [code, setCode] = useState("")
+  const [password, setPassword] = useState("")
   const [codes, setCodes] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -573,6 +574,7 @@ function TotpWizardDialog({
     if (!open) return
     setStep("scan")
     setCode("")
+    setPassword("")
     setCodes([])
     setErr(null)
     setBusy(true)
@@ -589,12 +591,16 @@ function TotpWizardDialog({
   }, [open])
 
   async function verify() {
+    if (!password) {
+      setErr("enter your console password")
+      return
+    }
     setBusy(true)
     setErr(null)
     try {
       const res = await api<{ codes: string[] }>("/auth/totp/confirm", {
         method: "POST",
-        body: { secret, code: code.trim() },
+        body: { secret, code: code.trim(), password },
       })
       setCodes(res.codes)
       setStep("keys")
@@ -648,7 +654,8 @@ function TotpWizardDialog({
           <>
             <div className="flex flex-col items-center gap-3 py-2">
               <p className="text-muted-foreground text-sm">
-                Enter the 6-digit code your app shows for this key.
+                Enter the 6-digit code your app shows for this key, then confirm with your console
+                password.
               </p>
               <Input
                 inputMode="numeric"
@@ -660,12 +667,20 @@ function TotpWizardDialog({
                 autoFocus
                 className="w-36 text-center text-lg tracking-[0.4em] tabular-nums"
               />
+              <div className="w-full max-w-sm">
+                <PasswordField
+                  id="totp-confirm-password"
+                  label="Console password"
+                  value={password}
+                  onChange={setPassword}
+                />
+              </div>
             </div>
             <DialogFooter>
               <Button variant="ghost" onClick={() => setStep("scan")} disabled={busy}>
                 Back
               </Button>
-              <Button onClick={verify} disabled={busy || code.length !== 6}>
+              <Button onClick={verify} disabled={busy || code.length !== 6 || !password}>
                 {busy && <LoaderCircle className="animate-spin" />}
                 Verify &amp; enable
               </Button>
@@ -980,12 +995,18 @@ function RegenerateDialog({
 
 function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => void }) {
   const [name, setName] = useState("")
+  const [registerPassword, setRegisterPassword] = useState("")
+  const [removePassword, setRemovePassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [pendingRemove, setPendingRemove] = useState<Passkey | null>(null)
 
   async function register() {
     if (!name.trim()) {
       toast.error("name this passkey first")
+      return
+    }
+    if (!registerPassword) {
+      toast.error("enter your console password")
       return
     }
     setBusy(true)
@@ -1024,6 +1045,7 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
         method: "POST",
         body: {
           name: name.trim(),
+          password: registerPassword,
           challenge: opts.challenge,
           response: {
             clientDataJSON: bufferToB64url(response.clientDataJSON),
@@ -1033,6 +1055,7 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
       })
       toast.success(`Passkey "${name.trim()}" registered`)
       setName("")
+      setRegisterPassword("")
       onDone()
     } catch (e: any) {
       toast.error(e.message || "registration failed")
@@ -1041,9 +1064,12 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
     }
   }
 
-  async function remove(id: string, label: string) {
+  async function remove(id: string, label: string, password: string) {
     try {
-      await apiFetch(`/auth/passkeys/${encodeURIComponent(id)}`, { method: "DELETE" })
+      await api(`/auth/passkeys/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        body: { password },
+      })
       toast.success(`Removed "${label}"`)
       onDone()
     } catch (e: any) {
@@ -1075,7 +1101,17 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
                 className="bg-card"
               />
             </Field>
-            <Button onClick={register} disabled={busy || !name.trim()} className="sm:mb-0">
+            <PasswordField
+              id="passkey-register-password"
+              label="Console password"
+              value={registerPassword}
+              onChange={setRegisterPassword}
+            />
+            <Button
+              onClick={register}
+              disabled={busy || !name.trim() || !registerPassword}
+              className="sm:mb-0"
+            >
               {busy ? <LoaderCircle className="animate-spin" /> : <Plus />}
               Add passkey
             </Button>
@@ -1134,22 +1170,40 @@ function PasskeyCard({ passkeys, onDone }: { passkeys: Passkey[]; onDone: () => 
           )}
         </CardContent>
       </Card>
-      <AlertDialog open={pendingRemove !== null} onOpenChange={(open) => !open && setPendingRemove(null)}>
+      <AlertDialog
+        open={pendingRemove !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingRemove(null)
+            setRemovePassword("")
+          }
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove {pendingRemove?.name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This device will no longer be able to sign in with this passkey. Other sign-in methods are unchanged.
+              This device will no longer be able to sign in with this passkey. Other sign-in methods
+              are unchanged. Confirm with your console password.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <PasswordField
+            id="passkey-remove-password"
+            label="Console password"
+            value={removePassword}
+            onChange={setRemovePassword}
+          />
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
+              disabled={!removePassword}
               onClick={() => {
                 const target = pendingRemove
+                const password = removePassword
                 setPendingRemove(null)
-                if (target) void remove(target.credential_id, target.name)
+                setRemovePassword("")
+                if (target) void remove(target.credential_id, target.name, password)
               }}
             >
               Remove passkey

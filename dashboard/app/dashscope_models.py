@@ -13,10 +13,9 @@ OpenAI-shaped data-plane contract. Non-DashScope providers are untouched.
 
 from __future__ import annotations
 
+import json
 import logging
 from urllib.parse import urlparse
-
-import httpx
 
 logger = logging.getLogger("janus.dashboard.dashscope_models")
 
@@ -80,14 +79,21 @@ async def fetch_native_listings(
     total: int | None = None
 
     while page_no <= _MAX_PAGES:
-        resp = await client.get(
+        async with client.stream(
+            "GET",
             root,
             headers=headers,
             params={"page_no": page_no, "page_size": _PAGE_SIZE},
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"http_{resp.status_code}")
-        data = resp.json()
+        ) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(f"http_{resp.status_code}")
+            from . import egress
+
+            raw = await egress.read_body_capped(resp)
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            raise RuntimeError("native_list_bad_json") from e
         if not isinstance(data, dict) or data.get("success") is not True:
             raise RuntimeError("native_list_unsuccessful")
         output = data.get("output")

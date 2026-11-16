@@ -22,12 +22,12 @@ Endpoints (mounted under /api/providers):
     GET  /{provider_id}/decisions-probe  — state: budget, cooldown, last result
 """
 
+import json
 import time
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from . import audit, database, probe_urls
+from . import audit, database, egress, probe_urls
 from .auth import require_auth
 from .crypto import decrypt
 from .decisions import DECISIONS_PROTOCOL
@@ -263,16 +263,24 @@ async def run_decisions_probe(provider_id: int, user: dict = Depends(require_aut
         started = time.monotonic()
         http_status: int | None = None
         parsed = None
-        try:
-            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SEC, verify=verify) as client:
-                resp = await client.post(url, headers=headers, json=body)
-            http_status = resp.status_code
-            try:
-                parsed = resp.json()
-            except Exception:
-                parsed = None
-        except Exception:
+        client = egress.pinned_async_client(
+            provider["base_url"], timeout=PROBE_TIMEOUT_SEC, verify=verify
+        )
+        if client is None:
             http_status, parsed = None, None
+        else:
+            try:
+                async with client, client.stream(
+                    "POST", url, headers=headers, json=body
+                ) as resp:
+                    http_status = resp.status_code
+                    raw = await egress.read_body_capped(resp)
+                try:
+                    parsed = json.loads(raw) if raw else None
+                except Exception:
+                    parsed = None
+            except Exception:
+                http_status, parsed = None, None
         latency_ms = int((time.monotonic() - started) * 1000)
     finally:
         await _release(provider_id)

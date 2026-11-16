@@ -784,7 +784,7 @@ async def restore_for_provider(
         return {"events": 0, "skipped": "provider_disabled"}
     events = await tx.fetch(
         """
-        SELECT id, routes, models, tiers FROM config_cascade_events
+        SELECT id, source_kind, routes, models, tiers FROM config_cascade_events
          WHERE restored_at IS NULL
            AND (source_provider_id = $1 OR ($2::text IS NOT NULL AND source_provider_name = $2))
          ORDER BY id
@@ -796,6 +796,43 @@ async def restore_for_provider(
     deferred = False
     for ev in events:
         routes = _jload(ev["routes"]) or []
+        # Listing retirements must not replay while that listing is still
+        # disabled (security audit run-2): enabling listing B / the provider
+        # used to re-enable listing A's routes and mark both events restored.
+        kind = str(ev["source_kind"] or "")
+        mark_restored = True
+        if kind.startswith("listing_"):
+            original_routes = routes
+            filtered: list[dict] = []
+            for route in routes:
+                # Mirror listing_retire's COALESCE(mr.upstream_model_id, m.name)
+                # — a NULL upstream_model_id is still a legitimate member of
+                # the listing snapshot (security audit run-2 OCR high).
+                upstream = route.get("upstream_model_id")
+                if not upstream:
+                    model_id = route.get("model_id")
+                    if model_id is None:
+                        continue
+                    upstream = await tx.fetchval(
+                        "SELECT name FROM models WHERE id = $1", model_id
+                    )
+                if not upstream:
+                    continue
+                listing_on = await tx.fetchval(
+                    "SELECT enabled FROM provider_models "
+                    "WHERE provider_id = $1 AND name = $2",
+                    provider_id,
+                    upstream,
+                )
+                if listing_on:
+                    filtered.append(route)
+            if not filtered:
+                continue  # leave event unrestored
+            routes = filtered
+            # Partial replay (mixed enabled listings in one journal row):
+            # restore what is allowed but leave the event open until every
+            # upstream listing is enabled again.
+            mark_restored = len(filtered) == len(original_routes)
         model_ids = [r.get("model_id") for r in routes if r.get("model_id")]
         touched_tiers = False
         for route in routes:
@@ -831,8 +868,9 @@ async def restore_for_provider(
             tx, ev["tiers"], source_kind=f"restore:{ev['id']}", provider_id=provider_id
         )
         deferred = deferred or deferred_restore
-        await _maybe_mark_restored(tx, ev["id"], routes, model_ids, actor)
-        restored += 1
+        if mark_restored:
+            await _maybe_mark_restored(tx, ev["id"], routes, model_ids, actor)
+            restored += 1
         if touched_tiers:
             logger.info("cascade restore: tiers re-inserted for provider %s", provider_id)
     if restored:
