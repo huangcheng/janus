@@ -74,6 +74,85 @@ jobs:
         # root from its own path, so the working directory does not matter.
         run: ./scripts/verification/assert_eunit_nonempty.sh
 
+      - name: Source line budget (OCR scannable)
+        # Soft warn >2500; hard fail >4000 (OCR skips `too_large` files).
+        working-directory: .
+        run: ./scripts/verification/assert_source_line_budget.sh
+
+  ocr:
+    # Every commit in the push must pass OCR (critical/high = fail).
+    # Requires repository secrets: OCR_LLM_URL, OCR_LLM_TOKEN, OCR_LLM_MODEL
+    # (optional OCR_USE_ANTHROPIC=true for Anthropic-compatible endpoints).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install open-code-review
+        run: npm install -g @alibaba-group/open-code-review
+
+      - name: Configure OCR LLM
+        env:
+          OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
+          OCR_LLM_MODEL: ${{ secrets.OCR_LLM_MODEL }}
+          OCR_USE_ANTHROPIC: ${{ secrets.OCR_USE_ANTHROPIC }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${OCR_LLM_URL:-}" || -z "${OCR_LLM_TOKEN:-}" || -z "${OCR_LLM_MODEL:-}" ]]; then
+            echo "FAIL: OCR_LLM_URL / OCR_LLM_TOKEN / OCR_LLM_MODEL secrets required" >&2
+            exit 1
+          fi
+          # Prefer env vars (highest priority per ocr docs); also persist
+          # for any subprocess that only reads config.
+          {
+            echo "OCR_LLM_URL=$OCR_LLM_URL"
+            echo "OCR_LLM_TOKEN=$OCR_LLM_TOKEN"
+            echo "OCR_LLM_MODEL=$OCR_LLM_MODEL"
+            if [[ -n "${OCR_USE_ANTHROPIC:-}" ]]; then
+              echo "OCR_USE_ANTHROPIC=$OCR_USE_ANTHROPIC"
+            fi
+          } >> "$GITHUB_ENV"
+          ocr config set llm.url "$OCR_LLM_URL"
+          ocr config set llm.auth_token "$OCR_LLM_TOKEN"
+          ocr config set llm.model "$OCR_LLM_MODEL"
+          if [[ "${OCR_USE_ANTHROPIC:-}" == "true" ]]; then
+            ocr config set llm.use_anthropic true
+          fi
+          ocr config set language English
+          ocr llm test
+
+      - name: OCR-audit every commit in the push
+        env:
+          JANUS_OCR_REQUIRED: "1"
+          CI: "true"
+        run: |
+          set -euo pipefail
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            # First push / manual dispatch: audit HEAD only.
+            ./scripts/verification/ocr_audit_commit.sh "$AFTER"
+            exit 0
+          fi
+          if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "WARN: before=$BEFORE not in history; auditing HEAD only" >&2
+            ./scripts/verification/ocr_audit_commit.sh "$AFTER"
+            exit 0
+          fi
+          while IFS= read -r sha; do
+            [[ -n "$sha" ]] || continue
+            ./scripts/verification/ocr_audit_commit.sh "$sha"
+          done < <(git rev-list --reverse "${BEFORE}..${AFTER}")
+
   judge-sidecar:
     # `gateway/sidecars/janus_judge` ships 12 pytest cases that nothing ran,
     # the same rot risk as the EUnit suites had. It is a separate Python

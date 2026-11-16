@@ -73,7 +73,19 @@ database, not in git.
     EUnit gate. It fails on a nonzero exit, any failing test, no
     summary line, a zero-count suite, or a summed total of zero,
     because `rebar3 eunit` exits 0 when nothing ran;
+  - `../scripts/verification/assert_source_line_budget.sh` — hard-fail
+    source files over 4000 lines (OCR `too_large`); warn over 2500;
+  - `ocr` job — every commit in the push is audited with
+    `scripts/verification/ocr_audit_commit.sh` (critical/high fail);
   - dashboard: `scripts/lint_all.sh` (ruff + SPA typecheck + build).
+- **OCR audits every commit.** Enable the checked-in hooks once per
+  clone: `git config core.hooksPath .githooks`. `pre-commit` audits the
+  working tree; `pre-push` audits each commit in the push range. Missing
+  `ocr` is a soft skip locally unless `JANUS_OCR_REQUIRED=1`. CI always
+  requires OCR. Install: `npm i -g @alibaba-group/open-code-review`.
+  GitHub Actions secrets for the `ocr` job (names only — never commit
+  values): `OCR_LLM_URL`, `OCR_LLM_TOKEN`, `OCR_LLM_MODEL`, and when
+  needed `OCR_USE_ANTHROPIC`.
 - Checked-in EUnit suites are supported and expected. This supersedes
   the earlier "no checked-in tests" rule: characterization tests are
   the cheapest way to pin a seam before changing it.

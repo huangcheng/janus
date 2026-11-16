@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Block a push when any commit in the push range fails OCR (critical/high).
+#
+# Git invokes this with: <remote-name> <remote-url>
+# And on stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+AUDIT="$REPO_ROOT/scripts/verification/ocr_audit_commit.sh"
+
+if [[ ! -x "$AUDIT" ]]; then
+  echo "FAIL: missing $AUDIT" >&2
+  exit 1
+fi
+
+# Force OCR for anything leaving this machine toward a remote.
+export JANUS_OCR_REQUIRED="${JANUS_OCR_REQUIRED:-1}"
+
+audit_sha() {
+  local sha="$1"
+  # Always detach child stdin from the hook's ref-list fd — otherwise
+  # ocr/python/git can consume refs and silently skip later updates.
+  "$AUDIT" "$sha" </dev/null
+}
+
+audit_range() {
+  local range="$1"
+  local list
+  list="$(mktemp -t janus-ocr-revlist-XXXXXX)"
+  # Capture rev-list status; process substitutions hide failures.
+  if ! git rev-list --reverse "$range" >"$list"; then
+    rm -f "$list"
+    echo "FAIL: git rev-list failed for range $range" >&2
+    exit 1
+  fi
+  while IFS= read -r sha || [[ -n "${sha:-}" ]]; do
+    [[ -n "${sha:-}" ]] || continue
+    audit_sha "$sha" || {
+      rm -f "$list"
+      echo "FAIL: OCR rejected commit $sha" >&2
+      exit 1
+    }
+  done <"$list"
+  rm -f "$list"
+}
+
+# Drain Git's ref list into a file first so child processes never share
+# that stdin, then iterate the saved lines.
+REFS="$(mktemp -t janus-ocr-refs-XXXXXX)"
+cat >"$REFS"
+trap 'rm -f "$REFS"' EXIT
+
+while IFS= read -r local_ref local_sha remote_ref remote_sha || [[ -n "${local_ref:-}" ]]; do
+  [[ -n "${local_ref:-}" ]] || continue
+
+  # Delete refs: nothing to audit.
+  if [[ "$local_sha" =~ ^0+$ ]]; then
+    continue
+  fi
+
+  echo "OCR pre-push audit for ${local_ref}…" >&2
+
+  if [[ "$remote_sha" =~ ^0+$ ]]; then
+    # New branch: every commit on the tip that is not already on a
+    # remote-tracking branch (fallback: origin/main..tip).
+    list="$(mktemp -t janus-ocr-newbranch-XXXXXX)"
+    if git rev-list --reverse "$local_sha" --not --remotes >"$list" 2>/dev/null \
+      && [[ -s "$list" ]]; then
+      :
+    elif git rev-parse --verify origin/main >/dev/null 2>&1; then
+      base="$(git merge-base origin/main "$local_sha")"
+      git rev-list --reverse "${base}..${local_sha}" >"$list"
+    else
+      echo "$local_sha" >"$list"
+    fi
+    while IFS= read -r sha || [[ -n "${sha:-}" ]]; do
+      [[ -n "${sha:-}" ]] || continue
+      audit_sha "$sha" || {
+        rm -f "$list"
+        echo "FAIL: OCR rejected commit $sha on ${local_ref}" >&2
+        exit 1
+      }
+    done <"$list"
+    rm -f "$list"
+  else
+    if ! git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+      echo "FAIL: remote tip $remote_sha not in local history (fetch/rebase first)" >&2
+      exit 1
+    fi
+    audit_range "${remote_sha}..${local_sha}"
+  fi
+done <"$REFS"
+
+exit 0

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Block the commit when the working tree has critical/high OCR findings.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+AUDIT="$REPO_ROOT/scripts/verification/ocr_audit_commit.sh"
+
+if [[ ! -x "$AUDIT" ]]; then
+  echo "FAIL: missing $AUDIT" >&2
+  exit 1
+fi
+
+exec "$AUDIT" --workspace

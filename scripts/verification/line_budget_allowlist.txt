@@ -1,0 +1,7 @@
+# Repo-relative paths exempt from the hard (>4000) line-budget fail.
+# Soft WARN still applies. Remove each entry when that module is split.
+gateway/apps/janus_core/src/janus_worker_pool.erl
+gateway/apps/janus_http/src/janus_protocol_translate.erl
+# Removed by the janus_http_proxy peel commits in this same change set
+# once the orchestrator is under 4000 lines — do not leave permanently.
+gateway/apps/janus_http/src/janus_http_proxy.erl
