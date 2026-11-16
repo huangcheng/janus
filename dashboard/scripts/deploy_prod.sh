@@ -1560,12 +1560,13 @@ if [ "$SMOKE_ONLY" -eq 0 ]; then
     if [ -n "${SKIP_LOCAL_BUILD:-}" ]; then
       echo "== 2b. B-D8 verify gate: SKIPPED (git ship — nodes build locally; a failed node build halts before any flip) =="
     else
-    echo "== 2b. B-D8 verify gate: throwaway-container boot of this run's bare artifacts =="
-    bash "$GW_SRC/scripts/verify_bare.sh" "$GW_TARBALL" \
-      || { echo "FAIL: verify_bare.sh (B-D8) — refusing to ship" >&2; exit 1; }
-    if [ "$DASH_BARE_SHIP" -eq 1 ]; then
-      bash scripts/verify_bare_dashboard.sh "$DASH_PAYLOAD" \
-        || { echo "FAIL: verify_bare_dashboard.sh (B-D8) — refusing to ship" >&2; exit 1; }
+      echo "== 2b. B-D8 verify gate: throwaway-container boot of this run's bare artifacts =="
+      bash "$GW_SRC/scripts/verify_bare.sh" "$GW_TARBALL" \
+        || { echo "FAIL: verify_bare.sh (B-D8) — refusing to ship" >&2; exit 1; }
+      if [ "$DASH_BARE_SHIP" -eq 1 ]; then
+        bash scripts/verify_bare_dashboard.sh "$DASH_PAYLOAD" \
+          || { echo "FAIL: verify_bare_dashboard.sh (B-D8) — refusing to ship" >&2; exit 1; }
+      fi
     fi
   fi
 
@@ -1573,6 +1574,10 @@ if [ "$SMOKE_ONLY" -eq 0 ]; then
   # (the topology leader) restarts FIRST so pending migrations execute exactly once;
   # followers then boot against an already-migrated schema — no
   # concurrent-migration races across nodes.
+  # NOTE: this MUST sit outside the BARE_NODES block — docker-only fleets
+  # skip that block entirely, and set -u would then trip at the leader
+  # migration gate (historically LATEST_MIGRATION was nested under
+  # BARE_NODES by a missing fi / stray closer).
   LATEST_MIGRATION="$(ls "$GW_SRC/apps/janus_core/priv/migrations/postgres"/*.sql | sed 's#.*/##; s/\.sql$//' | sort | tail -1)"
   # M1: empty LATEST_MIGRATION made the verification below compare '' to
   # '' and pass — the one gate that proves the leader is migrated became
@@ -1675,7 +1680,6 @@ EOF
     echo "   baseline gen0=$GEN0 (captured before ship)"
   fi
 
-    fi
   renew_deploy_lock "pre-ship (step 3)"
   echo "== 3. ship gateway to all nodes (artifact only, no restart yet) =="
   # Docker nodes: image over docker save|load (today's path, B-D5).
