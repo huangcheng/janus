@@ -832,7 +832,7 @@ export function Providers() {
                                     <Input
                                       id={`affinity-region-${p.id}`}
                                       className="h-9"
-                                      placeholder="e.g. cn-north-4"
+                                      placeholder="e.g. domestic or cn-east"
                                       value={
                                         regionEdit?.id === p.id
                                           ? regionEdit.value
@@ -854,8 +854,12 @@ export function Providers() {
                                     </Button>
                                   </div>
                                   <FieldDescription>
-                                    Soft geo preference only — NOT a pin. It never overrides a pin,
-                                    health or capacity.
+                                    Soft geo preference only — NOT a pin. Use{" "}
+                                    <span className="font-mono">domestic</span> /{" "}
+                                    <span className="font-mono">overseas</span> to prefer China vs
+                                    non-China workers (fail-open if none match), or a fine tag like{" "}
+                                    <span className="font-mono">cn-east</span> for exact match. Never
+                                    overrides a pin, health or capacity.
                                   </FieldDescription>
                                 </Field>
                               </div>

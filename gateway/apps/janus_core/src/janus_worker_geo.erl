@@ -253,17 +253,14 @@ validate_metadata_reply(_) ->
 %% (CN East/North/South/Southwest; Hong Kong -> cn-south; Ningxia ->
 %% cn-southwest).
 %%
-%% VOCABULARY CONFLICT (operator-visible, NOT resolved here): this
-%% table emits MACRO tags, while the master compares on EXACT binary
-%% equality (`geo_region =:= comparator`, janus_worker_pool:geo_tier/2)
-%% and prod overrides the rule table with CITY codes via
-%% `JANUS_SCHED_REGIONS` (`CN:Beijing=cn-beijing; CN:Jiangsu=cn-east;
-%% CN:Shanghai=cn-shanghai; CN:Hubei=cn-wuhan`). A discovered macro tag
-%% therefore equals such a comparator ONLY where the deployed rule kept
-%% the macro tag (Jiangsu=cn-east); elsewhere the geo tier silently
-%% no-ops (it is a narrowing tier, never an exclusion). The
-%% comparator-compatible path is the IP-bearing gw_echo layer: its mmdb
-%% tag is derived with the SAME deployed rules.
+%% VOCABULARY NOTE: this table emits MACRO tags (`cn-east`, …). Soft
+%% domestic/overseas dispatch in `janus_worker_pool:geo_tier/2` maps any
+%% `cn-*` tag to zone `domestic`, so a macro discovery still prefers
+%% China workers under auto / zone comparators. Fine `region_tag`
+%% (exact equality) still needs the comparator and worker tag to agree
+%% literally — city-code overrides via `JANUS_SCHED_REGIONS` only match
+%% exact fine tags. The IP-bearing gw_echo layer remains the path that
+%% derives tags with the SAME deployed rule table.
 -spec map_cloud_region(aliyun | tencent | aws | baidu, binary()) -> {ok, binary()} | miss.
 map_cloud_region(Adapter, Region) when is_atom(Adapter), is_binary(Region) ->
     case exact_region(Adapter, Region) of

@@ -128,6 +128,11 @@
     advance_divergence/4,
     %% Geo-affinity pure seams (spec 2026-10-11 D4/D15/D18).
     effective_geo/4,
+    %% Soft domestic/overseas zone (cn-* → domestic; other known tags →
+    %% overseas). Exported for eunit of geo_tier matching.
+    geo_zone/1,
+    %% Effective scheduling region (overlay geo_region, else env region).
+    member_geo_region/1,
     %% Capacity override precedence (worker-capacity-override spec Part 1):
     %% the PURE 3-arity form, so override-wins / bad-value-fallback /
     %% absent-entry are assertable without a running config server.
@@ -342,11 +347,15 @@ pick(Opts) when is_map(Opts) ->
                 case Class of
                     error ->
                         case Reason of
-                            badarg -> ok;
-                            _ -> bump(pick_fault), log_pick_fault(Class, Reason)
+                            badarg ->
+                                ok;
+                            _ ->
+                                bump(pick_fault),
+                                log_pick_fault(Class, Reason)
                         end;
                     _ ->
-                        bump(pick_fault), log_pick_fault(Class, Reason)
+                        bump(pick_fault),
+                        log_pick_fault(Class, Reason)
                 end,
             local_fallback(empty_pool)
     end.
@@ -507,7 +516,8 @@ reserve_loop([Node | Rest], Snapshot, Opts, JobRef, FirstReason) ->
                     try
                         true = ets:insert(
                             ?TRACKED,
-                            {JobRef, {Node, now_mono(), maps:get(provider_id, Opts, undefined), false}}
+                            {JobRef,
+                                {Node, now_mono(), maps:get(provider_id, Opts, undefined), false}}
                         )
                     catch
                         _:_ -> ok
@@ -727,8 +737,13 @@ pool_ping() ->
     Acc = maps:from_list([
         begin
             R = net_adm:ping(N),
-            {atom_to_binary(N, utf8),
-             case R of pong -> <<"pong">>; pang -> <<"pang">> end}
+            {
+                atom_to_binary(N, utf8),
+                case R of
+                    pong -> <<"pong">>;
+                    pang -> <<"pang">>
+                end
+            }
         end
      || N <- Nodes
     ]),
@@ -1180,11 +1195,16 @@ demoted_by_health(M) when is_map(M) ->
 
 %% Tier 4 — geo preference (narrowing, NOT exclusion). The legacy
 %% region_tag comparator is UNGATED v1 behavior; only the auto
-%% comparator is gated by geo_enabled. The tier applies ONLY when the
-%% comparator is known AND the candidate's geo_region is known AND
-%% they are EQUAL (unknown-vs-unknown never matches — explicit guard).
-%% ANY matching candidates => keep only them; else keep all with
-%% source `none` (a pick partition: pinned / no-comparator / no-match).
+%% comparator is gated by geo_enabled.
+%%
+%% Matching (soft domestic/overseas dispatch):
+%%   * fine `region_tag` (e.g. cn-east) → exact `geo_region` equality
+%%     (legacy);
+%%   * zone `region_tag` (`domestic` / `overseas`) → zone equality;
+%%   * auto `provider_geo` (sched.geo) → zone equality so cn-east and
+%%     cn-south both count as domestic.
+%% Unknown-vs-unknown never matches. ANY hits => keep only them; else
+%% keep ALL with source `none` (mono-country / single-worker fail-open).
 geo_tier(Candidates, Opts) ->
     case geo_comparator(Opts) of
         {undefined, none} ->
@@ -1193,8 +1213,7 @@ geo_tier(Candidates, Opts) ->
             Hits = [
                 C
              || {_, M} = C <- Candidates,
-                known_tag(maps:get(geo_region, M, undefined)) andalso
-                    maps:get(geo_region, M, undefined) =:= Tag
+                geo_pref_match(Tag, Source, maps:get(geo_region, M, undefined))
             ],
             case Hits of
                 [] -> {Candidates, none};
@@ -1224,6 +1243,45 @@ known_tag(B) when is_binary(B), B =/= <<>> ->
     true;
 known_tag(_) ->
     false.
+
+%% Soft preference match for one candidate's geo_region.
+geo_pref_match(Comparator, auto, WorkerRegion) ->
+    %% Auto path always compares zones (subdivision → domestic/overseas).
+    zone_eq(Comparator, WorkerRegion);
+geo_pref_match(Comparator, region_tag, WorkerRegion) ->
+    case is_zone_literal(Comparator) of
+        true ->
+            zone_eq(Comparator, WorkerRegion);
+        false ->
+            known_tag(WorkerRegion) andalso WorkerRegion =:= Comparator
+    end;
+geo_pref_match(_, _, _) ->
+    false.
+
+zone_eq(A, B) ->
+    ZA = geo_zone(A),
+    ZB = geo_zone(B),
+    ZA =/= unknown andalso ZA =:= ZB.
+
+is_zone_literal(<<"domestic">>) -> true;
+is_zone_literal(<<"overseas">>) -> true;
+is_zone_literal(_) -> false.
+
+%% Coarse zone for soft domestic/overseas dispatch.
+%%   domestic  — literal `domestic`, or any `cn-*` fine tag
+%%   overseas  — literal `overseas`, or any other non-empty known tag
+%%   unknown   — missing / empty / non-binary
+-spec geo_zone(term()) -> domestic | overseas | unknown.
+geo_zone(<<"domestic">>) ->
+    domestic;
+geo_zone(<<"overseas">>) ->
+    overseas;
+geo_zone(<<"cn-", _/binary>>) ->
+    domestic;
+geo_zone(Tag) when is_binary(Tag), Tag =/= <<>> ->
+    overseas;
+geo_zone(_) ->
+    unknown.
 
 %% Tier 5 — sort by `{rtt_key, inflight, name}`.
 %%
@@ -1280,13 +1338,15 @@ rtt_key(ProviderId, M) ->
 %% capable candidate the fallback is `infinity`, which for an
 %% all-old-version fleet is the pre-change behaviour.
 optimism_key(Candidates, ProviderId) ->
-    case [
-        R
-     || {_N, M} <- Candidates,
-        maps:get(can_sample, M, true),
-        R <- [rtt_key(ProviderId, M)],
-        is_number(R)
-    ] of
+    case
+        [
+            R
+         || {_N, M} <- Candidates,
+            maps:get(can_sample, M, true),
+            R <- [rtt_key(ProviderId, M)],
+            is_number(R)
+        ]
+    of
         [] -> infinity;
         Known -> lists:min(Known)
     end.
@@ -1320,7 +1380,13 @@ sort_key_rtt(ProviderId, Fallback, M, N) ->
 %% map is new, so entries written before it existed must not be trusted.
 health_ewma_age_ms(EwmaAt) when is_map(EwmaAt) ->
     Now = now_mono(),
-    maps:map(fun(_Node, At) when is_integer(At) -> max(0, Now - At); (_N, _) -> unknown end, EwmaAt);
+    maps:map(
+        fun
+            (_Node, At) when is_integer(At) -> max(0, Now - At);
+            (_N, _) -> unknown
+        end,
+        EwmaAt
+    );
 health_ewma_age_ms(_) ->
     #{}.
 
@@ -1446,7 +1512,11 @@ advance_divergence(Window, true, _Now, _WindowMs) ->
 -spec effective_geo(map(), integer(), pos_integer(), fun()) ->
     {binary() | undefined, geo_source()}.
 effective_geo(Member, NowSec, RetainSec, ResolveIp) when
-    is_map(Member), is_integer(NowSec), is_integer(RetainSec), RetainSec >= 1, is_function(ResolveIp, 1)
+    is_map(Member),
+    is_integer(NowSec),
+    is_integer(RetainSec),
+    RetainSec >= 1,
+    is_function(ResolveIp, 1)
 ->
     EnvRegion = norm_geo_bin(maps:get(region, Member, undefined)),
     Source = source_atom(maps:get(egress_source, Member, undefined)),
@@ -1840,10 +1910,12 @@ do_hello(From, Node, Meta, #state{pool = Pool} = State) ->
             Pool2 = maybe_ingest_geo(Node, Pool1),
             %% A hello is the node being stably back — clear its flap
             %% window so a LATER isolated nodedown logs as a first.
-            mark_dirty(maybe_knobs_off_guard(State#state{
-                pool = Pool2,
-                flap = maps:remove(Node, State#state.flap)
-            }));
+            mark_dirty(
+                maybe_knobs_off_guard(State#state{
+                    pool = Pool2,
+                    flap = maps:remove(Node, State#state.flap)
+                })
+            );
         {nack, Reason} ->
             case janus_worker_wire:hello_nack(node(), Reason) of
                 {ok, Nack} ->
@@ -1872,71 +1944,57 @@ wire_enc_ack(MasterNode) ->
 %% Computes the member's EFFECTIVE geo_region/geo_source from the raw
 %% hello egress keys (age-checked against the retain window; IP-bearing
 %% winners resolve through janus_geo's mmdb on THIS node) and runs the
-%% edge-triggered geo_mismatch state machine. Runs ONLY while the
-%% worker-geo overlay knob was requested at boot (JANUS_SCHED_WORKER_GEO,
-%% default OFF — knob-off ingest keeps the v1 legacy region view).
+%% edge-triggered geo_mismatch state machine.
+%%
+%% Always runs: with no egress / worker-geo overlay off, `effective_geo`
+%% falls through to env-class (`geo_source=env`, `geo_region=<hello
+%% region>`), so soft domestic/overseas dispatch and the Nodes display
+%% see the same tags (cn-shanghai → domestic, nl-amsterdam → overseas).
+%% IP/metadata layers still require egress on the hello.
 maybe_ingest_geo(Node, #{members := Members} = Pool) ->
-    %% Gate: the scheduling knob OR the member already carrying egress
-    %% data (a manual worker_geo_refresh reports fresh egress fields the
-    %% operator expects to SEE — geo_source/geo_region are display fields
-    %% here; selection behavior stays gated on its own knob in select_v2).
     case maps:find(Node, Members) of
         {ok, Member} when is_map(Member) ->
-            case worker_geo_on() orelse has_egress(Member) of
-                false ->
-                    Pool;
+            NowSec = erlang:system_time(second),
+            {GeoRegion, GeoSource} = effective_geo(
+                Member, NowSec, janus_worker_geo:retain_sec(), fun geo_resolver/1
+            ),
+            {Bump, Mis, NewPair} = mismatch_step(
+                last_geo_state(Node),
+                GeoSource,
+                GeoRegion,
+                norm_geo_bin(maps:get(region, Member, undefined))
+            ),
+            ok = store_last_geo_state(Node, NewPair),
+            case Bump of
                 true ->
-                    NowSec = erlang:system_time(second),
-                    {GeoRegion, GeoSource} = effective_geo(
-                        Member, NowSec, janus_worker_geo:retain_sec(), fun geo_resolver/1
-                    ),
-                    {Bump, Mis, NewPair} = mismatch_step(
-                        last_geo_state(Node),
-                        GeoSource,
-                        GeoRegion,
-                        norm_geo_bin(maps:get(region, Member, undefined))
-                    ),
-                    ok = store_last_geo_state(Node, NewPair),
-                    case Bump of
-                        true ->
-                            logger:warning(#{
-                                what => janus_geo_mismatch,
-                                node => Node,
-                                geo_source => GeoSource,
-                                geo_region => GeoRegion,
-                                env_region => maps:get(region, Member, undefined)
-                            }),
-                            ok = bump({geo_mismatch, Node});
-                        false ->
-                            ok
-                    end,
-                    Pool#{
-                        members => Members#{
-                            Node => Member#{
-                                geo_region => GeoRegion,
-                                geo_source => GeoSource,
-                                geo_mismatch => Mis,
-                                egress_fetched_at => maps:get(
-                                    egress_fetched_at, Member, undefined
-                                )
-                            }
-                        }
+                    logger:warning(#{
+                        what => janus_geo_mismatch,
+                        node => Node,
+                        geo_source => GeoSource,
+                        geo_region => GeoRegion,
+                        env_region => maps:get(region, Member, undefined)
+                    }),
+                    ok = bump({geo_mismatch, Node});
+                false ->
+                    ok
+            end,
+            Pool#{
+                members => Members#{
+                    Node => Member#{
+                        geo_region => GeoRegion,
+                        geo_source => GeoSource,
+                        geo_mismatch => Mis,
+                        egress_fetched_at => maps:get(
+                            egress_fetched_at, Member, undefined
+                        )
                     }
-            end;
+                }
+            };
         _ ->
             Pool
     end;
 maybe_ingest_geo(_Node, Pool) ->
     Pool.
-
-%% A member reports egress data when any raw egress key is present with
-%% a value (a manual worker_geo_refresh stores them even with the
-%% scheduling knob off).
-has_egress(Member) ->
-    lists:any(
-        fun(K) -> maps:get(K, Member, undefined) =/= undefined end,
-        [egress_source, egress_region, egress_ip]
-    ).
 
 geo_resolver(IpBin) ->
     try
@@ -2008,10 +2066,12 @@ maybe_knobs_off_guard(#state{knobs_off_warned = false} = State) ->
             logger:warning(#{
                 what => scheduler_knobs_all_off,
                 note =>
-                    <<"geo/health/rtt are ALL off — selection is "
-                      "least-inflight + name order (v1). See the v2.1 "
-                      "runbook (skills/fleet-node-ops) for the enablement "
-                      "order.">>
+                    <<
+                        "geo/health/rtt are ALL off — selection is "
+                        "least-inflight + name order (v1). See the v2.1 "
+                        "runbook (skills/fleet-node-ops) for the enablement "
+                        "order."
+                    >>
             }),
             ok = bump(knobs_off),
             State#state{knobs_off_warned = true};
@@ -2146,8 +2206,10 @@ note_nodedown(Node, #state{flap = Flap} = State) ->
                     node => Node,
                     window_count => C1,
                     hint =>
-                        <<"a second process may be claiming this node name "
-                          "(duplicate bare/docker deployment on its host) or dist is flapping">>
+                        <<
+                            "a second process may be claiming this node name "
+                            "(duplicate bare/docker deployment on its host) or dist is flapping"
+                        >>
                 }),
                 Now;
             false ->
@@ -2518,7 +2580,9 @@ republish(State) ->
 %% takes no new work, so an override there is meaningless.
 -spec effective_capacity(node(), map()) -> pos_integer() | infinity.
 effective_capacity(Node, M) ->
-    effective_capacity(Node, maps:get(capacity, M, infinity), janus_config:worker_capacity_overrides()).
+    effective_capacity(
+        Node, maps:get(capacity, M, infinity), janus_config:worker_capacity_overrides()
+    ).
 
 %% Pure seam (eunit): the precedence rule governs admission for every
 %% node, so it is separable from the persistent_term read.
@@ -2545,14 +2609,16 @@ warn_unused_capacity_overrides(LiveNodes) ->
     maps:foreach(
         fun(Name, _Val) ->
             case lists:member(Name, Live) of
-                true -> ok;
-                false -> warn_once({capacity_override_unused, Name}, fun() ->
-                    logger:warning(#{
-                        what => janus_worker_pool_capacity_override_unused,
-                        node => Name,
-                        hint => <<"no live worker carries this name; the override is inert">>
-                    })
-                end)
+                true ->
+                    ok;
+                false ->
+                    warn_once({capacity_override_unused, Name}, fun() ->
+                        logger:warning(#{
+                            what => janus_worker_pool_capacity_override_unused,
+                            node => Name,
+                            hint => <<"no live worker carries this name; the override is inert">>
+                        })
+                    end)
             end
         end,
         janus_config:worker_capacity_overrides()
@@ -2624,21 +2690,33 @@ build_snapshot(#state{pool = #{members := Members}, ewma = Ewma}) ->
      || {Node, M} <- maps:to_list(Members)
     ].
 
-%% Effective member geo for the snapshot: when the worker-geo overlay
-%% computed a geo_source, its geo_region IS the answer (even undefined
-%% — a gw_echo winner the mmdb cannot map must NOT silently fall back
-%% to the env region: the layer ranking would be undone); without a
-%% computed geo_source (knob off / legacy worker) the env-class region
-%% remains the v1 view.
+%% Effective member geo for the snapshot / soft zone dispatch.
+%%
+%%   * Non-empty overlay `geo_region` wins.
+%%   * A real non-env layer (`gw_echo` / `third_echo` / `metadata`) that
+%%     resolved to no tag must NOT fall back to env (D15 ranking).
+%%   * `unset` / `env` / absent source → env hello `region` (so
+%%     cn-shanghai / nl-amsterdam still drive domestic/overseas prefer
+%%     when worker-geo discovery is off or has not filled yet).
+-spec member_geo_region(map() | term()) -> binary() | undefined.
 member_geo_region(M) when is_map(M) ->
-    case maps:is_key(geo_source, M) of
-        true ->
-            case maps:get(geo_region, M, undefined) of
-                B when is_binary(B), B =/= <<>> -> B;
-                _ -> undefined
-            end;
-        false ->
-            maps:get(region, M, undefined)
+    case maps:get(geo_region, M, undefined) of
+        B when is_binary(B), B =/= <<>> ->
+            B;
+        _ ->
+            case maps:get(geo_source, M, undefined) of
+                gw_echo ->
+                    undefined;
+                third_echo ->
+                    undefined;
+                metadata ->
+                    undefined;
+                _ ->
+                    case maps:get(region, M, undefined) of
+                        R when is_binary(R), R =/= <<>> -> R;
+                        _ -> undefined
+                    end
+            end
     end;
 member_geo_region(_) ->
     undefined.
@@ -2649,7 +2727,9 @@ rtt_by_node(Now) ->
             ({{Node, ProviderId}, _Ms, _Source, _SampledAt, ExpiresAt, Ewma, _Count}, Acc) when
                 ExpiresAt > Now, is_number(Ewma)
             ->
-                maps:update_with(Node, fun(Rm) -> Rm#{ProviderId => Ewma} end, #{ProviderId => Ewma}, Acc);
+                maps:update_with(
+                    Node, fun(Rm) -> Rm#{ProviderId => Ewma} end, #{ProviderId => Ewma}, Acc
+                );
             (_Row, Acc) ->
                 %% Expired rows are absent from rtt_map (TTL enforced
                 %% at build time, spec Part 0.4).
@@ -2775,7 +2855,9 @@ v1_candidates(_) ->
 %% cast keeps its own suppression rule worker-side; a steady-state
 %% lying worker may never send (documented starvation of the mismatch
 %% counter — accepted v1).
-do_load(Node, Info, #state{ewma = Ewma, divergence = Div, load = Load, wire_enc_relay = Relay} = State) when
+do_load(
+    Node, Info, #state{ewma = Ewma, divergence = Div, load = Load, wire_enc_relay = Relay} = State
+) when
     is_map(Info)
 ->
     Reported = maps:get(ewma_upstream_ms, Info, undefined),
@@ -2794,11 +2876,13 @@ do_load(Node, Info, #state{ewma = Ewma, divergence = Div, load = Load, wire_enc_
             _ -> Div#{Node => Window1}
         end,
     State#state{
-        load = Load#{Node => #{
-            inflight_self => maps:get(inflight_self, Info, undefined),
-            ewma_upstream_ms => Reported,
-            mem_self => maps:get(mem_self, Info, undefined)
-        }},
+        load = Load#{
+            Node => #{
+                inflight_self => maps:get(inflight_self, Info, undefined),
+                ewma_upstream_ms => Reported,
+                mem_self => maps:get(mem_self, Info, undefined)
+            }
+        },
         divergence = Div1,
         %% D9 Task C: store the relayed codec-counters snapshot,
         %% LATEST-WINS and normalized (fixed-enum family — a lying
@@ -2837,13 +2921,19 @@ is_wire_enc_key({wire_enc_chunks_total, {Dir, Enc}}) ->
     wire_enc_dir(Dir) andalso lists:member(Enc, [identity, zlib]);
 is_wire_enc_key({wire_enc_bytes_total, {Dir, Enc}}) ->
     wire_enc_dir(Dir) andalso lists:member(Enc, [identity, zlib, plain]);
-is_wire_enc_key(wire_enc_deflate_time_us_total) -> true;
-is_wire_enc_key(wire_enc_inflate_time_us_total) -> true;
-is_wire_enc_key(wire_enc_inflate_fail_total) -> true;
-is_wire_enc_key(wire_enc_bad_config_total) -> true;
+is_wire_enc_key(wire_enc_deflate_time_us_total) ->
+    true;
+is_wire_enc_key(wire_enc_inflate_time_us_total) ->
+    true;
+is_wire_enc_key(wire_enc_inflate_fail_total) ->
+    true;
+is_wire_enc_key(wire_enc_bad_config_total) ->
+    true;
 %% PR2 (spec D9/F5): label-free ops signal for unsolicited stream gzip.
-is_wire_enc_key({upstream_enc_unsolicited_total, {in, gzip}}) -> true;
-is_wire_enc_key(_) -> false.
+is_wire_enc_key({upstream_enc_unsolicited_total, {in, gzip}}) ->
+    true;
+is_wire_enc_key(_) ->
+    false.
 
 wire_enc_dir(out) -> true;
 wire_enc_dir(in) -> true;
@@ -3148,11 +3238,12 @@ probe_issue(JobRef, Node, ProviderId, Window, State) ->
     _TRef = erlang:send_after(
         janus_worker_wire:ack_deadline_ms(), self(), {probe_ack_timeout, JobRef}
     ),
-    _ = try
-        true = ets:insert(?TRACKED, {JobRef, {Node, SentAt, ProviderId, true}})
-    catch
-        _:_ -> ok
-    end,
+    _ =
+        try
+            true = ets:insert(?TRACKED, {JobRef, {Node, SentAt, ProviderId, true}})
+        catch
+            _:_ -> ok
+        end,
     Inflight = (State#state.probe_inflight)#{Node => JobRef},
     ProbeSent = (State#state.probe_sent)#{JobRef => {Node, ProviderId, SentAt, false}},
     ProbeLast = (State#state.probe_last)#{{Node, ProviderId} => SentAt},
@@ -3313,7 +3404,8 @@ first_chat_listing(Id, Tabs) ->
                                 maps:get(enabled, E, false) =:= true andalso
                                 maps:get(modality, E, <<"chat">>) =:= <<"chat">>
                         end,
-                        Entries)
+                        Entries
+                    )
                 ]),
                 case Names of
                     [] -> undefined;
@@ -3419,7 +3511,12 @@ probe_request_shape(<<"openai_responses">>, Model, Secret) ->
             {<<"authorization">>, <<"Bearer ", Secret/binary>>},
             {<<"content-type">>, <<"application/json">>}
         ],
-        #{<<"model">> => Model, <<"input">> => <<"hi">>, <<"max_output_tokens">> => 1, <<"stream">> => false}
+        #{
+            <<"model">> => Model,
+            <<"input">> => <<"hi">>,
+            <<"max_output_tokens">> => 1,
+            <<"stream">> => false
+        }
     };
 probe_request_shape(_OpenaiChatDefault, Model, Secret) ->
     {
@@ -3589,10 +3686,9 @@ workers_view(#{members := Members} = Pool, Ewma, Counters, HealthOn, Load) ->
                     %% effective overlay geo + mismatch gauge + the
                     %% worker's gw-echo health counters.
                     geo_source => maps:get(geo_source, M, unset),
-                    %% The OVERLAY's effective region (null when the
-                    %% overlay never ran — the legacy env-class region
-                    %% stays visible in `region`, same as v1).
-                    geo_region => maps:get(geo_region, M, undefined),
+                    %% Same tag soft zone dispatch / select_v2 uses
+                    %% (overlay geo_region, else env hello region).
+                    geo_region => member_geo_region(M),
                     geo_mismatch => maps:get(geo_mismatch, M, false) =:= true,
                     egress_fetched_at =>
                         case is_integer(FetchedAt) andalso FetchedAt > 0 of
@@ -3604,38 +3700,37 @@ workers_view(#{members := Members} = Pool, Ewma, Counters, HealthOn, Load) ->
                 }
             end
          || {Node, M} <- maps:to_list(Members)
-        ]
-        ++
-        %% Sticky-drained nodes are NOT members (drain-idle removed
-        %% them) — surface them too or the `sticky` field can never
-        %% be true and operators lose drained-node visibility
-        %% (ocr review). Not dispatchable, no live member fields.
-        [
-            #{
-                node => Node,
-                status => sticky,
-                sticky => true,
-                capacity => infinity,
-                region => undefined,
-                sched_v => 1,
-                draining => true,
-                inflight => 0,
-                dispatchable => false,
-                dispatched_total => 0,
-                health_ewma_ms => unknown,
-                rtt_ms_avg => null,
-                rtt_sample_count => 0,
-                would_demote => null,
-                git_sha => <<"unknown">>,
-                geo_source => unset,
-                geo_region => null,
-                geo_mismatch => false,
-                egress_fetched_at => null,
-                echo_ok_total => 0,
-                echo_fail_total => 0
-            }
-         || Node <- maps:keys(maps:get(sticky, Pool, #{}))
-        ]
+        ] ++
+            %% Sticky-drained nodes are NOT members (drain-idle removed
+            %% them) — surface them too or the `sticky` field can never
+            %% be true and operators lose drained-node visibility
+            %% (ocr review). Not dispatchable, no live member fields.
+            [
+                #{
+                    node => Node,
+                    status => sticky,
+                    sticky => true,
+                    capacity => infinity,
+                    region => undefined,
+                    sched_v => 1,
+                    draining => true,
+                    inflight => 0,
+                    dispatchable => false,
+                    dispatched_total => 0,
+                    health_ewma_ms => unknown,
+                    rtt_ms_avg => null,
+                    rtt_sample_count => 0,
+                    would_demote => null,
+                    git_sha => <<"unknown">>,
+                    geo_source => unset,
+                    geo_region => null,
+                    geo_mismatch => false,
+                    egress_fetched_at => null,
+                    echo_ok_total => 0,
+                    echo_fail_total => 0
+                }
+             || Node <- maps:keys(maps:get(sticky, Pool, #{}))
+            ]
     );
 workers_view(_, _, _, _, _) ->
     [].
@@ -3686,7 +3781,6 @@ geo_enabled_safe() ->
     catch
         _:_ -> false
     end.
-
 
 geo_requested_safe() ->
     try
@@ -3831,8 +3925,9 @@ reconcile_counters(Tracked, PrevExcess) ->
 %% rows only (the reconcile comparison filter, v2.1 B.1).
 expected_by_node(Tracked) ->
     lists:foldl(
-        fun({_JobRef, {Node, _At, _ProviderId, false}}, Acc) ->
-            maps:update_with(Node, fun(C) -> C + 1 end, 1, Acc);
+        fun
+            ({_JobRef, {Node, _At, _ProviderId, false}}, Acc) ->
+                maps:update_with(Node, fun(C) -> C + 1 end, 1, Acc);
             (_, Acc) ->
                 Acc
         end,
