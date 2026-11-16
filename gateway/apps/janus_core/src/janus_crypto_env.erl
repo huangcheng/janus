@@ -77,11 +77,15 @@ active_secrets_key_id() ->
             end;
         _ ->
             case application:get_env(janus, secrets_active_key_id, undefined) of
-                Id when is_binary(Id) -> Id;
-                Id when is_list(Id) -> list_to_binary(Id);
-                Id when is_atom(Id) -> atom_to_binary(Id, utf8);
+                Id when is_binary(Id), Id =/= <<>> -> Id;
+                Id when is_list(Id), Id =/= [] -> list_to_binary(Id);
+                %% `undefined` is the get_env default — must NOT become
+                %% <<"undefined">> via the atom clause (ocr high).
+                Id when is_atom(Id), Id =/= undefined -> atom_to_binary(Id, utf8);
                 _ ->
-                    case maps:keys(secrets_keyring()) of
+                    %% maps:keys/1 order is unspecified — sort so the
+                    %% app-env fallback picks a stable active id.
+                    case lists:sort(maps:keys(secrets_keyring())) of
                         [Id | _] -> Id;
                         [] -> error({janus_boot_fail, missing_JANUS_SECRETS_KEY})
                     end

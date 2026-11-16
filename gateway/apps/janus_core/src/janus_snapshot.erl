@@ -248,8 +248,20 @@ transform_secret_value(Value, decrypt) when is_binary(Value) ->
         false ->
             Value
     end;
-transform_secret_value(Value, Op) ->
-    walk_sensitive(Value, Op).
+%% Sensitive key holding a container: encrypt/decrypt EVERY binary leaf
+%% under it. walk_sensitive alone only reacts to nested key names, so
+%% #{secret => #{value => <<"k">>}} previously wrote plaintext (ocr critical).
+transform_secret_value(Value, Op) when is_map(Value) ->
+    maps:map(fun(_K, V) -> transform_secret_value(V, Op) end, Value);
+transform_secret_value(Value, Op) when is_list(Value) ->
+    case is_proplist_or_terms(Value) of
+        true -> [transform_secret_value(E, Op) || E <- Value];
+        false -> Value
+    end;
+transform_secret_value(Value, Op) when is_tuple(Value) ->
+    list_to_tuple([transform_secret_value(E, Op) || E <- tuple_to_list(Value)]);
+transform_secret_value(Value, _Op) ->
+    Value.
 
 is_proplist_or_terms([]) ->
     true;

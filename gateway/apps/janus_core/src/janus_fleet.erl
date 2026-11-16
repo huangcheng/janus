@@ -450,8 +450,11 @@ publish(Msg) ->
 %% @doc Configured peers (tolerant read — gen_server may be parked).
 -spec peers() -> [node()].
 peers() ->
+    %% ets:lookup/2 on a set returns `[{Key, Value}]` — the prior
+    %% `[_, Ps]` pattern required a 2-element list and never matched,
+    %% so fleet command fan-out always saw an empty peer set.
     case tolerant_lookup(?STATE, peers) of
-        [_, Ps] when is_list(Ps) -> Ps;
+        [{peers, Ps}] when is_list(Ps) -> Ps;
         _ -> []
     end.
 
@@ -617,7 +620,9 @@ handle_info(lease_tick, State) ->
     _ = erlang:send_after(?LEASE_TICK_MS, self(), lease_tick),
     {noreply, State};
 handle_info(quota_tick, State) ->
-    {noreply, quota_heartbeat(State)};
+    NewState = quota_heartbeat(State),
+    _ = erlang:send_after(?QUOTA_TICK_MS, self(), quota_tick),
+    {noreply, NewState};
 handle_info({nodeup, Node}, State) ->
     logger:info(#{what => janus_fleet_nodeup, node => Node}),
     ok = recompute_lease(),

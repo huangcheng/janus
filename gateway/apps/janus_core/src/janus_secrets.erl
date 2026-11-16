@@ -80,17 +80,26 @@ decrypt(EnvelopeBin) when is_binary(EnvelopeBin) ->
         {ok, #{key_id := KeyId, iv := IV, tag := Tag, ciphertext := CT}} ->
             case janus_crypto_env:secrets_key(KeyId) of
                 {ok, Key} ->
-                    case
-                        crypto:crypto_one_time_aead(
-                            aes_256_gcm, Key, IV, CT, KeyId, Tag, false
-                        )
-                    of
-                        Plain when is_binary(Plain) ->
-                            {ok, Plain};
-                        error ->
+                    %% crypto_one_time_aead raises badarg on bad IV/tag
+                    %% sizes — keep the {ok|error} contract (ocr high).
+                    try
+                        case
+                            crypto:crypto_one_time_aead(
+                                aes_256_gcm, Key, IV, CT, KeyId, Tag, false
+                            )
+                        of
+                            Plain when is_binary(Plain) ->
+                                {ok, Plain};
+                            error ->
+                                {error, decrypt_failed};
+                            Other ->
+                                {error, {decrypt_failed, Other}}
+                        end
+                    catch
+                        error:badarg ->
                             {error, decrypt_failed};
-                        Other ->
-                            {error, {decrypt_failed, Other}}
+                        error:Reason ->
+                            {error, {decrypt_failed, Reason}}
                     end;
                 {error, unknown_key_id} ->
                     {error, {unknown_key_id, KeyId}}
@@ -129,9 +138,9 @@ encode_envelope(#{
 -spec decode_envelope(binary()) -> {ok, envelope()} | {error, term()}.
 decode_envelope(<<?MAGIC, ?VERSION:8, KeyIdLen:16, Rest/binary>>) when KeyIdLen > 0 ->
     case Rest of
-        <<KeyId:KeyIdLen/binary, IvLen:8, Rest2/binary>> when IvLen > 0 ->
+        <<KeyId:KeyIdLen/binary, IvLen:8, Rest2/binary>> when IvLen =:= ?IV_LEN ->
             case Rest2 of
-                <<IV:IvLen/binary, TagLen:8, Rest3/binary>> when TagLen > 0 ->
+                <<IV:IvLen/binary, TagLen:8, Rest3/binary>> when TagLen =:= ?TAG_LEN ->
                     case Rest3 of
                         <<Tag:TagLen/binary, CT/binary>> ->
                             {ok, #{
@@ -143,9 +152,13 @@ decode_envelope(<<?MAGIC, ?VERSION:8, KeyIdLen:16, Rest/binary>>) when KeyIdLen 
                         _ ->
                             {error, truncated_envelope}
                     end;
+                <<_:IvLen/binary, TagLen:8, _/binary>> ->
+                    {error, {bad_tag_len, TagLen}};
                 _ ->
                     {error, truncated_envelope}
             end;
+        <<_:KeyIdLen/binary, IvLen:8, _/binary>> ->
+            {error, {bad_iv_len, IvLen}};
         _ ->
             {error, truncated_envelope}
     end;

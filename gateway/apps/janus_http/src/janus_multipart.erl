@@ -85,8 +85,16 @@ boundary_param([Seg | Rest]) ->
     case binary:split(strip(Seg), <<"=">>) of
         [K, V] when byte_size(V) > 0 ->
             case lower(K) of
-                <<"boundary">> -> {ok, unquote(strip(V))};
-                _ -> boundary_param(Rest)
+                <<"boundary">> ->
+                    %% Reject empty boundary (e.g. boundary="") — an
+                    %% empty delimiter would make the parser match
+                    %% every `--` and corrupt the body.
+                    case unquote(strip(V)) of
+                        <<>> -> error;
+                        B -> {ok, B}
+                    end;
+                _ ->
+                    boundary_param(Rest)
             end;
         _ ->
             boundary_param(Rest)

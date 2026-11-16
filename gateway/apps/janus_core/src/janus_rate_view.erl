@@ -265,7 +265,10 @@ put_entity(State, Entity0, NowMs, Cap) ->
         undefined ->
             Rec = new_record(NowMs),
             Ents1 = Ents0#{Entity => Rec},
-            {Ents2, Evicted1, Overflow1} = maybe_evict(Ents1, Evicted0, Overflow0, Cap),
+            %% Never evict the entity we just inserted — same-ms ties
+            %% made maps:fold pick the newcomer and crash touch_record
+            %% on the subsequent maps:get (ocr critical).
+            {Ents2, Evicted1, Overflow1} = maybe_evict(Ents1, Evicted0, Overflow0, Cap, Entity),
             State#{entities => Ents2, evicted => Evicted1, evicted_overflow => Overflow1};
         Rec ->
             State#{entities => Ents0#{Entity => Rec#{last_ms => NowMs}}}
@@ -278,26 +281,36 @@ new_record(NowMs) ->
         last_ms => NowMs
     }.
 
-maybe_evict(Ents, Evicted, Overflow, Cap) when map_size(Ents) =< Cap ->
+maybe_evict(Ents, Evicted, Overflow, Cap, Protect) when map_size(Ents) =< Cap ->
     {Ents, Evicted, Overflow};
-maybe_evict(Ents, Evicted, Overflow, _Cap) ->
+maybe_evict(Ents, Evicted, Overflow, _Cap, Protect) ->
     %% Evict the oldest last_ms entity (caller already knows size > Cap).
-    {Victim, _} =
+    %% Skip Protect so a just-inserted entity cannot be the victim.
+    case
         maps:fold(
-            fun(E, #{last_ms := T}, Acc) ->
-                case Acc of
-                    undefined -> {E, T};
-                    {_, BestT} when T < BestT -> {E, T};
-                    Keep -> Keep
-                end
+            fun
+                (E, #{last_ms := T}, Acc) when E =/= Protect ->
+                    case Acc of
+                        undefined -> {E, T};
+                        {_, BestT} when T < BestT -> {E, T};
+                        Keep -> Keep
+                    end;
+                (_, _, Acc) ->
+                    Acc
             end,
             undefined,
             Ents
-        ),
-    %% Newest-first; trim in place so the list cannot grow unbounded.
-    Evicted1 = [Victim | Evicted],
-    {Evicted2, Overflow2} = trim_evicted(Evicted1, Overflow),
-    {maps:remove(Victim, Ents), Evicted2, Overflow2}.
+        )
+    of
+        undefined ->
+            %% Only Protect remains (Cap = 0/1) — keep it; do not remove.
+            {Ents, Evicted, Overflow};
+        {Victim, _} ->
+            %% Newest-first; trim in place so the list cannot grow unbounded.
+            Evicted1 = [Victim | Evicted],
+            {Evicted2, Overflow2} = trim_evicted(Evicted1, Overflow),
+            {maps:remove(Victim, Ents), Evicted2, Overflow2}
+    end.
 
 trim_evicted(Evicted, Overflow) ->
     case length(Evicted) > ?EVICTED_CAP of

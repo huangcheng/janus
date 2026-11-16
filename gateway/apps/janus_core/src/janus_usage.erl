@@ -131,9 +131,12 @@ usage_attempt_rows() ->
     end.
 
 migration_applied() ->
+    %% Must go through q/2 so Postgres gets `$1` placeholders — a raw
+    %% `?` bind fails under epgsql, the catch below swallowed it, and
+    %% attempt-row probing stayed stuck at false forever after mig 018.
     Sql = <<"SELECT 1 FROM schema_migrations WHERE version = ?">>,
     try
-        case janus_db_conn:query(Sql, [?ATTEMPT_ROWS_VERSION]) of
+        case q(Sql, [?ATTEMPT_ROWS_VERSION]) of
             {ok, [_ | _]} -> true;
             {ok, []} -> false;
             {error, _} -> false

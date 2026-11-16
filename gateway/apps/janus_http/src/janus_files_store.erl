@@ -22,8 +22,20 @@
 -spec backend() -> module().
 backend() ->
     case os:getenv("JANUS_FILES_STORE", "fs") of
-        "s3" -> janus_files_store_s3;
-        _ -> janus_files_store_fs
+        "s3" ->
+            %% Fail closed: the S3 backend module is not shipped yet.
+            %% A typo / premature flip must not crash on first put/get
+            %% with undef — refuse the misconfig at selection time.
+            case code:which(janus_files_store_s3) of
+                non_existing ->
+                    error({janus_boot_fail, files_store_s3_unavailable});
+                _ ->
+                    janus_files_store_s3
+            end;
+        "fs" ->
+            janus_files_store_fs;
+        Other ->
+            error({janus_boot_fail, unknown_files_store, Other})
     end.
 
 -spec put(binary(), binary()) -> ok | {error, term()}.

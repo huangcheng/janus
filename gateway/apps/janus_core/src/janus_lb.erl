@@ -1475,8 +1475,11 @@ dec_inflight(Target, Inflight) ->
 
 route_target(#{provider_id := P, model_id := M}) ->
     {route, M, P};
+%% Provider-only maps (no model_id key) must match normalize_target/1
+%% (`{provider, P}`). The previous `{route, null, P}` form diverged from
+%% cool_clear / note_latency keys for the same map shape (ocr high).
 route_target(#{provider_id := P}) ->
-    {route, null, P};
+    {provider, P};
 route_target(Other) ->
     normalize_target(Other).
 

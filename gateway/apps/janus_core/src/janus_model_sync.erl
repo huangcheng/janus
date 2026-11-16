@@ -603,7 +603,10 @@ http_get_body(Url, Token) ->
         {"accept", "application/json"}
     ],
     Req = {Url, Headers},
-    HTTPOpts = [{timeout, 15_000}, {autoredirect, true}, {ssl, janus_ssl_opts()}],
+    %% Never autoredirect while carrying Authorization — a
+    %% provider-controlled 3xx can otherwise replay the Bearer token
+    %% to an attacker-controlled Location (ocr security high).
+    HTTPOpts = [{timeout, 15_000}, {autoredirect, false}, {ssl, janus_ssl_opts()}],
     Opts = [{body_format, binary}],
     case httpc:request(get, Req, HTTPOpts, Opts) of
         {ok, {{_V, 200, _}, _H, Body}} ->

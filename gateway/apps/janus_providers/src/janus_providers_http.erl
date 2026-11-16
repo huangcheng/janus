@@ -439,9 +439,33 @@ drain_stream(Conn, Stream, ChunkFun, KeepaliveFun, KaMs, StallDeadline, TickDead
     case gun:await(Conn, Stream, next_tick(StallDeadline, TickDeadline)) of
         {data, nofin, Data} ->
             _ = ChunkFun(Data),
-            drain_stream(
-                Conn, Stream, ChunkFun, KeepaliveFun, KaMs, idle_deadline(), tick_deadline(KaMs)
-            );
+            case Data of
+                <<>> ->
+                    case expired(StallDeadline) of
+                        true ->
+                            {error, {body, timeout}};
+                        false ->
+                            drain_stream(
+                                Conn,
+                                Stream,
+                                ChunkFun,
+                                KeepaliveFun,
+                                KaMs,
+                                StallDeadline,
+                                tick_deadline(KaMs)
+                            )
+                    end;
+                _ ->
+                    drain_stream(
+                        Conn,
+                        Stream,
+                        ChunkFun,
+                        KeepaliveFun,
+                        KaMs,
+                        idle_deadline(),
+                        tick_deadline(KaMs)
+                    )
+            end;
         {data, fin, Data} ->
             _ = ChunkFun(Data),
             ok;
@@ -595,16 +619,41 @@ drain_stream_decoding(Conn, Stream, ChunkFun, KeepaliveFun, S0, KaMs, StallDeadl
             case janus_wire_enc:inflate_stream_frame(S0, Data) of
                 {ok, Out, S1} ->
                     _ = ChunkFun(Out),
-                    drain_stream_decoding(
-                        Conn,
-                        Stream,
-                        ChunkFun,
-                        KeepaliveFun,
-                        S1,
-                        KaMs,
-                        idle_deadline(),
-                        tick_deadline(KaMs)
-                    );
+                    %% Stall only resets on a non-empty forwarded chunk —
+                    %% empty inflate output (padding/gzip sync frames)
+                    %% must not refresh the inactivity ceiling (ocr high).
+                    %% Also fail closed HERE: a stream of empty frames
+                    %% never hits `{error, timeout}`, so the stall must
+                    %% be checked on the empty path too.
+                    case Out of
+                        <<>> ->
+                            case expired(StallDeadline) of
+                                true ->
+                                    {error, {body, timeout}};
+                                false ->
+                                    drain_stream_decoding(
+                                        Conn,
+                                        Stream,
+                                        ChunkFun,
+                                        KeepaliveFun,
+                                        S1,
+                                        KaMs,
+                                        StallDeadline,
+                                        tick_deadline(KaMs)
+                                    )
+                            end;
+                        _ ->
+                            drain_stream_decoding(
+                                Conn,
+                                Stream,
+                                ChunkFun,
+                                KeepaliveFun,
+                                S1,
+                                KaMs,
+                                idle_deadline(),
+                                tick_deadline(KaMs)
+                            )
+                    end;
                 {error, Reason} ->
                     {error, {body, {content_encoding, Reason}}}
             end;

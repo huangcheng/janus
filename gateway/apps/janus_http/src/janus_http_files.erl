@@ -109,7 +109,9 @@ route(_Method, _Path, _AgentKeyId, Req, State) ->
 
 upload(AgentKeyId, Req, State) ->
     Ct = cowboy_req:header(<<"content-type">>, Req, <<>>),
-    case boundary_of(Ct) of
+    %% Use the shared multipart parser — the local hand-roll mishandled
+    %% quoted / empty / parameter-tailed boundaries (ocr critical).
+    case janus_multipart:boundary_of(Ct) of
         {ok, Boundary} ->
             case janus_http_preamble:read_full(Req, ?MAX_BODY) of
                 {ok, Body, Req2} ->
@@ -204,27 +206,6 @@ not_found(Req, State, Id) ->
     }).
 
 %% ---- helpers ---------------------------------------------------------
-
-boundary_of(<<"multipart/form-data", Rest/binary>>) ->
-    case binary:split(Rest, <<"boundary=">>) of
-        [_, B] ->
-            Boundary = case B of
-                <<$", Quoted/binary>> -> binary:part(Quoted, 0, byte_size(Quoted) - 1);
-                _ -> B
-            end,
-            {ok, binary:part(Boundary, 0, index_of($;, Boundary, byte_size(Boundary)))};
-        _ ->
-            error
-    end;
-boundary_of(_) ->
-    error.
-
-index_of(_C, <<>>, Default) -> Default;
-index_of(C, Bin, Default) ->
-    case binary:match(Bin, <<C>>) of
-        {Pos, _} -> Pos;
-        nomatch -> Default
-    end.
 
 %% janus_multipart's file parts carry name/filename/content_type/data.
 filename_of(#{filename := F}) when is_binary(F), F =/= <<>> -> F;

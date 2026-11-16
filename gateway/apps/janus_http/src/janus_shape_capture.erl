@@ -337,7 +337,7 @@ ensure_table() ->
         undefined ->
             Owner = spawn(fun owner_loop/0),
             register(janus_shape_sentinel_owner, Owner),
-            Owner ! go,
+            Owner ! {go, self()},
             receive
                 ready -> ok
             after 5000 -> ok
@@ -348,13 +348,24 @@ ensure_table() ->
 
 owner_loop() ->
     receive
+        {go, From} when is_pid(From) ->
+            Tid =
+                ets:new(?DEDUP_TABLE, [
+                    named_table, public, set, {write_concurrency, true}
+                ]),
+            %% Unblock ensure_table/0 — without this the first caller
+            %% always burns the full 5s receive timeout.
+            From ! ready,
+            %% Periodic sweep so the table stays bounded by the
+            %% DISTINCT shapes in the window, not by history.
+            sweep_loop(Tid);
+        %% Legacy atom form (tests / older callers): create the table
+        %% but nobody is waiting.
         go ->
             Tid =
                 ets:new(?DEDUP_TABLE, [
                     named_table, public, set, {write_concurrency, true}
                 ]),
-            %% Periodic sweep so the table stays bounded by the
-            %% DISTINCT shapes in the window, not by history.
             sweep_loop(Tid)
     end.
 
