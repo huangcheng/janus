@@ -16,7 +16,7 @@ function Table({
       className={cn(
         "relative w-full overflow-x-auto overscroll-x-contain scrollbar-thin",
         flush &&
-          "[&_td:first-child]:pl-5 [&_td:last-child]:pr-5 [&_th:first-child]:pl-5 [&_th:last-child]:pr-5",
+          "[--flush-cell-pad:calc(var(--spacing)*5)] [&_td:first-child]:pl-(--flush-cell-pad) [&_td:last-child]:pr-(--flush-cell-pad) [&_th:first-child]:pl-(--flush-cell-pad) [&_th:last-child]:pr-(--flush-cell-pad)",
       )}
     >
       <table

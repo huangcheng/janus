@@ -86,6 +86,45 @@ import { SHOW_MODEL_PRICES } from "@/lib/flags"
  * native face (spec 2026-10-07) — bills per decision upstream. */
 const isDecisionsProtocol = (protocol: string) => protocol === "openai_decisions"
 
+type EndpointKnobProps = {
+  label: string
+  checked: boolean | null
+  title: string
+  onToggle: () => void
+}
+
+function endpointKnobText(checked: boolean | null) {
+  if (checked === null) return "—"
+  return checked ? "On" : "Off"
+}
+
+function EndpointKnob({ label, checked, title, onToggle }: EndpointKnobProps) {
+  return (
+    <Button
+      type="button"
+      variant={checked === true ? "secondary" : "outline"}
+      size="xs"
+      disabled={checked === null}
+      aria-pressed={checked ?? undefined}
+      aria-label={checked === null ? `${label}: state unavailable` : undefined}
+      title={title}
+      onClick={onToggle}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "size-1.5 rounded-full",
+          checked === true ? "bg-success" : "bg-muted-foreground/40",
+        )}
+      />
+      <span>{label}</span>
+      <span aria-hidden className="font-mono text-[9px] font-medium tracking-wide text-muted-foreground uppercase">
+        {endpointKnobText(checked)}
+      </span>
+    </Button>
+  )
+}
+
 export function Providers() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [error, setError] = useState("")
@@ -373,7 +412,7 @@ export function Providers() {
       description="Upstream endpoints and their encrypted credentials."
     >
       {error && <ErrorFlash message={error} />}
-      <Card className="flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
+      <Card className="@container flex h-fit max-h-full w-full flex-col self-start overflow-hidden">
         <CardHeader className="border-b">
           <CardTitle>Providers</CardTitle>
           <CardDescription>
@@ -401,44 +440,37 @@ export function Providers() {
             </Button>
           </CardAction>
         </CardHeader>
-        <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-3">
-          <span className="mr-2 w-full text-xs font-medium text-muted-foreground sm:w-auto">Endpoint features</span>
-          <Button
-            variant={toolsTranslate ? "secondary" : "outline"}
-            size="xs"
-            disabled={toolsTranslate === null}
-            aria-pressed={toolsTranslate === true}
-            title="Cross-protocol streaming tool-call translation (settings knob, default off)"
-            onClick={toggleToolsTranslate}
-          >
-            <span className={`size-1.5 rounded-full ${toolsTranslate ? "bg-success" : "bg-muted-foreground/40"}`} />
-            tools-stream
-          </Button>
-          <Button
-            variant={responsesTranslate ? "secondary" : "outline"}
-            size="xs"
-            disabled={responsesTranslate === null}
-            aria-pressed={responsesTranslate === true}
-            title="Responses-client streaming translation to chat/anthropic providers (settings knob, default off)"
-            onClick={toggleResponsesTranslate}
-          >
-            <span className={`size-1.5 rounded-full ${responsesTranslate ? "bg-success" : "bg-muted-foreground/40"}`} />
-            responses-stream
-          </Button>
-          {["image", "tts", "asr", "video", "embedding"].map((m) => (
-            <Button
-              key={m}
-              variant={modalityCfg?.[m] ? "secondary" : "outline"}
-              size="xs"
-              disabled={!modalityCfg}
-              aria-pressed={modalityCfg?.[m] === true}
-              title={`Serve /v1 modality endpoints for ${m} (settings knob, default off)`}
-              onClick={() => toggleModality(m)}
-            >
-              <span className={`size-1.5 rounded-full ${modalityCfg?.[m] ? "bg-success" : "bg-muted-foreground/40"}`} />
-              {m}
-            </Button>
-          ))}
+        <div className="flex flex-col gap-3 border-b bg-muted/20 px-5 py-3">
+          <span className="text-xs font-medium text-muted-foreground">Endpoint features</span>
+          <div className="flex flex-wrap gap-x-5 gap-y-3">
+            <div role="group" aria-label="Translation features" className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[10px] text-muted-foreground uppercase">Translation</span>
+              <EndpointKnob
+                label="tools-stream"
+                checked={toolsTranslate}
+                title="Cross-protocol streaming tool-call translation (settings knob, default off)"
+                onToggle={toggleToolsTranslate}
+              />
+              <EndpointKnob
+                label="responses-stream"
+                checked={responsesTranslate}
+                title="Responses-client streaming translation to chat/anthropic providers (settings knob, default off)"
+                onToggle={toggleResponsesTranslate}
+              />
+            </div>
+            <div role="group" aria-label="Modality endpoints" className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[10px] text-muted-foreground uppercase">Modalities</span>
+              {["image", "tts", "asr", "video", "embedding"].map((m) => (
+                <EndpointKnob
+                  key={m}
+                  label={m}
+                  checked={modalityCfg ? modalityCfg[m] === true : null}
+                  title={`Serve /v1 modality endpoints for ${m} (settings knob, default off)`}
+                  onToggle={() => toggleModality(m)}
+                />
+              ))}
+            </div>
+          </div>
         </div>
         <CardContent className="min-h-0 px-0">
           {!loaded && !error ? (
@@ -595,7 +627,8 @@ export function Providers() {
                     {expanded?.id === p.id && (
                       <TableRow className="hover:bg-transparent">
                         <TableCell colSpan={5} className="p-0">
-                          <div className="border-t border-border/60 bg-muted/20 px-5 py-4">
+                          {/* Width tracks the provider card and Table flush's --flush-cell-pad. */}
+                          <div className="w-full max-w-[calc(100cqw-2*var(--flush-cell-pad))] whitespace-normal border-t border-border/60 bg-muted/20 px-5 py-4">
                             {expanded.section === "keys" && (
                             <div id={`provider-${p.id}-keys`} className="flex flex-col gap-2">
                               <div className="flex items-center gap-2">
@@ -630,7 +663,7 @@ export function Providers() {
                                   (x) => x.provider_key_id === k.id,
                                 )
                                 return (
-                                <div key={k.id} className="flex flex-wrap items-center gap-3">
+                                <div key={k.id} className="flex flex-wrap items-center gap-x-3 gap-y-2">
                                   <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
                                     {k.key_id}
                                   </span>
@@ -695,7 +728,7 @@ export function Providers() {
                                       }
                                     >
                                       weight {k.weight}
-                                      <Pencil className="size-3 opacity-0 transition-opacity group-hover:opacity-60" />
+                                      <Pencil className="size-3 opacity-60 transition-opacity group-hover:opacity-100" />
                                     </button>
                                   )}
                                   <div className="flex-1" />
@@ -828,10 +861,10 @@ export function Providers() {
                                   <FieldLabel htmlFor={`affinity-region-${p.id}`}>
                                     Region tag — soft preference
                                   </FieldLabel>
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex flex-wrap items-center gap-2">
                                     <Input
                                       id={`affinity-region-${p.id}`}
-                                      className="h-9"
+                                      className="h-9 min-w-0 grow basis-52"
                                       placeholder="e.g. domestic or cn-east"
                                       value={
                                         regionEdit?.id === p.id
@@ -848,6 +881,7 @@ export function Providers() {
                                     <Button
                                       variant="outline"
                                       size="sm"
+                                      className="shrink-0"
                                       onClick={() => saveRegionTag(p)}
                                     >
                                       Save
@@ -865,10 +899,10 @@ export function Providers() {
                               </div>
 
                               <div className="max-w-2xl overflow-hidden rounded border border-border/60 bg-background/60">
-                                <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                                <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-xs font-medium text-muted-foreground">
                                   <span>Live workers · {workers.length}</span>
                                   {p.affinity_node && (
-                                    <span className="ml-auto font-mono">
+                                    <span className="min-w-0 break-words whitespace-normal font-mono max-sm:basis-full sm:ml-auto" title={p.affinity_node}>
                                       pinned → {p.affinity_node}
                                     </span>
                                   )}
@@ -889,11 +923,13 @@ export function Providers() {
                                           w.node === p.affinity_node && "bg-link/5",
                                         )}
                                       >
-                                        <span className="font-mono">{w.node}</span>
+                                        <span className="min-w-0 break-words whitespace-normal font-mono max-sm:basis-full" title={w.node}>
+                                          {w.node}
+                                        </span>
                                         <span className="text-muted-foreground">
                                           {w.region ?? "no region"}
                                         </span>
-                                        <span className="truncate text-muted-foreground">
+                                        <span className="min-w-0 grow basis-40 truncate text-muted-foreground" title={w.note || undefined}>
                                           {w.note || "no note"}
                                         </span>
                                         <span className="ml-auto text-muted-foreground">
@@ -1601,7 +1637,7 @@ function ProviderListings({
   return (
     <div className="flex flex-col gap-2">
       {isDecisionsProtocol(provider.protocol) && <DecisionsProbeBar provider={provider} />}
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="text-xs font-medium text-muted-foreground">
           Models
         </div>
@@ -1634,16 +1670,16 @@ function ProviderListings({
         </span>
       )}
       {listings.length > 0 && (
-        <div className="max-h-64 overflow-y-auto rounded-md border border-border/70 bg-background scrollbar-thin">
+        <div className="max-h-64 overflow-x-hidden overflow-y-auto rounded-md border border-border/70 bg-background scrollbar-thin">
           {shown.map((m) => {
             const ent = entByName.get(m.name)
             const st = tests[m.id]
             return (
             <div
               key={m.id}
-              className="flex items-center gap-3 border-b border-border/60 px-3 py-1.5 transition-colors last:border-b-0 hover:bg-muted/50"
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1.5 transition-colors last:border-b-0 hover:bg-muted/50"
             >
-              <span className="font-mono text-sm">{m.name}</span>
+              <span className="min-w-0 max-w-full break-words whitespace-normal font-mono text-sm">{m.name}</span>
               {m.modality && m.modality !== "chat" && (
                 <Badge variant="secondary" className="font-mono text-[11px]">
                   {m.modality}

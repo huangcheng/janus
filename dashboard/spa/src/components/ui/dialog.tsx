@@ -87,14 +87,12 @@ const DialogContent = React.forwardRef<
         ref={ref}
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-lg border p-6 shadow-lg duration-200 sm:max-w-lg",
-          // A footer carries its own bottom padding and must sit flush with
-          // the content edge; leaving the content's p-6 under it produced a
-          // dead strip below the buttons. The content is a grid with gap-4,
-          // so the footer's old -mb-6 trick fought the gap instead of
-          // cancelling the padding: it ate the space above the footer and
-          // left the strip below.
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-lg border [--dialog-close-inset:0.75rem] [--dialog-close-size:2rem] [--dialog-pad:1rem] p-(--dialog-pad) shadow-lg duration-200 sm:max-w-lg sm:[--dialog-pad:1.5rem]",
+          // A sticky footer owns its bottom padding and sits flush with the
+          // content edge; its responsive margins mirror --dialog-pad above.
           "has-[[data-slot=dialog-footer]]:pb-0",
+          showCloseButton &&
+            "[--dialog-close-gutter:calc(var(--dialog-close-size)+var(--dialog-close-inset)-var(--dialog-pad))]",
           size === "md" && "sm:max-w-[560px]",
           size === "lg" && "sm:max-w-[768px]",
           className
@@ -129,10 +127,11 @@ const DialogContent = React.forwardRef<
           </DialogHeader>
         )}
         {children}
+        {/* The header gutter derives from the same close-button geometry variables. */}
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-3 right-3 flex size-8 cursor-pointer items-center justify-center rounded-md opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+            className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-(--dialog-close-inset) right-(--dialog-close-inset) flex size-(--dialog-close-size) cursor-pointer items-center justify-center rounded-md opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
           >
             <XIcon />
             <span className="sr-only">Close</span>
@@ -148,7 +147,10 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2 text-center sm:text-left", className)}
+      className={cn(
+        "flex flex-col gap-2 px-(--dialog-close-gutter,0px) text-center sm:pl-0 sm:text-left",
+        className,
+      )}
       {...props}
     />
   )
@@ -159,7 +161,7 @@ function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="dialog-footer"
       className={cn(
-        "sticky bottom-0 z-10 -mx-6 mt-2 flex flex-col-reverse gap-2 border-t bg-background px-6 pt-4 pb-6 sm:flex-row sm:justify-end",
+        "sticky bottom-0 z-10 -mx-[var(--dialog-pad)] mt-2 flex flex-col-reverse gap-2 border-t bg-background px-(--dialog-pad) pt-4 pb-(--dialog-pad) sm:flex-row sm:justify-end",
         className,
       )}
       {...props}
