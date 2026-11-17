@@ -241,6 +241,6 @@ Expected: lint exits 0 and `git diff --check` prints nothing. If an unrelated pr
 
 - [ ] **Step 5: Inspect delivery scope**
 
-Run `git status --short` and `git diff -- dashboard/spa/src/pages/providers.tsx dashboard/spa/src/components/ui/dialog.tsx docs/superpowers/specs/2026-11-16-providers-ui-polish-design.md docs/superpowers/plans/2026-11-16-providers-ui-polish.md`.
+Run `git status --short` and `git diff -- dashboard/spa/src/pages/providers.tsx dashboard/spa/src/components/ui/dialog.tsx dashboard/spa/src/components/ui/table.tsx dashboard/spa/src/components/ui/alert-dialog.tsx docs/superpowers/specs/2026-11-16-providers-ui-polish-design.md docs/superpowers/plans/2026-11-16-providers-ui-polish.md`.
 
-Expected: only the two intended UI source files plus this design/plan are changed by this pass; pre-existing worker/geo changes remain untouched. Report verification evidence and any unverified scenario. Do not commit.
+Expected: only the four intended UI source files plus this design/plan are changed by this pass; pre-existing worker/geo changes remain untouched. Report verification evidence and any unverified scenario. Do not commit.
